@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!DOCTYPE softwarelist SYSTEM "softwarelist.dtd">
+
+<softwarelist name="gbcolor">
+	<software name="gctf">
+                <description>gctf Game Boy challenge</description>
+                <year>2025</year>
+                <publisher>gctf</publisher>
+                <info name="serial" value="gctf serial" />
+                <part name="cart" interface="gameboy_cart">
+                        <feature name="slot" value="rom_mbc5" />
+                        <dataarea name="rom" size="0x100000">
+                                <rom name="gctf.gb" size="0x00008000" crc="215617ab" sha1="5e28c15f8eb2c23528f4cb81efc7de8d347961c9" />
+                        </dataarea>
+                        <dataarea name="nvram" size="0x8000">
+                        </dataarea>
+                </part>
+        </software>
+</softwarelist>
