@@ -74,7 +74,7 @@ $TASK_DIR=$(python3 "$SHARED_DIR/scripts/create_task_dir.py")
   Bash:      python3 "$SHARED_DIR/scripts/create_task_dir.py"
 
 如果 $SHARED_DIR 为空，使用硬编码路径:
-  PowerShell: python "C:\Codes\open-security\.opencode\binary-analysis\scripts\create_task_dir.py"
+  PowerShell: python "C:\Codes\OpenSecurity\.opencode\binary-analysis\scripts\create_task_dir.py"
   Bash:      python3 "$HOME/.config/opencode/binary-analysis/scripts/create_task_dir.py"
 
 输出即为 $TASK_DIR 路径。记录到变量后继续。

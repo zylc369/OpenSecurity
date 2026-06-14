@@ -1,4 +1,4 @@
-# open-security
+# OpenSecurity
 
 AI 驱动的多领域安全分析 Agent 平台。
 
