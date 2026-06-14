@@ -1,0 +1,65 @@
+{
+  "_comment": "web-analysis agent 专用脚本注册表。通用脚本（detect_env 等）在 $SHARED_DIR/scripts/registry.json 中注册",
+  "scripts": [
+    {
+      "name": "web_helpers",
+      "file": "web_helpers.py",
+      "description": "Web 安全分析公共工具库：create_session（预配置 HTTP session）、get_csrf（CSRF token 提取）、register_and_login（注册+登录）、extract_flag_from_webhook（webhook.site flag 提取）、create_webhook（创建 webhook 端点）。作为库模块被 import",
+      "params": [],
+      "example_call": "import sys; sys.path.insert(0, '$AGENT_DIR/scripts'); from web_helpers import create_session",
+      "added_at": "2026-05-24",
+      "verified": false
+    },
+    {
+      "name": "cache_poison",
+      "file": "cache_poison.py",
+      "description": "Web Cache Poisoning 攻击框架：CachePoison 类（投毒、验证、Bot 触发、缓存中缓存渗出）、probe_accept_encoding（Bot AE 探测）、probe_cache_key（缓存键分析）。纯标准库，无第三方依赖",
+      "params": [
+        {"name": "target_host", "desc": "靶机外网 IP"},
+        {"name": "target_port", "desc": "靶机端口"},
+        {"name": "internal_host", "desc": "Docker 内部域名（如 proxy:4000）"}
+      ],
+      "example_call": "python cache_poison.py 46.62.153.171 4000 proxy:4000",
+      "added_at": "2026-05-25",
+      "verified": false
+    },
+    {
+      "name": "param_bomb",
+      "file": "param_bomb.py",
+      "description": "PHP max_input_vars 参数炸弹生成器：build_bomb_post_data（POST 参数炸弹）、build_bomb_get_url（GET URL 参数炸弹）、build_two_stage_bomb（两阶段组合：提交+Bot访问）、estimate_param_count（参数计数调试）。纯标准库",
+      "params": [],
+      "example_call": "import sys; sys.path.insert(0, '$AGENT_DIR/scripts'); from param_bomb import build_two_stage_bomb",
+      "added_at": "2026-05-25",
+      "verified": false
+    },
+    {
+      "name": "markdown_fuzz",
+      "file": "markdown_fuzz.py",
+      "description": "Markdown 解析器 XSS 注入系统化测试：8 种注入分类（HTML 混合、alt 注入、URL 属性注入、title 注入、href 协议注入、嵌套结构、decode-reprocess、代码块逃逸），支持本地和远程测试，自动检测漏洞并生成报告",
+      "params": [],
+      "example_call": "import sys; sys.path.insert(0, '$AGENT_DIR/scripts'); from markdown_fuzz import MarkdownFuzzer, generate_payloads",
+      "added_at": "2026-05-26",
+      "verified": false
+    },
+    {
+      "name": "sandbox_escape",
+      "file": "sandbox_escape.py",
+      "description": "iframe Sandbox 逃逸测试与 payload 生成：generate_sandbox_test_payload（sandbox 逃逸 JS）、generate_controller_page（控制器页面 HTML）、generate_notebook_payload（恶意 notebook JSON）、generate_sso_bypass_url（SSO blob URL 绕过）。纯标准库",
+      "params": [],
+      "example_call": "import sys; sys.path.insert(0, '$AGENT_DIR/scripts'); from sandbox_escape import generate_controller_page",
+      "added_at": "2026-05-26",
+      "verified": false
+    },
+    {
+      "name": "bot_analyze",
+      "file": "bot_analyze.py",
+      "description": "Bot server.js 自动分析：提取关键参数（flag 位置、内部 URL、超时、浏览器配置）、分类 Bot 模式（单页/双页）、生成攻击时间线和策略建议。纯标准库",
+      "params": [
+        {"name": "filepath", "desc": "Bot server.js 文件路径"}
+      ],
+      "example_call": "python bot_analyze.py /path/to/bot/server.js",
+      "added_at": "2026-05-26",
+      "verified": false
+    }
+  ]
+}

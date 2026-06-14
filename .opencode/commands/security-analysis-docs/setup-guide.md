@@ -1,0 +1,129 @@
+# BinaryAnalysis Agent 新机器配置指南
+
+> 从零开始在一台新机器上配置 BinaryAnalysis Agent 的完整步骤。
+
+## 前置条件
+
+- IDA Pro 已安装（需要 `idat` 可执行文件）
+- Python 3.8+ 已安装
+- Git 已安装
+- OpenCode (opencode CLI) 已安装
+
+## 步骤
+
+### 1. 克隆项目
+
+```bash
+git clone <仓库地址>
+cd open-security
+git submodule update --init --recursive
+```
+
+> `vendor/oh-my-openagent` 是子模块，必须用 `--recursive` 初始化。
+
+### 2. Python 依赖
+
+Python 依赖由 `detect_env.py` 自动安装到专用虚拟环境（`~/bw-security-analysis/.venv`），**无需手动安装**。
+
+如需手动安装到 venv（自动安装失败时）：
+
+```bash
+# Linux/macOS
+~/bw-security-analysis/.venv/bin/python -m pip install capstone unicorn gmpy2 frida
+
+# Windows
+~/bw-security-analysis/.venv/Scripts/python.exe -m pip install capstone unicorn gmpy2 frida
+```
+
+frida 是可选的。如果安装失败（需要 Rust 编译环境），可以跳过，Agent 会自动跳过 Frida 相关方案。
+
+### 3. 安装 C/C++ 编译器
+
+| 平台 | 安装命令 |
+|------|---------|
+| Windows | 下载 [VS Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)，安装时勾选"使用 C++ 的桌面开发" |
+| Linux | `sudo apt install build-essential libgmp-dev` |
+| macOS | `xcode-select --install` |
+
+### 4. 运行环境检测
+
+Plugin 启动时自动创建虚拟环境（`~/bw-security-analysis/.venv`）。启动 agent 会话后，环境检测脚本会自动安装 Python 依赖：
+
+```
+# 在 agent 会话中自动执行，无需手动运行
+# 如需强制重新检测：
+$PYTHON_CMD "$SHARED_DIR/scripts/detect_env.py" --force
+```
+
+成功输出应包含:
+```json
+{"success": true, "data": {"compiler": {"available": true, ...}, "packages": {...}}, "errors": []}
+```
+
+如有缺失工具，按提示安装后重新运行。
+
+### 5. 创建配置文件
+
+```bash
+# Linux/macOS
+mkdir -p ~/bw-security-analysis
+cat > ~/bw-security-analysis/config.json << 'EOF'
+{
+  "ida_path": "<IDA Pro 安装路径>"
+}
+EOF
+
+# Windows (PowerShell)
+mkdir ~/bw-security-analysis -Force
+Set-Content -Path ~/bw-security-analysis/config.json -Value '{"ida_path": "<IDA Pro 安装路径>"}' -Encoding UTF8
+```
+
+**ida_path 示例**:
+- Windows: `C:\\Program Files\\IDA Pro 9.0`
+- Linux: `/opt/ida-9.0`
+- macOS: `/Applications/IDA Pro 9.0`
+
+**移动端分析工具配置（可选）**: 如果需要使用 mobile-analysis Agent，在 config.json 中添加 `tools` 字段：
+
+```json
+{
+  "ida_path": "<IDA Pro 安装路径>",
+  "tools": {
+    "apktool": {
+      "path": "apktool",
+      "agents": ["mobile-analysis"],
+      "required": true,
+      "version_cmd": ["--version"],
+      "description": "APK 解包+反汇编工具"
+    }
+  }
+}
+```
+
+> 脚本目录由 Plugin 自动定位（通过插件自身安装位置推导），无需手动配置。
+
+### 6. 在 OpenCode 中使用
+
+1. 启动 OpenCode: 在项目根目录运行 `opencode`
+2. 按 `Tab` 键切换 Agent
+3. 选择 `binary-analysis`
+4. 输入分析需求（如: `/path/to/target.exe 分析这个文件的加密算法`）
+
+## 验证清单
+
+- [ ] `python detect_env.py --force` 输出 `success: true`
+- [ ] `~/bw-security-analysis/.venv/` 虚拟环境已创建
+- [ ] `~/bw-security-analysis/config.json` 存在且 `ida_path` 指向正确的 IDA 安装目录
+- [ ] OpenCode 启动后按 Tab 能看到 `binary-analysis` 和 `mobile-analysis` Agent
+- [ ] 切换到 binary-analysis Agent 后，对话中能看到环境信息段（包含 PYTHON_CMD 路径）
+- [ ] （可选）`$PYTHON_CMD "$SHARED_DIR/scripts/detect_env.py" --agent mobile-analysis --force` 检测移动端工具
+
+## 常见问题
+
+| 问题 | 解决方案 |
+|------|---------|
+| frida 安装失败 | 跳过 frida，Agent 会自动适配（不推荐 Frida 方案） |
+| gmpy2 安装失败 (Windows) | 手动安装: `~/bw-security-analysis/.venv/Scripts/python.exe -m pip install gmpy2` 或用 conda |
+| Agent 未出现在 Tab 列表 | 检查 agents 目录下对应 `.md` 文件的 YAML frontmatter 格式 |
+| 环境信息未注入 | 检查 `~/bw-security-analysis/config.json` 是否存在且格式正确 |
+| 虚拟环境损坏 | 删除 `~/bw-security-analysis/.venv` 和 `~/bw-security-analysis/env_cache.json`，重启 OpenCode（Plugin 自动重建 venv） |

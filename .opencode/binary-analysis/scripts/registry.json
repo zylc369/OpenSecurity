@@ -1,0 +1,104 @@
+{
+  "_comment": "verified: 是否经过真实 .i64 文件 + idat 端到端验证。false 表示代码审查通过但未用真实样本测试",
+  "scripts": [
+    {
+      "name": "debug_dump",
+      "file": "debug_dump.py",
+      "description": "IDA 调试器脱壳 dump 脚本：运行到 OEP 断点，dump 内存段并重建可执行文件（PE/ELF）",
+      "params": ["IDA_OEP_ADDR", "IDA_PE_OUTPUT", "IDA_OUTPUT"],
+      "example_call": "IDA_OEP_ADDR=0x401000 IDA_PE_OUTPUT=$TASK_DIR/unpacked.exe IDA_OUTPUT=$TASK_DIR/result.json $IDAT -A -S$SHARED_DIR/scripts/debug_dump.py target.i64",
+      "added_at": "2026-04-19",
+      "verified": false
+    },
+    {
+      "name": "initial_analysis",
+      "file": "initial_analysis.py",
+      "description": "一键初始分析流水线：单次 idat 调用完成 segments/entry_points/imports/strings/packer_detect + 场景分类",
+      "params": ["IDA_OUTPUT"],
+      "example_call": "IDA_OUTPUT=$TASK_DIR/result.json $IDAT -A -S$SHARED_DIR/scripts/initial_analysis.py target.i64",
+      "added_at": "2026-04-19",
+      "verified": false
+    },
+    {
+      "name": "gui_verify",
+      "file": "gui_verify.py",
+      "description": "Win32 GUI 自动化验证脚本：支持控件探测(--discover)、标准 GUI 操作 + 多维行为观察、Hook 注入参数(--hook-inject)、Hook 读取比较结果(--hook-result)，hook-inject 和 hook-result 可组合使用",
+      "params": ["--exe", "--username", "--license", "--output", "--timeout", "--edit1-id", "--edit2-id", "--button-id", "--discover", "--hook-inject", "--hook-func-addr", "--hook-inputs", "--hook-inputs-file", "--hook-trigger-addr", "--hook-calling-convention", "--hook-result", "--hook-compare-addr", "--hook-compare-type", "--observe-rounds"],
+      "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/gui_verify.py --exe TARGET.EXE --username test --license XXXX --output result.json",
+      "added_at": "2026-04-23",
+      "verified": false
+    },
+    {
+      "name": "gui_capture",
+      "file": "gui_capture.py",
+      "description": "全屏截图工具，输出 JPEG/PNG 图片 + 元数据 JSON",
+      "params": ["--output-dir", "--name", "--format", "--quality"],
+      "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/gui_capture.py --output-dir $TASK_DIR/view --name step1_initial",
+      "added_at": "2026-04-24",
+      "verified": false
+    },
+    {
+      "name": "gui_act",
+      "file": "gui_act.py",
+      "description": "坐标级键鼠操作（click/double_click/type/hotkey/scroll），支持剪贴板粘贴",
+      "params": ["--action", "--x", "--y", "--text", "--keys", "--direction", "--clicks", "--button", "--paste", "--settle"],
+      "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/gui_act.py --action click --x 460 --y 320",
+      "added_at": "2026-04-24",
+      "verified": false
+    },
+    {
+      "name": "gui_launch",
+      "file": "gui_launch.py",
+      "description": "进程和窗口管理（launch/find_window/bring_to_front/kill/wait_window），P0 仅 Windows",
+      "params": ["--action", "--exe", "--pid", "--title", "--timeout"],
+      "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/gui_launch.py --action launch --exe TARGET.EXE",
+      "added_at": "2026-04-24",
+      "verified": false
+    },
+    {
+      "name": "process_patch",
+      "file": "process_patch.py",
+      "description": "通用进程 Patch + 值捕获工具：启动目标进程，应用多点多类型补丁（patch/write-data/write-code），触发动作（click），等待信号同步，捕获内存数据。替代手写 ctypes 脚本",
+      "params": ["--exe", "--window-title", "--patch", "--write-data", "--write-code", "--capture", "--signal", "--trigger", "--timeout", "--settle", "--no-kill", "--output"],
+      "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/process_patch.py --exe TARGET.EXE --patch 0x40234C:EB --capture 0x422480:16 --signal 0x42248C:DEADBEEF --trigger click:1002 --timeout 15 --output result.json",
+      "added_at": "2026-04-26",
+      "verified": false
+    },
+    {
+      "name": "create_task_dir",
+      "file": "create_task_dir.py",
+      "description": "任务目录创建与映射注册：创建时间戳目录 + 注册 sessionID→task_dir 映射（压缩后精确恢复）。SESSION_ID 由 Plugin tool.execute.before hook 注入",
+      "params": [],
+      "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/create_task_dir.py",
+      "added_at": "2026-04-28",
+      "verified": false
+    },
+    {
+      "name": "web_render",
+      "file": "web_render.py",
+      "description": "Playwright 无头浏览器网页渲染：支持 JavaScript 执行，可获取 SPA 页面渲染后内容（markdown/text/html）和页面截图",
+      "params": ["--url", "--format", "--screenshot", "--screenshot-full-page", "--timeout", "--wait-selector", "--output", "--user-agent"],
+      "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/web_render.py --url https://example.com --format markdown",
+      "added_at": "2026-05-03",
+      "verified": true
+    },
+    {
+      "name": "detect_kernel_debug_env",
+      "file": "detect_kernel_debug_env.py",
+      "description": "双机调试环境检测：检查 vmrun、VM 运行状态、kd.exe、VM 调试配置（NET 传输）、VM 自动登录。输出结构化 JSON",
+      "params": ["--output", "--vm-name"],
+      "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/detect_kernel_debug_env.py --output $TASK_DIR/kernel_env.json",
+      "added_at": "2026-05-30",
+      "verified": false
+    },
+    {
+      "name": "vm_login",
+      "file": "vm_login.py",
+      "description": "VM 登录管理：配置自动登录（--login）、检查状态（--status）、加密密码（--encrypt-password）。密码 Base64 存储，不输出到 stdout",
+      "params": ["--login", "--status", "--encrypt-password"],
+      "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/vm_login.py --login",
+      "added_at": "2026-05-30",
+      "verified": false
+    }
+  ]
+}

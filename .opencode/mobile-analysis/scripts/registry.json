@@ -1,0 +1,68 @@
+[
+  {
+    "name": "manage_frida",
+    "description": "Frida-server 生命周期管理（安装/启动/停止/状态查询）",
+    "file": "manage_frida.py",
+    "language": "python",
+    "runner": "$PYTHON_CMD",
+    "usage": "$PYTHON_CMD $AGENT_DIR/scripts/manage_frida.py --action {install|start|stop|status} [-s SERIAL] [--upgrade]",
+    "output_format": "JSON",
+    "actions": {
+      "install": "下载并安装 frida-server 到设备（随机名）",
+      "start": "启动 frida-server + 端口转发，输出 host_port/device_port/pid",
+      "stop": "停止 frida-server + 清理端口转发",
+      "status": "检查 frida-server 运行状态"
+    },
+    "requires_venv": true,
+    "requires_frida_scripts": true
+  },
+  {
+    "name": "dex_dump",
+    "description": "DEX 内存 dump 工具（通过 Frida 全量扫描进程内存中的 DEX 文件）",
+    "file": "dex_dump.py",
+    "language": "python",
+    "runner": "$PYTHON_CMD",
+    "usage": "$PYTHON_CMD $AGENT_DIR/scripts/dex_dump.py --pid <PID> --output <DIR> [--host 127.0.0.1:6656]",
+    "output_format": "DEX 文件写入 --output 目录",
+    "note": "使用 frida.Compiler 编译 TypeScript（含 Java bridge），首次运行自动安装 npm 依赖",
+    "requires_venv": true,
+    "requires_node": true
+  },
+  {
+    "name": "dex_dump_js",
+    "description": "DEX 内存 dump JS 脚本（frida CLI 专用）",
+    "file": "dex_dump.js",
+    "language": "javascript",
+    "runner": "frida",
+    "usage": "frida -H 127.0.0.1:6656 -n com.target.app -l $AGENT_DIR/scripts/dex_dump.js",
+    "output_format": "通过 send() 发送 DEX 二进制数据",
+    "note": "仅用于 frida CLI（REPL 内置 Java bridge）。Python SDK 请使用 dex_dump.py",
+    "requires_venv": false
+  },
+  {
+    "name": "mitm_proxy",
+    "description": "HTTPS MITM 代理 — 拦截并篡改 API JSON 响应字段。配合自签 CA + TrustBuiltinRoots SSL bypass 使用",
+    "file": "mitm_proxy.py",
+    "language": "python",
+    "runner": "$PYTHON_CMD",
+    "usage": "$PYTHON_CMD $AGENT_DIR/scripts/mitm_proxy.py --workdir <DIR> --target-host <HOST> --tamper-field <FIELD> --tamper-value <VALUE> [--gen-ca] [--listen-port 44300]",
+    "output_format": "HTTPS 代理日志（stdout），篡改后的 HTTP 响应返回给客户端",
+    "actions": {
+      "gen-ca": "生成自签 CA 密钥和证书（首次使用时执行一次）",
+      "proxy": "启动 HTTPS 代理（默认行为，需指定 --target-host）"
+    },
+    "note": "需要 openssl 命令行工具。CA 安装到设备后配合 Frida getaddrinfo+connect hook 使用。详见 $AGENT_DIR/knowledge-base/mitm-methodology.md §2.5 方案 D",
+    "requires_venv": false
+  },
+  {
+    "name": "build_apk",
+    "description": "命令行 APK 构建工具 — 从源码目录一键生成签名 APK（无需 Gradle）",
+    "file": "build_apk.py",
+    "language": "python",
+    "runner": "$PYTHON_CMD",
+    "usage": "$PYTHON_CMD $AGENT_DIR/scripts/build_apk.py --src <源码目录> --output <输出.apk> [--keystore <KS>] [--ks-pass <PASS>]",
+    "output_format": "签名 APK 文件写入 --output 路径",
+    "note": "需要 Android SDK（ANDROID_HOME）。自动检测 build-tools 和 platform。支持标准项目结构和扁平结构",
+    "requires_venv": false
+  }
+]

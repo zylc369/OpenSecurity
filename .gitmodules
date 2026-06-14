@@ -1,0 +1,16 @@
+[submodule "vendor/ida-sdk"]
+	path = vendor/ida-sdk
+	url = git@github.com:HexRaysSA/ida-sdk.git
+	branch = main
+[submodule "vendor/oh-my-openagent"]
+	path = vendor/oh-my-openagent
+	url = https://github.com/code-yeongyu/oh-my-openagent.git
+	branch = dev
+[submodule "vendor/opencode"]
+	path = vendor/opencode
+	url = git@github.com:anomalyco/opencode.git
+	branch = dev
+[submodule "vendor/frida"]
+	path = vendor/frida
+	url = git@github.com:frida/frida.git
+	branch = main

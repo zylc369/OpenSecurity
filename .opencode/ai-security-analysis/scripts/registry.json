@@ -1,0 +1,29 @@
+{
+  "_comment": "ai-security-analysis agent 专用脚本注册表",
+  "scripts": [
+    {
+      "name": "deepseek_client",
+      "file": "deepseek_client.py",
+      "description": "LLM API 多轮对话客户端（兼容 DeepSeek/OpenAI 等 OpenAI 兼容 API）。支持多轮对话、流式/非流式、思考模式、JSON 模式、对话历史持久化。主类: LLMClient（DeepSeekClient 为向后兼容别名）",
+      "params": [],
+      "example_call": "from deepseek_client import LLMClient; client = LLMClient(); response = client.chat('你好')",
+      "added_at": "2026-05-30",
+      "verified": false
+    },
+    {
+      "name": "llm_sim",
+      "file": "llm_sim.py",
+      "description": "通用 LLM 应用模拟器。接收任意 system prompt + user input，调用 LLM，返回结构化结果。支持单轮（query）、多轮（query_multiturn）、批量（query_batch，用于稳定性测试）。包含 ResponseParser（从 LLM 输出提取 grade/score 等结构化信息）",
+      "params": [
+        {"name": "--system-prompt", "desc": "目标应用的 system prompt（必需）"},
+        {"name": "--input", "desc": "直接传入输入文本"},
+        {"name": "--input-file", "desc": "输入文件路径（.txt/.md/.docx）"},
+        {"name": "--base-url", "desc": "API base URL（默认 DeepSeek）"},
+        {"name": "--model", "desc": "模型名称"}
+      ],
+      "example_call": "python llm_sim.py --system-prompt '你是一个评分助手' --input-file essay.txt",
+      "added_at": "2026-05-30",
+      "verified": false
+    }
+  ]
+}
