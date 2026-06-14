@@ -1356,7 +1356,8 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
                 await opencodeClient.session.promptAsync({
                   path: { id: sessionID },
                   body: {
-                    parts: [{ type: "text" as const, text: RESUME_PROMPT }],
+                    agent: session.primaryAgent,
+                    parts: [{ type: "text" as const, text: RESUME_PROMPT, synthetic: true }],
                   },
                 });
                 recordResumeAttempt(sessionID);
