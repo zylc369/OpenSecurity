@@ -58,6 +58,7 @@ for (const name of PRIMARY_AGENTS) {
 //   2. 该 session 的 primaryAgent 属于 PRIMARY_AGENTS（排除子 session）
 //   3. primaryAgent 不是 security-analysis-evolve（进化 Agent 不做分析工作）
 //   4. 未超过最大持续时间（默认 6 小时，可通过 .persistence.json 文件指定）
+//   5. 最后一条 assistant 消息未被用户手动中断（error.name !== ABORTED_ERROR_NAME）
 //
 // 持续性状态文件 ($TASK_DIR/.persistence.json):
 //   {
@@ -68,6 +69,7 @@ for (const name of PRIMARY_AGENTS) {
 
 const MAX_DURATION_DEFAULT = 6 * 60 * 60 * 1000; // 6 小时，单位毫秒
 const PERSISTENCE_FILE = ".persistence.json";
+const ABORTED_ERROR_NAME = "MessageAbortedError";
 const RESUME_PROMPT =
   "你之前的分析是否已经完成了？如果已经完成，请直接输出最终结论。如果尚未完成，请自主继续分析，不要停下来向用户提问。";
 
@@ -113,6 +115,42 @@ function getMaxDuration(sessionID: string): number {
     return Math.floor(data.max_duration_hours * 3600 * 1000);
   }
   return MAX_DURATION_DEFAULT;
+}
+
+// 检查最后一条 assistant 消息是否被用户手动中断
+// session.idle 无法区分 LLM 自然结束和用户手动停止，两者都会触发 idle。
+// 但手动中断的 assistant 消息会带有 error.name = "MessageAbortedError"。
+// 通过 client.session.messages API 获取消息列表并检查最后一条 assistant 消息。
+async function checkLastMessageAborted(sessionID: string): Promise<boolean> {
+  if (!opencodeClient) return false;
+  try {
+    const response = await opencodeClient.session.messages({
+      path: { id: sessionID },
+    });
+    if (response.error || !response.data) return false;
+    const messages = response.data;
+    if (!Array.isArray(messages) || messages.length === 0) return false;
+    // 找最后一条 assistant 消息
+    const lastAssistant = [...messages]
+      .reverse()
+      .find(
+        (m: { info?: { role?: string } }) =>
+          m?.info?.role === "assistant",
+      );
+    if (!lastAssistant) return false;
+    // 检查 error.name 是否为 MessageAbortedError
+    // OpenCode 的 prompt.ts 中 finalizeInterruptedAssistant 会设置:
+    //   msg.error = MessageV2.fromError(new DOMException("Aborted", "AbortError"), { aborted: true })
+    // Assistant schema 中 error 字段在 info 上（与 role 同级）
+    const info = (lastAssistant as { info?: { error?: { name?: string } } }).info;
+    return info?.error?.name === ABORTED_ERROR_NAME;
+  } catch (e) {
+    debugLog(
+      `checkLastMessageAborted: 查询异常 sessionID=${sessionID} error=${e}`,
+      sessionID,
+    );
+    return false;
+  }
 }
 
 function recordResumeAttempt(sessionID: string): void {
@@ -1315,6 +1353,8 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         // 被 requireSessionWithPrimary 过滤掉。
         // security-analysis-evolve Agent 不触发恢复（进化 Agent 不做分析工作）。
         // 没有 taskDir 的 session 不触发恢复（简单问答，不是正式分析任务）。
+        // 用户手动中断（Escape/Ctrl+C）时不恢复 — 通过检查最后一条 assistant
+        // 消息的 error.name === "MessageAbortedError" 来判断。
         try {
           const session = await requireSessionWithPrimary(
             "session.idle",
@@ -1348,23 +1388,34 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
                   sessionID,
                 );
               } else if (opencodeClient) {
-                const persistenceData = readPersistenceData(sessionID);
-                debugLog(
-                  `session.idle: 恢复分析 sessionID=${sessionID} agent=${session.primaryAgent} elapsed=${Math.floor(elapsed / 60000)}m max=${Math.floor(maxDuration / 60000)}m resume_count=${persistenceData?.resume_count ?? 0}`,
-                  sessionID,
-                );
-                await opencodeClient.session.promptAsync({
-                  path: { id: sessionID },
-                  body: {
-                    agent: session.primaryAgent,
-                    parts: [{ type: "text" as const, text: RESUME_PROMPT, synthetic: true }],
-                  },
-                });
-                recordResumeAttempt(sessionID);
-                debugLog(
-                  `session.idle: 恢复消息已发送 sessionID=${sessionID}`,
-                  sessionID,
-                );
+                // 检查最后一条 assistant 消息是否被用户手动中断
+                // session.idle 无法区分手动停止和 LLM 自然停止，
+                // 但被中断的 assistant 消息会带有 error.name = "MessageAbortedError"
+                const wasAborted = await checkLastMessageAborted(sessionID);
+                if (wasAborted) {
+                  debugLog(
+                    `session.idle: 跳过恢复 — 用户手动中断, sessionID=${sessionID}`,
+                    sessionID,
+                  );
+                } else {
+                  const persistenceData = readPersistenceData(sessionID);
+                  debugLog(
+                    `session.idle: 恢复分析 sessionID=${sessionID} agent=${session.primaryAgent} elapsed=${Math.floor(elapsed / 60000)}m max=${Math.floor(maxDuration / 60000)}m resume_count=${persistenceData?.resume_count ?? 0}`,
+                    sessionID,
+                  );
+                  await opencodeClient.session.promptAsync({
+                    path: { id: sessionID },
+                    body: {
+                      agent: session.primaryAgent,
+                      parts: [{ type: "text" as const, text: RESUME_PROMPT, synthetic: true }],
+                    },
+                  });
+                  recordResumeAttempt(sessionID);
+                  debugLog(
+                    `session.idle: 恢复消息已发送 sessionID=${sessionID}`,
+                    sessionID,
+                  );
+                }
               } else {
                 debugLog(
                   `session.idle: 跳过恢复 — opencodeClient 未初始化`,
