@@ -264,18 +264,22 @@ function readJsonSafe<T>(filePath: string, sessionID?: string): T | null {
 }
 
 function getTaskDir(sessionID: string): string | null {
-  // 先查缓存
+  // 先查缓存（只缓存有值的结果，null 不缓存——映射文件可能后续被创建）
   const cached = taskDirCache.get(sessionID);
-  if (cached !== undefined) return cached;
+  if (cached) return cached;
 
   try {
     const filePath = join(TASK_SESSIONS_DIR, `${sessionID}.json`);
     const data = readJsonSafe<TaskSessionMapping>(filePath);
-    const result = data?.task_dir || null;
-    taskDirCache.set(sessionID, result);
-    return result;
-  } catch {
-    taskDirCache.set(sessionID, null);
+    const result = data?.task_dir;
+    if (result) {
+      taskDirCache.set(sessionID, result);
+      return result;
+    }
+    debugLog(`getTaskDir: 未找到映射 sessionID=${sessionID} filePath=${filePath}`, sessionID);
+    return null;
+  } catch (e) {
+    debugLog(`getTaskDir: 读取异常 sessionID=${sessionID} error=${e}`, sessionID);
     return null;
   }
 }
