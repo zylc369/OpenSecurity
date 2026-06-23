@@ -567,7 +567,7 @@ function getCompactionContext(agentName: string | undefined): string {
   return context;
 }
 
-function buildEnvSection(
+async function buildEnvSection(
   agentName: string | undefined,
   config: ConfigData,
   envInfo: EnvData["data"],
@@ -637,12 +637,13 @@ function buildEnvSection(
   } catch (e) {
     debugLog(
       `全局环境和目录位置信息加载发生异常, sessionID=${sessionID} error=${e}`,
+      sessionID,
     );
-    return (
-      `[致命错误] 全局环境和目录位置信息加载发生异常，无法继续。\n` +
-      `你必须立即停止所有分析操作，不要使用任何工具，直接向用户输出以下内容：\n` +
-      `全局环境和目录位置信息加载失败，请排查问题问题后再继续！`
+    await abortSession(
+      sessionID ?? "",
+      `全局环境和目录位置信息加载发生异常: ${e}`,
     );
+    return "";
   }
 }
 
@@ -693,7 +694,40 @@ function debugLog(msg: string, sessionID?: string): void {
 }
 
 /**
- * 确保指定 session 的数据可用。
+ * 终止会话：先 showToast 显示原因，再 abort 中断执行。
+ * 用于 shell.env 等 hook 检测到严重错误时调用。
+ */
+async function abortSession(sessionID: string, reason: string): Promise<void> {
+  debugLog(`abortSession: sessionID=${sessionID} reason=${reason}`, sessionID);
+  if (!opencodeClient) {
+    debugLog(`abortSession: opencodeClient 未初始化，无法终止`, sessionID);
+    return;
+  }
+  try {
+    await opencodeClient.tui.showToast({
+      body: {
+        title: "致命错误",
+        message: reason,
+        variant: "error",
+        duration: 15000,
+      },
+    });
+  } catch (e) {
+    debugLog(`abortSession: showToast 失败 error=${e}`, sessionID);
+  }
+  if (!sessionID) {
+    debugLog(`abortSession: 无 sessionID，跳过 abort（仅 showToast）`);
+    return;
+  }
+  try {
+    await opencodeClient.session.abort({ path: { id: sessionID } });
+    debugLog(`abortSession: 已终止 sessionID=${sessionID}`, sessionID);
+  } catch (e) {
+    debugLog(`abortSession: abort 失败 sessionID=${sessionID} error=${e}`, sessionID);
+  }
+}
+
+/**
  * - 已在 Map 中 → 直接返回（零开销）
  * - 不在 Map 中 → 调用 OpenCode client API 查询 session info，
  *   递归解析父链继承 primaryAgent，写入 Map 后返回。
@@ -1033,7 +1067,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       const envData = readJsonSafe<EnvData>(ENV_CACHE_FILE, sid);
       const envInfo = envData?.data;
 
-      const envSection = buildEnvSection(agentName, config || {}, envInfo, sid);
+      const envSection = await buildEnvSection(agentName, config || {}, envInfo, sid);
       output.context.push(envSection);
       const compactionCtx = getCompactionContext(agentName);
       const compactionReminder = getCompactionReminder(agentName);
@@ -1200,7 +1234,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       const envData = readJsonSafe<EnvData>(ENV_CACHE_FILE, sessionID);
       const envInfo = envData?.data;
 
-      const envSection = buildEnvSection(agentName, config, envInfo, sessionID);
+      const envSection = await buildEnvSection(agentName, config, envInfo, sessionID);
       output.system.push(envSection);
       debugLog(
         `[INFO] system.transform: #${session.systemTransformCount} 注入环境信息 sessionID=${sessionID}, agent=${agentName}, primaryAgent=${session.primaryAgent}, configMissing=${configMissing}, length=${envSection.length}, envSection=\n${envSection}`,
@@ -1214,18 +1248,62 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     "shell.env": async (input, output) => {
       const sessionID = input.sessionID;
       if (!sessionID) {
-        debugLog(`shell.env: 跳过 — 无 sessionID, cwd=${input.cwd}`);
+        debugLog(`shell.env: 致命错误 — 无 sessionID, cwd=${input.cwd}`);
+        await abortSession("", `shell.env 触发但无 sessionID (cwd=${input.cwd})，session 初始化异常`);
         return;
       }
       debugLog(`shell.env: 触发 sessionID=${sessionID} cwd=${input.cwd} callID=${input.callID ?? "无"}`, sessionID);
       const session = await requireSessionWithPrimary("shell.env", sessionID);
       if (!session) {
-        debugLog(`shell.env: 跳过 — 非 PRIMARY sessionID=${sessionID}`, sessionID);
+        debugLog(`shell.env: 致命错误 — 非 PRIMARY sessionID=${sessionID}`, sessionID);
+        await abortSession(sessionID, `shell.env: sessionID=${sessionID} 不属于任何 PRIMARY agent，session 初始化异常`);
         return;
       }
+
+      const agentName = session.agentName;
+      if (!agentName) {
+        debugLog(`shell.env: 致命错误 — agentName 为空 sessionID=${sessionID}`, sessionID);
+        await abortSession(sessionID, `shell.env: sessionID=${sessionID} 的 agentName 为空，session 初始化异常`);
+        return;
+      }
+
+      // 基础变量（全局常量，始终可注入）
       output.env.SESSION_ID = sessionID;
-      output.env.AGENT_NAME = session.agentName || "";
-      debugLog(`shell.env: 已注入 SESSION_ID=${sessionID} AGENT_NAME=${session.agentName || "无"}`, sessionID);
+      output.env.AGENT_NAME = agentName;
+      output.env.PYTHON_CMD = PYTHON_CMD;
+      output.env.OPENCODE_ROOT = OPENCODE_ROOT;
+      output.env.SHARED_DIR = join(OPENCODE_ROOT, AGENT_BINARY_ANALYSIS);
+
+      // AGENT_DIR（根据当前 agent 计算）
+      const scriptDir = getScriptDir(agentName, session.primaryAgent);
+      if (scriptDir) {
+        output.env.AGENT_DIR = scriptDir;
+      }
+
+      // TASK_DIR（从 task session mapping 读取，可能为空）
+      const taskDir = getTaskDir(sessionID);
+      if (taskDir) {
+        output.env.TASK_DIR = taskDir;
+      }
+
+      // IDAT（从 config.json 读取 ida_path + /idat）
+      const config = readJsonSafe<ConfigData>(CONFIG_FILE, sessionID);
+      if (config?.ida_path) {
+        output.env.IDAT = join(config.ida_path, "idat");
+      }
+
+      debugLog(
+        `shell.env: 已注入` +
+          ` SESSION_ID=${sessionID}` +
+          ` AGENT_NAME=${agentName}` +
+          ` PYTHON_CMD=${PYTHON_CMD}` +
+          ` OPENCODE_ROOT=${OPENCODE_ROOT}` +
+          ` AGENT_DIR=${scriptDir ?? "无"}` +
+          ` SHARED_DIR=${output.env.SHARED_DIR}` +
+          ` TASK_DIR=${taskDir ?? "无"}` +
+          ` IDAT=${output.env.IDAT ?? "无"}`,
+        sessionID,
+      );
     },
 
     // 工具执行前触发（awaited）
