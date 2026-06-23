@@ -70,6 +70,7 @@ const SHARED_DIR = join(OPENCODE_ROOT, AGENT_BINARY_ANALYSIS);
 //   }
 
 const MAX_DURATION_DEFAULT = 6 * 60 * 60 * 1000; // 6 小时，单位毫秒
+const MAX_RESUMES = 50; // 最大恢复次数，防止分析完成后无限循环恢复
 const PERSISTENCE_FILE = ".persistence.json";
 const ABORTED_ERROR_NAME = "MessageAbortedError";
 const RESUME_PROMPT =
@@ -1209,8 +1210,8 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       );
 
       // 环境信息注入频率：
-      // 前 2 次都注入（新会话 step=1 时标题生成请求先触发 #1，主聊天 #2，
-      //   两者都需要拿到环境信息才能正确解析 $SHARED_DIR 等变量）
+      // 前 3 次都注入（新会话 step=1 时标题生成请求先触发 #1，主聊天 #2，首次工具调用 #3，
+      //   都需要拿到环境信息才能正确解析 $SHARED_DIR 等变量）
       // 之后每 X 次注入一次（节省 token）
       session.systemTransformCount++;
       const shouldInject =
@@ -1250,8 +1251,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       debugLog(`shell.env: 触发 sessionID=${sessionID} cwd=${input.cwd} callID=${input.callID ?? "无"}`, sessionID);
       const session = await requireSessionWithPrimary("shell.env", sessionID);
       if (!session) {
-        debugLog(`shell.env: 致命错误 — 非 PRIMARY sessionID=${sessionID}`, sessionID);
-        await abortSession(sessionID, `shell.env: sessionID=${sessionID} 不属于任何 PRIMARY agent，session 初始化异常`);
+        debugLog(`shell.env: 跳过 — 非 PRIMARY sessionID=${sessionID}`, sessionID);
         return;
       }
 
@@ -1404,6 +1404,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         if (sessionID) {
           debugLog(`event: session.deleted id=${sessionID}`, sessionID);
           sessions.delete(sessionID);
+          nonPrimarySessions.delete(sessionID);
           removeTaskSession(sessionID);
         }
       }
@@ -1475,22 +1476,30 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
                   );
                 } else {
                   const persistenceData = readPersistenceData(sessionID);
-                  debugLog(
-                    `session.idle: 恢复分析 sessionID=${sessionID} agent=${session.primaryAgent} elapsed=${Math.floor(elapsed / 60000)}m max=${Math.floor(maxDuration / 60000)}m resume_count=${persistenceData?.resume_count ?? 0}`,
-                    sessionID,
-                  );
-                  await opencodeClient.session.promptAsync({
-                    path: { id: sessionID },
-                    body: {
-                      agent: session.primaryAgent,
-                      parts: [{ type: "text" as const, text: RESUME_PROMPT, synthetic: true }],
-                    },
-                  });
-                  recordResumeAttempt(sessionID);
-                  debugLog(
-                    `session.idle: 恢复消息已发送 sessionID=${sessionID}`,
-                    sessionID,
-                  );
+                  const resumeCount = persistenceData?.resume_count ?? 0;
+                  if (resumeCount >= MAX_RESUMES) {
+                    debugLog(
+                      `session.idle: 跳过恢复 — 已达最大恢复次数 ${MAX_RESUMES} sessionID=${sessionID}`,
+                      sessionID,
+                    );
+                  } else {
+                    debugLog(
+                      `session.idle: 恢复分析 sessionID=${sessionID} agent=${session.primaryAgent} elapsed=${Math.floor(elapsed / 60000)}m max=${Math.floor(maxDuration / 60000)}m resume_count=${resumeCount}`,
+                      sessionID,
+                    );
+                    await opencodeClient.session.promptAsync({
+                      path: { id: sessionID },
+                      body: {
+                        agent: session.primaryAgent,
+                        parts: [{ type: "text" as const, text: RESUME_PROMPT, synthetic: true }],
+                      },
+                    });
+                    recordResumeAttempt(sessionID);
+                    debugLog(
+                      `session.idle: 恢复消息已发送 sessionID=${sessionID}`,
+                      sessionID,
+                    );
+                  }
                 }
               } else {
                 debugLog(
