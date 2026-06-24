@@ -73,9 +73,11 @@ const MAX_DURATION_DEFAULT = 6 * 60 * 60 * 1000; // 6 小时，单位毫秒
 const MAX_RESUMES = 50; // 最大恢复次数，防止分析完成后无限循环恢复
 const PERSISTENCE_FILE = ".persistence.json";
 const ABORTED_ERROR_NAME = "MessageAbortedError";
-const RESUME_PROMPT =
-  "你之前的分析是否已经完成了？如果已经完成，请直接输出最终结论，并在最后单独一行输出 >>>COMPLETE<<< 。如果尚未完成，请自主继续分析，不要停下来向用户提问。";
 const COMPLETION_MARKER = ">>>COMPLETE<<<";
+const RESUME_PROMPT =
+  `你之前的分析是否已经完成了？\n" +
+  "- 如果已经完成：请直接输出最终结论，然后在最后一行精确输出这个标记（原样复制，不要修改）：${COMPLETION_MARKER}\n" +
+  "- 如果尚未完成：请自主继续分析，不要停下来向用户提问。`;
 
 // ─── 分析持续性恢复：状态文件读写 ──────────────────────────────
 
@@ -992,6 +994,87 @@ function recordTimeline(
   }
 }
 
+// ─── 分析持续性恢复 ──────────────────────────────────────────────
+//
+// 安全分析 Agent 的主 session 空闲时，自动发送恢复消息。
+// 通过多层条件判断（early return）决定是否恢复：
+//   1. session 属于 PRIMARY_AGENTS（排除子 session）
+//   2. agent 不是 security-analysis-evolve（进化 Agent 不做分析工作）
+//   3. 有 taskDir（正式分析任务，非简单问答）
+//   4. 未超过最大持续时间（默认 6 小时）
+//   5. 最后一条 assistant 消息未被用户手动中断
+//   6. 上一轮响应不包含完成标记 >>>COMPLETE<<<（agent 显式声明已完成）
+//   7. 未超过最大恢复次数 MAX_RESUMES（兜底防护）
+
+async function maybeResumeAnalysis(sessionID: string): Promise<void> {
+  try {
+    const session = await requireSessionWithPrimary("session.idle", sessionID);
+    if (!session) {
+      debugLog(`session.idle: 跳过恢复 — 非 PRIMARY sessionID=${sessionID}`, sessionID);
+      return;
+    }
+
+    if (session.agentName === AGENT_SECURITY_ANALYSIS_EVOLVE) {
+      debugLog(`session.idle: 跳过恢复 — evolve agent 不做分析工作, sessionID=${sessionID}`, sessionID);
+      return;
+    }
+
+    const taskDir = getTaskDir(sessionID);
+    if (!taskDir) {
+      debugLog(`session.idle: 跳过恢复 — 无 taskDir（非正式分析任务）, sessionID=${sessionID}`, sessionID);
+      return;
+    }
+
+    const elapsed = Date.now() - session.createdAt;
+    const maxDuration = getMaxDuration(sessionID);
+    if (elapsed >= maxDuration) {
+      debugLog(`session.idle: 跳过恢复 — 已超时 sessionID=${sessionID} elapsed=${Math.floor(elapsed / 60000)}m max=${Math.floor(maxDuration / 60000)}m`, sessionID);
+      return;
+    }
+
+    if (!opencodeClient) {
+      debugLog(`session.idle: 跳过恢复 — opencodeClient 未初始化`, sessionID);
+      return;
+    }
+
+    // 检查最后一条 assistant 消息是否被用户手动中断
+    const wasAborted = await checkLastMessageAborted(sessionID);
+    if (wasAborted) {
+      debugLog(`session.idle: 跳过恢复 — 用户手动中断, sessionID=${sessionID}`, sessionID);
+      return;
+    }
+
+    // 检查上一轮响应是否包含完成标记（agent 显式声明分析已完成）
+    const lastText = await getLastAssistantText(sessionID);
+    if (lastText && lastText.includes(COMPLETION_MARKER)) {
+      debugLog(`session.idle: 跳过恢复 — 检测到完成标记 ${COMPLETION_MARKER}, sessionID=${sessionID}`, sessionID);
+      return;
+    }
+
+    // 检查恢复次数
+    const persistenceData = readPersistenceData(sessionID);
+    const resumeCount = persistenceData?.resume_count ?? 0;
+    if (resumeCount >= MAX_RESUMES) {
+      debugLog(`session.idle: 跳过恢复 — 已达最大恢复次数 ${MAX_RESUMES} sessionID=${sessionID}`, sessionID);
+      return;
+    }
+
+    // 发送恢复消息
+    debugLog(`session.idle: 恢复分析 sessionID=${sessionID} agent=${session.agentName} elapsed=${Math.floor(elapsed / 60000)}m max=${Math.floor(maxDuration / 60000)}m resume_count=${resumeCount}`, sessionID);
+    await opencodeClient.session.promptAsync({
+      path: { id: sessionID },
+      body: {
+        agent: session.agentName,
+        parts: [{ type: "text" as const, text: RESUME_PROMPT, synthetic: true }],
+      },
+    });
+    recordResumeAttempt(sessionID);
+    debugLog(`session.idle: 恢复消息已发送 sessionID=${sessionID}`, sessionID);
+  } catch (e) {
+    debugLog(`session.idle: 恢复异常 sessionID=${sessionID} error=${e}`, sessionID);
+  }
+}
+
 export const SecurityAnalysisPlugin: Plugin = async (input) => {
   const { client, directory } = input;
   opencodeClient = client;
@@ -1445,105 +1528,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         flushTimeline(sessionID);
 
         // ─── 分析持续性恢复 ────────────────────────────────────
-        // 安全分析 Agent 的主 session 空闲时，自动发送恢复消息。
-        // 子 session（Task 工具创建，agent 为 "general" 等）不会触发恢复，
-        // 被 requireSessionWithPrimary 过滤掉。
-        // security-analysis-evolve Agent 不触发恢复（进化 Agent 不做分析工作）。
-        // 没有 taskDir 的 session 不触发恢复（简单问答，不是正式分析任务）。
-        // 用户手动中断（Escape/Ctrl+C）时不恢复 — 通过检查最后一条 assistant
-        // 消息的 error.name === "MessageAbortedError" 来判断。
-        try {
-          const session = await requireSessionWithPrimary(
-            "session.idle",
-            sessionID,
-          );
-          if (!session) {
-            debugLog(
-              `session.idle: 跳过恢复 — 非 PRIMARY sessionID=${sessionID}`,
-              sessionID,
-            );
-          } else if (
-            session.agentName === AGENT_SECURITY_ANALYSIS_EVOLVE
-          ) {
-            debugLog(
-              `session.idle: 跳过恢复 — evolve agent 不做分析工作, sessionID=${sessionID}`,
-              sessionID,
-            );
-          } else {
-            const taskDir = getTaskDir(sessionID);
-            if (!taskDir) {
-              debugLog(
-                `session.idle: 跳过恢复 — 无 taskDir（非正式分析任务）, sessionID=${sessionID}`,
-                sessionID,
-              );
-            } else {
-              const elapsed = Date.now() - session.createdAt;
-              const maxDuration = getMaxDuration(sessionID);
-              if (elapsed >= maxDuration) {
-                debugLog(
-                  `session.idle: 跳过恢复 — 已超时 sessionID=${sessionID} elapsed=${Math.floor(elapsed / 60000)}m max=${Math.floor(maxDuration / 60000)}m`,
-                  sessionID,
-                );
-              } else if (opencodeClient) {
-                // 检查最后一条 assistant 消息是否被用户手动中断
-                // session.idle 无法区分手动停止和 LLM 自然停止，
-                // 但被中断的 assistant 消息会带有 error.name = "MessageAbortedError"
-                const wasAborted = await checkLastMessageAborted(sessionID);
-                if (wasAborted) {
-                  debugLog(
-                    `session.idle: 跳过恢复 — 用户手动中断, sessionID=${sessionID}`,
-                    sessionID,
-                  );
-                } else {
-                  // 检查上一轮响应是否包含完成标记（agent 显式声明分析已完成）
-                  const lastText = await getLastAssistantText(sessionID);
-                  if (lastText && lastText.includes(COMPLETION_MARKER)) {
-                    debugLog(
-                      `session.idle: 跳过恢复 — 检测到完成标记 ${COMPLETION_MARKER}, sessionID=${sessionID}`,
-                      sessionID,
-                    );
-                  } else {
-                    const persistenceData = readPersistenceData(sessionID);
-                    const resumeCount = persistenceData?.resume_count ?? 0;
-                    if (resumeCount >= MAX_RESUMES) {
-                      debugLog(
-                        `session.idle: 跳过恢复 — 已达最大恢复次数 ${MAX_RESUMES} sessionID=${sessionID}`,
-                        sessionID,
-                      );
-                    } else {
-                      debugLog(
-                        `session.idle: 恢复分析 sessionID=${sessionID} agent=${session.agentName} elapsed=${Math.floor(elapsed / 60000)}m max=${Math.floor(maxDuration / 60000)}m resume_count=${resumeCount}`,
-                        sessionID,
-                      );
-                      await opencodeClient.session.promptAsync({
-                        path: { id: sessionID },
-                        body: {
-                          agent: session.agentName,
-                          parts: [{ type: "text" as const, text: RESUME_PROMPT, synthetic: true }],
-                        },
-                      });
-                      recordResumeAttempt(sessionID);
-                      debugLog(
-                        `session.idle: 恢复消息已发送 sessionID=${sessionID}`,
-                        sessionID,
-                      );
-                    }
-                  }
-                }
-              } else {
-                  debugLog(
-                    `session.idle: 跳过恢复 — opencodeClient 未初始化`,
-                    sessionID,
-                  );
-                }
-            }
-          }
-        } catch (e) {
-          debugLog(
-            `session.idle: 恢复异常 sessionID=${sessionID} error=${e}`,
-            sessionID,
-          );
-        }
+        await maybeResumeAnalysis(sessionID);
       }
 
       // session 状态变化和错误（非 idle）
