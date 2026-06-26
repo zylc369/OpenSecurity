@@ -30,7 +30,7 @@
 - 消除 debugLog 循环依赖（getTaskDirRaw 拆分方案，根治递归风险）
 - debugLog 提取到 logging.ts，所有模块统一使用（日志逻辑一致）
 - 全局状态统一收口到 PluginContext（client、directory、sessionManager）
-- 删除 4 个散落函数 + 3 个全局变量
+- 删除 4 个散落函数 + 4 个全局变量（opencodeClient、sessions、nonPrimarySessions、pendingEnsures）
 - SessionData 新增 parentSessionID 字段，为编排 agent 子任务方案打基础
 
 ## §2 技术方案
@@ -115,7 +115,7 @@ doEnsureSession/requireSessionWithPrimary → 调 debugLog（记录日志）
 
 | 函数 | 文件 | 职责 | 调日志？ |
 |------|------|------|---------|
-| `getTaskDirRaw(sessionID)` | utils.ts | 纯文件读取 + JSON 解析 + 缓存，返回 `{ path, error? }` | ❌ 绝不调 |
+| `getTaskDirRaw(sessionID)` | utils.ts | 纯文件读取 + JSON 解析 + 缓存（只缓存有值结果，null 不缓存——映射文件可能后续被创建），返回 `{ path, error? }` | ❌ 绝不调 |
 | `getTaskDir(sessionID)` | task-session.ts | 调 getTaskDirRaw，有 error 时调 debugLog | ✅ |
 
 `debugLog` 只调 `getTaskDirRaw`（不调 `getTaskDir`），彻底切断循环。同时消灭递归风险——不再需要手动 workaround。
@@ -126,6 +126,11 @@ doEnsureSession/requireSessionWithPrimary → 调 debugLog（记录日志）
 
 ```typescript
 // logging.ts
+import { join, dirname } from "path";
+import { mkdirSync, writeFileSync, existsSync, statSync, readFileSync } from "fs";
+import { DEFAULT_LOG, LOGS_DIR, PRIMARY_AGENTS, MAX_LOG_SIZE, KEEP_SIZE } from "./constants";
+import { getTaskDirRaw, getAgentName } from "./utils";
+
 function debugLog(msg: string, sessionID?: string): void {
   if (sessionID) {
     const result = getTaskDirRaw(sessionID);   // ← 调 Raw 版本，不回调 debugLog
@@ -142,6 +147,8 @@ function debugLog(msg: string, sessionID?: string): void {
 ```
 
 4. **所有模块统一使用 debugLog**：底层模块（task-session.ts、session-manager.ts、persistence.ts 等）从 logging.ts import debugLog，日志逻辑全局一致。不再需要 `writeLog(DEFAULT_LOG, msg)` 降级处理。
+
+`getLogFilePath(agentName)` 行为：当 `agentName` 为 undefined 时（如 session 尚未创建、API 未返回 agent 字段），`PRIMARY_AGENTS.includes(undefined)` 为 false，返回 `DEFAULT_LOG`。这意味着 `createFromAPI` 中的早期日志（session 未插入 Map 前）会路由到 `plugin_debug.log`，行为正确。
 
 ### 2.4 SessionData 类
 
@@ -177,6 +184,8 @@ export class SessionData {
 
 ```typescript
 // session-manager.ts
+import type { OpencodeClient } from "@opencode-ai/sdk";
+import { PRIMARY_AGENTS } from "./constants";
 import { debugLog } from "./logging";
 
 export class SessionDataManager {
@@ -231,7 +240,7 @@ export class SessionDataManager {
     if (session) session.agentName = agentName;
   }
 
-  /** 删除（session.deleted 时调用）。同时清理 pending 防止竞态。 */
+  /** 删除（session.deleted 时调用）。同时清理 pending Map。 */
   delete(sessionID: string): void {
     this.sessions.delete(sessionID);
     this.pending.delete(sessionID);
@@ -266,7 +275,9 @@ export class SessionDataManager {
 
 注意：SessionDataManager 统一使用 `debugLog`（从 logging.ts import）。循环依赖已通过 §2.3 的 getTaskDirRaw 拆分方案解决，不再需要 `writeLog(DEFAULT_LOG, msg)` 降级处理。
 
-**API 恢复的局限性**：SDK 的 `Session` 类型不含 `agent` 字段，API 恢复时 `agentName` 可能为 `undefined`。依赖 `chat.message` 后续设置正确的 agentName。在 agentName 被设置前，`isPrimaryAgent()` 返回 false，`requirePrimary` 会跳过所有 hook。
+`delete()` 同时清理 pending Map 的原因：如果 `getOrCreate` 的 `createFromAPI` 正在执行（API 请求 in-flight），`delete` 后该 promise 仍会完成并 `sessions.set` 重新插入 session。这是可接受的——`session.deleted` 意味着服务端 session 已删除，in-flight API 调用大概率 404 返回 undefined，不会成功插入。清理 pending Map 的作用是让后续的 `getOrCreate` 不会复用已失效的 in-flight promise，而是发起新请求（新请求也会 404）。
+
+**API 恢复的局限性**：SDK 的 `Session` 类型不含 `agent` 字段（lines 253-254 的类型转换 `(sessionInfo as { agent?: string })?.agent` 是已知 SDK 差距）。API 恢复时 `agentName` 可能为 `undefined`。依赖 `chat.message` 后续设置正确的 agentName。在 agentName 被设置前，`isPrimaryAgent()` 返回 false，`requirePrimary` 会跳过所有 hook。如果 hook 突然全部停止触发，首先检查 API 是否返回了 agent 字段。
 
 ### 2.6 调用点变更对照
 
@@ -276,9 +287,13 @@ export class SessionDataManager {
 | `requireSessionWithPrimary(hook, sid)` | `ctx.sessionManager!.requirePrimary(hook, sid)` | security-analysis.ts、persistence.ts (maybeResumeAnalysis) |
 | `sessions.get(sid)?.agentName` | `ctx.sessionManager!.get(sid)?.agentName` | security-analysis.ts (event handler) |
 | `sessions.delete(sid)` | `ctx.sessionManager!.delete(sid)` | security-analysis.ts (session.deleted) |
+| `removeTaskSession(sid)` | `removeTaskSession(sid)`（从 task-session.ts import，不变） | security-analysis.ts (session.deleted)。⚠️ 必须保留——删除 TASK_SESSIONS_DIR/\<sid\>.json 映射文件 + 清除 taskDirCache，否则映射文件和缓存泄露 |
+| `nonPrimarySessions.delete(sid)` | 删除（session.deleted handler 中不再调用） | 不再需要 |
 | `getAgentName(sessionID)` | `getAgentName(sessionID)`（从 utils.ts import） | logging.ts (debugLog)。security-analysis.ts 不再调用（见下方 fallbackAgent 移除） |
 | `opencodeClient` | `ctx.client` | persistence.ts、security-analysis.ts (abortSession) |
 | `nonPrimarySessions.add/delete/has` | 删除 | 不再需要（所有 session 统一在 SessionDataManager 中） |
+
+session.deleted handler 完整变更：删除 `sessions.delete` + `nonPrimarySessions.delete`（替换为 `ctx.sessionManager!.delete(sid)`），保留 `removeTaskSession(sid)`（从 task-session.ts import）。
 
 chat.message hook 行为变化：不再区分 PRIMARY/非 PRIMARY 做特殊处理，所有 agent 统一调 `getOrCreate` + `setAgentName`。过滤由 `requirePrimary` 在下游 hook 中执行（`isPrimaryAgent()` 返回 false 就跳过）。功能等价。
 
@@ -402,7 +417,7 @@ export const ctx = new PluginContext();
 - 预估行数: ~130 新增 + ~50 修改
 - 验证点:
   - `node --check` 通过
-  - `rg -n "\b(ensureSession|requireSessionWithPrimary|getAgentName|nonPrimarySessions|pendingEnsures)\b" .opencode/plugins/security-analysis.ts` 无匹配（排除注释）
+  - `rg -n "\b(ensureSession|requireSessionWithPrimary|getAgentName|nonPrimarySessions|pendingEnsures)\b" .opencode/plugins/security-analysis.ts` 仅在注释中匹配（代码中零引用）
   - `rg -n "const sessions\b" .opencode/plugins/security-analysis.ts` 无匹配
 - 依赖: 步骤 1、2、3
 
