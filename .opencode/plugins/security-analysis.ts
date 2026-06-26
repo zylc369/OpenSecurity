@@ -316,10 +316,11 @@ function getTaskDir(sessionID: string): string | null {
       taskDirCache.set(sessionID, result);
       return result;
     }
-    debugLog(`getTaskDir: 未找到映射 sessionID=${sessionID} filePath=${filePath}`, sessionID);
+    // 注意：此处不传 sessionID 给 debugLog，否则 debugLog→getTaskDir 会与此处形成无限递归（栈溢出卡死整个 opencode）
+    debugLog(`getTaskDir: 未找到映射 sessionID=${sessionID} filePath=${filePath}`);
     return null;
   } catch (e) {
-    debugLog(`getTaskDir: 读取异常 sessionID=${sessionID} error=${e}`, sessionID);
+    debugLog(`getTaskDir: 读取异常 sessionID=${sessionID} error=${e}`);
     return null;
   }
 }
