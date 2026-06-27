@@ -64,8 +64,9 @@ $OPENCODE_ROOT/                              # 由插件注入，项目级 .open
 │       ├── llm-attack-methodology.md     #   LLM 攻击方法论
 │       ├── prompt-injection-patterns.md  #   提示注入模式
 │       └── ...                           #   其他 AI 安全文档
-└── commands/
-    └── security-analysis-requirements/   # 进化需求文档
+├── commands/                              # opencode 命令目录（opencode 只把 *.md 当命令；非命令 .md 勿放，会被误识别。可含命令配套的 .py 脚本）
+└── requirements/
+    └── evolve/                            # 进化需求文档（不放 commands/，避免被 opencode 当命令加载）
 
 归属规则:
   mobile-analysis/ 可引用 binary-analysis/ 的知识库和脚本（通过 $SHARED_DIR）
@@ -148,7 +149,7 @@ Plugin hooks:
 ┌──────────────────────────────────────────────────────────┐
 │ Phase 2: 生成需求文档                                       │
 │                                                            │
-│ 写入 $OPENCODE_ROOT/commands/security-analysis-requirements/ 目录，必须包含:
+│ 写入 $OPENCODE_ROOT/requirements/evolve/ 目录，必须包含:
 │   §1 背景与目标（来源: 哪次复盘、哪个痛点、预期收益）          │
 │   §2 技术方案（改动文件、函数签名、数据格式、架构影响）         │
 │   §3 实现规范（改动范围表、编码规则）                          │
@@ -398,7 +399,7 @@ Plugin hooks:
   - IDAPython 脚本 → `.opencode/binary-analysis/` 下对应层级
   - 独立 Python 工具 → `.opencode/binary-analysis/scripts/`（通用）或 `.opencode/mobile-analysis/scripts/`（移动端特有）
   - 知识库 → `.opencode/binary-analysis/knowledge-base/`（通用）或 `.opencode/mobile-analysis/knowledge-base/`（移动端特有）
-  - 需求文档 → `.opencode/commands/security-analysis-requirements/`
+  - 需求文档 → `.opencode/requirements/evolve/`
   - 禁止散落到项目根目录或 `.opencode/` 之外
 - 知识/脚本的归属判定:
   - **通用（放 `binary-analysis/`）**: PC 端和移动端都可能用到。如: Frida API 变化、Hook 原则、密码学验证模式、技术选型
