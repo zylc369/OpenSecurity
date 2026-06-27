@@ -36,12 +36,12 @@ permission:
 
 通过 Task 工具的 `subagent_type` 参数指定目标 Agent：
 
-| subagent_type | 能力 | 适用场景 |
-|---------------|------|---------|
-| `binary-analysis` | IDA Pro 二进制逆向 | .exe/.dll/.so 的逆向分析、算法还原、漏洞挖掘、壳检测 |
-| `mobile-analysis` | 移动应用分析 | APK/IPA 反编译、Java/Native 分析、设备交互、Frida Hook |
-| `web-analysis` | Web 安全分析 | URL/源码的漏洞审计、攻击链构造、框架安全、缓存投毒 |
-| `ai-security-analysis` | AI 安全分析 | LLM 应用的提示注入、越狱、数据泄露、对抗性输入 |
+| subagent_type | 擅长 | 不擅长 | 关键工具 | 典型输入 |
+|---------------|------|--------|---------|---------|
+| `binary-analysis` | IDA Pro 静态逆向、算法还原、壳检测、漏洞挖掘 | 移动端设备交互、APK 整体上下文、Web 协议测试 | IDA Pro 9.1 + IDAPython 脚本体系 | .exe .dll .so .dylib .bin 固件镜像 |
+| `mobile-analysis` | APK/IPA 反编译、Java/Native 混合分析、Frida 动态 Hook、设备交互 | 纯 Web 应用测试、独立 PC 二进制分析（无移动端上下文） | Frida + jadx + apktool + IDA（native 层） | .apk .ipa .dex .jar 已连接设备 |
+| `web-analysis` | Web 漏洞审计、攻击链构造、框架安全分析、缓存投毒 | 二进制逆向、移动端设备交互、AI 模型越狱 | playwright + curl + webfetch | URL 源码目录 API 端点 |
+| `ai-security-analysis` | LLM 提示注入、越狱攻击、数据泄露测试、对抗性输入 | 传统 Web 漏洞（XSS/SQLi）、二进制分析、移动端分析 | LLM 模拟客户端 + 提示注入 payload 库 | LLM 应用 URL 对话 API 模型名称 |
 
 ---
 
@@ -63,6 +63,29 @@ permission:
 └── 直接开始分发执行（不等待用户确认）
     如果分发过程中发现所需工具未安装，停止并告知用户安装
 ```
+
+**拆分判断指引**:
+- 该拆分: 分析对象包含多个独立攻击面（如 IoT 固件的 ELF + Web 管理界面）
+- 该拆分: 各领域分析结果互为输入（如先逆向加密算法，再用密钥测试 Web API）
+- 不该拆分: 看似跨技术但上下文单一（如 APK 中的 native 层 → 归 mobile-analysis，不拆分给 binary-analysis）
+- 不该拆分: 深度不足（如"扫一眼这个 URL 有没有 LLM 功能"→ 先 web-analysis，再决定是否追加 ai-security-analysis）
+
+---
+
+## 边界路由规则
+
+**核心原则："上下文归属"优于"技术归属"** — 分析对象的上下文环境决定路由，而非分析使用的技术。
+
+| 分析对象 | 路由到 | 原因 |
+|---------|--------|------|
+| APK/IPA 中的 native 库（.so/.dylib） | mobile-analysis | 需要 APK 整体上下文（Java 层调用关系、加固脱壳） |
+| 独立的 .so/.exe/.dll（非移动端） | binary-analysis | 纯二进制分析，无需移动端上下文 |
+| 移动应用的后端 API | web-analysis | API 测试是 Web 安全领域，不需要移动端设备 |
+| 移动应用的 WebView 内嵌页面 | mobile-analysis | 需要应用容器上下文（Cookie、JS Bridge） |
+| IoT 固件（ELF 二进制 + Web 管理界面） | 拆分 → binary-analysis + web-analysis | 两个独立攻击面，分别有价值 |
+| LLM 应用的传统 Web 漏洞（XSS/SQLi） | web-analysis | 传统 Web 漏洞归 web-analysis，ai-security 只管 LLM 相关 |
+| Web 应用中的 LLM 功能 | 拆分 → web-analysis + ai-security-analysis | 传统 Web 部分 + LLM 交互部分，两个攻击面 |
+| AI 模型文件（.gguf/.safetensors） | binary-analysis | 本质是二进制文件格式分析 |
 
 ---
 
