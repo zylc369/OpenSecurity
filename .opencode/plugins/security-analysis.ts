@@ -1,262 +1,35 @@
-import {
-  readFileSync,
-  writeFileSync,
-  existsSync,
-  unlinkSync,
-  mkdirSync,
-  statSync,
-} from "fs";
-import { join, dirname } from "path";
-import { homedir } from "os";
-import { execSync } from "child_process";
-import { fileURLToPath } from "url";
+import { writeFileSync, existsSync } from "fs";
+import { join } from "path";
 import type { Plugin } from "@opencode-ai/plugin";
-import type { OpencodeClient } from "@opencode-ai/sdk";
-
-const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
-const OPENCODE_ROOT = dirname(PLUGIN_DIR);
-
-const DATA_DIR = join(homedir(), "bw-security-analysis");
-const CONFIG_FILE = join(DATA_DIR, "config.json");
-const ENV_CACHE_FILE = join(DATA_DIR, "env_cache.json");
-const WORKSPACE_DIR = join(DATA_DIR, "workspace");
-const TASK_SESSIONS_DIR = join(WORKSPACE_DIR, ".task_sessions");
-const LOGS_DIR = join(DATA_DIR, "logs");
-const DEFAULT_LOG = join(LOGS_DIR, "plugin_debug.log");
-const MAX_LOG_SIZE = 5 * 1024 * 1024;
-const KEEP_SIZE = 2 * 1024 * 1024;
-const ENV_INJECTION_FREQUENCY = 5; // 每 N 次请求注入一次环境信息
-
-const AGENT_BINARY_ANALYSIS = "binary-analysis";
-const AGENT_MOBILE_ANALYSIS = "mobile-analysis";
-const AGENT_WEB_ANALYSIS = "web-analysis";
-const AGENT_AI_SECURITY_ANALYSIS = "ai-security-analysis";
-const AGENT_SECURITY_ANALYSIS_EVOLVE = "security-analysis-evolve";
-const AGENT_SECURITY_COORDINATOR = "security-coordinator";
-
-const PRIMARY_AGENTS = [
+import {
+  PLUGIN_DIR,
+  OPENCODE_ROOT,
+  DATA_DIR,
+  CONFIG_FILE,
+  ENV_CACHE_FILE,
+  WORKSPACE_DIR,
+  TASK_SESSIONS_DIR,
+  LOGS_DIR,
+  DEFAULT_LOG,
+  ENV_INJECTION_FREQUENCY,
   AGENT_BINARY_ANALYSIS,
   AGENT_MOBILE_ANALYSIS,
   AGENT_WEB_ANALYSIS,
-  AGENT_AI_SECURITY_ANALYSIS,
   AGENT_SECURITY_ANALYSIS_EVOLVE,
   AGENT_SECURITY_COORDINATOR,
-];
-
-const AGENT_SCRIPT_DIRS: Record<string, string> = {};
-for (const name of PRIMARY_AGENTS) {
-  AGENT_SCRIPT_DIRS[name] = join(OPENCODE_ROOT, name);
-}
-
-const SHARED_DIR = join(OPENCODE_ROOT, AGENT_BINARY_ANALYSIS);
-
-// ─── 分析持续性恢复 ──────────────────────────────────────────────
-//
-// 当安全分析 Agent 的主 session 空闲时，自动发送恢复消息。
-// 避免 LLM 因上下文耗尽或自身判断而停止生成后，需要用户手动继续。
-//
-// 恢复条件:
-//   1. session.idle 事件触发
-//   2. 该 session 的 agentName 属于 PRIMARY_AGENTS（排除子 session）
-//   3. agentName 不是 security-analysis-evolve（进化 Agent 不做分析工作）
-//   4. 未超过最大持续时间（默认 6 小时，可通过 .persistence.json 文件指定）
-//   5. 最后一条 assistant 消息未被用户手动中断（error.name !== ABORTED_ERROR_NAME）
-//
-// 持续性状态文件 ($TASK_DIR/.persistence.json):
-//   {
-//     "max_duration_hours": 6,      // 最大持续时间（小时），默认 6
-//     "resume_count": 3,            // 已发送恢复消息的次数
-//     "last_resume_at": "2026-06-13T10:30:00.000Z"  // 最近一次恢复时间
-//   }
-
-const MAX_DURATION_DEFAULT = 6 * 60 * 60 * 1000; // 6 小时，单位毫秒
-const MAX_RESUMES = 50; // 最大恢复次数，防止分析完成后无限循环恢复
-const PERSISTENCE_FILE = ".persistence.json";
-const ABORTED_ERROR_NAME = "MessageAbortedError";
-const COMPLETION_MARKER = ">>>COMPLETE<<<";
-const RESUME_PROMPT =
-  `你之前的分析是否已经完成了？\n" +
-  "- 如果已经完成：请直接输出最终结论，然后在最后一行精确输出这个标记（原样复制，不要修改）：${COMPLETION_MARKER}\n" +
-  "- 如果尚未完成：请自主继续分析，不要停下来向用户提问。`;
-
-// ─── 分析持续性恢复：状态文件读写 ──────────────────────────────
-
-interface PersistenceData {
-  max_duration_hours: number;
-  resume_count: number;
-  last_resume_at: string | null;
-}
-
-function readPersistenceData(sessionID: string): PersistenceData | null {
-  const taskDir = getTaskDir(sessionID);
-  if (!taskDir) return null;
-  const filePath = join(taskDir, PERSISTENCE_FILE);
-  try {
-    const content = readFileSync(filePath, "utf-8").trim();
-    const data = JSON.parse(content) as PersistenceData;
-    if (
-      typeof data.max_duration_hours === "number" &&
-      data.max_duration_hours > 0 &&
-      data.max_duration_hours <= 24
-    ) {
-      return {
-        max_duration_hours: data.max_duration_hours,
-        resume_count: typeof data.resume_count === "number" ? data.resume_count : 0,
-        last_resume_at: data.last_resume_at ?? null,
-      };
-    }
-    debugLog(
-      `readPersistenceData: invalid max_duration_hours in ${filePath}, using default`,
-      sessionID,
-    );
-  } catch {
-    // 文件不存在或 JSON 解析失败，使用默认值
-  }
-  return null;
-}
-
-function getMaxDuration(sessionID: string): number {
-  const data = readPersistenceData(sessionID);
-  if (data) {
-    return Math.floor(data.max_duration_hours * 3600 * 1000);
-  }
-  return MAX_DURATION_DEFAULT;
-}
-
-// 检查最后一条 assistant 消息是否被用户手动中断
-// session.idle 无法区分 LLM 自然结束和用户手动停止，两者都会触发 idle。
-// 但手动中断的 assistant 消息会带有 error.name = "MessageAbortedError"。
-// 通过 client.session.messages API 获取消息列表并检查最后一条 assistant 消息。
-async function checkLastMessageAborted(sessionID: string): Promise<boolean> {
-  if (!opencodeClient) return false;
-  try {
-    const response = await opencodeClient.session.messages({
-      path: { id: sessionID },
-    });
-    if (response.error || !response.data) return false;
-    const messages = response.data;
-    if (!Array.isArray(messages) || messages.length === 0) return false;
-    // 找最后一条 assistant 消息
-    const lastAssistant = [...messages]
-      .reverse()
-      .find(
-        (m: { info?: { role?: string } }) =>
-          m?.info?.role === "assistant",
-      );
-    if (!lastAssistant) return false;
-    // 检查 error.name 是否为 MessageAbortedError
-    // OpenCode 的 prompt.ts 中 finalizeInterruptedAssistant 会设置:
-    //   msg.error = MessageV2.fromError(new DOMException("Aborted", "AbortError"), { aborted: true })
-    // Assistant schema 中 error 字段在 info 上（与 role 同级）
-    const info = (lastAssistant as { info?: { error?: { name?: string } } }).info;
-    return info?.error?.name === ABORTED_ERROR_NAME;
-  } catch (e) {
-    debugLog(
-      `checkLastMessageAborted: 查询异常 sessionID=${sessionID} error=${e}`,
-      sessionID,
-    );
-    return false;
-  }
-}
-
-// 获取最后一条 assistant 消息的文本内容（用于检测完成标记）
-async function getLastAssistantText(sessionID: string): Promise<string | null> {
-  if (!opencodeClient) return null;
-  try {
-    const response = await opencodeClient.session.messages({
-      path: { id: sessionID },
-    });
-    if (response.error || !response.data) return null;
-    const messages = response.data;
-    if (!Array.isArray(messages) || messages.length === 0) return null;
-    const lastAssistant = [...messages]
-      .reverse()
-      .find(
-        (m: { info?: { role?: string } }) =>
-          m?.info?.role === "assistant",
-      );
-    if (!lastAssistant) return null;
-    const parts = (
-      lastAssistant as {
-        parts?: Array<{ type?: string; text?: string }>;
-      }
-    ).parts;
-    if (!parts || !Array.isArray(parts)) return null;
-    return parts
-      .filter((p) => p.type === "text" && p.text)
-      .map((p) => p.text!)
-      .join("\n");
-  } catch (e) {
-    debugLog(
-      `getLastAssistantText: 查询异常 sessionID=${sessionID} error=${e}`,
-      sessionID,
-    );
-    return null;
-  }
-}
-
-function recordResumeAttempt(sessionID: string): void {
-  const taskDir = getTaskDir(sessionID);
-  if (!taskDir) {
-    debugLog(
-      `recordResumeAttempt: no taskDir for sessionID=${sessionID}`,
-      sessionID,
-    );
-    return;
-  }
-  const filePath = join(taskDir, PERSISTENCE_FILE);
-  const existing = readPersistenceData(sessionID);
-  const data: PersistenceData = {
-    max_duration_hours: existing?.max_duration_hours ?? MAX_DURATION_DEFAULT / (3600 * 1000),
-    resume_count: (existing?.resume_count ?? 0) + 1,
-    last_resume_at: new Date().toISOString(),
-  };
-  try {
-    writeFileSync(filePath, JSON.stringify(data, null, 2));
-    debugLog(
-      `recordResumeAttempt: written resume_count=${data.resume_count} to ${filePath}`,
-      sessionID,
-    );
-  } catch (e) {
-    debugLog(
-      `recordResumeAttempt: failed to write ${filePath} error=${e}`,
-      sessionID,
-    );
-  }
-}
-
-function getLogFilePath(agentName: string | undefined): string {
-  if (agentName && PRIMARY_AGENTS.includes(agentName)) {
-    return join(LOGS_DIR, `${agentName}.log`);
-  }
-  return DEFAULT_LOG;
-}
-
-function trimLogFile(logFile: string): void {
-  try {
-    if (existsSync(logFile) && statSync(logFile).size > MAX_LOG_SIZE) {
-      const content = readFileSync(logFile, "utf-8");
-      const keep = content.slice(-KEEP_SIZE);
-      const firstNewline = keep.indexOf("\n");
-      writeFileSync(
-        logFile,
-        firstNewline >= 0 ? keep.slice(firstNewline + 1) : keep,
-      );
-    }
-  } catch {}
-}
-
-function writeLog(logFile: string, msg: string): void {
-  try {
-    mkdirSync(dirname(logFile), { recursive: true });
-    trimLogFile(logFile);
-    const now = new Date();
-    const ts =
-      now.toLocaleString("zh-CN", { hour12: false }) +
-      `.${String(now.getMilliseconds()).padStart(3, "0")}`;
-    writeFileSync(logFile, `[${ts}] ${msg}\n`, { flag: "a" });
-  } catch {}
-}
+  PRIMARY_AGENTS,
+  AGENT_SCRIPT_DIRS,
+  SHARED_DIR,
+  AGENTS_DIR,
+} from "./constants";
+import { ctx } from "./context";
+import { SessionDataManager } from "./session-manager";
+import { debugLog } from "./logging";
+import { readJsonSafe, getTaskDir, removeTaskSession } from "./task-session";
+import { PYTHON_CMD } from "./venv";
+import { hasBuwaiExtensionId, loadSnippet } from "./snippet";
+import { maybeResumeAnalysis } from "./persistence";
+import { recordTimeline, flushTimeline } from "./timeline";
 
 interface ToolConfig {
   path: string;
@@ -285,62 +58,6 @@ interface EnvData {
   };
 }
 
-interface TaskSessionMapping {
-  task_dir: string;
-}
-
-// getTaskDir 内存缓存（避免每次 debugLog 都读文件系统）
-const taskDirCache = new Map<string, string | null>();
-
-function readJsonSafe<T>(filePath: string, sessionID?: string): T | null {
-  try {
-    if (existsSync(filePath)) {
-      return JSON.parse(readFileSync(filePath, "utf-8")) as T;
-    }
-  } catch (e) {
-    debugLog(`readJsonSafe failed: ${filePath} error=${e}`, sessionID);
-  }
-  return null;
-}
-
-function getTaskDir(sessionID: string): string | null {
-  // 先查缓存（只缓存有值的结果，null 不缓存——映射文件可能后续被创建）
-  const cached = taskDirCache.get(sessionID);
-  if (cached) return cached;
-
-  try {
-    const filePath = join(TASK_SESSIONS_DIR, `${sessionID}.json`);
-    const data = readJsonSafe<TaskSessionMapping>(filePath);
-    const result = data?.task_dir;
-    if (result) {
-      taskDirCache.set(sessionID, result);
-      return result;
-    }
-    // 注意：此处不传 sessionID 给 debugLog，否则 debugLog→getTaskDir 会与此处形成无限递归（栈溢出卡死整个 opencode）
-    debugLog(`getTaskDir: 未找到映射 sessionID=${sessionID} filePath=${filePath}`);
-    return null;
-  } catch (e) {
-    debugLog(`getTaskDir: 读取异常 sessionID=${sessionID} error=${e}`);
-    return null;
-  }
-}
-
-function removeTaskSession(sessionID: string): void {
-  taskDirCache.delete(sessionID);
-  try {
-    const filePath = join(TASK_SESSIONS_DIR, `${sessionID}.json`);
-    if (existsSync(filePath)) {
-      debugLog(`removeTaskSession: deleting ${filePath}`, sessionID);
-      unlinkSync(filePath);
-    }
-  } catch (e) {
-    debugLog(
-      `removeTaskSession failed: sessionID=${sessionID} error=${e}`,
-      sessionID,
-    );
-  }
-}
-
 function getToolsForAgent(
   agentName: string,
   config: ConfigData,
@@ -351,189 +68,11 @@ function getToolsForAgent(
     .map(([name, tool]) => ({ name, ...tool }));
 }
 
-// ─── Python 虚拟环境管理 ──────────────────────────────────────────────
-//
-// Plugin 启动时确保 ~/bw-security-analysis/.venv 存在且可用。
-// $PYTHON_CMD 指向 venv Python 绝对路径，所有 agent 统一使用。
-// venv 创建需要系统 Python（通过 findSystemPython 检测）。
-// 整个流程在 Plugin 加载时执行一次，失败则抛异常终止加载。
-
-const VENV_DIR = join(DATA_DIR, ".venv");
-
-// venv 内 Python 可能的路径（覆盖所有平台，按常见度排序）
-const VENV_PYTHON_CANDIDATES = [
-  join(VENV_DIR, "Scripts", "python.exe"), // Windows 标准位置
-  join(VENV_DIR, "bin", "python"), // Linux/macOS 标准位置
-  join(VENV_DIR, "Scripts", "python3.exe"), // Windows（python3 别名）
-  join(VENV_DIR, "bin", "python3"), // Linux/macOS（python3）
-];
-
-// 实际运行 Python 代码验证可用性（不依赖 exit code，不假设路径）
-function verifyPython(pathOrCmd: string): boolean {
-  try {
-    const output = execSync(`"${pathOrCmd}" -c "print('OK')"`, {
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 5000,
-      encoding: "utf-8",
-    });
-    return output.trim() === "OK";
-  } catch {
-    return false;
-  }
-}
-
-// 从 venv 中检测可用的 Python（不假设路径，逐个验证）
-function findVenvPython(): string | null {
-  for (const candidate of VENV_PYTHON_CANDIDATES) {
-    if (!existsSync(candidate)) continue;
-    if (verifyPython(candidate)) {
-      return candidate;
-    }
-    debugLog(`findVenvPython: ${candidate} exists but failed verification`);
-  }
-  return null;
-}
-
-// 检测系统 Python 命令（仅用于创建 venv）
-function findSystemPython(): string {
-  const candidates =
-    process.platform === "win32"
-      ? ["python", "python3"]
-      : ["python3", "python"];
-
-  for (const cmd of candidates) {
-    if (verifyPython(cmd)) return cmd;
-  }
-  throw new Error(
-    `未找到可用的系统 Python。请安装 Python 3.8+ 后重试。\n` +
-      `已尝试: ${candidates.join(", ")}`,
-  );
-}
-
-function ensureVenvPython(): string {
-  // 1. 已有 venv → 检测可用的 Python
-  const existing = findVenvPython();
-  if (existing) {
-    debugLog(`ensureVenvPython: ${existing} verified`);
-    return existing;
-  }
-
-  // 2. 需要创建 venv
-  const systemPython = findSystemPython();
-  debugLog(`ensureVenvPython: creating venv with ${systemPython}`);
-
-  try {
-    execSync(`"${systemPython}" -m venv "${VENV_DIR}"`, {
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 120000,
-      encoding: "utf-8",
-    });
-  } catch (e) {
-    throw new Error(
-      `创建 Python 虚拟环境失败: ${(e as Error).message}\n` +
-        `请手动运行: ${systemPython} -m venv "${VENV_DIR}"`,
-    );
-  }
-
-  // 3. 创建后重新检测（不假设路径，用同一套检测逻辑）
-  const created = findVenvPython();
-  if (created) {
-    debugLog(`ensureVenvPython: ${created} created and verified`);
-    return created;
-  }
-  throw new Error(
-    `虚拟环境创建成功但未检测到可用的 Python。\n` +
-      `请删除 "${VENV_DIR}" 后重试。`,
-  );
-}
-
-// Plugin 加载时立即确保 venv 可用；失败则整个 Plugin 加载失败
-const PYTHON_CMD = ensureVenvPython();
-
-// 根据实际 agent 名获取脚本目录；子 agent（如 "general"）不在映射表中时，
-// 回退到 agentName 对应的目录；均无映射则返回 undefined
+// 根据 agent 名获取脚本目录；不在映射表中时返回 undefined
 function getScriptDir(
   agentName: string | undefined,
-  fallbackAgent?: string,
 ): string | undefined {
-  return (
-    AGENT_SCRIPT_DIRS[agentName || ""] ||
-    AGENT_SCRIPT_DIRS[fallbackAgent || ""] ||
-    undefined
-  );
-}
-
-const AGENTS_DIR = join(OPENCODE_ROOT, "agents");
-const AGENTS_RULES_DIR = join(OPENCODE_ROOT, "agents-rules");
-
-// ─── 占位符展开 ──────────────────────────────────────────────────────
-//
-// Agent .md 文件中可以用 {{buwai-rule:片段名}} 引用 agents-rules/ 下的通用片段。
-// Plugin 在 system.transform hook 中展开占位符，LLM 收到的是完整 prompt。
-//
-// 缓存策略：mtime 检测（statSync + mtimeMs 对比），文件改动后下次调用即生效。
-// 依赖顺序：session 检查 → 占位符展开（每次）→ 环境信息注入（每次）
-
-interface SnippetCacheEntry {
-  content: string | null;
-  mtime: number;
-}
-const snippetCache = new Map<string, SnippetCacheEntry>();
-
-interface FrontmatterCacheEntry {
-  result: boolean;
-  mtime: number;
-}
-const frontmatterCache = new Map<string, FrontmatterCacheEntry>();
-
-// 解析 YAML frontmatter（仅扁平 key-value，不处理嵌套结构）
-// 示例输入：---\nmode: primary\nbuwai-extension-id: binary-analysis\n---\n
-// 返回：{ mode: "primary", "buwai-extension-id": "binary-analysis" }
-function parseFrontmatter(content: string): Record<string, string> {
-  // 匹配 --- 开头和结尾之间的内容（兼容 \r\n 和 \n）
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
-  if (!match) return {};
-  const result: Record<string, string> = {};
-  for (const line of match[1].split(/\r?\n/)) {
-    // 只匹配顶层 key: value（缩进行如 "  external_directory:" 被跳过）
-    const kv = line.match(/^([a-zA-Z0-9_-]+):\s*(.*)$/);
-    if (kv) result[kv[1]] = kv[2].trim();
-  }
-  return result;
-}
-
-// 检查 agent .md 是否声明了 buwai-extension-id（有此字段才做占位符展开）
-// 结果按 agentFile 路径缓存，mtime 变了才重新读取
-function hasBuwaiExtensionId(agentFile: string): boolean {
-  try {
-    const stat = statSync(agentFile);
-    const cached = frontmatterCache.get(agentFile);
-    if (cached && cached.mtime === stat.mtimeMs) return cached.result;
-    const content = readFileSync(agentFile, "utf-8");
-    const fm = parseFrontmatter(content);
-    const result = "buwai-extension-id" in fm;
-    frontmatterCache.set(agentFile, { result, mtime: stat.mtimeMs });
-    return result;
-  } catch {
-    return false;
-  }
-}
-
-// 加载 agents-rules/<name>.md 片段文件，带 mtime 缓存
-// 返回 null 表示文件不存在（调用方保留占位符原文）
-function loadSnippet(name: string): string | null {
-  const filePath = join(AGENTS_RULES_DIR, `${name}.md`);
-  try {
-    const stat = statSync(filePath);
-    const cached = snippetCache.get(name);
-    if (cached && cached.mtime === stat.mtimeMs) return cached.content;
-    const content = readFileSync(filePath, "utf-8").trim();
-    snippetCache.set(name, { content, mtime: stat.mtimeMs });
-    return content;
-  } catch {
-    debugLog(`Snippet not found: ${filePath}`);
-    return null;
-  }
+  return AGENT_SCRIPT_DIRS[agentName || ""] || undefined;
 }
 
 function getCompactionReminder(agentName: string | undefined): string {
@@ -621,8 +160,7 @@ async function buildEnvSection(
   sessionID?: string,
 ): Promise<string> {
   try {
-    const fallbackAgent = getAgentName(sessionID);
-    const scriptsDir = getScriptDir(agentName, fallbackAgent);
+    const scriptsDir = getScriptDir(agentName);
 
     let envSection = `\n## 全局环境和目录位置信息\n**Agent需要这些信息，它们非常关键。如果Agent忽略这些信息，Agent的运行将不符合预期！**\n`;
     envSection += `- 项目的OpenCode配置根目录 ($OPENCODE_ROOT)路径，即项目的\`.opencode\`路径，它里面包含项目的所有Agents、Plugins、知识库、工具、脚本: ${OPENCODE_ROOT}\n`;
@@ -696,57 +234,25 @@ async function buildEnvSection(
 // ─── session 管理 ──────────────────────────────────────────────────────
 //
 // 数据结构
-// - createdAt:   session 初始化时间（ensureSession 设置）
+// - createdAt:   session 初始化时间（SessionDataManager 创建）
 // - agentName:   当前实际使用的 agent 名（chat.message 设置，如 "binary-analysis"）
 //
 // 恢复策略
 // 插件重启后内存 Map 清空，OpenCode 不会为已有 session 重发 session.created 事件。
-// ensureSession 通过 client API 按需查询 session info（含 parentID），
-// 递归解析父链恢复 agentName。每个 session 在每个进程生命周期内最多触发
-// 一次 API 调用，后续访问纯内存读取，零开销。
-interface SessionData {
-  createdAt: number;
-  agentName?: string;
-  systemTransformCount: number;
-}
-
-const sessions = new Map<string, SessionData>();
-// 缓存已确认非 PRIMARY_AGENT 的 session，避免反复调 session.get API
-const nonPrimarySessions = new Set<string>();
-
-// OpenCode client，在 Plugin 函数中初始化
-let opencodeClient: OpencodeClient | null = null;
-
-// 并发去重：同一 sessionID 的并发 ensureSession 调用共享同一个 Promise
-const pendingEnsures = new Map<string, Promise<SessionData | undefined>>();
-
-function getAgentName(sessionID?: string): string | undefined {
-  return sessionID ? sessions.get(sessionID)?.agentName : undefined;
-}
-
-function debugLog(msg: string, sessionID?: string): void {
-  // 优先写到任务目录下的 logs/plugin.log，没有任务目录则走集中日志
-  const taskDir = sessionID ? getTaskDir(sessionID) : null;
-  if (taskDir) {
-    writeLog(join(taskDir, "logs", "plugin.log"), msg);
-  } else {
-    const logFile = getLogFilePath(getAgentName(sessionID));
-    writeLog(logFile, msg);
-  }
-}
-
+// SessionDataManager.createFromAPI 通过 client API 按需查询 session info（含 parentID），
+// 每个 session 在每个进程生命周期内最多触发一次 API 调用，后续访问纯内存读取，零开销。
 /**
  * 终止会话：先 showToast 显示原因，再 abort 中断执行。
  * 用于 shell.env 等 hook 检测到严重错误时调用。
  */
 async function abortSession(sessionID: string, reason: string): Promise<void> {
   debugLog(`abortSession: sessionID=${sessionID} reason=${reason}`, sessionID);
-  if (!opencodeClient) {
-    debugLog(`abortSession: opencodeClient 未初始化，无法终止`, sessionID);
+  if (!ctx.client) {
+    debugLog(`abortSession: ctx.client 未初始化，无法终止`, sessionID);
     return;
   }
   try {
-    await opencodeClient.tui.showToast({
+    await ctx.client.tui.showToast({
       body: {
         title: "致命错误",
         message: reason,
@@ -762,323 +268,22 @@ async function abortSession(sessionID: string, reason: string): Promise<void> {
     return;
   }
   try {
-    await opencodeClient.session.abort({ path: { id: sessionID } });
+    await ctx.client.session.abort({ path: { id: sessionID } });
     debugLog(`abortSession: 已终止 sessionID=${sessionID}`, sessionID);
   } catch (e) {
     debugLog(`abortSession: abort 失败 sessionID=${sessionID} error=${e}`, sessionID);
   }
 }
 
-/**
- * - 已在 Map 中 → 直接返回（零开销）
- * - 不在 Map 中 → 调用 OpenCode client API 查询 session info，
- *   递归解析父链继承 agentName，写入 Map 后返回。
- * - 同一 session 的并发调用共享同一个 Promise，避免重复 API 请求。
- */
-async function ensureSession(
-  sessionID: string,
-): Promise<SessionData | undefined> {
-  const existing = sessions.get(sessionID);
-  if (existing) return existing;
-
-  const pending = pendingEnsures.get(sessionID);
-  if (pending) return pending;
-
-  const promise = doEnsureSession(sessionID);
-  pendingEnsures.set(sessionID, promise);
-  try {
-    return await promise;
-  } finally {
-    pendingEnsures.delete(sessionID);
-  }
-}
-
-async function doEnsureSession(
-  sessionID: string,
-): Promise<SessionData | undefined> {
-  if (!opencodeClient) {
-    debugLog(`doEnsureSession: client 未初始化, sessionID=${sessionID}`);
-    return undefined;
-  }
-
-  try {
-    const response = await opencodeClient.session.get({
-      path: { id: sessionID },
-    });
-
-    debugLog(
-      `doEnsureSession: client 响应 response=${JSON.stringify(response)}`,
-      sessionID,
-    );
-
-    if (response.error) {
-      debugLog(
-        `doEnsureSession: API 错误 sessionID=${sessionID} error=${JSON.stringify(response.error)}`,
-      );
-      return undefined;
-    }
-    const sessionInfo = response.data;
-    if (!sessionInfo) {
-      debugLog(`doEnsureSession: API 返回空数据 sessionID=${sessionID}`);
-      return undefined;
-    }
-
-    const agentName = (sessionInfo as { agent?: string })?.agent;
-
-    const session: SessionData = {
-      createdAt: Date.now(),
-      agentName,
-      systemTransformCount: 0,
-    };
-    sessions.set(sessionID, session);
-    debugLog(
-      `doEnsureSession: 恢复 sessionID=${sessionID} agentName=${agentName || "无"} parentID=${sessionInfo.parentID || "无"}`,
-      sessionID,
-    );
-    return session;
-  } catch (e) {
-    debugLog(
-      `doEnsureSession: 异常 sessionID=${sessionID} error=${e}`,
-      sessionID,
-    );
-    return undefined;
-  }
-}
-
-/**
- * 统一的 hook 入口守卫：
- * 1. 优先从 Map 中查找 session（chat.message 已注册）
- * 2. Map miss 时，通过 session.get API 查询当前 session 的 agent
- *    - 如果是 PRIMARY_AGENT，恢复到 Map 中并返回
- *    - 否则跳过
- *
- * 修复：agent 中途切换后 chat.message 可能不重新触发，
- * 导致 Map 中无数据但实际 agent 已变为 PRIMARY_AGENT。
- */
-async function requireSessionWithPrimary(
-  hookName: string,
-  sessionID?: string,
-): Promise<SessionData | undefined> {
-  if (!sessionID) {
-    debugLog(`${hookName}: 跳过 — 无 sessionID`);
-    return undefined;
-  }
-
-  const existing = sessions.get(sessionID);
-  if (existing) return existing;
-
-  // 已确认非 PRIMARY_AGENT，跳过（避免重复 API 调用）
-  if (nonPrimarySessions.has(sessionID)) {
-    debugLog(
-      `${hookName}: 跳过 — 已缓存为非 PRIMARY sessionID=${sessionID}`,
-      sessionID,
-    );
-    return undefined;
-  }
-
-  // Map miss — 尝试从 API 恢复（覆盖 agent 切换场景）
-  if (!opencodeClient) {
-    debugLog(`${hookName}: Map miss → opencodeClient 未初始化，无法恢复`);
-    return undefined;
-  }
-  try {
-    const response = await opencodeClient.session.get({
-      path: { id: sessionID },
-    });
-    const sessionInfo = response?.data;
-    const agentName = (sessionInfo as { agent?: string } | undefined)?.agent;
-
-    if (agentName && PRIMARY_AGENTS.includes(agentName)) {
-      debugLog(
-        `${hookName}: Map miss → API 恢复成功 sessionID=${sessionID} agent=${agentName}`,
-        sessionID,
-      );
-      const session: SessionData = {
-        createdAt: Date.now(),
-        agentName,
-        systemTransformCount: 0,
-      };
-      sessions.set(sessionID, session);
-      return session;
-    }
-
-    // 缓存为非 PRIMARY，后续直接跳过
-    nonPrimarySessions.add(sessionID);
-    debugLog(
-      `${hookName}: Map miss → API 返回非 PRIMARY agent=${agentName || "无"} sessionID=${sessionID}`,
-      sessionID,
-    );
-  } catch (e) {
-    debugLog(
-      `${hookName}: Map miss → API 查询异常 sessionID=${sessionID} error=${e}`,
-      sessionID,
-    );
-  }
-
-  return undefined;
-}
-
-// ─── 时间线日志 ──────────────────────────────────────────────────────
-//
-// 记录工具执行和 session 事件的时间线，供事后复盘分析。
-// 内存 buffer → 文件 flush 策略，避免每次事件都写磁盘。
-
-type TimelineEventType =
-  | "tool.before"
-  | "tool.after"
-  | "session.status"
-  | "session.error"
-  | "heartbeat";
-
-interface TimelineEvent {
-  timestamp: number;
-  type: TimelineEventType;
-  tool?: string;
-  detail?: string;
-  duration?: number;
-}
-
-const MAX_TIMELINE_BUFFER = 500;
-const timelineBuffers = new Map<string, TimelineEvent[]>();
-
 // 工具开始执行时间戳（tool.execute.before → tool.execute.after 配对计算耗时）
 const toolStartTimes = new Map<string, number>();
 
-function formatTimelineEntry(event: TimelineEvent): string {
-  const date = new Date(event.timestamp);
-  const ts = date.toLocaleString("zh-CN", { hour12: false });
-  const obj: Record<string, unknown> = {
-    ts: event.timestamp,
-    type: event.type,
-  };
-  if (event.tool) obj.tool = event.tool;
-  if (event.detail) obj.detail = event.detail;
-  if (event.duration !== undefined) obj.duration = event.duration;
-  return `[${ts}] ${JSON.stringify(obj)}`;
-}
-
-function flushTimeline(sessionID: string): void {
-  const buffer = timelineBuffers.get(sessionID);
-  if (!buffer || buffer.length === 0) return;
-
-  const taskDir = getTaskDir(sessionID);
-  const logFile = taskDir
-    ? join(taskDir, "logs", "timeline.log")
-    : join(LOGS_DIR, `timeline-${sessionID}.log`);
-
-  try {
-    const lines = buffer.map(formatTimelineEntry).join("\n") + "\n";
-    mkdirSync(dirname(logFile), { recursive: true });
-    writeFileSync(logFile, lines, { flag: "a" });
-  } catch (e) {
-    debugLog(`flushTimeline failed: ${e}`, sessionID);
-  }
-
-  buffer.length = 0;
-}
-
-function recordTimeline(
-  sessionID: string,
-  event: TimelineEvent,
-  flush = false,
-): void {
-  let buffer = timelineBuffers.get(sessionID);
-  if (!buffer) {
-    buffer = [];
-    timelineBuffers.set(sessionID, buffer);
-  }
-  buffer.push(event);
-
-  // buffer 满时自动 flush
-  if (buffer.length >= MAX_TIMELINE_BUFFER || flush) {
-    flushTimeline(sessionID);
-  }
-}
-
-// ─── 分析持续性恢复 ──────────────────────────────────────────────
-//
-// 安全分析 Agent 的主 session 空闲时，自动发送恢复消息。
-// 通过多层条件判断（early return）决定是否恢复：
-//   1. session 属于 PRIMARY_AGENTS（排除子 session）
-//   2. agent 不是 security-analysis-evolve（进化 Agent 不做分析工作）
-//   3. 有 taskDir（正式分析任务，非简单问答）
-//   4. 未超过最大持续时间（默认 6 小时）
-//   5. 最后一条 assistant 消息未被用户手动中断
-//   6. 上一轮响应不包含完成标记 >>>COMPLETE<<<（agent 显式声明已完成）
-//   7. 未超过最大恢复次数 MAX_RESUMES（兜底防护）
-
-async function maybeResumeAnalysis(sessionID: string): Promise<void> {
-  try {
-    const session = await requireSessionWithPrimary("session.idle", sessionID);
-    if (!session) {
-      debugLog(`session.idle: 跳过恢复 — 非 PRIMARY sessionID=${sessionID}`, sessionID);
-      return;
-    }
-
-    if (session.agentName === AGENT_SECURITY_ANALYSIS_EVOLVE) {
-      debugLog(`session.idle: 跳过恢复 — evolve agent 不做分析工作, sessionID=${sessionID}`, sessionID);
-      return;
-    }
-
-    const taskDir = getTaskDir(sessionID);
-    if (!taskDir) {
-      debugLog(`session.idle: 跳过恢复 — 无 taskDir（非正式分析任务）, sessionID=${sessionID}`, sessionID);
-      return;
-    }
-
-    const elapsed = Date.now() - session.createdAt;
-    const maxDuration = getMaxDuration(sessionID);
-    if (elapsed >= maxDuration) {
-      debugLog(`session.idle: 跳过恢复 — 已超时 sessionID=${sessionID} elapsed=${Math.floor(elapsed / 60000)}m max=${Math.floor(maxDuration / 60000)}m`, sessionID);
-      return;
-    }
-
-    if (!opencodeClient) {
-      debugLog(`session.idle: 跳过恢复 — opencodeClient 未初始化`, sessionID);
-      return;
-    }
-
-    // 检查最后一条 assistant 消息是否被用户手动中断
-    const wasAborted = await checkLastMessageAborted(sessionID);
-    if (wasAborted) {
-      debugLog(`session.idle: 跳过恢复 — 用户手动中断, sessionID=${sessionID}`, sessionID);
-      return;
-    }
-
-    // 检查上一轮响应是否包含完成标记（agent 显式声明分析已完成）
-    const lastText = await getLastAssistantText(sessionID);
-    if (lastText && lastText.includes(COMPLETION_MARKER)) {
-      debugLog(`session.idle: 跳过恢复 — 检测到完成标记 ${COMPLETION_MARKER}, sessionID=${sessionID}`, sessionID);
-      return;
-    }
-
-    // 检查恢复次数
-    const persistenceData = readPersistenceData(sessionID);
-    const resumeCount = persistenceData?.resume_count ?? 0;
-    if (resumeCount >= MAX_RESUMES) {
-      debugLog(`session.idle: 跳过恢复 — 已达最大恢复次数 ${MAX_RESUMES} sessionID=${sessionID}`, sessionID);
-      return;
-    }
-
-    // 发送恢复消息
-    debugLog(`session.idle: 恢复分析 sessionID=${sessionID} agent=${session.agentName} elapsed=${Math.floor(elapsed / 60000)}m max=${Math.floor(maxDuration / 60000)}m resume_count=${resumeCount}`, sessionID);
-    await opencodeClient.session.promptAsync({
-      path: { id: sessionID },
-      body: {
-        agent: session.agentName,
-        parts: [{ type: "text" as const, text: RESUME_PROMPT, synthetic: true }],
-      },
-    });
-    recordResumeAttempt(sessionID);
-    debugLog(`session.idle: 恢复消息已发送 sessionID=${sessionID}`, sessionID);
-  } catch (e) {
-    debugLog(`session.idle: 恢复异常 sessionID=${sessionID} error=${e}`, sessionID);
-  }
-}
-
 export const SecurityAnalysisPlugin: Plugin = async (input) => {
   const { client, directory } = input;
-  opencodeClient = client;
+
+  // 初始化全局上下文（必须在任何 hook 触发之前完成）
+  const sessionManager = new SessionDataManager(client);
+  ctx.init(client, directory, sessionManager);
 
   debugLog(`=== SecurityAnalysisPlugin loaded ===`);
   debugLog(`  PLUGIN_DIR: ${PLUGIN_DIR}`);
@@ -1093,7 +298,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   debugLog(`  directory param: ${directory}`);
   debugLog(`  config exists: ${existsSync(CONFIG_FILE)}`);
   debugLog(`  env_cache exists: ${existsSync(ENV_CACHE_FILE)}`);
-  debugLog(`  opencodeClient: ${!!opencodeClient}`);
+  debugLog(`  ctx.client: ${!!ctx.client}`);
   debugLog(`  PYTHON_CMD: ${PYTHON_CMD}`);
 
   // 写心跳文件，供 agent 检测 Plugin 是否正常加载
@@ -1117,45 +322,24 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     // 职责：记录 agentName
     // 注意：chat.message 是唯一能直接从 input.agent 获取 agent 名的 hook
     //       system.transform / tool.execute.before 的 input 无 agent
-    //       但 requireSessionWithPrimary 可通过 session.get API 间接获取
+    //       但 SessionDataManager.requirePrimary 可通过 session.get API 间接获取
     "chat.message": async (input) => {
       const agent = (input as { agent?: string })?.agent;
-      // DEBUG: 诊断 OpenCode hook input 结构（确认后可删除）
-      debugLog(
-        `DEBUG chat.message INPUT keys=${Object.keys(input || {}).join(",")} agent=${agent ?? "无"}`,
-      );
       const sessionID = (input as { sessionID?: string })?.sessionID;
       if (!sessionID) {
-        debugLog(`chat.message: 跳过 — 无 sessionID, agent=${agent}`);
-        return;
+        const errMsg = `chat.message: input 缺少 sessionID 字段 agent=${agent}`;
+        debugLog(errMsg);
+        throw new Error(errMsg);
       }
-
-      let isValidAgent = true;
       if (!agent) {
-        debugLog("chat.message: 跳过 — 无 agent", sessionID);
-        isValidAgent = false;
-      } else if (!PRIMARY_AGENTS.includes(agent)) {
-        debugLog(
-          `chat.message: 跳过 — agent=${agent} 不在 PRIMARY_AGENTS 中, sessionID=${sessionID}`,
-          sessionID,
-        );
-        isValidAgent = false;
+        const errMsg = `chat.message: input 缺少 agent 字段 sessionID=${sessionID}`;
+        debugLog(errMsg, sessionID);
+        throw new Error(errMsg);
       }
 
-      if (!isValidAgent) {
-        sessions.delete(sessionID);
-        nonPrimarySessions.add(sessionID);
-        return;
-      }
+      // 更新 agentName + lastUserMessageAt。session 不存在时自动创建（插件重启兜底），创建失败抛异常中断 prompt。
+      await ctx.sessionManager.upsert(sessionID, agent);
 
-      // 清除非主缓存（agent 可能已切换回 PRIMARY）
-      nonPrimarySessions.delete(sessionID);
-
-      // 确保 session 存在（重启后懒恢复）
-      const session = await ensureSession(sessionID);
-      if (!session) return;
-
-      session.agentName = agent;
       debugLog(
         `chat.message: sessionID=${sessionID} agent=${agent}`,
         sessionID,
@@ -1166,7 +350,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     // 职责：注入环境摘要 + 分析状态保留提示 + TASK_DIR，防止压缩丢失关键信息
     "experimental.session.compacting": async (input, output) => {
       const sid = input?.sessionID;
-      const session = await requireSessionWithPrimary("compacting", sid);
+      const session = await ctx.sessionManager.requirePrimary("compacting", sid);
       if (!session) return;
       const agentName = session.agentName;
       debugLog(
@@ -1223,7 +407,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         `system.transform INPUT keys=${Object.keys(input || {}).join(",")} agent=${(input as { agent?: string })?.agent ?? "未传入"} sessionID=${sessionID}`,
         sessionID,
       );
-      const session = await requireSessionWithPrimary(
+      const session = await ctx.sessionManager.requirePrimary(
         "system.transform",
         sessionID,
       );
@@ -1353,7 +537,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         return;
       }
       debugLog(`shell.env: 触发 sessionID=${sessionID} cwd=${input.cwd} callID=${input.callID ?? "无"}`, sessionID);
-      const session = await requireSessionWithPrimary("shell.env", sessionID);
+      const session = await ctx.sessionManager.requirePrimary("shell.env", sessionID);
       if (!session) {
         debugLog(`shell.env: 跳过 — 非 PRIMARY sessionID=${sessionID}`, sessionID);
         return;
@@ -1374,7 +558,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       output.env.SHARED_DIR = SHARED_DIR;
 
       // AGENT_DIR（根据当前 agent 计算）
-      const scriptDir = getScriptDir(agentName, session.agentName);
+      const scriptDir = getScriptDir(agentName);
       if (scriptDir) {
         output.env.AGENT_DIR = scriptDir;
       }
@@ -1411,7 +595,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     //   2. 记录时间线（环境变量注入已迁移到 shell.env hook）
     "tool.execute.before": async (input, output) => {
       const sid = input.sessionID;
-      const session = await requireSessionWithPrimary(
+      const session = await ctx.sessionManager.requirePrimary(
         "tool.execute.before",
         sid,
       );
@@ -1464,7 +648,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     // 职责：记录工具执行结果，供 evolve agent 事后验证
     "tool.execute.after": async (input, output) => {
       const sid = input.sessionID;
-      const session = await requireSessionWithPrimary(
+      const session = await ctx.sessionManager.requirePrimary(
         "tool.execute.after",
         sid,
       );
@@ -1487,7 +671,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
 
     // session 生命周期事件（fire-and-forget，宿主不等待完成）
     // 职责：清理 session 数据 + 记录生命周期日志
-    // 注意：session.created 不再做 session 初始化（由 ensureSession 按需完成），
+    // 注意：session.created 触发 SessionDataManager.create 创建 SessionData
     //       但仍记录日志以保持可观测性
     event: async (input) => {
       const { event } = input;
@@ -1495,20 +679,25 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       const sessionID: string | undefined = props.info?.id ?? props.sessionID;
 
       if (event.type === "session.created") {
-        const parentID = (props?.info as { parentID?: string } | undefined)
-          ?.parentID;
-        debugLog(
-          `event: session.created id=${sessionID} parentID=${parentID || "无"}`,
-          sessionID,
-        );
+        if (sessionID) {
+          const result = await ctx.sessionManager.create(sessionID);
+          if (result.success) {
+            debugLog(
+              `event: session.created id=${sessionID} agent=${result.data!.agentName || "无"} parentID=${result.data!.parentSessionID || "无"}`,
+              sessionID,
+            );
+          }
+        } else {
+          debugLog(`event: session.created 无 sessionID，无法创建 SessionData`, undefined);
+        }
       }
 
       // 删除 session：统一清理所有状态 + task session 文件
       if (event.type === "session.deleted") {
         if (sessionID) {
           debugLog(`event: session.deleted id=${sessionID}`, sessionID);
-          sessions.delete(sessionID);
-          nonPrimarySessions.delete(sessionID);
+          flushTimeline(sessionID);
+          ctx.sessionManager.delete(sessionID);
           removeTaskSession(sessionID);
         }
       }
@@ -1535,7 +724,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       // session 状态变化和错误（非 idle）
       if (
         sessionID &&
-        PRIMARY_AGENTS.includes(sessions.get(sessionID)?.agentName || "")
+        PRIMARY_AGENTS.includes(ctx.sessionManager.get(sessionID)?.agentName || "")
       ) {
         if (event.type === "session.status") {
           recordTimeline(sessionID, {
