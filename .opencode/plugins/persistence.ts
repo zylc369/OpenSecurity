@@ -126,9 +126,9 @@ function recordResumeAttempt(sessionID: string): void {
 
 export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
   try {
-    const session = await ctx.sessionManager.requirePrimary("session.idle", sessionID);
+    const session = ctx.sessionManager.requireSecurityAgent("session.idle", sessionID);
     if (!session) {
-      debugLog(`session.idle: 跳过恢复 — 非 PRIMARY sessionID=${sessionID}`, sessionID);
+      debugLog(`session.idle: 跳过恢复 — 非 Security Agent sessionID=${sessionID}`, sessionID);
       return;
     }
 

@@ -219,7 +219,7 @@ OpenCode 删除 session 时递归删除所有子 session，每个子 session 都
 - `session.idle` 事件在 session 空闲时触发，Plugin 利用此事件自动恢复安全分析 Agent 的主 session
 - 恢复条件（全部满足才触发恢复）:
   1. session.idle 事件触发
-  2. `primaryAgent` 属于 PRIMARY_AGENTS（排除子 session）
+  2. `primaryAgent` 属于 SECURITY_AGENTS（排除子 session）
   3. `primaryAgent` 不是 security-analysis-evolve（进化 Agent 不做分析工作）
   4. 该 session 有对应的 `$TASK_DIR`（无 taskDir = 简单问答，不需要恢复）
   5. 未超过最大持续时间
@@ -245,7 +245,7 @@ const sessionPrimaryAgent = new Map<string, string>();       // 主 agent 名（
 
 | Map | 设置位置 | 设置时机 |
 |-----|---------|---------|
-| `primaryAgent` | `chat.message` | 主 session 首次出现 PRIMARY_AGENTS 时 |
+| `primaryAgent` | `chat.message` | 主 session 首次出现 SECURITY_AGENTS 时 |
 | `primaryAgent` | `ensureSession` | 子 session 从父链递归继承（通过 client API 查询 parentID） |
 | `agentName` | `chat.message` | 每条消息时更新 |
 

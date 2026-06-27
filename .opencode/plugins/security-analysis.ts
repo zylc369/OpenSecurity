@@ -1,6 +1,7 @@
 import { writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import type { Plugin } from "@opencode-ai/plugin";
+import type { Event } from "@opencode-ai/sdk";
 import {
   PLUGIN_DIR,
   OPENCODE_ROOT,
@@ -17,7 +18,7 @@ import {
   AGENT_WEB_ANALYSIS,
   AGENT_SECURITY_ANALYSIS_EVOLVE,
   AGENT_SECURITY_COORDINATOR,
-  PRIMARY_AGENTS,
+  SECURITY_AGENTS,
   AGENT_SCRIPT_DIRS,
   SHARED_DIR,
   AGENTS_DIR,
@@ -322,15 +323,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     // 职责：记录 agentName
     // 注意：chat.message 是唯一能直接从 input.agent 获取 agent 名的 hook
     //       system.transform / tool.execute.before 的 input 无 agent
-    //       但 SessionDataManager.requirePrimary 可通过 session.get API 间接获取
+    //       但 SessionDataManager.requireSecurityAgent 可通过 session.get API 间接获取
     "chat.message": async (input) => {
-      const agent = (input as { agent?: string })?.agent;
-      const sessionID = (input as { sessionID?: string })?.sessionID;
-      if (!sessionID) {
-        const errMsg = `chat.message: input 缺少 sessionID 字段 agent=${agent}`;
-        debugLog(errMsg);
-        throw new Error(errMsg);
-      }
+      const { sessionID, agent } = input;
       if (!agent) {
         const errMsg = `chat.message: input 缺少 agent 字段 sessionID=${sessionID}`;
         debugLog(errMsg, sessionID);
@@ -349,9 +344,12 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     // 上下文压缩前触发（awaited）
     // 职责：注入环境摘要 + 分析状态保留提示 + TASK_DIR，防止压缩丢失关键信息
     "experimental.session.compacting": async (input, output) => {
-      const sid = input?.sessionID;
-      const session = await ctx.sessionManager.requirePrimary("compacting", sid);
-      if (!session) return;
+      const sid = input.sessionID;
+      const session = ctx.sessionManager.requireSecurityAgent("compacting", sid);
+      if (!session) {
+        debugLog(`compacting: 跳过 — 非 Security Agent, sessionID=${sid}`, sid);
+        return;
+      }
       const agentName = session.agentName;
       debugLog(
         `compacting: sessionID=${sid} agent=${agentName}`,
@@ -389,7 +387,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         }
 
         // 分析持续性恢复：压缩后如果分析尚未完成，AI 应继续自主分析
-        if (session.agentName && PRIMARY_AGENTS.includes(session.agentName) && session.agentName !== AGENT_SECURITY_ANALYSIS_EVOLVE) {
+        if (SECURITY_AGENTS.includes(session.agentName) && session.agentName !== AGENT_SECURITY_ANALYSIS_EVOLVE) {
           output.context.push(`## 分析持续性（压缩后必须遵守）
 这是安全分析会话，分析可能尚未完成。压缩后请继续执行未完成的分析步骤，不要输出状态报告后停下来等待用户。如果分析已完成，直接输出最终结论即可。`);
         }
@@ -401,19 +399,14 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     // 注意：output.system 每次请求都重建，不会累积
     //       前 2 次必注入（标题生成 #1 + 主聊天 #2），之后每 X 次注入一次
     "experimental.chat.system.transform": async (input, output) => {
-      const sessionID = (input as { sessionID?: string })?.sessionID;
-      // DEBUG: 诊断 OpenCode hook input 结构（确认后可删除）
-      debugLog(
-        `system.transform INPUT keys=${Object.keys(input || {}).join(",")} agent=${(input as { agent?: string })?.agent ?? "未传入"} sessionID=${sessionID}`,
-        sessionID,
-      );
-      const session = await ctx.sessionManager.requirePrimary(
+      const sessionID = input.sessionID;
+      const session = ctx.sessionManager.requireSecurityAgent(
         "system.transform",
         sessionID,
       );
       if (!session) {
         debugLog(
-          `[WARN] system.transform: 跳过 — 无有效 session, sessionID=${sessionID}`,
+          `[WARN] system.transform: 跳过 — 非 Security Agent, sessionID=${sessionID}`,
           sessionID,
         );
         return;
@@ -422,63 +415,52 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       const agentName = session.agentName;
 
       // 占位符展开（每次 LLM 调用都执行）
-      if (agentName) {
+      debugLog(
+        `system.transform: 开始占位符展开 sessionID=${sessionID} agent=${agentName}`,
+        sessionID,
+      );
+      const agentFile = join(AGENTS_DIR, `${agentName}.md`);
+      if (hasBuwaiExtensionId(agentFile)) {
         debugLog(
-          `system.transform: 开始占位符展开 sessionID=${sessionID} agent=${agentName}`,
+          `system.transform: 检测到 buwai-extension-id in ${agentFile}, performing snippet expansion`,
           sessionID,
         );
-        const agentFile = join(AGENTS_DIR, `${agentName}.md`);
-        if (hasBuwaiExtensionId(agentFile)) {
-          debugLog(
-            `system.transform: 检测到 buwai-extension-id in ${agentFile}, performing snippet expansion`,
-            sessionID,
-          );
 
-          // 匹配 {{buwai-rule:片段名}} — 片段名仅允许字母数字连字符下划线
-          const regex = /\{\{buwai-rule:([a-zA-Z0-9_-]+)\}\}/g;
-          for (let i = 0; i < output.system.length; i++) {
-            // 快速跳过不含占位符的字符串，避免无谓的正则匹配
-            if (!output.system[i].includes("{{buwai-rule:")) continue;
-            output.system[i] = output.system[i].replace(regex, (_, name) => {
-              const snippet = loadSnippet(name);
-              if (snippet === null) {
-                debugLog(`Snippet not found: ${name}`, sessionID);
-                return _; // 保留原始占位符文本，不删除
-              }
-              debugLog(
-                `Expanded snippet: ${name} (${snippet.length} chars)`,
-                sessionID,
-              );
-              return snippet;
-            });
-            // DEBUG: 打印替换完成后的完整内容，验证通过后注释掉
-            // debugLog(`=== system[${i}] after expansion (${output.system[i].length} chars) ===\n${output.system[i]}`, sessionID);
-          }
-        } else {
-          debugLog(
-            `[ERROR] system.transform: ${agentFile} 不包含 buwai-extension-id，跳过占位符展开`,
-            sessionID,
-          );
+        // 匹配 {{buwai-rule:片段名}} — 片段名仅允许字母数字连字符下划线
+        const regex = /\{\{buwai-rule:([a-zA-Z0-9_-]+)\}\}/g;
+        for (let i = 0; i < output.system.length; i++) {
+          // 快速跳过不含占位符的字符串，避免无谓的正则匹配
+          if (!output.system[i].includes("{{buwai-rule:")) continue;
+          output.system[i] = output.system[i].replace(regex, (_, name) => {
+            const snippet = loadSnippet(name);
+            if (snippet === null) {
+              debugLog(`Snippet not found: ${name}`, sessionID);
+              return _; // 保留原始占位符文本，不删除
+            }
+            debugLog(
+              `Expanded snippet: ${name} (${snippet.length} chars)`,
+              sessionID,
+            );
+            return snippet;
+          });
         }
+      } else {
+        debugLog(
+          `[ERROR] system.transform: ${agentFile} 不包含 buwai-extension-id，跳过占位符展开`,
+          sessionID,
+        );
       }
 
       // 每次都注入 Plugin 完整性检查 + Agent 身份
       // 放在 output.system 最前面，确保 LLM 优先看到
       // 如果 Plugin 未加载，这段不会出现，agent 应立即停止并告知用户
-      if (agentName) {
-        debugLog(
-          `system.transform: 注入 Plugin 完整性检查和 Agent 身份 sessionID=${sessionID} agent=${agentName}`,
-          sessionID,
-        );
-        output.system.unshift(
-          `[系统完整性] Plugin 已加载。当前 Agent: ${agentName}。如果你看不到这段标记，说明 Plugin 未加载，当前会话缺少关键功能（环境信息、工具配置、占位符展开）。请立即告知用户并停止分析。`,
-        );
-      } else {
-        debugLog(
-          `[WARN] system.transform: 无 agentName，跳过环境信息注入，但继续执行占位符展开`,
-          sessionID,
-        );
-      }
+      debugLog(
+        `system.transform: 注入 Plugin 完整性检查和 Agent 身份 sessionID=${sessionID} agent=${agentName}`,
+        sessionID,
+      );
+      output.system.unshift(
+        `[系统完整性] Plugin 已加载。当前 Agent: ${agentName}。如果你看不到这段标记，说明 Plugin 未加载，当前会话缺少关键功能（环境信息、工具配置、占位符展开）。请立即告知用户并停止分析。`,
+      );
 
       const config = readJsonSafe<ConfigData>(CONFIG_FILE, sessionID);
       if (!config) {
@@ -537,18 +519,13 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         return;
       }
       debugLog(`shell.env: 触发 sessionID=${sessionID} cwd=${input.cwd} callID=${input.callID ?? "无"}`, sessionID);
-      const session = await ctx.sessionManager.requirePrimary("shell.env", sessionID);
+      const session = ctx.sessionManager.requireSecurityAgent("shell.env", sessionID);
       if (!session) {
-        debugLog(`shell.env: 跳过 — 非 PRIMARY sessionID=${sessionID}`, sessionID);
+        debugLog(`shell.env: 跳过 — 非 Security Agent sessionID=${sessionID}`, sessionID);
         return;
       }
 
       const agentName = session.agentName;
-      if (!agentName) {
-        debugLog(`shell.env: 致命错误 — agentName 为空 sessionID=${sessionID}`, sessionID);
-        await abortSession(sessionID, `shell.env: sessionID=${sessionID} 的 agentName 为空，session 初始化异常`);
-        return;
-      }
 
       // 基础变量（全局常量，始终可注入）
       output.env.SESSION_ID = sessionID;
@@ -595,11 +572,14 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     //   2. 记录时间线（环境变量注入已迁移到 shell.env hook）
     "tool.execute.before": async (input, output) => {
       const sid = input.sessionID;
-      const session = await ctx.sessionManager.requirePrimary(
+      const session = ctx.sessionManager.requireSecurityAgent(
         "tool.execute.before",
         sid,
       );
-      if (!session) return;
+      if (!session) {
+        debugLog(`tool.execute.before: 跳过 — 非 Security Agent, sessionID=${sid}`, sid);
+        return;
+      }
       debugLog(`tool.execute.before: tool=${input.tool} sessionID=${sid}`, sid);
 
       // 时间线记录：工具开始执行（记录注入前的原始命令）
@@ -648,11 +628,14 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     // 职责：记录工具执行结果，供 evolve agent 事后验证
     "tool.execute.after": async (input, output) => {
       const sid = input.sessionID;
-      const session = await ctx.sessionManager.requirePrimary(
+      const session = ctx.sessionManager.requireSecurityAgent(
         "tool.execute.after",
         sid,
       );
-      if (!session) return;
+      if (!session) {
+        debugLog(`tool.execute.after: 跳过 — 非 Security Agent, sessionID=${sid}`, sid);
+        return;
+      }
 
       const toolName = input.tool;
 
@@ -673,9 +656,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     // 职责：清理 session 数据 + 记录生命周期日志
     // 注意：session.created 触发 SessionDataManager.create 创建 SessionData
     //       但仍记录日志以保持可观测性
-    event: async (input) => {
+    event: async (input: { event: Event }) => {
       const { event } = input;
-      const props = event.properties || {};
+      const props = event.properties as Record<string, any>;
       const sessionID: string | undefined = props.info?.id ?? props.sessionID;
 
       if (event.type === "session.created") {
@@ -683,12 +666,12 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           const result = await ctx.sessionManager.create(sessionID);
           if (result.success) {
             debugLog(
-              `event: session.created id=${sessionID} agent=${result.data!.agentName || "无"} parentID=${result.data!.parentSessionID || "无"}`,
+              `event: session.created id=${sessionID} agent=${result.data!.agentName} parentID=${result.data!.parentSessionID || "无"}`,
               sessionID,
             );
           }
         } else {
-          debugLog(`event: session.created 无 sessionID，无法创建 SessionData`, undefined);
+          debugLog(`event: session.created 无 sessionID，无法创建 SessionData`);
         }
       }
 
@@ -724,7 +707,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       // session 状态变化和错误（非 idle）
       if (
         sessionID &&
-        PRIMARY_AGENTS.includes(ctx.sessionManager.get(sessionID)?.agentName || "")
+        SECURITY_AGENTS.includes(ctx.sessionManager.get(sessionID)?.agentName || "")
       ) {
         if (event.type === "session.status") {
           recordTimeline(sessionID, {

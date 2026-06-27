@@ -9,14 +9,14 @@ import {
 import {
   DEFAULT_LOG,
   LOGS_DIR,
-  PRIMARY_AGENTS,
+  SECURITY_AGENTS,
   MAX_LOG_SIZE,
   KEEP_SIZE,
 } from "./constants";
 import { getTaskDirRaw, getAgentName } from "./utils";
 
 function getLogFilePath(agentName: string | undefined): string {
-  if (agentName && PRIMARY_AGENTS.includes(agentName)) {
+  if (agentName && SECURITY_AGENTS.includes(agentName)) {
     return join(LOGS_DIR, `${agentName}.log`);
   }
   return DEFAULT_LOG;

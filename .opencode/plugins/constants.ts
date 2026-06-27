@@ -27,7 +27,7 @@ export const AGENT_AI_SECURITY_ANALYSIS = "ai-security-analysis";
 export const AGENT_SECURITY_ANALYSIS_EVOLVE = "security-analysis-evolve";
 export const AGENT_SECURITY_COORDINATOR = "security-coordinator";
 
-export const PRIMARY_AGENTS = [
+export const SECURITY_AGENTS = [
   AGENT_BINARY_ANALYSIS,
   AGENT_MOBILE_ANALYSIS,
   AGENT_WEB_ANALYSIS,
@@ -37,7 +37,7 @@ export const PRIMARY_AGENTS = [
 ];
 
 export const AGENT_SCRIPT_DIRS: Record<string, string> = {};
-for (const name of PRIMARY_AGENTS) {
+for (const name of SECURITY_AGENTS) {
   AGENT_SCRIPT_DIRS[name] = join(OPENCODE_ROOT, name);
 }
 

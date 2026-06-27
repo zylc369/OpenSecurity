@@ -1,5 +1,5 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { PRIMARY_AGENTS } from "./constants";
+import { SECURITY_AGENTS } from "./constants";
 import { debugLog } from "./logging";
 import { Result } from "./result";
 
@@ -22,8 +22,8 @@ export class SessionData {
     this.parentSessionID = parentSessionID;
   }
 
-  isPrimaryAgent(): boolean {
-    return PRIMARY_AGENTS.includes(this.agentName);
+  isSecurityAgent(): boolean {
+    return SECURITY_AGENTS.includes(this.agentName);
   }
 
   /** 当前未使用，预留给编排 agent 子任务方案 */
@@ -66,11 +66,11 @@ export class SessionDataManager {
     return session;
   }
 
-  /** 只返回 PRIMARY agent 的 session。只查不创建。 */
-  async requirePrimary(
+  /** 只返回 Security Agent 的 session。只查不创建。 */
+  requireSecurityAgent(
     hookName: string,
     sessionID?: string,
-  ): Promise<SessionData | undefined> {
+  ): SessionData | undefined {
     if (!sessionID) {
       debugLog(`[${hookName}] 跳过 — 无 sessionID`);
       return undefined;
@@ -80,9 +80,9 @@ export class SessionDataManager {
       debugLog(`[${hookName}] 跳过 — session 未创建（等待 chat.message）, sessionID=${sessionID}`);
       return undefined;
     }
-    if (!session.isPrimaryAgent()) {
+    if (!session.isSecurityAgent()) {
       debugLog(
-        `[${hookName}] 跳过 — 非 PRIMARY agent=${session.agentName || "无"} sessionID=${sessionID}`,
+        `[${hookName}] 跳过 — 非 Security Agent agent=${session.agentName} sessionID=${sessionID}`,
         sessionID,
       );
       return undefined;
