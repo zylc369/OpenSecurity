@@ -6,12 +6,25 @@ import {
   PERSISTENCE_FILE,
   ABORTED_ERROR_NAME,
   COMPLETION_MARKER,
-  RESUME_PROMPT,
+  RESUME_PROMPTS,
   AGENT_SECURITY_ANALYSIS_EVOLVE,
 } from "./constants";
 import { ctx } from "./context";
 import { debugLog } from "./logging";
 import { getTaskDir } from "./task-session";
+
+// 记录上一次使用的恢复提示词索引，保证本次与上次不重复，缓解 LLM 对同一提示词"皮掉"的问题。
+let lastResumePromptIndex = -1;
+
+function getResumePrompt(): string {
+  if (RESUME_PROMPTS.length <= 1) return RESUME_PROMPTS[0];
+  let idx = lastResumePromptIndex;
+  while (idx === lastResumePromptIndex) {
+    idx = Math.floor(Math.random() * RESUME_PROMPTS.length);
+  }
+  lastResumePromptIndex = idx;
+  return RESUME_PROMPTS[idx];
+}
 
 interface PersistenceData {
   max_duration_hours: number;
@@ -179,7 +192,7 @@ export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
       path: { id: sessionID },
       body: {
         agent: session.agentName,
-        parts: [{ type: "text" as const, text: RESUME_PROMPT, synthetic: true }],
+        parts: [{ type: "text" as const, text: getResumePrompt(), synthetic: true }],
       },
     });
     recordResumeAttempt(sessionID);

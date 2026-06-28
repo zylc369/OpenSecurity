@@ -14,7 +14,8 @@
 | 凯撒/维吉尼亚/单表替换/无密钥、字母频率 | 古典 | `classical-crypto.md` |
 | AES/DES、CBC/ECB/CTR/GCM、padding 报错、IV 可控 | 对称 | `symmetric-and-hash.md` |
 | MD5/SHA、`mac=hash(key∥msg)`、长度扩展 | 哈希 | `symmetric-and-hash.md` |
-| PRNG、随机数、状态恢复 | 伪随机 | 按子类（LCM/LFSR/Mersenne）查通用资料 |
+| PRNG、随机数、状态恢复 | 伪随机 | 按子类（LCG/LFSR/Mersenne Twister）查通用资料；LCG 恢复见 `symmetric-and-hash.md` §6 |
+| 构造满足整除/模运算/位运算约束的输入（非给密文求明文） | 数论构造题 | `number-theory-construction.md` |
 
 **判断不清时**：把题目所有参数列出来，看"哪个参数异常"（e 太小/太大、hint 数量、比特长度关系）——异常点就是攻击方向。
 
@@ -24,7 +25,7 @@
 1. 提取全部已知量（n, e, c, hint, 曲线参数……）写进脚本常量
 2. 识别攻击模式（见各攻击库的"什么时候用"）
 3. 用 SageMath 构造求解（格 → matrix.LLL()；多项式小根 → small_roots()；离散对数 → discrete_log）
-4. 求出 p/q/明文 → long_to_bytes → 验证 flag 格式
+4. 求出 p/q/明文 → i2b → 验证 flag 格式
 5. 失败 → 回溯：换攻击 / 检查参数识别 / 调格构造参数
 ```
 
@@ -57,9 +58,13 @@ detect_env 会检测。若缺失：
 ## 4. 大整数与编码
 
 ```python
-from Crypto.Util.number import long_to_bytes, bytes_to_long
+# bytes↔int 用标准库（无需 pycryptodome）
+def i2b(n):  # int -> bytes (大端), 等价于 long_to_bytes
+    return n.to_bytes((n.bit_length()+7)//8 or 1, 'big')
+def b2i(b):  # bytes -> int (大端), 等价于 bytes_to_long
+    return int.from_bytes(b, 'big')
 # 明文整数 → bytes（flag）
-flag = long_to_bytes(m)
+flag = i2b(m)
 # 检查
 assert flag.startswith(b'flag') or flag.startswith(b'SEKAI')
 ```
@@ -88,6 +93,6 @@ phi = (p-1)*(q-1)
 
 ## 6. 注意
 
-- **先验证再下结论**：求出候选明文必须 `long_to_bytes` 看是否像 flag，不能只算出数就说"解了"。
+- **先验证再下结论**：求出候选明文必须 `i2b` 看是否像 flag，不能只算出数就说"解了"。
 - **参数即线索**：e=3、n=2*p、hint=3 个、bits 不对称……每个异常都指向特定攻击。
 - **不盲目爆破**：先模式匹配；爆破只在搜索空间极小（如古典密码位移）时。

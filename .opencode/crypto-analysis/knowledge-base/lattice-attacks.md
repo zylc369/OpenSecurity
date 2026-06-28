@@ -1,101 +1,133 @@
-# 格攻击（Lattice / LLL）
+# 格攻击（Lattice）
 
-> 何时用：题目含多个"近似/线性"关系——如 `a*p+b*q` hint、截断比特、HNP、隐含线性方程。**SageMath 必装**（手写 LLL 极易错）。
+> 何时用：题目有线性关系的 hint（如 `a*p+b*q`、截断的比特、近似值）、HNP（隐藏数问题）、多维 Coppersmith 小根。格攻击的核心是**把问题构造为格，用 LLL/BKZ 找短向量**。必用 sage。
 
-## 核心：LLL 格规约
+## 1. 识别格题
 
-LLL 在格中找"短向量"。构造一个矩阵 M，使目标解（小的系数或差值）成为 M 的某短行/列，`M.LLL()` 后取出来。
+| 特征 | 类型 | 去读 |
+|------|------|------|
+| 多个 `a_i*p + b_i*q = c_i` 形 hint | 线性关系求 p,q | §3 |
+| 给了 LCG 输出的高位/低位（截断） | 截断 LCG / HNP | §4 |
+| 给了 `x` 的近似值 `x_approx`，求小误差 `e` | HNP / Coppersmith | §4/§5 |
+| RSA 已知 p 的高位/低位 | Coppersmith 一元小根 | §5 |
+| 多个变量的小根联立 | 多维 Coppersmith | §5 |
 
----
+**判断**：只要能写成"`小未知数` 满足 `模方程`"→ 考虑格/Coppersmith。
 
-## 1. `a*p + b*q` 提示型（如 SekaiCTF apbq-rsa-iv）
+## 2. LLL 基础（必读）
 
-**识别**：给 n=p*q 和若干 `hint_i = a_i*p + b_i*q`，其中 a_i,b_i 未知但较小（上界已知）。
-
-**思路**：构造格，把短向量 `(p, q, ...)` 暴露出来。给定 hint 与 n，p 满足 `hint ≡ a*p (mod q)` 类关系，但 a,b 都未知——用多组 hint 构造使 `(p,q)` 成为短解。
-
-**构造要点**（3 组 hint 时）：
-- 把 hint 和 n 排进矩阵，用大缩放因子压住已知大数，留出 p,q 所在小行。
-- 缩放因子 K 取 ≈ hint 上界级别，让 LLL 偏好含 p,q 的短行。
+LLL 在格 `{Σ a_i·b_i : a_i∈Z}`（`b_i` 为格基行向量）中找"短"向量。构造格的关键：**把已知量放对角线、未知小量放某行使 LLL 后该行变短**。
 
 ```sage
-# 模板（按题调参）：n, hints 已知，a,b 上界 B
-# 构造 M 使其某短行 ∝ (p, q)
-# 常见技巧：行 = [hint_i 缩放, 单位项], 末行 = [n 缩放, K]
-# LLL 后在某行读出 (p, q)（可能差符号/倍数，验证 n%p==0）
-n = ...
-hints = [...]
-B = 4**312   # a,b 上界
-# 例：构造矩阵后
-M = Matrix(ZZ, [...])
-L = M.LLL()
-for row in L:
-    # 尝试解读 row 为 (p, q) 或含其线性组合
-    cand = abs(row[0])
-    if n % cand == 0 and 1 < cand < n:
-        p = cand; q = n // p; print("FOUND", p, q); break
-# 求出 p,q 后 RSA 解密
+# sage 格规约模板
+M = matrix(ZZ, [
+    [大缩放_1,  0,    ..., 已知量_1],
+    [0,    大缩放_2, ..., 已知量_2],
+    ...
+])
+L = M.LLL()      # 或 M.BKZ(block_size=20)
+# L 的某一行即为所求小向量
 ```
 
-> 实际构造随 hint 数量/上界变化。**先用 3 组 hint + 大缩放试，无解则调缩放/加 n 行**。
+**缩放原则**：不同行的"量纲"差很大时（如一行是 bit、一行是 256 位素数），用缩放因子把各行量纲拉到同一数量级，否则 LLL 会偏向大数值行。
 
-## 2. 隐含数问题（HNP, Hidden Number Problem）
+## 3. `a*p+b*q` 提示求 p,q
 
-**识别**：知道 `t_i` 和 `a_i = ⌊t_i * α / 2^k⌉`（α 未知密钥，a_i 是截断高位）。即已知乘积的高位，恢复 α（常见于 DSA/ECDSA nonce 部分泄漏）。
+**何时用**：给了多组 `(a_i, b_i, c_i)` 满足 `a_i*p + b_i*q = c_i`（p、q 是 RSA 的素因子）。
 
-**构造**：
+**原理**：把 `c_i - a_i*p - b_i*q = 0` 的"小解"用格找。至少 2 组线性无关的 hint 可定 p、q。
+
 ```sage
-# 已知 t_i, a_i, k（已知高位比特数），求 α
-# M 行 = [2^k, 0,..., t_i, 0], 最后一行含 a_i 与大常数
-# LLL 找 (α - a_i*2^k) 等小量
-d = len(t)
-M = Matrix(ZZ, d+2, d+2)
-K = 2^(k+1)   # 上界缩放
-for i in range(d):
-    M[i,i] = 2^k
-    M[d,i] = t[i]
-    M[i,d] = ... # 视实现
-M[d,d] = 1
-M[d+1,d+1] = K
-L = M.LLL()
-# 在短行里找 α
+# 给两组 hint: a1*p+b1*q=c1, a2*p+b2*q=c2 (p,q 约 N^0.5)
+# 直接解线性方程最简单; hint 多于2组或有噪声时用 LLL
+# 噪声型: c_i = a_i*p + b_i*q + e_i (e_i 小) => HNP 风格格
+def solve_apbq(hints, N):
+    # hints = [(a1,b1,c1), (a2,b2,c2), ...]
+    M = matrix(ZZ, [[h[0], h[1], h[2]] for h in hints] + [[1,0,0],[0,1,0]])
+    # 构造使 p,q 为短向量的格 (具体构造依题)
+    ...
 ```
 
-## 3. 截断 LSB/MSB 恢复
+> 2 组精确 hint 直接用 sympy 解线性方程 `solve([a1*p+b1*q-c1, a2*p+b2*q-c2], [p,q])`；格用于"多于方程数"或"有噪声"的情形。
 
-**识别**：已知 `x_i = r_i * α + β (mod p)` 的高位或低位。类似 HNP，构造格求 α,β。
+## 4. HNP（隐藏数问题）/ 截断 LCG
 
-## 4. knapsack / 背包
+**何时用**：已知 `t_i` 和 `a_i` 满足 `|a_i - t_i·x (mod p)| < B`（x 是隐藏值），或 LCG 输出被截断了高位/低位。
 
-**识别**：求子集使其和 = 目标（超增背包或一般背包）。CJLOSS 格：
+**截断 LCG 模型**：`s_{i+1} = a·s_i + b (mod m)`，只看到 `s_i` 的高 `k` 位（低 `l` 位未知）。构造格恢复未知低位。
+
 ```sage
-# 已知 a_i（权重），目标 S。求 e_i∈{0,1} 使 Σ e_i a_i = S
-n = len(a)
-M = Matrix(ZZ, n+1, n+1)
-for i in range(n): M[i,i] = 1; M[i,n] = a[i]
-M[n,n] = -S
-# 加大缩放后 LLL
+# HNP 经典格构造 (Boneh-Venkatesan)
+# 已知 t_i, a_i, 求 x 使 a_i ≈ t_i*x (mod p), 误差 < B
+def hnp_lattice(t_list, a_list, p, B):
+    n = len(t_list)
+    M = matrix(ZZ, n+2, n+2)
+    for i in range(n):
+        M[i,i] = p
+        M[n,i] = t_list[i]
+        M[n+1,i] = a_list[i]
+    M[n,n] = B            # 缩放
+    M[n+1,n+1] = B
+    # LLL 后含 (x, ...) 的短向量
+    return M.LLL()
 ```
 
-## 5. 通用构造原则
+**常见陷阱**：`B`（误差界）选错 → LLL 找不到短向量。`B` 应略大于真实误差上界。
 
-1. **未知的小量放短行**：把要恢复的小变量对应的列"不加缩放"或小缩放，已知大数列加大缩放。
-2. **维度 = 变量数 + 约束数**，宁少勿多（维度大 LLL 慢且不稳）。
-3. **缩放因子（weights）**：让目标行长度 ≈ 其它行长度，LLL 才会选它。常试 `K = 上界`、`K = √n` 等。
-4. **验证**：LLL 出的每个短行都试解（除以倍数/换符号），用题目约束验证（如 `n % p == 0`）。
+## 5. Coppersmith（小根）
 
-## 6. 决策
+**何时用**：多项式模方程 `f(x) ≡ 0 (mod N)` 有小根 `x < X`，且 `X < N^(1/deg(f))`（一元）或满足多维界（多元）。
+
+### 5.1 一元小根（RSA 已知 p 高位/低位）
+
+```sage
+# 已知 p 的高位 p0, 未知低 unknown_bits 位
+P.<x> = PolynomialRing(Zmod(n))
+f = p0 + x            # f(x) = p (mod p), 其中 p|n
+roots = f.small_roots(X=2^unknown_bits, beta=0.5)
+# beta: p 相对 n 的规模, p≈n^0.5 => beta=0.5
+# roots[0] 即 p 的未知低位, p = p0 + roots[0]
+```
+
+### 5.2 多元小根（多变量联立）
+
+```sage
+# 例: 求 x,y 使 f(x,y) ≡ 0 (mod n), x<X, y<Y
+P.<x,y> = PolynomialRing(Zmod(n))
+f = x*y - c           # 或更复杂的关系
+# 多元 Coppersmith 需调 m (Howgrave-Graham 参数) 和 t
+# 用 defund/coppersmith 的 multivariate small_roots:
+# https://github.com/defund/coppersmith
+roots = small_roots(f, [X_bound, Y_bound], m=3, d=2)
+```
+
+> 多元 Coppersmith 无标准库一键函数，常用 `defund/coppersmith` 的 `small_roots` 实现。调参（`m`、`d`）是经验活，失败时增 `m`。
+
+## 6. 调参与排错
+
+| 失败现象 | 排查方向 |
+|---------|---------|
+| LLL 输出无目标向量 | 缩放因子不对；增大格维度；检查格构造（未知量是否在某行） |
+| Coppersmith `small_roots` 返回空 | bound `X` 太大（超理论界）；调大 `m`/调小 `epsilon`；检查 `beta` |
+| 解出来但 `pow` 验证不过 | 求错了；检查模数/方程构造；可能需要换攻击 |
+
+**调参梯度**：`m`（Howgrave-Graham 层数）从 3 起递增到 7；`epsilon` 从 0.05 调到更小；`beta` 按因子的规模设（`p≈n^k` 则 `beta=k`）。
+
+## 决策
 
 ```
-hint 形式含 p,q → §1
-nonce/随机数部分泄漏（DSA/ECDSA） → HNP §2
-已知乘积的高/低位 → §3
-子集求和 → §4
-其它线性隐含关系 → 通用构造 §5
+能写成 "小未知数 满足 模方程"?
+├─ 单变量 + 小根 < N^(1/deg) → 一元 Coppersmith (§5.1)
+├─ 多变量 → 多元 Coppersmith (§5.2, defund 库)
+├─ 线性 hint 求 p,q → §3 (2组直接解, 多组/噪声用格)
+├─ 截断 LCG / 近似值 → HNP 格 (§4)
+└─ 纯找短向量 → LLL/BKZ (§2)
 ```
 
 ## 注意
 
-- **必须用 sage** `M.LLL()` / `M.BKZ()`；BKZ 更强但慢，LLL 失败时换 BKZ(block_size=20~30)。
-- LLL 不出 → 调缩放/维度，别急着换攻击，可能只差一个 weight。
-- 求出 p 后务必 `n % p == 0` 验证再解密。
+- **必用 sage**：`matrix.LLL()`、`small_roots` 手写极易错，sage 是标配
+- **缩放是关键**：格的各行量纲不一致时 LLL 失效，用缩放因子拉平
+- **bound 必须满足理论界**：Coppersmith 的 `X < N^(beta²/delta)` 不满足时数学上无解
+- **验证**：求出 p/q 后必须 `pow(c,d,n)` 解密验证，不能只靠 LLL 输出
+- 详细 sage 用法见 `$AGENT_DIR/knowledge-base/crypto-methodology.md` §3

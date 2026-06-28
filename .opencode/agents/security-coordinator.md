@@ -42,7 +42,7 @@ permission:
 | `mobile-analysis` | APK/IPA 反编译、Java/Native 混合分析、Frida 动态 Hook、设备交互 | 纯 Web 应用测试、独立 PC 二进制分析（无移动端上下文） | Frida + jadx + apktool + IDA（native 层） | .apk .ipa .dex .jar 已连接设备 |
 | `web-analysis` | Web 漏洞审计、攻击链构造、框架安全分析、缓存投毒 | 二进制逆向、移动端设备交互、AI 模型越狱 | playwright + curl + webfetch | URL 源码目录 API 端点 |
 | `ai-security-analysis` | LLM 提示注入、越狱攻击、数据泄露测试、对抗性输入 | 传统 Web 漏洞（XSS/SQLi）、二进制分析、移动端分析 | LLM 模拟客户端 + 提示注入 payload 库 | LLM 应用 URL 对话 API 模型名称 |
-| `crypto-analysis` | 密码学攻击（RSA/格/ECC/古典/对称/哈希）、flag 求解 | 二进制逆向、Web 漏洞、移动端、AI 模型 | SageMath + gmpy2 + sympy | 加密脚本 RSA 参数 密文 曲线参数 |
+| `crypto-analysis` | 密码学攻击（RSA/格/ECC/古典/对称/哈希/数论构造等）、flag 求解 | 二进制逆向、Web 漏洞、移动端、AI 模型 | SageMath + gmpy2 + sympy | 加密脚本 RSA 参数 密文 曲线参数 约束表达式 |
 
 ---
 
@@ -87,7 +87,7 @@ permission:
 | LLM 应用的传统 Web 漏洞（XSS/SQLi） | web-analysis | 传统 Web 漏洞归 web-analysis，ai-security 只管 LLM 相关 |
 | Web 应用中的 LLM 功能 | 拆分 → web-analysis + ai-security-analysis | 传统 Web 部分 + LLM 交互部分，两个攻击面 |
 | AI 模型文件（.gguf/.safetensors） | binary-analysis | 本质是二进制文件格式分析 |
-| 纯密码学题（RSA/格/ECC/古典/对称/哈希，含加密脚本或参数密文） | crypto-analysis | 密码学攻击是独立赛道，不依赖二进制/Web/移动端上下文 |
+| 纯密码学题（RSA/格/ECC/古典/对称/哈希/数论构造等，含加密脚本、参数密文或需构造满足数论/位运算约束的输入） | crypto-analysis | 密码学攻击是独立赛道，不依赖二进制/Web/移动端上下文 |
 | 二进制中的加密算法还原（识别出 RSA/AES 实现后求 key/plaintext） | 拆分 → binary-analysis（定位算法）+ crypto-analysis（密码学求解） | 逆向定位归 binary，密码学攻击归 crypto |
 
 ---
