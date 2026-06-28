@@ -6,9 +6,13 @@ permission:
   external_directory:
     ~/bw-security-analysis/**: allow
     ~/Downloads/**: allow
+    ~/go/**: allow
   read:
+    "~/go/**": allow
     "~/Downloads/**/*.env": allow
     "~/Downloads/**/*.env.*": allow
+  edit:
+    "~/go/**": deny
 ---
 
 ## 角色
