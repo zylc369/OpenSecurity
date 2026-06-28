@@ -1,6 +1,5 @@
 import { writeFileSync, existsSync } from "fs";
 import { join } from "path";
-import { spawnSync } from "child_process";
 import type { Plugin } from "@opencode-ai/plugin";
 import type { Event } from "@opencode-ai/sdk";
 import {
@@ -32,6 +31,7 @@ import { getPythonCmd, getCondaInstallHint } from "./lib/venv";
 import { hasBuwaiExtensionId, loadSnippet } from "./lib/snippet";
 import { maybeResumeAnalysis } from "./lib/persistence";
 import { recordTimeline, flushTimeline } from "./lib/timeline";
+import { runProcess } from "./lib/spawn";
 
 interface ToolConfig {
   path: string;
@@ -290,13 +290,22 @@ type EnvironmentCheckResult = {
 };
 
 // 预装依赖检查：调 detect_env --check-preinstall <agent>，返回结构化结果。
-// 纯函数——永远返回，不 throw（包括 detect_env 崩溃的情况）。
-function checkPreinstall(agent: string, pythonCmd: string, sessionID: string): EnvironmentCheckResult {
+// 纯函数——永远 resolve，不 reject（包括 detect_env 崩溃、超时的情况）。
+async function checkPreinstall(
+  agent: string,
+  pythonCmd: string,
+  sessionID: string,
+): Promise<EnvironmentCheckResult> {
   const detectEnv = join(SHARED_DIR, "scripts", "detect_env.py");
-  const r = spawnSync(pythonCmd, [detectEnv, "--check-preinstall", agent], {
-    encoding: "utf8",
-    timeout: 8000,
-  });
+
+  // 用统一的跨平台包装函数（Windows 内部用 Bun.spawn 绕开 spawnSync bug，
+  // Unix 内部用 spawnSync）。平台特殊逻辑详见 lib/spawn.ts 的注释。
+  const r = await runProcess(
+    pythonCmd,
+    [detectEnv, "--check-preinstall", agent],
+    { timeout: 8000 },
+  );
+
   debugLog(
     `check-preinstall 结果: agent=${agent} status=${r.status} signal=${r.signal}` +
       ` error=${r.error?.message ?? "无"}` +
@@ -333,12 +342,12 @@ function checkPreinstall(agent: string, pythonCmd: string, sessionID: string): E
 
 // 统一环境检测入口（chat.message 调用此函数，不直接调 checkPreinstall）
 // 检测顺序：conda env 可用性 → 预装依赖
-function checkEnvironment(agent: string, sessionID: string): EnvironmentCheckResult {
+async function checkEnvironment(agent: string, sessionID: string): Promise<EnvironmentCheckResult> {
   const pythonCmd = getPythonCmd();
   if (!pythonCmd) {
     return { ready: false, message: getCondaInstallHint() };
   }
-  return checkPreinstall(agent, pythonCmd, sessionID);
+  return await checkPreinstall(agent, pythonCmd, sessionID);
 }
 
 // 终止 session 并保存错误信息到 sessionData（由 session.idle 事件取出输出）。
@@ -423,7 +432,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         debugLog(`chat.message: sessionID=${sessionID} agent=${agent}`, sessionID);
 
       // 环境检测：不 ready → 存错误信息到 sessionData + 终止（不 throw，不调 session.prompt）
-      const envCheck = checkEnvironment(agent, sessionID);
+      const envCheck = await checkEnvironment(agent, sessionID);
       if (!envCheck.ready) {
         debugLog(`chat.message: 环境检测未通过 agent=${agent}，输出错误并终止`, sessionID);
         await reportErrorAndAbort(ctx.client, sessionID, sessionData, envCheck.message);
