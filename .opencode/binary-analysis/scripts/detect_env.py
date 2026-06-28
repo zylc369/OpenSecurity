@@ -414,6 +414,10 @@ def run_detection(skip_install=False, agent=None):
             print(f"[*] {name} 未安装，正在自动安装...")
             if _install_package(info["pip_name"]):
                 pkg_info = _detect_package(name, version_via=info.get("version_via"))
+                if not pkg_info["available"]:
+                    # 首次 import 可能因动态库初始化延迟失败（如 macOS PyObjC），重试一次
+                    time.sleep(1)
+                    pkg_info = _detect_package(name, version_via=info.get("version_via"))
                 if pkg_info["available"]:
                     # 处理 post_install（如 playwright 需要额外安装浏览器）
                     if info.get("post_install") and name == "playwright":
