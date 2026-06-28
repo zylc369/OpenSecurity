@@ -4,12 +4,12 @@
 
 ## 0. 通用约定
 
-bytes↔int 转换用标准库（无需 pycryptodome）：
+bytes↔int 转换用 Python 标准库：
 
 ```python
-def i2b(n):  # int -> bytes (大端), 等价于 pycryptodome 的 long_to_bytes
+def i2b(n):  # int -> bytes (大端)
     return n.to_bytes((n.bit_length()+7)//8 or 1, 'big')
-def b2i(b):  # bytes -> int (大端), 等价于 bytes_to_long
+def b2i(b):  # bytes -> int (大端)
     return int.from_bytes(b, 'big')
 ```
 

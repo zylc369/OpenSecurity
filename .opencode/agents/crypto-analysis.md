@@ -64,7 +64,7 @@ permission:
 ### 阶段 C：构造求解并验证
 
 1. 用 SageMath 做代数/格/数论（优先，最简洁）；gmpy2 做大整数；不重复造轮子。
-2. 求出明文后用标准库转 bytes（`m.to_bytes((m.bit_length()+7)//8 or 1,'big')`，等价于 pycryptodome 的 `long_to_bytes`；本环境未装 pycryptodome），验证符合 flag 格式。详见 `$AGENT_DIR/knowledge-base/crypto-methodology.md` §4。
+2. 求出明文后用 Python 标准库转 bytes（`m.to_bytes((m.bit_length()+7)//8 or 1,'big')`）验证符合 flag 格式。详见 `$AGENT_DIR/knowledge-base/crypto-methodology.md` §4。
 3. 失败则回溯：换攻击模式 / 检查参数识别错误 / 读知识库其它分支。
 
 **常见失败与切换**：
