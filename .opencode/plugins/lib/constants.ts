@@ -74,7 +74,7 @@ export const PERSISTENCE_FILE = ".persistence.json";
 export const ABORTED_ERROR_NAME = "MessageAbortedError";
 export const COMPLETION_MARKER = ">>>COMPLETE<<<";
 export const RESUME_PROMPT =
-  `你之前的分析是否已经完成了？\n` +
+  `你之前的分析是否已经完成了？**你必须要如实回答和执行**：\n` +
   `- 如果已经完成：请直接输出最终结论，然后在最后一行精确输出这个标记（原样复制，不要修改）：${COMPLETION_MARKER}\n` +
   `- 如果尚未完成：不论任何原因只要未完成，你都必须自主继续分析，不要停下来向用户提问。复盘一下之前的分析内容、结果，然后继续分析，直到完成为止。未完成的情况下绝对不允许输出 ${COMPLETION_MARKER} 标记。`;
 
