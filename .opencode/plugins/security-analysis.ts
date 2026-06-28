@@ -292,7 +292,7 @@ function checkPreinstall(agent: string, sessionID: string): PreinstallResult {
   const detectEnv = join(SHARED_DIR, "scripts", "detect_env.py");
   const r = spawnSync(PYTHON_CMD, [detectEnv, "--check-preinstall", agent], {
     encoding: "utf8",
-    timeout: 5000,
+    timeout: 8000,
   });
   debugLog(
     `check-preinstall 结果: agent=${agent} status=${r.status} signal=${r.signal}` +
