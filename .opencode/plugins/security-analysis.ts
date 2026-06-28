@@ -28,7 +28,7 @@ import { ctx } from "./lib/context";
 import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
 import { readJsonSafe, getTaskDir, removeTaskSession } from "./lib/task-session";
-import { PYTHON_CMD } from "./lib/venv";
+import { getPythonCmd, getCondaInstallHint } from "./lib/venv";
 import { hasBuwaiExtensionId, loadSnippet } from "./lib/snippet";
 import { maybeResumeAnalysis } from "./lib/persistence";
 import { recordTimeline, flushTimeline } from "./lib/timeline";
@@ -180,7 +180,10 @@ async function buildEnvSection(
     } else {
       envSection += `- IDA Pro: 未配置\n`;
     }
-    envSection += `- Python ($PYTHON_CMD): ${PYTHON_CMD}\n`;
+    const pythonCmd = getPythonCmd();
+    if (pythonCmd) {
+      envSection += `- Python ($PYTHON_CMD): ${pythonCmd}\n`;
+    }
 
     if (envInfo) {
       const compiler = envInfo.compiler;
@@ -280,17 +283,17 @@ async function abortSession(sessionID: string, reason: string): Promise<void> {
 // 工具开始执行时间戳（tool.execute.before → tool.execute.after 配对计算耗时）
 const toolStartTimes = new Map<string, number>();
 
-// 预装依赖检查结果
-type PreinstallResult = {
+// 环境检测结果
+type EnvironmentCheckResult = {
   ready: boolean;
   message: string; // ready=true 时为空；否则是给用户看的错误消息
 };
 
 // 预装依赖检查：调 detect_env --check-preinstall <agent>，返回结构化结果。
 // 纯函数——永远返回，不 throw（包括 detect_env 崩溃的情况）。
-function checkPreinstall(agent: string, sessionID: string): PreinstallResult {
+function checkPreinstall(agent: string, pythonCmd: string, sessionID: string): EnvironmentCheckResult {
   const detectEnv = join(SHARED_DIR, "scripts", "detect_env.py");
-  const r = spawnSync(PYTHON_CMD, [detectEnv, "--check-preinstall", agent], {
+  const r = spawnSync(pythonCmd, [detectEnv, "--check-preinstall", agent], {
     encoding: "utf8",
     timeout: 8000,
   });
@@ -326,6 +329,16 @@ function checkPreinstall(agent: string, sessionID: string): PreinstallResult {
     };
   }
   return { ready: true, message: "" };
+}
+
+// 统一环境检测入口（chat.message 调用此函数，不直接调 checkPreinstall）
+// 检测顺序：conda env 可用性 → 预装依赖
+function checkEnvironment(agent: string, sessionID: string): EnvironmentCheckResult {
+  const pythonCmd = getPythonCmd();
+  if (!pythonCmd) {
+    return { ready: false, message: getCondaInstallHint() };
+  }
+  return checkPreinstall(agent, pythonCmd, sessionID);
 }
 
 // 终止 session 并保存错误信息到 sessionData（由 session.idle 事件取出输出）。
@@ -371,7 +384,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   debugLog(`  config exists: ${existsSync(CONFIG_FILE)}`);
   debugLog(`  env_cache exists: ${existsSync(ENV_CACHE_FILE)}`);
   debugLog(`  ctx.client: ${!!ctx.client}`);
-  debugLog(`  PYTHON_CMD: ${PYTHON_CMD}`);
+  debugLog(`  PYTHON_CMD: ${getPythonCmd() ?? "未初始化（等待首次 chat.message 触发）"}`);
 
   // 写心跳文件，供 agent 检测 Plugin 是否正常加载
   const heartbeatFile = join(DATA_DIR, ".plugin-heartbeat");
@@ -409,11 +422,11 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         sessionData = await ctx.sessionManager.upsert(sessionID, agent);
         debugLog(`chat.message: sessionID=${sessionID} agent=${agent}`, sessionID);
 
-      // 预装依赖检查：不 ready → 存错误信息到 sessionData + 终止（不 throw，不调 session.prompt）
-      const preinstall = checkPreinstall(agent, sessionID);
-      if (!preinstall.ready) {
-        debugLog(`chat.message: 预装检查未通过 agent=${agent}，输出错误并终止`, sessionID);
-        await reportErrorAndAbort(ctx.client, sessionID, sessionData, preinstall.message);
+      // 环境检测：不 ready → 存错误信息到 sessionData + 终止（不 throw，不调 session.prompt）
+      const envCheck = checkEnvironment(agent, sessionID);
+      if (!envCheck.ready) {
+        debugLog(`chat.message: 环境检测未通过 agent=${agent}，输出错误并终止`, sessionID);
+        await reportErrorAndAbort(ctx.client, sessionID, sessionData, envCheck.message);
         return;
       }
       sessionData.activelyTerminated = false;
@@ -629,7 +642,11 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       // 基础变量（全局常量，始终可注入）
       output.env.SESSION_ID = sessionID;
       output.env.AGENT_NAME = agentName;
-      output.env.PYTHON_CMD = PYTHON_CMD;
+      // PYTHON_CMD（惰性获取，chat.message 已确保环境就绪后此处非 null）
+      const pythonCmd = getPythonCmd();
+      if (pythonCmd) {
+        output.env.PYTHON_CMD = pythonCmd;
+      }
       output.env.OPENCODE_ROOT = OPENCODE_ROOT;
       output.env.SHARED_DIR = SHARED_DIR;
 
@@ -655,7 +672,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         `shell.env: 已注入` +
           ` SESSION_ID=${sessionID}` +
           ` AGENT_NAME=${agentName}` +
-          ` PYTHON_CMD=${PYTHON_CMD}` +
+          ` PYTHON_CMD=${pythonCmd ?? "未初始化"}` +
           ` OPENCODE_ROOT=${OPENCODE_ROOT}` +
           ` AGENT_DIR=${scriptDir ?? "无"}` +
           ` SHARED_DIR=${output.env.SHARED_DIR}` +

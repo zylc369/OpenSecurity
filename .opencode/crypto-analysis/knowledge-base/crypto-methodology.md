@@ -51,7 +51,7 @@ sage -python solve.py
 ### 3.3 sage 缺失时
 
 detect_env 会检测。若缺失：
-- 格攻击/Coppersmith/ECC 离散对数 → **必须先装 sage**（detect_env 会给命令：`~/bw-security-analysis/.venv/bin/pip install sagemath-standard`）。
+- 格攻击/Coppersmith/ECC 离散对数 → **必须先装 sage**（detect_env 会给命令：`conda install -p ~/bw-security-analysis/.venv sage`）。
 - 简单 RSA（已知 p/q 直接解）、古典、对称 → 用 `gmpy2` + `sympy` 手写可行。
 
 ## 4. 大整数与编码

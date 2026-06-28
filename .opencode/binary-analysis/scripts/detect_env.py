@@ -49,9 +49,10 @@ REQUIRED_PACKAGES = {
     "sage": {
         "required": False,
         "pip_name": "sagemath-standard",
+        "conda_name": "sage",
         "agents": ["crypto-analysis"],
         "preinstall": True,
-        "note": "安装命令本身由 detect_env 动态生成"
+        "installer": "conda",
     },
 }
 
@@ -195,7 +196,7 @@ def _detect_gcc_unix():
 def _detect_package(name, version_via=None):
     """检测 Python 包是否已安装。
     version_via: None 表示用 name.__version__；"importlib:PIP_NAME" 表示用 importlib.metadata。
-    使用 sys.executable（由 Plugin 保证为 venv Python）执行检测。"""
+    使用 sys.executable（由 Plugin 保证为 conda env Python）执行检测。"""
     try:
         if version_via and version_via.startswith("importlib:"):
             pip_name = version_via.split(":", 1)[1]
@@ -227,6 +228,17 @@ def _install_package(pip_name, timeout=60):
     except OSError as e:
         print(f"[!] pip install {pip_name} 异常: {e}", file=sys.stderr)
     return False
+
+
+def _build_install_cmd(info):
+    """根据 info 的 installer 字段生成安装命令（配置驱动，不硬编码包名）。
+    用于 _check_preinstall 生成给用户看的 install_hint。
+    sys.prefix 在 conda env 里指向 env 根目录（跨平台）。"""
+    installer = info.get("installer", "pip")
+    if installer == "conda":
+        name = info.get("conda_name") or info["pip_name"]
+        return f"conda install -p '{sys.prefix}' -y {name}"
+    return f"{sys.executable} -m pip install {info['pip_name']}"
 
 
 def _detect_playwright_browser():
@@ -340,7 +352,7 @@ def _check_preinstall(agent):
     """检查指定 Agent 的预装依赖（preinstall 类型）是否就绪。
     不自动装、不走 24h 缓存（必须反映用户刚装好的状态）。
     返回 {success: bool, errors: [{package, install_hint}]}，与 detect_env 输出形状一致。
-    当前进程即 venv python（由 $PYTHON_CMD 调用），find_spec 直接查 venv site-packages。"""
+    当前进程即 conda env python（由 $PYTHON_CMD 调用），find_spec 直接查 env site-packages。"""
     import importlib.util
     errors = []
     for name, info in REQUIRED_PACKAGES.items():
@@ -355,16 +367,14 @@ def _check_preinstall(agent):
             print(f"[!] _check_preinstall: find_spec({name}) 异常: {e}", file=sys.stderr)
             raise
         if spec is None:
-            install_cmd = f"{sys.executable} -m pip install {info['pip_name']}"
-            # 从条目字段动态生成描述（不靠硬编码 note）
+            install_cmd = _build_install_cmd(info)
+            # 从条目字段动态生成描述（配置驱动，不硬编码安装器类型）
             agents_str = "/".join(info.get("agents", []))
-            preinstall_desc_part1 = f"预装依赖 {name}（pip: {info['pip_name']}）未安装"
+            installer = info.get("installer", "pip")
+            pkg_name = info.get("conda_name") or info["pip_name"]
+            preinstall_desc_part1 = f"预装依赖 {name}（{installer}: {pkg_name}）未安装"
             desc = f"{agents_str} 需要的{preinstall_desc_part1}" if agents_str else preinstall_desc_part1
-            note = info.get("note")
-            parts = [desc, f"安装命令：{install_cmd}"]
-            if note:
-                parts.append(note)
-            install_hint = "\n".join(parts)
+            install_hint = f"{desc}\n安装命令：{install_cmd}"
             errors.append({"package": name, "install_hint": install_hint})
     return {"success": len(errors) == 0, "errors": errors}
 
