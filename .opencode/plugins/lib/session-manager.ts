@@ -16,6 +16,8 @@ export class SessionData {
   lastUserMessageAt: number;
   /** agent 切换标记。upsert 检测到 agentName 变化时置为旧 agent 名，system.transform 读取后清空 */
   agentSwitchedFrom: string | null = null;
+  /** 主动终止标记。chat.message 里预装检查不通过 → 主动 abort 时置 true，event hook 恢复逻辑据此跳过 maybeResumeAnalysis */
+  activelyTerminated: boolean | null = null;
 
   constructor(agentName: string, parentSessionID?: string) {
     this.createdAt = Date.now();

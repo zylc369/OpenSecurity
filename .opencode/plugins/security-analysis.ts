@@ -25,7 +25,7 @@ import {
   AGENTS_DIR,
 } from "./lib/constants";
 import { ctx } from "./lib/context";
-import { SessionDataManager } from "./lib/session-manager";
+import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
 import { readJsonSafe, getTaskDir, removeTaskSession } from "./lib/task-session";
 import { PYTHON_CMD } from "./lib/venv";
@@ -393,27 +393,33 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     //       但 SessionDataManager.requireSecurityAgent 可通过 session.get API 间接获取
     "chat.message": async (input) => {
       const { sessionID, agent } = input;
+      let sessionData: SessionData | null = null;
       try {
         if (!agent) {
-          debugLog(`chat.message: input 缺少 agent 字段 sessionID=${sessionID}`, sessionID);
+          const errMsg = `chat.message: input 缺少 agent 字段 sessionID=${sessionID}`;
+          debugLog(errMsg, sessionID);
+          await reportErrorAndAbort(ctx.client, sessionID, `[chat.message 数据错误] ${errMsg}`);
           return;
         }
 
-        await ctx.sessionManager.upsert(sessionID, agent);
+        sessionData = await ctx.sessionManager.upsert(sessionID, agent);
         debugLog(`chat.message: sessionID=${sessionID} agent=${agent}`, sessionID);
 
         // 预装依赖检查：不 ready → 往输出区写错误消息 + 终止（不 throw）
         const preinstall = checkPreinstall(agent, sessionID);
         if (!preinstall.ready) {
           debugLog(`chat.message: 预装检查未通过 agent=${agent}，输出错误并终止`, sessionID);
+          sessionData.activelyTerminated = true;
           await reportErrorAndAbort(ctx.client, sessionID, preinstall.message);
           return;
         }
+        sessionData.activelyTerminated = false;
       } catch (e) {
         // 兜底：chat.message 里的任何意外异常都不能 throw（会变 defect → 用户空白）
         const msg = (e as Error)?.message ?? String(e);
         debugLog(`chat.message: 意外异常 sessionID=${sessionID} err=${msg}`, sessionID);
         try {
+          if (sessionData) sessionData.activelyTerminated = true;
           await reportErrorAndAbort(ctx.client, sessionID, `[chat.message 异常] ${msg}`);
         } catch {
           // reportErrorAndAbort 本身也失败了，只能靠日志
@@ -791,7 +797,13 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         flushTimeline(sessionID);
 
         // ─── 分析持续性恢复 ────────────────────────────────────
-        await maybeResumeAnalysis(sessionID);
+        const session = ctx.sessionManager.get(sessionID);
+        if (session?.activelyTerminated || session?.activelyTerminated === null) {
+          debugLog(`session.idle: 主动终止（预装检查），跳过恢复，activelyTerminated=${session?.activelyTerminated}`, sessionID);
+          session.activelyTerminated = false;
+        } else {
+          await maybeResumeAnalysis(sessionID);
+        }
       }
 
       // session 状态变化和错误（非 idle）
