@@ -18,6 +18,8 @@ export class SessionData {
   agentSwitchedFrom: string | null = null;
   /** 主动终止标记。chat.message 里预装检查不通过 → 主动 abort 时置 true，event hook 恢复逻辑据此跳过 maybeResumeAnalysis */
   activelyTerminated: boolean | null = null;
+  /** 待输出的错误信息。chat.message 主动终止时保存，session.idle 时取出并通过 session.prompt 输出给用户 */
+  pendingErrorMessage: string | null = null;
 
   constructor(agentName: string, parentSessionID?: string) {
     this.createdAt = Date.now();

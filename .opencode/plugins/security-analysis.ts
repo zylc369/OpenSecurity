@@ -328,21 +328,25 @@ function checkPreinstall(agent: string, sessionID: string): PreinstallResult {
   return { ready: true, message: "" };
 }
 
-// 往输出区发送一条错误消息并终止 session。
-// chat.message 里不能用 throw（会被 prompt 层转成 defect → 用户看到空白），
-// 所以用 session.prompt(noReply:true) 往聊天区写消息 + session.abort 终止。
-async function reportErrorAndAbort(client: any, sessionID: string, message: string) {
+// 终止 session 并保存错误信息到 sessionData（由 session.idle 事件取出输出）。
+// 不调 session.prompt——从 chat.message 内部调会死锁。
+async function reportErrorAndAbort(
+  client: any,
+  sessionID: string,
+  sessionData: SessionData | null,
+  message: string,
+) {
+  if (sessionData) {
+    sessionData.activelyTerminated = true;
+    sessionData.pendingErrorMessage = message;
+    debugLog(`reportErrorAndAbort: sessionData 更新错误信息 sessionID=${sessionID} message=${message}`, sessionID);
+  } else {
+    debugLog(`reportErrorAndAbort: sessionData 未提供，无法保存错误信息 sessionID=${sessionID} message=${message}`, sessionID);
+  }
   try {
-    await client.session.prompt({
-      path: { id: sessionID },
-      body: {
-        parts: [{ type: "text", text: message }],
-        noReply: true,
-      },
-    });
     await client.session.abort({ path: { id: sessionID } });
   } catch (e) {
-    debugLog(`reportErrorAndAbort: 失败 sessionID=${sessionID} err=${(e as Error)?.message}`, sessionID);
+    debugLog(`reportErrorAndAbort: abort 失败 sessionID=${sessionID} err=${(e as Error)?.message}`, sessionID);
   }
 }
 
@@ -398,29 +402,28 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         if (!agent) {
           const errMsg = `chat.message: input 缺少 agent 字段 sessionID=${sessionID}`;
           debugLog(errMsg, sessionID);
-          await reportErrorAndAbort(ctx.client, sessionID, `[chat.message 数据错误] ${errMsg}`);
+          await reportErrorAndAbort(ctx.client, sessionID, null, errMsg);
           return;
         }
 
         sessionData = await ctx.sessionManager.upsert(sessionID, agent);
         debugLog(`chat.message: sessionID=${sessionID} agent=${agent}`, sessionID);
 
-        // 预装依赖检查：不 ready → 往输出区写错误消息 + 终止（不 throw）
-        const preinstall = checkPreinstall(agent, sessionID);
-        if (!preinstall.ready) {
-          debugLog(`chat.message: 预装检查未通过 agent=${agent}，输出错误并终止`, sessionID);
-          sessionData.activelyTerminated = true;
-          await reportErrorAndAbort(ctx.client, sessionID, preinstall.message);
-          return;
-        }
-        sessionData.activelyTerminated = false;
+      // 预装依赖检查：不 ready → 存错误信息到 sessionData + 终止（不 throw，不调 session.prompt）
+      const preinstall = checkPreinstall(agent, sessionID);
+      if (!preinstall.ready) {
+        debugLog(`chat.message: 预装检查未通过 agent=${agent}，输出错误并终止`, sessionID);
+        await reportErrorAndAbort(ctx.client, sessionID, sessionData, preinstall.message);
+        return;
+      }
+      sessionData.activelyTerminated = false;
+      sessionData.pendingErrorMessage = null;
       } catch (e) {
         // 兜底：chat.message 里的任何意外异常都不能 throw（会变 defect → 用户空白）
         const msg = (e as Error)?.message ?? String(e);
         debugLog(`chat.message: 意外异常 sessionID=${sessionID} err=${msg}`, sessionID);
         try {
-          if (sessionData) sessionData.activelyTerminated = true;
-          await reportErrorAndAbort(ctx.client, sessionID, `[chat.message 异常] ${msg}`);
+          await reportErrorAndAbort(ctx.client, sessionID, sessionData, `[chat.message 异常] ${msg}`);
         } catch {
           // reportErrorAndAbort 本身也失败了，只能靠日志
         }
@@ -800,7 +803,21 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         const session = ctx.sessionManager.get(sessionID);
         if (session?.activelyTerminated || session?.activelyTerminated === null) {
           debugLog(`session.idle: 主动终止（预装检查），跳过恢复，activelyTerminated=${session?.activelyTerminated}`, sessionID);
+          // 如果有待输出的错误信息，在 session 空闲时通过 session.prompt 输出（从 chat.message 内部调会死锁）
           session.activelyTerminated = false;
+          if (session?.pendingErrorMessage) {
+            const errMsg = session.pendingErrorMessage;
+            session.pendingErrorMessage = null;
+            try {
+              debugLog(`session.idle: 输出待处理的错误信息：${errMsg}`, sessionID);
+              await ctx.client.session.prompt({
+                path: { id: sessionID },
+                body: { parts: [{ type: "text", text: errMsg }], noReply: true },
+              });
+            } catch (e) {
+              debugLog(`session.idle: 输出错误信息失败: ${(e as Error)?.message}`, sessionID);
+            }
+          }
         } else {
           await maybeResumeAnalysis(sessionID);
         }
