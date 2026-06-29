@@ -20,6 +20,9 @@ export interface ProcessResult {
 export interface RunProcessOptions {
   /** 超时时间（毫秒）；不传则不限制 */
   timeout?: number;
+  /** 额外的环境变量，合并到默认 env（process.env + UTF-8 配置）之上。
+   *  调用方变量优先级高于默认变量。 */
+  env?: Record<string, string>;
 }
 
 /**
@@ -51,7 +54,7 @@ export async function runProcess(
   // 默认用 GBK(CP936) 编码、而读取端按 UTF-8 解码导致的中文乱码。
   // PYTHONUTF8=1（PEP 540，3.7+）覆盖所有 I/O；PYTHONIOENCODING 兜底 stdin/stdout/stderr。
   // Unix 上默认就是 UTF-8，加上是无害的防御性配置，保持两端行为一致。
-  const env = { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" };
+  const env = { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", ...options.env };
 
   // ── Unix 路径：直接用 spawnSync ──────────────────────────────────
   if (process.platform !== "win32") {

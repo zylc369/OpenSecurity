@@ -237,7 +237,8 @@ def _build_install_cmd(info):
     installer = info.get("installer", "pip")
     if installer == "conda":
         name = info.get("conda_name") or info["pip_name"]
-        return f"conda install -p '{sys.prefix}' -y {name}"
+        conda_cmd = os.environ.get("CONDA_CMD", "conda")
+        return f"{conda_cmd} install -p '{sys.prefix}' -y {name}"
     return f"{sys.executable} -m pip install {info['pip_name']}"
 
 

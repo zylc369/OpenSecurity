@@ -102,8 +102,9 @@ export const RESUME_PROMPTS: string[] = [
 export const VENV_DIR = join(DATA_DIR, ".venv");
 
 export const VENV_PYTHON_CANDIDATES = [
-  join(VENV_DIR, "Scripts", "python.exe"), // Windows 标准位置
-  join(VENV_DIR, "bin", "python"), // Linux/macOS 标准位置
+  join(VENV_DIR, "python.exe"), // conda env Windows 根目录
+  join(VENV_DIR, "Scripts", "python.exe"), // venv Windows 标准位置
+  join(VENV_DIR, "bin", "python"), // Linux/macOS 标准位置（venv / conda 共享）
   join(VENV_DIR, "Scripts", "python3.exe"), // Windows（python3 别名）
   join(VENV_DIR, "bin", "python3"), // Linux/macOS（python3）
 ];
