@@ -47,10 +47,17 @@ export async function runProcess(
   args: string[],
   options: RunProcessOptions = {},
 ): Promise<ProcessResult> {
+  // 强制 Python 子进程 UTF-8 输出，避免 Windows 上 stdout 重定向到管道时
+  // 默认用 GBK(CP936) 编码、而读取端按 UTF-8 解码导致的中文乱码。
+  // PYTHONUTF8=1（PEP 540，3.7+）覆盖所有 I/O；PYTHONIOENCODING 兜底 stdin/stdout/stderr。
+  // Unix 上默认就是 UTF-8，加上是无害的防御性配置，保持两端行为一致。
+  const env = { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" };
+
   // ── Unix 路径：直接用 spawnSync ──────────────────────────────────
   if (process.platform !== "win32") {
     const r = spawnSync(exe, args, {
       encoding: "utf8",
+      env,
       timeout: options.timeout,
     });
     return {
@@ -69,6 +76,7 @@ export async function runProcess(
     // Bun 全局：OpenCode 跑在 Bun runtime（用 globalThis as any 避开 TS 类型报错）
     proc = (globalThis as any).Bun.spawn({
       cmd: [exe, ...args],
+      env,
       stdout: "pipe",
       stderr: "pipe",
       stdin: "ignore",
