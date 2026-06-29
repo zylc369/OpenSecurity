@@ -27,7 +27,7 @@ import { ctx } from "./lib/context";
 import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
 import { readJsonSafe, getTaskDir, removeTaskSession } from "./lib/task-session";
-import { getPythonCmd, getCondaInstallHint } from "./lib/venv";
+import { getPythonCmd, getCondaCmd, getCondaInstallHint } from "./lib/venv";
 import { hasBuwaiExtensionId, loadSnippet } from "./lib/snippet";
 import { maybeResumeAnalysis } from "./lib/persistence";
 import { recordTimeline, flushTimeline } from "./lib/timeline";
@@ -300,10 +300,11 @@ async function checkPreinstall(
 
   // 用统一的跨平台包装函数（Windows 内部用 Bun.spawn 绕开 spawnSync bug，
   // Unix 内部用 spawnSync）。平台特殊逻辑详见 lib/spawn.ts 的注释。
+  const condaCmd = getCondaCmd();
   const r = await runProcess(
     pythonCmd,
     [detectEnv, "--check-preinstall", agent],
-    { timeout: 8000 },
+    { timeout: 8000, env: condaCmd ? { CONDA_CMD: condaCmd } : undefined },
   );
 
   debugLog(
@@ -690,6 +691,12 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           // delimiter 跨平台: POSIX=':' Windows=';'（与 constants.ts 的 Windows 支持一致）
           output.env.PATH = [venvBin, process.env.PATH].filter(Boolean).join(delimiter);
         }
+        // CONDA_CMD（惰性缓存，getPythonCmd 已触发 ensureCondaEnvPython 设置缓存；
+        // 用于 detect_env.py 生成准确的 conda 安装提示）
+        const condaCmd = getCondaCmd();
+        if (condaCmd) {
+          output.env.CONDA_CMD = condaCmd;
+        }
         output.env.OPENCODE_ROOT = OPENCODE_ROOT;
         output.env.SHARED_DIR = SHARED_DIR;
 
@@ -716,6 +723,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             ` SESSION_ID=${sessionID}` +
             ` AGENT_NAME=${agentName}` +
             ` PYTHON_CMD=${pythonCmd ?? "未初始化"}` +
+            ` CONDA_CMD=${condaCmd ?? "未初始化"}` +
             ` OPENCODE_ROOT=${OPENCODE_ROOT}` +
             ` AGENT_DIR=${scriptDir ?? "无"}` +
             ` SHARED_DIR=${output.env.SHARED_DIR}` +

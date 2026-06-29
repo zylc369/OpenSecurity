@@ -5,6 +5,13 @@ import { join } from "path";
 import { VENV_DIR, VENV_PYTHON_CANDIDATES } from "./constants";
 import { debugLog } from "./logging";
 
+// 惰性缓存的 Python 命令路径
+let cachedPythonCmd: string | null = null;
+
+// 惰性缓存的 conda 命令路径（由 ensureCondaEnvPython 设置；
+// 若 getPythonCmd 未调用，getCondaCmd 会独立调用 findConda 兜底）
+let cachedCondaCmd: string | null = null;
+
 // 验证 Python 可用性（执行 print('OK') 检查）
 function verifyPython(pathOrCmd: string): boolean {
   try {
@@ -89,12 +96,23 @@ function ensureCondaEnvPython(): string | null {
   // 1. 已有 env → 检测可用的 Python
   const existing = findVenvPython();
   if (existing) {
-    debugLog(`${methodName}: ${existing} verified`);
+    // env 已存在也要确认 conda 仍可用。否则 env 是孤儿：
+    // 后续无法用 conda 装包（如 preinstall 的 sage），preinstall 提示会给出
+    // 用户根本跑不了的 `conda install` 命令。函数名 ensureCondaEnvPython
+    // 语义上就要求 conda 在，不能只看 .venv\python.exe 能跑就放行。
+    const conda = findConda();
+    cachedCondaCmd = conda;
+    if (!conda) {
+      debugLog(`${methodName}: ${existing} verified but conda not available, env is orphan`);
+      return null;
+    }
+    debugLog(`${methodName}: ${existing} verified, conda available at ${conda}`);
     return existing;
   }
 
   // 2. 需要创建 env → 先检测 conda
   const conda = findConda();
+  cachedCondaCmd = conda;
   if (!conda) {
     debugLog(`${methodName}: conda not found, cannot create env`);
     return null;
@@ -124,9 +142,6 @@ function ensureCondaEnvPython(): string | null {
   return null;
 }
 
-// 惰性缓存的 Python 命令路径
-let cachedPythonCmd: string | null = null;
-
 // 获取 Python 命令路径（惰性初始化 + 缓存）
 // 首次调用时检测/创建 conda env，后续直接返回缓存值
 // 返回 null 表示 conda 不可用且 env 不存在
@@ -136,6 +151,18 @@ export function getPythonCmd(): string | null {
   }
   cachedPythonCmd = ensureCondaEnvPython();
   return cachedPythonCmd;
+}
+
+// 获取 conda 命令路径（惰性缓存）
+// 若 getPythonCmd 已调用，直接返回 ensureCondaEnvPython 中缓存的路径
+// 否则独立调用 findConda 兜底
+// 返回 null 表示 conda 未安装或不可用
+export function getCondaCmd(): string | null {
+  if (cachedCondaCmd !== null) {
+    return cachedCondaCmd;
+  }
+  cachedCondaCmd = findConda();
+  return cachedCondaCmd;
 }
 
 // 返回平台相关的 miniforge 安装指引（供 checkEnvironment 使用）
