@@ -52,7 +52,7 @@
 - [x] **A2**. `pwn-heap-methodology.md`（落点决策树+House模板+safe-linking）— 170行，审计通过
 - [x] **A3**. `pwn-kernel-methodology.md`（结构体泄漏+msg_msg+Dirty PageTable+竞态扩大）— 174行，审计通过
 - [x] **B1**. `deobfuscation-selection.md`（OLLVM/MBA/VM识别+工具选型D-810/deflat/QSynth）— 155行，审计通过
-- [ ] **B2**. 更新 `idapython-conventions.md`（IDA 9.0 API 变化）— 完成，新增 IDA 9.0 迁移章节
+- [~] **B2**. 更新 `idapython-conventions.md` — **已撤销**（用户判定没必要，一直在用 IDA 9.X，不需要"从旧迁移"指南）
 - [x] **C1**. `client-side-attacks.md`（bfcache+CSS trigram exfil+xsleak+iframe reparenting）— 146行，审计通过
 - [x] **C2**. `race-conditions.md`（单包攻击+原型链污染gadget+解析器差异）— 107行，审计通过
 

