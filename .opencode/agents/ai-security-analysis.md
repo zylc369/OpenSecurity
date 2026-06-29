@@ -282,6 +282,7 @@ results = sim.query_batch(["输入"] * 3, temperature=0.3)
 | `ai-security-defense.md` | 分析防御方案时。输入层/System Prompt/输出层/架构层防御方案 |
 | `carrier-construction-guide.md` | 构造注入载体时。高质量载体构造方法、质量标准、按类型策略、验证方法 |
 | `payload-effectiveness-evaluation.md` | 评估注入效果时。真实性评估维度、检查方法、评分卡、常见失败模式 |
+| `agent-attacks.md` 🆕 | 目标为 AI Agent（MCP/Tool/RAG/Computer Use）或需自动化越狱工具（PAIR/TAP/Crescendo/GCG）时 |
 
 ### 通用知识库（$SHARED_DIR/knowledge-base/）
 

@@ -2,7 +2,7 @@
 
 需求文档: 2026-06-29-ctf-writeup-knowledge-evolution.md
 
-## 当前阶段: 阶段一完成（第一批方向），准备进入阶段二
+## 当前阶段: 全部完成 ✅
 
 ## 已完成
 
@@ -38,9 +38,9 @@
 3. **roderickwang ≠ roderickchan** → Pwn 报告笔误，roderickwang 是前端开发者，House of Apple 作者应是 roderickchan
 
 ### 待补充的源文档（标注待查找）
-- ptr-yudai DiceCTF 2026 cornelslop（内核: MADV_DONTNEED+cross-cache+PTE overlap）— 需查找博客 URL
-- ctf-wiki kernel pwn — 需下载
-- House of Apple/Cat（roderickchan）— 需查找正确 URL
+- ptr-yudai DiceCTF 2026 cornelslop（内核: MADV_DONTNEED+cross-cache+PTE overlap）— 博客在线(ptr-yudai.hatenablog.com)但具体文章URL待定位
+- ctf-wiki kernel pwn — ctf-wiki.org 改版，所有路径 404，需确认新 URL
+- House of Apple/Cat（roderickchan）— GitHub(roderickchan) 有 pwncli/kernel_pwn_tool 等仓库但无 House of Apple 文章，文章可能在 CSDN/掘金
 
 ## 待办
 
@@ -57,12 +57,25 @@
 - [x] **C2**. `race-conditions.md`（单包攻击+原型链污染gadget+解析器差异）— 107行，审计通过
 
 第二批（视精力）:
-- [ ] **D**. 增强 `crypto-methodology.md`（参数→攻击速查 + Coppersmith模板整合）
-- [ ] **E**. `agent-attacks.md`（MCP/Tool poisoning/Computer Use）
+- [x] **D**. 增强 `crypto-methodology.md`（参数→攻击速查表 + Coppersmith变种速查）— +82行，审计通过
+- [x] **E**. `agent-attacks.md`（MCP/Tool poisoning/RAG/Computer Use + 自动化越狱工具对比）— 151行 + ai-security prompt索引
 
 ### 阶段三：同步更新 agent prompt
 - [x] binary-analysis.md 加索引（+4行：pwn-methodology/heap/kernel + deobfuscation-selection）— 324行
 - [x] web-analysis.md 加索引（+2行：client-side-attacks + race-conditions）— 318行
+- [x] ai-security-analysis.md 加索引（+1行：agent-attacks）— 330行
+
+### 最终审计 ✅
+- Agent prompt 行数全部 < 450（324/318/330）
+- 交叉引用一致性：16 个引用文件全部存在
+- Agent prompt 索引全部添加（7 条新索引）
+
+## 最终统计
+- 新增知识库文件：8 个（1058 行）
+- 增强现有文件：2 个（crypto-methodology +82行 / idapython-conventions +41行）
+- Agent prompt 索引：3 个 agent（+7 行索引）
+- 源文档库：27 个源文档 + 3 个索引 + 下载脚本
+- 调研报告：5 个方向（Pwn 459行 + 逆向 + Web + 密码学 501行 + AI安全）
 
 ## 决策记录
 1. **2026-06-29 用户纠偏**: 不要直接从 agent 摘要沉淀，先下载 writeup 原文建源文档库，再基于原文沉淀。二手摘要会丢细节、不可回溯。

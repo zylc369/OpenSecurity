@@ -77,21 +77,88 @@ m = pow(c, d, n)
 phi = (p-1)*(q-1)
 ```
 
-## 5. 模式匹配清单（速查，详见各库）
+## 5. 参数特征→攻击速查表（详见各攻击库）
 
-| 现象 | 攻击 | 库 |
-|------|------|----|
-| 同 n 不同 e | 共模攻击 | rsa |
-| e 很小（如 3）+ m 小 | 直接开方 / Coppersmith | rsa |
-| d 小（e 大） | Wiener / Boneh-Durfee | rsa |
-| 多组 hint 线性含 p,q | LLL | lattice |
-| 截断的 LCG/比特 | HNP（格） | lattice |
-| 曲线阶 = p | Smart（anomalous） | ecc |
-| 阶光滑 | Pohlig-Hellman | ecc |
-| CBC + padding oracle | Padding Oracle | symmetric |
-| `mac=hash(key∥msg)` | 长度扩展 | symmetric |
+### RSA 参数异常
 
-## 6. 注意
+| 参数特征 | 攻击 | 条件/说明 |
+|---------|------|----------|
+| 同 n 不同 e | 共模攻击（common modulus） | `gcd(e1,e2)=1`，用扩展欧几里得合并 |
+| e 很小（3/5/7）+ m 小 | 直接开方 / Coppersmith | m < n^(1/e) 直接开 e 次方；否则 small_roots |
+| e 很小 + 多组 (c_i, n_i) 同明文 | Håstad broadcast | 需要 ≥ e 组 |
+| d 小（e 大，接近 n） | Wiener（d < n^0.25）/ Boneh-Durfee（d < n^0.292） | Wiener 用连分数；BD 用格 |
+| n1, n2 共因子 | `gcd(n1, n2)` | 多个 n 时两两 GCD |
+| 已知 p 的高/低 k 位 | Coppersmith partial factor | 已知 > n^0.25 位即可 |
+| 已知 d 的高/低 k 位 | partial key exposure | 已知 d 的 n^0.25 位即可 |
+| 已知 p+q 或 p-q | 转化 → 一元二次 → 求根 | `(p+q)^2 - 4n = (p-q)^2` |
+| 给了 dp/dq（CRT 密钥） | CRT 攻击 | dp 满足 `e*dp ≡ 1 mod (p-1)` |
+| 两次加密有线性关系 m1=a*m2+b | Franklin-Reiter / Coppersmith related | e=3 最有效 |
+| 给了多个 a*p+b*q 形式的 hint | LLL 格规约 | 见 lattice-attacks.md |
+
+### ECC 参数异常
+
+| 参数特征 | 攻击 | 条件 |
+|---------|------|------|
+| 曲线判别式 Δ=0（奇异） | singular curve | cusp: y²=x³ → 映射到加法群；node: y²=x²(x+a) → 映射到 GF(p) 乘法 |
+| 曲线阶 = p（anomalous） | Smart's attack | `p == E.order()`，把 ECDLP 降到 GF(p) 加法 |
+| 阶光滑（小因子分解） | Pohlig-Hellman | `order` 的因子全小，sage `discrete_log` 自动用 |
+| 超奇异（#E = p+1） | MOV / Supersingular | embedding degree 小，映射到有限域 |
+| 点不在曲线上（invalid curve） | invalid curve attack | 换曲线阶分解离散对数 |
+| twist 攻击 | twist attack | 未验证点 ∈ E，用 twist 的低阶子群 |
+
+### 格/Lattice 参数异常
+
+| 参数特征 | 攻击 | 条件 |
+|---------|------|------|
+| 多组 hint 含 p,q 线性组合 | LLL 格规约 | 见 lattice-attacks.md |
+| 截断的 LCG 输出 / 截断比特 | HNP（Hidden Number Problem） | 构造 CVP，LLL 求解 |
+| LWE（带噪声线性方程） | 格规约 / BKZ | 噪声小时 LLL 可解 |
+| NTRU 结构 | 格规约 | 私钥 = 短向量 |
+| 多变量多项式小根 | Coppersmith 多元（defund 封装） | 见 Coppersmith 小节 |
+
+### 对称/哈希 参数异常
+
+| 参数特征 | 攻击 | 条件 |
+|---------|------|------|
+| CBC + padding 报错反馈 | Padding Oracle | 逐字节解密，`l = len(block)` |
+| GCM nonce reuse | GF(2^128) 求解 XOR | 两密文 XOR 去掉认证 |
+| ECB 模式 | cut-paste / 字典 | 相同明文块→相同密文块 |
+| mac = hash(key ∥ msg) | 长度扩展 | MD5/SHA1 可扩展 |
+| 自定义 ARX（ChaCha/Salsa 变种） | 差分分析（简化版） | 轮数不足时 |
+| LFSR 已知输出 | B-M 算法 / 格 | Berlekamp-Massey 求特征多项式 |
+
+### DSA/ECDSA 参数异常
+
+| 参数特征 | 攻击 | 条件 |
+|---------|------|------|
+| 两次签名 nonce k 相同 | 直接解出 k → 私钥 | `k = (m1-m2)/(s1-s2) mod n` |
+| nonce k 有偏（HNP） | 格规约 | k 的高/低位固定 |
+
+## 6. Coppersmith 变种速查
+
+> Coppersmith 方法 = 在模 n（或 n 的因子）下求多项式小根。是 RSA 题的核心武器。
+
+| 变种 | 场景 | sage 模板 |
+|------|------|---------|
+| **small_roots** | f(x) 在 mod n 下有小根 | `P.<x>=PolynomialRing(Zmod(n)); f.small_roots(X=上界, beta=1)` |
+| **partial key exposure (d)** | 已知 d 的高/低 k 位 | 构造 `f(x) = e*x - 1` 在 mod phi(n) 下 |
+| **partial factor (p)** | 已知 p 的高/低 k 位 | `f(x) = x + p_high`，`beta=0.5`，在 mod n 下 |
+| **stereotyped message** | 已知明文前缀 | `f(x) = (prefix + x)^e - c` |
+| **related message** | m2 = a*m1 + b | `f1 = m1^e - c1`, `f2 = (a*m1+b)^e - c2`，resultant 消元 |
+| **broadcast** | 同明文 e 组 (c_i, n_i) | CRT 合并 → `m^e mod (n1*n2*...)` → 开 e 次方 |
+| **多元（defund）** | 多变量多项式小根 | 用 `defund/coppersmith` 封装（GitHub） |
+
+**基本调用**：
+```python
+# 单变量 Coppersmith
+P.<x> = PolynomialRing(Zmod(n))
+f = (known_prefix * (256^k) + x)^e - c
+roots = f.small_roots(X=256^unknown_bytes, beta=1, epsilon=0.05)
+```
+
+**参数调优**：`epsilon` 越小越能找到根但越慢（默认 1/e）；`X` 是根的上界（要准确估计）。
+
+## 7. 注意
 
 - **先验证再下结论**：求出候选明文必须 `i2b` 看是否像 flag，不能只算出数就说"解了"。
 - **参数即线索**：e=3、n=2*p、hint=3 个、bits 不对称……每个异常都指向特定攻击。
