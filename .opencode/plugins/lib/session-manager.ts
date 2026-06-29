@@ -20,6 +20,18 @@ export class SessionData {
   activelyTerminated: boolean | null = null;
   /** 待输出的错误信息。chat.message 主动终止时保存，session.idle 时取出并通过 session.prompt 输出给用户 */
   pendingErrorMessage: string | null = null;
+  /** 上次 resume prompt 植入的完成标记。maybeResumeAnalysis 发 prompt 成功后写入；
+   *  chat.message 时清成 null（用户新消息 = 新一轮，旧 marker 不再相关）。
+   *  完成检测用它精确匹配 lastText，强制 LLM 原样复制本次植入的具体值，
+   *  避免它通过模仿格式（如 `>>>COMPLETE-xxxx<<<`）绕过完成检测。 */
+  resumeMarker: string | null = null;
+  /** 自动恢复次数（内存，不持久化）。重启 opencode 后归零。
+   *  防止分析完成后无限循环恢复。达到 MAX_RESUMES 后不再 resume。 */
+  resumeCount = 0;
+  /** 上次发送 resume prompt 的时间戳。用于冷却判断，防止 AI 空转快速烧配额。 */
+  lastResumeAt = 0;
+  /** 冷却中 pending 的 setTimeout handle。新 resume 前或用户手动发消息时清除。 */
+  pendingResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(agentName: string, parentSessionID?: string) {
     this.createdAt = Date.now();
@@ -35,6 +47,18 @@ export class SessionData {
   /** 当前未使用，预留给编排 agent 子任务方案 */
   isChildSession(): boolean {
     return !!this.parentSessionID;
+  }
+
+  /** 清除 pending 的冷却 resume timer。
+   *  用户手动发消息（chat.message）或新一轮冷却前调用。
+   *  返回 true 表示确实清除了一个 pending timer。 */
+  clearPendingResume(): boolean {
+    if (this.pendingResumeTimer) {
+      clearTimeout(this.pendingResumeTimer);
+      this.pendingResumeTimer = null;
+      return true;
+    }
+    return false;
   }
 }
 
@@ -64,10 +88,13 @@ export class SessionDataManager {
   /**
    * 更新 session 数据（agentName + lastUserMessageAt）。
    * 仅供 chat.message 调用。session 不存在时先创建（插件重启兜底），创建失败抛异常（中断 prompt，用户看到 toast）。
+   * isSynthetic: resume prompt 回声（由 chat.message 根据 resumeMarker 判断），为 true 时不刷新 lastUserMessageAt。
    */
-  async upsert(sessionID: string, agentName: string): Promise<SessionData> {
+  async upsert(sessionID: string, agentName: string, isSynthetic?: boolean): Promise<SessionData> {
     const session = await this.createInternal(sessionID); // 已存在则返回，不存在则创建（失败抛异常）
-    session.lastUserMessageAt = Date.now();
+    if (!isSynthetic) {
+      session.lastUserMessageAt = Date.now();
+    }
     if (session.agentName !== agentName) {
       session.agentSwitchedFrom = session.agentName;
       session.agentName = agentName;

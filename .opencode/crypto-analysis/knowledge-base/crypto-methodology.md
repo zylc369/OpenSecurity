@@ -58,10 +58,10 @@ detect_env 会检测。若缺失：
 ## 4. 大整数与编码
 
 ```python
-# bytes↔int 用标准库（无需 pycryptodome）
-def i2b(n):  # int -> bytes (大端), 等价于 long_to_bytes
+# bytes↔int 用 Python 标准库
+def i2b(n):  # int -> bytes (大端)
     return n.to_bytes((n.bit_length()+7)//8 or 1, 'big')
-def b2i(b):  # bytes -> int (大端), 等价于 bytes_to_long
+def b2i(b):  # bytes -> int (大端)
     return int.from_bytes(b, 'big')
 # 明文整数 → bytes（flag）
 flag = i2b(m)

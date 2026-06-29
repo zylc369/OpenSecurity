@@ -143,4 +143,4 @@ k = discrete_log(Q, G, ord=order, operation='+')
 - sage 的 `discrete_log` 对加法群要传 `operation='+'`
 - **验证**：求出 `k` 后必须 `k*G == Q` 确认
 - 点坐标给的是 `(x,y)` 还是压缩格式要注意；sage 构造点 `E(x,y)`
-- 求出 `k`（私钥/明文）后转 flag：`k.to_bytes((k.bit_length()+7)//8,'big')`（标准库，无需 pycryptodome）
+- 求出 `k`（私钥/明文）后转 flag：`k.to_bytes((k.bit_length()+7)//8,'big')`（Python 标准库）
