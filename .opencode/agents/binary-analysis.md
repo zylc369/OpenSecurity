@@ -274,6 +274,10 @@ $PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" --output "$TASK_DIR/env.json"
 | `arm64-reverse-methodology.md` | arm64 无符号二进制中定位函数和数据（ADRP 搜索、调用约定） |
 | `frida-native-shell-tricks.md` | Frida 中 Java bridge 不可用时的 native 替代方案（popen/fgets） |
 | `kernel-driver-analysis.md` | 目标为 Windows 内核驱动（.sys）、VMP 混淆、需双机调试时 |
+| `pwn-methodology.md` | 题目为 pwn 类（二进制 + nc 远程连接、checksec 显示 mitigations） |
+| `pwn-heap-methodology.md` | pwn 题：堆利用落点决策树与伪造模板（House of Apple/Water/Tangerine、safe-linking） |
+| `pwn-kernel-methodology.md` | pwn 题：内核漏洞利用（结构体泄漏、msg_msg、Dirty PageTable、竞态扩大） |
+| `deobfuscation-selection.md` | 反编译含混淆代码（OLLVM/平坦化/MBA/VM），需选择反混淆工具（D-810/deflat/QSynth） |
 
 ---
 

@@ -48,22 +48,21 @@
 
 ### 阶段二：沉淀知识（每个文件独立走 evolve 流程）
 第一批（用户确认，依赖阶段一完成）:
-- [ ] **A1**. `pwn-methodology.md`（标准流程+mitigations速查+卡点突破+工具链）
-- [ ] **A2**. `pwn-heap-methodology.md`（落点决策树+House模板+safe-linking）
-- [ ] **A3**. `pwn-kernel-methodology.md`（结构体泄漏+msg_msg+Dirty PageTable+竞态扩大）
-- [ ] **B1**. `deobfuscation-selection.md`（OLLVM/MBA/VM识别+工具选型D-810/deflat/QSynth）
-- [ ] **B2**. 更新 `idapython-conventions.md`（IDA 9.0 API 变化）
-- [ ] **C1**. `client-side-attacks.md`（bfcache+CSS trigram exfil+xsleak+iframe reparenting）
-- [ ] **C2**. `race-conditions.md`（单包攻击+原型链污染gadget+解析器差异）
+- [x] **A1**. `pwn-methodology.md`（标准流程+mitigations速查+卡点突破+工具链）— 155行，审计通过
+- [x] **A2**. `pwn-heap-methodology.md`（落点决策树+House模板+safe-linking）— 170行，审计通过
+- [x] **A3**. `pwn-kernel-methodology.md`（结构体泄漏+msg_msg+Dirty PageTable+竞态扩大）— 174行，审计通过
+- [x] **B1**. `deobfuscation-selection.md`（OLLVM/MBA/VM识别+工具选型D-810/deflat/QSynth）— 155行，审计通过
+- [ ] **B2**. 更新 `idapython-conventions.md`（IDA 9.0 API 变化）— 完成，新增 IDA 9.0 迁移章节
+- [x] **C1**. `client-side-attacks.md`（bfcache+CSS trigram exfil+xsleak+iframe reparenting）— 146行，审计通过
+- [x] **C2**. `race-conditions.md`（单包攻击+原型链污染gadget+解析器差异）— 107行，审计通过
 
 第二批（视精力）:
 - [ ] **D**. 增强 `crypto-methodology.md`（参数→攻击速查 + Coppersmith模板整合）
 - [ ] **E**. `agent-attacks.md`（MCP/Tool poisoning/Computer Use）
 
 ### 阶段三：同步更新 agent prompt
-- [ ] Pwn 相关 agent prompt 加索引（需先确认是否有 pwn agent，或并入 binary-analysis）
-- [ ] 逆向 agent prompt 加反混淆索引
-- [ ] Web agent prompt 加客户端攻击索引
+- [x] binary-analysis.md 加索引（+4行：pwn-methodology/heap/kernel + deobfuscation-selection）— 324行
+- [x] web-analysis.md 加索引（+2行：client-side-attacks + race-conditions）— 318行
 
 ## 决策记录
 1. **2026-06-29 用户纠偏**: 不要直接从 agent 摘要沉淀，先下载 writeup 原文建源文档库，再基于原文沉淀。二手摘要会丢细节、不可回溯。

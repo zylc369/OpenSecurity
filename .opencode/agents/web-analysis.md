@@ -270,6 +270,8 @@ from bot_analyze import analyze_bot_file
 | `bot-patterns.md` | 分析 Bot server.js 时。Bot 代码通用结构、单页/双页模式快速分类、安全决策分析（URL 验证、httpOnly、Docker Chromium 特性）、攻击链决策树 |
 | `js-obfuscation-patterns.md` | 分析 JS 逆向题/混淆代码时。不可见 Unicode 字符、tagged template 隐式调用、Function.call 空函数、原型链劫持、debug condition 副作用 |
 | `browser-debugging.md` | 需要浏览器自动化/远程调试时。CDP 核心 API、Playwright + CDP 模式、debug() API、常见陷阱 |
+| `client-side-attacks.md` | 有 admin bot + flag 在 bot 端。bfcache 污染、CSS trigram exfil、xsleak、iframe reparenting、connection pool |
+| `race-conditions.md` | 竞态条件（单包攻击/HTTP/2 并发）；原型链污染（sources/sinks/gadgets/RCE 链） |
 
 ### 通用知识库（$SHARED_DIR/knowledge-base/）
 
