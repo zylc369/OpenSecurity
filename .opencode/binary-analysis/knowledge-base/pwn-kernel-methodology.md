@@ -110,7 +110,8 @@ commit_creds(prepare_kernel_cred(0));  // 当前进程提权到 root
   1. 目标文件（如 /etc/passwd）被 mmap 为只读（R/W=0）
   2. 页级 UAF → PTE 页回收 → 喷射占位
   3. 翻转该文件 PTE 的 R/W 位: 0→1
-  4. 只读文件映射变为可写 → 任意文件写
+  4. 写入修改 → CPU 自动设置 D (Dirty) bit
+  5. munmap 时内核看到 D bit → 认为页被修改 → 写回文件 → 只读文件被覆写
 优势: 只翻转一个 bit，比改地址字段更简单、更不容易触发检测
 ```
 

@@ -119,9 +119,11 @@ Plugin hooks:
 ┌──────────────────────────────────────────────────────────┐
 │ Phase 0: 复盘分析（循环直到连续 3 轮无遗漏、无问题）             │
 │                                                            │
-│ 两种入口:                                                   │
+│ 三种入口:                                                   │
 │   A) 用户要求复盘 → 按以下步骤分析                           │
 │   B) 用户直接提方案 → 用方案内容代替复盘，直接评估价值        │
+│   C) 用户要求从 writeup 或已有文件学习 → 获取素材、识别     │
+│      gap、产出候选方案                                        │
 │                                                            │
 │ 复盘步骤:                                                   │
 │ 1. 回顾最近一次或多次 security-analysis 的使用过程            │
@@ -227,7 +229,7 @@ Plugin hooks:
 │                                                            │
 │ 贯穿全程:                                                  │
 │   - 接口变更时确认所有消费方已同步更新                       │
-│   - 代码任务完成后，同步更新对应 agent prompt                │
+│   - 任务完成后，同步更新对应 agent prompt（含知识库索引）     │
 │   - 如果执行中发现某步实际超过 200 行，立即拆分该步骤：     │
 │     在 §3.1 中新增子步骤（不需要重新审计整个需求文档）      │
 │   - 如果上下文被压缩，读 progress.md 恢复进度后继续         │
@@ -239,6 +241,8 @@ Plugin hooks:
 │ 额外检查（实现审计特有）:                                     │
 │   - 运行时正确性: 资源管理、错误处理、边界条件                 │
 │   - 跨文件一致性: 接口对齐、引用正确、参数匹配                 │
+│   - 从源文档提炼的知识: 对照源文档验证技术准确性              │
+│     （公式/步骤/payload 与原文一致）                          │
 │                                                            │
 │   所有级别的问题都必须修复，不设严重度门槛                    │
 │   按改动类型选择验证方式（见规则 6）                         │
@@ -246,6 +250,8 @@ Plugin hooks:
 ```
 
 **禁止跳过任何 Phase。Phase 0-1 是分析讨论阶段，Phase 2-6 是严格实施阶段。**
+
+入口 C 操作指引: 搜索下载素材时读取 `$AGENT_DIR/knowledge-base/knowledge-sourcing-guide.md` 获取渠道和方法；用户指定文件或对话上下文时直接读取/回顾。识别 gap 的方法: 逐篇阅读素材，对照现有知识库索引表，列出"知识库中没有的技术"。后续的提炼、写入、审计走通用 Phase 1-6 流程。
 
 ---
 
@@ -480,6 +486,19 @@ Plugin hooks:
 
 日志宁可多打不要漏打——排查时多几行日志只是多一点 grep，漏了关键节点则可能完全摸不着头脑。
 
+### 规则 10: 禁止引用 docs/ 目录
+
+**绝对不允许**在知识库文件、脚本、Agent prompt 中引用 `docs/` 目录下的任何文件或目录路径。
+
+**原因**: `docs/` 是项目的原始资料区（writeup 源文档、分析报告等），内容随时可能变动、删除或重命名。Agent 的运行依赖这些引用会导致引用失效、知识库断裂。
+
+**正确的做法**:
+- 从 `docs/` 的源文档中**提炼技术内容**，写入 agent 自有的知识库（`$AGENT_DIR/knowledge-base/` 或 `$SHARED_DIR/knowledge-base/`）
+- 脚本和工具放到 `$AGENT_DIR/scripts/` 或 `$SHARED_DIR/scripts/`
+- 知识库文件自包含——不通过路径引用 `docs/` 中的文件来补充信息
+
+**例外**: `download_sources.py` 的 `SOURCE_DIR` 指向 `docs/资料/writeup-sources/` 作为下载保存目标——这是"写入"操作（产出原始资料），不是 agent 运行时"依赖"（读取）。
+
 ---
 
 ## OpenCode 开发知识库
@@ -488,17 +507,16 @@ Plugin hooks:
 
 进化过程中涉及 Plugin 和 Agent 开发时，按需读取以下知识库文件:
 
-| 文档 | 触发条件 |
-|------|---------|
-| `knowledge-writing-guide.md` | 沉淀知识到任何知识库文件之前 |
-| `opencode-plugin-api.md` | 查看 Hook 签名、input/output 类型 |
-| `opencode-plugin-hooks-lifecycle.md` | 理解 Hook 执行时序、awaited vs fire-and-forget、常见陷阱 |
-| `opencode-plugin-development-guide.md` | 从零创建插件、最小模板、状态管理模式 |
-| `opencode-agent-format.md` | 创建/修改 Agent 文件格式、frontmatter 字段 |
-| `opencode-plugin-debugging.md` | 排查 Plugin 问题、测试验证方法 |
-| `idapython-conventions.md` | 生成 IDAPython 脚本时的编码规范 |
-
-路径: `$OPENCODE_ROOT/binary-analysis/knowledge-base/<文件名>`
+| 文档路径 | 触发条件 |
+|----------|---------|
+| `$SHARED_DIR/knowledge-base/knowledge-writing-guide.md` | 沉淀知识到任何知识库文件之前 |
+| `$AGENT_DIR/knowledge-base/knowledge-sourcing-guide.md` | 搜索下载 writeup 素材时（Phase 0 入口 C） |
+| `$SHARED_DIR/knowledge-base/opencode-plugin-api.md` | 查看 Hook 签名、input/output 类型 |
+| `$SHARED_DIR/knowledge-base/opencode-plugin-hooks-lifecycle.md` | 理解 Hook 执行时序、awaited vs fire-and-forget、常见陷阱 |
+| `$SHARED_DIR/knowledge-base/opencode-plugin-development-guide.md` | 从零创建插件、最小模板、状态管理模式 |
+| `$SHARED_DIR/knowledge-base/opencode-agent-format.md` | 创建/修改 Agent 文件格式、frontmatter 字段 |
+| `$SHARED_DIR/knowledge-base/opencode-plugin-debugging.md` | 排查 Plugin 问题、测试验证方法 |
+| `$SHARED_DIR/knowledge-base/idapython-conventions.md` | 生成 IDAPython 脚本时的编码规范 |
 
 ### 源码参考（知识库不足时）
 
