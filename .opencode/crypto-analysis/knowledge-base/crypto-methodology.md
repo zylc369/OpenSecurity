@@ -16,6 +16,9 @@
 | MD5/SHA、`mac=hash(key∥msg)`、长度扩展 | 哈希 | `symmetric-and-hash.md` |
 | PRNG、随机数、状态恢复 | 伪随机 | 按子类（LCG/LFSR/Mersenne Twister）查通用资料；LCG 恢复见 `symmetric-and-hash.md` §6 |
 | 构造满足整除/模运算/位运算约束的输入（非给密文求明文） | 数论构造题 | `number-theory-construction.md` |
+| circom/snarkjs/halo2 电路、Σ 协议、`c=H(transcript)` Fiat-Shamir | ZKP（零知识证明） | §5 ZQP 攻击速查（Fiat-Shamir 伪造/欠约束电路/Castryck-Decru SIDH） |
+| 加密/评估 oracle（SEAL/CKKS/BFV）、LWE 参数、噪声预算 | FHE（全同态加密） | §5 速查（噪声/oracle 滥用 → LWE 格归约恢复密钥） |
+| Kyber/ML-KEM、Dilithium、LWE/RLWE 公式、SIDH 辅助点映像 | PQC（后量子） | LWE→`lattice-attacks.md`；SIDH→§5 ZQP 攻击速查（Castryck-Decru） |
 
 **判断不清时**：把题目所有参数列出来，看"哪个参数异常"（e 太小/太大、hint 数量、比特长度关系）——异常点就是攻击方向。
 
@@ -133,6 +136,15 @@ phi = (p-1)*(q-1)
 |---------|------|------|
 | 两次签名 nonce k 相同 | 直接解出 k → 私钥 | `k = (m1-m2)/(s1-s2) mod n` |
 | nonce k 有偏（HNP） | 格规约 | k 的高/低位固定 |
+
+### ZKP / Fiat-Shamir 攻击速查
+
+| 参数特征 | 攻击 | 关键步骤 |
+|---------|------|---------|
+| Fiat-Shamir 哈希输入缺公开量（如公钥 h） | **伪造证明** | 任取 u、随机 z → `c=H(g,q,u)` → 反推 `h=(g^z/u)^{1/c}` → 提交 `(u,c,z)` 双校验通过 |
+| 交互式 Σ 协议 + 可控 verifier challenge | **HVZKP 恶意验证者** | Two-Prime-Divisor: 发 `ρ=r² mod N`，prover 返回 `σ`，`gcd(N,σ-r)` 出因子；Short Factoring: `e=A` 反解 `φ(N)≈N-y//e` |
+| circom/halo2 电路有 `<--` 无 `<==` | **Under-constrained circuit** | 找未约束信号，构造满足等式但取非预期值的 witness |
+| SIDH 公开辅助扭基点映像 | **Castryck-Decru 攻击** | 构造积曲面 + Richelot (2,2)-isogeny 分裂逐位恢复私钥（SageMath 脚本搜索：Castryck-Decru-SageMath）|
 
 ## 6. Coppersmith 变种速查
 

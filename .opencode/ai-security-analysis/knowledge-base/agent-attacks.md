@@ -148,4 +148,3 @@ MCP 是 Anthropic 提出的 Agent 工具协议（2024-2025 快速普及）。攻
 - `$AGENT_DIR/knowledge-base/llm-attack-methodology.md` — 应用层攻击规划
 - `$AGENT_DIR/knowledge-base/model-security-analysis-guide.md` — 模型层越狱
 - `$AGENT_DIR/knowledge-base/bypass-framework-matrix.md` — 绕过框架矩阵
-- 源文档: `research/ai-security-2026/AI安全攻击调研报告-2023-2026.md`

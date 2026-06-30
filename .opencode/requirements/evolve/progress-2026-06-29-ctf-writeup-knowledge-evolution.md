@@ -117,6 +117,52 @@
 ### 审计 ✅
 - 代码块全闭合；行数 < 450；交叉引用全存在；索引行验证通过
 
+## 第四批工作记录（2026-06-30，源文档库补充）
+
+### ptr-yudai writeup 集合（pwn 方向，2024-2026 年 9 篇）
+- [x] 2026 DiceCTF cornelslop（24KB，含 350 行 exploit）
+- [x] 2025 Best Pwnable Challenges 年度精选
+- [x] 2025年9月 Dirty Pagetable/Pageflags 技术文章
+- [x] 2025年4月/3月 + 2024年11月/8月/7月/1月（各 CTF writeup）
+- ptr-yudai _index 更新
+
+### pcw109550 crypto writeup（crypto 方向，5 个 writeup / 11 个文件）
+- [x] DiceCTF 2023 BBBB（LCG + Coppersmith）
+- [x] TSG CTF 2023 Delta-Force（奇异曲线 DLP，含完整 solve.sage + README + 题目）
+- [x] RCTF 2022 S2DH（SIDH Castryck-Decru 实战）
+- [x] CODEGATE 2022 Final Look_It_Up（Plonkup + Frozen Heart ZKP，52KB 详细 writeup）
+- [x] angstromCTF 2022 logloglog（Pohlig-Hellman）
+- crypto _index 更新
+
+### 源文档库最终统计: 56 个文件 / 874KB
+- pwn/: 20 个（10 how2heap PoC + 9 ptr-yudai + _index）
+- web/: 12 个（11 博客/文档 + _index）
+- reversing/: 7 个（6 文档 + _index）
+- crypto/: 15 个（3 ZKP/SIDH 参考 + 11 pcw109550 + _index）
+- 工具: 2 个（_download_sources.py + download-checklist.md）
+
+## 第五批工作记录（2026-06-30，从源文档提炼技术到知识库）
+
+> 用户指出：下载了大量源文档但未充分提炼到知识库。立即修复。
+
+### 从 ptr-yudai 文章提炼（5 个技术点）
+- [x] **Dirty Pageflags**（PTE flag 翻转，比 Dirty Pagetable 更简单）→ pwn-kernel 新增落点 D
+- [x] **socket fd 操纵泄漏**（BOF 改 fd + RST 使 read 失败 → 跨 socket 泄漏未初始化栈）→ pwn-methodology 卡点表
+- [x] **core_pattern 攻击面**（畸形 ELF 触发 core dump 处理器 OOB 读 flag）→ pwn-methodology 卡点表
+- [x] **tcache 禁用 + malloc_consolidate**（top 不可用时触发合并 fastbin）→ pwn-methodology 卡点表
+- [x] 内核 data-oriented 趋势确认（2025 年一半以上内核题是 data-oriented）
+
+### 从 ZKDocs / pcw109550 提炼（4 个技术点）
+- [x] **Fiat-Shamir 伪造**（哈希输入缺公开量 → 反推 h 伪造证明，含完整步骤）→ crypto-methodology ZKP 速查
+- [x] **HVZKP 恶意验证者**（Two-Prime-Divisor gcd 提取因子 / Short Factoring Proof）→ crypto-methodology ZKP 速查
+- [x] **Under-constrained circuit**（circom `<--` 无 `<==` → 构造非预期 witness）→ crypto-methodology ZKP 速查
+- [x] **Castryck-Decru SIDH 攻击**（积曲面 + Richelot isogeny 分裂，含脚本引用）→ crypto-methodology ZKP 速查
+
+### 增强后行数
+- pwn-kernel-methodology.md: 174→194 行（+Dirty Pageflags）
+- pwn-methodology.md: 177→180 行（+socket/core_pattern/tcache 卡点）
+- crypto-methodology.md: 165→179 行（+ZQP 攻击速查表）
+
 ## 最终全局统计（截至 2026-06-30）
 
 ### 知识库文件

@@ -24,6 +24,14 @@
 | 文件 | 来源 | 赛事/年份 | 覆盖技术 |
 |------|------|----------|---------|
 | 2026-dicectf-cornelslop-ptr-yudai.md | ptr-yudai.hatenablog.com | DiceCTF 2026 Quals | RCU double free, MADV_DONTNEED+mprotect竞态扩大, cross-cache跨CPU排空, PTE overlap任意文件写（含350行exploit源码）|
+| 2025-best-pwnable-challenges-ptr-yudai.md | ptr-yudai.hatenablog.com | 2025年度精选 | Stack Impromptu(创造力奖), decore/core_pattern(漏洞奖), new_era(教育奖) |
+| 2025-ptr-yudai-sept.md | ptr-yudai.hatenablog.com | 2025年9月 | Dirty Pagetable / Dirty Pageflags 深度技术（翻转PTE R/W位获取文件写权限）|
+| 2025-ptr-yudai-apr.md | ptr-yudai.hatenablog.com | 2025年4月 | 详细 writeup |
+| 2025-ptr-yudai-mar.md | ptr-yudai.hatenablog.com | 2025年3月 | 详细 writeup |
+| 2024-ptr-yudai-nov.md | ptr-yudai.hatenablog.com | 2024年11月 | Best Pwnable Challenges 2024 年度精选 |
+| 2024-ptr-yudai-aug.md | ptr-yudai.hatenablog.com | 2024年8月 | 详细 writeup |
+| 2024-ptr-yudai-jul.md | ptr-yudai.hatenablog.com | 2024年7月 | 详细 writeup |
+| 2024-ptr-yudai-jan.md | ptr-yudai.hatenablog.com | 2024年1月 | 详细 writeup |
 
 ## 待补充（标注待查找）
 - ptr-yudai DiceCTF 2026 cornelslop（内核: MADV_DONTNEED+cross-cache+PTE overlap）— 需查找博客 URL

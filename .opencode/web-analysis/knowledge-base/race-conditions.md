@@ -40,8 +40,6 @@ def queueRequests(target, wordlists):
 3. 精简到 2 请求验证
 4. 不支持 HTTP/2 时退回 **last-byte sync**（20 个 TCP 连接预发，同时发最后字节）
 
-**源文档**: `docs/资料/writeup-sources/web/portswigger-single-packet-attack.md`（完整方法论 + 案例）
-
 ## §2 原型链污染（Prototype Pollution）
 
 > JavaScript 递归 merge 不清洗 `__proto__` 键 → 污染 `Object.prototype` → 下游 gadget 读取。
@@ -73,7 +71,7 @@ __proto__ → constructor.prototype（绕 __proto__ 黑名单）
 | Gadget | 库/场景 | 利用 |
 |--------|--------|------|
 | `transport_url` / `src` | 通用 `<script src>` 配置 | 污染 → 加载攻击者 JS → XSS |
-| `baseURL` / `headers` | **axios** | 污染 baseURL → 控制请求目标（corCTF 2024 iframe-note） |
+| `baseURL` / `headers` | **axios** | 污染 baseURL → 控制请求目标 |
 | `execArgv` / `execPath` / `env` | **child_process.fork/execSync** | 污染 → RCE |
 | `shell` | **child_process** | `__proto__[shell]=node` → 通过 NODE_OPTIONS RCE |
 | `html` / `template` | 模板引擎（EJS/Pug/Hogan） | 污染 → SSTI → RCE |
@@ -86,8 +84,6 @@ __proto__ → constructor.prototype（绕 __proto__ 黑名单）
 3. 找 gadget: grep merge/assign/deparam + child_process/template engine
 4. 污染 gadget 属性 → 触发 RCE
 ```
-
-**源文档**: `docs/资料/writeup-sources/web/portswigger-prototype-pollution.md`（含完整 sources/sinks/gadgets/RCE 详解）
 
 ## §3 服务端竞态排查清单
 
@@ -104,4 +100,3 @@ __proto__ → constructor.prototype（绕 __proto__ 黑名单）
 
 - `$AGENT_DIR/knowledge-base/client-side-attacks.md` — 客户端攻击（bfcache/CSS exfil/xsleak）
 - `$AGENT_DIR/knowledge-base/web-vulnerabilities.md` — 服务端漏洞模式
-- 源文档库: `docs/资料/writeup-sources/web/portswigger-single-packet-attack.md`、`portswigger-prototype-pollution.md`

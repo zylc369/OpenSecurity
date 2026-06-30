@@ -1,7 +1,6 @@
 # Pwn 堆利用方法论 — 原语、落点与伪造模板
 
 > 堆利用详细参考。标准 8 步流程见 `$SHARED_DIR/knowledge-base/pwn-methodology.md`。
-> 一手 PoC 源码参考: 源文档库 `docs/资料/writeup-sources/pwn/how2heap-*.c`（可编译验证）。
 
 ## 触发条件
 
@@ -198,4 +197,3 @@ entries[64] : ptr     × 64 = 0x200   (每个 tcache bin 头指针)
 
 - `$SHARED_DIR/knowledge-base/pwn-methodology.md` — 标准 8 步流程、mitigations 速查、卡点突破表
 - `$SHARED_DIR/knowledge-base/pwn-kernel-methodology.md` — 内核利用详解
-- 源文档库 `docs/资料/writeup-sources/pwn/` — how2heap PoC 一手源码（10 个核心 PoC）

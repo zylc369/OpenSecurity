@@ -144,6 +144,9 @@ patchelf --set-interpreter <ld_path> --set-rpath <libc_dir> <binary>
 | 远程超时 | 用 `context.log_level='debug'` 检查交互时序；pwntools `p.recvuntil` 而非 `sleep` |
 | **栈迁移**（溢出空间小，ROP 链放不下） | 方法 A `leave;ret`：覆写 saved rbp = `chain_addr-8`、ret = `leave;ret` gadget → sp 迁到 chain。方法 B `xchg rsp,rax;ret`（rax 持堆/bss 指针）。方法 C `pop rsp;ret`。ARM64：找 `mov sp,x29` 控 x29 |
 | **格式化字符串偏移定位** | x86-64：`%1`~`%5` 读 rsi/rdx/rcx/r8/r9，`%6` 起读栈。发 `AAAAAAAA %6$p` 数到 `0x4141414141414141`。一键构造：`fmtstr_payload(offset, {addr: val}, write_size='byte')`。ARM64：`%1`~`%8` 读 x0-x7，`%9` 起读栈 |
+| **无泄漏途径（socket fd 操纵法）** | 线程服务器 + BOF 能改 fd：① BOF 替换 fd → close 原 fd ② 给另一个等待 `read` 的 socket 发 RST 包 → `read` 返回 -1 ③ 未初始化栈缓冲通过被替换的 fd 泄漏到另一个 socket |
+| **core_pattern 攻击面** | 脆弱程序注册在 `/proc/sys/kernel/core_pattern` → 构造畸形 ELF 触发崩溃 → core dump 处理器解析 ELF symtab/strtab 时 OOB 读 flag |
+| **tcache 被禁用** | fastbin double free + 利用 `malloc_consolidate`（top 不可用但 fastbin 存在时自动触发，合并 fastbin 到 unsorted bin 构造堆布局）。⚠2.43 补 fastbin_dup 后需换路 |
 
 ## §5 工具链
 

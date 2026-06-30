@@ -6,9 +6,6 @@
 覆盖技术: RCU double free, MADV_DONTNEED+mprotect竞态扩大, cross-cache跨CPU排空, PTE overlap任意文件写
 ---
 
-この広告は、90日以上更新していないブログに表示しています。
-
-
 This year, I played in the DiceCTF qualifiers with BunkyoWesterns, and we managed to place first.
 
 > We finished 1st place at DiceCTF 2026 Quals!  

@@ -91,8 +91,27 @@ commit_creds(prepare_kernel_cred(0));  // 当前进程提权到 root
   3. 改写 PTE 项: 修改物理页号字段指向目标物理地址
   4. 通过该 PTE 映射的虚拟地址读写任意物理内存
   5. 改 creds 或覆盖 suid 二进制
-变体（ptr-yudai DiceCTF 2026）: 重叠"匿名页 PTE"与"文件页 PTE"，
+变体: 重叠"匿名页 PTE"与"文件页 PTE"，
   使只读文件映射经匿名侧可写 → 任意文件写
+```
+
+### 落点 D：Dirty Pageflags（PTE flag 翻转，比 PageTable 更简单）
+**场景**: 有页级 UAF，但不需要改 PTE 地址字段，只需翻转 flags
+
+```
+原理: 不覆写 PTE 的物理地址（Dirty Pagetable 做法），而是翻转 PTE 的 flags 位
+关键 flags:
+  - R/W (Read/Write): 0=只读, 1=可写
+  - U/S (User/Supervisor): 0=仅内核, 1=用户态可访问
+  - P (Present): 0=触发缺页, 1=在内存中
+  - XD (Execute Disable): 1=禁止执行
+
+攻击步骤:
+  1. 目标文件（如 /etc/passwd）被 mmap 为只读（R/W=0）
+  2. 页级 UAF → PTE 页回收 → 喷射占位
+  3. 翻转该文件 PTE 的 R/W 位: 0→1
+  4. 只读文件映射变为可写 → 任意文件写
+优势: 只翻转一个 bit，比改地址字段更简单、更不容易触发检测
 ```
 
 ## §4 msg_msg 任意读写
@@ -117,12 +136,12 @@ commit_creds(prepare_kernel_cred(0));  // 当前进程提权到 root
 | 方法 | 原理 | 适用场景 |
 |------|------|---------|
 | **FUSE** | 用户态 FUSE 文件系统阻塞内核 `read`，stall `copy_from_user` | 能触发内核读用户态数据 |
-| **MADV_DONTNEED + 并发 mprotect** | MADV_DONTNEED 清 PTE 使每页缺页；另一线程疯狂 mprotect 翻转权限争抢 mmap_lock，把毫秒级窗口拖到数十秒 | 长遍历（哈希/check）中的竞态（ptr-yudai DiceCTF 2026 首创） |
+| **MADV_DONTNEED + 并发 mprotect** | MADV_DONTNEED 清 PTE 使每页缺页；另一线程疯狂 mprotect 翻转权限争抢 mmap_lock，把毫秒级窗口拖到数十秒 | 长遍历（哈希/check）中的竞态 |
 | **io_uring** | 异步 IO stall | 内核 ≥ 5.1 且未禁 io_uring |
 | **fallocate** | `fallocate(FALLOC_FL_PUNCH_HOLE)` 延迟 | 特定文件操作竞态 |
 | **SIGALRM + 多线程** | 在 io 操作中插入可中断点 | 简单竞态 |
 
-### MADV_DONTNEED + mprotect 详解（ptr-yudai 首创）
+### MADV_DONTNEED + mprotect 详解
 ```c
 // 线程 A: 疯狂翻转权限
 while (racing) {
@@ -142,7 +161,7 @@ madvise(page, PAGE_SIZE, MADV_DONTNEED);
 
 ```
 原理: 把独立缓存的页归还 buddy allocator，再用别的 slab（msg_msg/pipe/PTE 页）回收该页
-步骤（ptr-yudai cross-CPU 法）:
+步骤（cross-CPU 法）:
   1. sched_setaffinity 绑定 CPU0 分配、CPU1 释放
   2. 持续刷满 CPU partial（cpu_partial 阈值）→ node partial → discard_slab
   3. 页回 buddy/PCP 后喷射目标结构体（msg_msg/pipe/PTE 页）回收
@@ -171,4 +190,3 @@ madvise(page, PAGE_SIZE, MADV_DONTNEED);
 
 - `$SHARED_DIR/knowledge-base/pwn-methodology.md` — 标准 8 步流程、mitigations 速查
 - `$SHARED_DIR/knowledge-base/pwn-heap-methodology.md` — 用户态堆利用详解
-- 源文档库: ptr-yudai DiceCTF 2026 cornelslop writeup（待下载）、ctf-wiki kernel pwn（待下载）
