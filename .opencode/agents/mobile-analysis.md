@@ -175,6 +175,7 @@ permission:
 | `frida-hook-principles.md` | 编写任何 Frida Hook 时（4 条铁律 + Java Bridge 陷阱 + 检查清单） |
 | `frida-hook-templates.md` | 需要 Hook 模板时（标准模板 + 拦截器链 + Native Hook） |
 | `android-unpacking.md` | 检测到加固/需要脱壳时（识别特征 + dump 策略） |
+| `cross-platform-frameworks.md` | 检测到跨平台框架（Flutter/RN/Hermes）时。框架指纹识别、blutter/reFlutter/hermes-dec 工具选型、frida-strace 反 Frida |
 | `flutter-ssl-bypass.md` | 分析 Flutter 应用，需要绕过 SSL pinning 时 |
 | `mitm-methodology.md` | 需要拦截/篡改移动应用 HTTPS 通信时 |
 | `tls-traffic-interception.md` | 需要追踪 SSL 连接、识别 TLS 流量（与 MITM 配合） |

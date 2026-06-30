@@ -20,6 +20,11 @@
 | how2heap-tcache_poisoning.c | 基础 tcache 毒化 | 2.26+ | tcache next 指针篡改 |
 | how2heap-fastbin_reverse_into_tcache.c | fastbin→tcache | 2.26-2.41 ⚠2.42补 | fastbin 释放时回填 tcache |
 
+## 博客 writeup（一手实战）
+| 文件 | 来源 | 赛事/年份 | 覆盖技术 |
+|------|------|----------|---------|
+| 2026-dicectf-cornelslop-ptr-yudai.md | ptr-yudai.hatenablog.com | DiceCTF 2026 Quals | RCU double free, MADV_DONTNEED+mprotect竞态扩大, cross-cache跨CPU排空, PTE overlap任意文件写（含350行exploit源码）|
+
 ## 待补充（标注待查找）
 - ptr-yudai DiceCTF 2026 cornelslop（内核: MADV_DONTNEED+cross-cache+PTE overlap）— 需查找博客 URL
 - ctf-wiki kernel pwn — 需下载

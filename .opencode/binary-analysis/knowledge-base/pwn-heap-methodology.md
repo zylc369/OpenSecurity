@@ -163,6 +163,37 @@ real_addr = encrypted_fd ^ (chunk_addr >> 12)
 
 > **glibc 2.42+ 策略**：优先 House of Water / Tangerine / tcache_metadata_hijacking / exit_funcs / _rtld_global，避开已补的原语。
 
+### tcache_metadata_hijacking（2.42+ 首选任意分配原语）
+
+`tcache_perthread_struct` 是堆上第一个 chunk（通常 0x290），位于 `heap_base`：
+```
+counts[64]  : uint16_t × 64 = 0x80   (每个 tcache bin 计数)
+entries[64] : ptr     × 64 = 0x200   (每个 tcache bin 头指针)
+```
+**关键**：`entries[]` 存的是**原始指针**（未 safe-linking）。写到 entries 后无需堆泄漏绕 safe-linking。
+
+```
+步骤（把"任意写"升级为"任意地址分配"）:
+  1. 获得触及 tcache_perthread_struct 的写原语:
+     - House of Water 路线: smallbin 改 fd/bk 低位指向 metadata
+     - tcache_poisoning 反打: 毒化 fd 指向 heap_base
+  2. 改 entries[tc_idx] = target_addr，counts[tc_idx] 写非 0
+  3. malloc(对应大小) 直接返回 target_addr（首次取回不受 safe-linking 影响）
+  4. 往目标写伪造内容（_dl_rtld_lock_recursive / IO 结构），触发 exit
+```
+
+### 2.42+ 落点决策树
+
+| 手上原语 | 推荐落点 | 说明 |
+|---------|---------|------|
+| 单次任意写 | **`_rtld_global._dl_rtld_lock_recursive`** | 无加密，写一次即劫持，exit 触发。**2.42+ 最干净** |
+| 任意写 + 泄漏 pointer guard | `__exit_funcs`（atexit 链） | fn 受 PTR_MANGLE 保护，需算值 |
+| 任意写 + FSOP | 改 `_IO_list_all` + House of Apple | 2.42 前用 large_bin_attack；后用 metadata_hijack 直接分配伪造块 |
+| 仅 UAF / 无 free | House of Tangerine → tcache poison → metadata_hijack | 2.34+ 通用 |
+| UAF + 堆泄漏 | House of Water → metadata_hijack → 任意分配 | smallbin 变体无需爆破 |
+
+**一句话**：2.42+ 通用公式 = `任意分配(metadata_hijack) → 落 _dl_rtld_lock_recursive / IO 伪造 → exit`
+
 ## §8 关联文件
 
 - `$SHARED_DIR/knowledge-base/pwn-methodology.md` — 标准 8 步流程、mitigations 速查、卡点突破表

