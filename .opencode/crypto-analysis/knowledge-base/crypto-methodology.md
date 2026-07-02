@@ -102,7 +102,7 @@ phi = (p-1)*(q-1)
 
 | 参数特征 | 攻击 | 条件 |
 |---------|------|------|
-| 曲线判别式 Δ=0（奇异） | singular curve | cusp: y²=x³ → 映射到加法群；node: y²=x²(x+a) → 映射到 GF(p) 乘法 |
+| 曲线判别式 Δ=0（奇异） | singular curve | cusp: y²=x³ → 映射到加法群(阶 p)；node: y²=x²(x+α) → α 为 QR 映到 GF(p)* (阶 p-1)；α 非 QR 映到范数 1 群 (阶 p+1) |
 | 曲线阶 = p（anomalous） | Smart's attack | `p == E.order()`，把 ECDLP 降到 GF(p) 加法 |
 | 阶光滑（小因子分解） | Pohlig-Hellman | `order` 的因子全小，sage `discrete_log` 自动用 |
 | 超奇异（#E = p+1） | MOV / Supersingular | embedding degree 小，映射到有限域 |
@@ -142,9 +142,17 @@ phi = (p-1)*(q-1)
 | 参数特征 | 攻击 | 关键步骤 |
 |---------|------|---------|
 | Fiat-Shamir 哈希输入缺公开量（如公钥 h） | **伪造证明** | 任取 u、随机 z → `c=H(g,q,u)` → 反推 `h=(g^z/u)^{1/c}` → 提交 `(u,c,z)` 双校验通过 |
-| 交互式 Σ 协议 + 可控 verifier challenge | **HVZKP 恶意验证者** | Two-Prime-Divisor: 发 `ρ=r² mod N`，prover 返回 `σ`，`gcd(N,σ-r)` 出因子；Short Factoring: `e=A` 反解 `φ(N)≈N-y//e` |
+| 交互式 Σ 协议 + 可控 verifier challenge | **HVZKP 恶意验证者** | Two-Prime-Divisor: 发 `ρ=r² mod N`，prover 返回 `σ`，`gcd(N,σ-r)` 出因子；Short Factoring: `e=A` 反解 `φ(N)=N-y//e`（精确，因 e=A=r 上界时 r<e） |
 | circom/halo2 电路有 `<--` 无 `<==` | **Under-constrained circuit** | 找未约束信号，构造满足等式但取非预期值的 witness |
 | SIDH 公开辅助扭基点映像 | **Castryck-Decru 攻击** | 构造积曲面 + Richelot (2,2)-isogeny 分裂逐位恢复私钥（SageMath 脚本搜索：Castryck-Decru-SageMath）|
+| challenge 可被操纵为常量（calldata/transcript 可控） | **Frozen Heart** | 固定 β,γ → 令某因子=0（如 f[0]=-γ）使 grand-product 方程恒成立。Plonkup 经 assembly calldatacopy offset 操纵把真值挪出 hash 区 → β,γ 固定已知 |
+
+**SIDH/Castryck-Decru 工程化要点**:
+- 素数形式: `p = 2^a · 3^b - 1`
+- j=1728 曲线（E:y²=x³+x）需提取 two_i 自同构: `phi=EllipticCurveIsogeny(E,x)` → 遍历 codomain automorphisms 找 `iota(iota(P))==-P`
+- 共享密钥用 j 不变量恢复: `shared = Ea.isogeny(phiPb+recovered*phiQb, algorithm='factored').codomain().j_invariant()`
+- Fp² → int 密钥: `key = (int(shared[1])<<84) + int(shared[0])`（shared[0]=实部, shared[1]=i 系数）
+- 性能: `proof.arithmetic(False)` + monkey patch `vector_space`/`dimension`；Oudompheng 改进（直接同源）SIKEp434: 10min→22s
 
 ## 6. Coppersmith 变种速查
 
@@ -157,7 +165,7 @@ phi = (p-1)*(q-1)
 | **partial factor (p)** | 已知 p 的高/低 k 位 | `f(x) = x + p_high`，`beta=0.5`，在 mod n 下 |
 | **stereotyped message** | 已知明文前缀 | `f(x) = (prefix + x)^e - c` |
 | **related message** | m2 = a*m1 + b | `f1 = m1^e - c1`, `f2 = (a*m1+b)^e - c2`，resultant 消元 |
-| **broadcast** | 同明文 e 组 (c_i, n_i) | CRT 合并 → `m^e mod (n1*n2*...)` → 开 e 次方 |
+| **broadcast** | 同明文 e 组 (c_i, n_i) | CRT 合并 → `m^e mod (n1*n2*...)` → 开 e 次方。**超界退路**: 若 `m^e ≥ Πn_i`（明文有未知段），CRT 后用 Coppersmith: `g=sum(ts[i]*((shift*x+r_i+C)^e-c_i))` 在 `mod Πn_i` 上 `small_roots(X=未知段上界)` |
 | **多元（defund）** | 多变量多项式小根 | 用 `defund/coppersmith` 封装（GitHub） |
 
 **基本调用**：

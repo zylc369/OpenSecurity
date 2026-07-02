@@ -15,6 +15,7 @@
 - **单端点碰撞**: 同一请求的两个实例同时修改同一资源（如 Devise CVE-2022-4037：同时改邮箱到两个地址，收件人用实例变量但 token 从 DB 重读 → 邮件发错地址但 token 有效）
 - **多端点碰撞**: 不同端点共享同一状态
 - **密码重置接管**: 同时用两个 token 触发重置
+- **partial-construction（部分构造）**: 对象分多步创建（如注册先建 user 行再单独写 password），中间态未初始化。用能匹配未初始化值的输入（JSON `null` / PHP 空数组）命中中间态 → 密码重置/登录绕过
 
 ### 操作步骤（Turbo Intruder）
 ```python
@@ -39,6 +40,7 @@ def queueRequests(target, wordlists):
 2. 探测异常（响应/耗时/二阶邮件差异）
 3. 精简到 2 请求验证
 4. 不支持 HTTP/2 时退回 **last-byte sync**（20 个 TCP 连接预发，同时发最后字节）
+5. **多端点速度不一致时**: 故意大量发垃圾请求触发服务端 leaky-bucket 限流，让服务端自行延迟快端点 → 单包仍成立（客户端不延迟）
 
 ## §2 原型链污染（Prototype Pollution）
 
@@ -67,7 +69,7 @@ __proto__ → constructor.prototype（绕 __proto__ 黑名单）
 ### Client-side 检测
 用 **DOM Invader**（Burp 内置）自动找 PP 源和 gadget。
 
-### 常见 Gadgets 速查（2023-2026 高频）
+### 常见 Gadgets 速查
 | Gadget | 库/场景 | 利用 |
 |--------|--------|------|
 | `transport_url` / `src` | 通用 `<script src>` 配置 | 污染 → 加载攻击者 JS → XSS |
@@ -76,6 +78,7 @@ __proto__ → constructor.prototype（绕 __proto__ 黑名单）
 | `shell` | **child_process** | `__proto__[shell]=node` → 通过 NODE_OPTIONS RCE |
 | `html` / `template` | 模板引擎（EJS/Pug/Hogan） | 污染 → SSTI → RCE |
 | `outputFunctionName` | **EJS** | `__proto__[outputFunctionName]=x;process.mainModule.require('child_process').exec('...')//` |
+| `headers`（通用） | **fetch()** / 任何读 Object 的请求库 | 污染 → 所有请求带攻击者 header（比 axios baseURL 更通用） |
 
 ### RCE 链（Server-side PP → RCE）
 ```

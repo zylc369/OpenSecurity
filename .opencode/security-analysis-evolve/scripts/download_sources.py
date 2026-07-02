@@ -42,7 +42,7 @@ SOURCES = [
     ("reversing", "hex-rays-microcode-api.md", "https://www.hex-rays.com/blog/hex-rays-microcode-api-vs-obfuscating-compiler/", "html"),
     ("reversing", "hexraysdeob-readme.md", "https://raw.githubusercontent.com/RolfRolles/HexRaysDeob/master/README.md", "raw"),
     ("reversing", "goresym-readme.md", "https://raw.githubusercontent.com/mandiant/GoReSym/master/README.md", "raw"),
-    ("reversing", "mandiant-golang-internals.md", "https://www.mandiant.com/resources/blog/golang-internals-symbol-recovery", "html"),
+    ("reversing", "mandiant-golang-internals.md", "https://cloud.google.com/blog/topics/threat-intelligence/golang-internals-symbol-recovery", "html"),
     ("reversing", "ida90-release-notes.md", "https://docs.hex-rays.com/release-notes/9_0.md", "html"),
 ]
 

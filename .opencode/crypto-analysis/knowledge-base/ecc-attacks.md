@@ -78,6 +78,22 @@ assert k*G == Q
 
 **注意**：若 `order` 有大素因子（> 2^60），Pohlig-Hellman 退化，需 Pollard rho（sage 的 `discrete_log` 也会自动用，但慢）。
 
+### 部分低位恢复（order = q·2^k，q 大素数时）
+
+当 `order` 有大素因子 q 但目标只需光滑因子部分（如 flag 低位在 mod 2^k 内），投影到 2^k 阶子群手动恢复:
+```python
+# order = q * 2^e
+g_ = pow(g, q, p)   # 2^e 阶元
+a_ = pow(a, q, p)
+gamma = pow(g_, 2**(e-1), p)  # 2 阶元（即 -1）
+xs = [0]
+for k in range(e):
+    d = 1 if pow(pow(g_, -xs[k], p) * a_ % p, 2**(e-1-k), p) == gamma else 0
+    xs.append(xs[k] + 2**k * d)
+d_low = xs[e]  # = d mod 2^e
+```
+复杂度 O(e·√2)。q 不可破也能拿 flag 低位。
+
 ## 5. Invalid Curve 攻击
 
 **何时用**：服务端**不验证输入点是否在曲线上**。可送入"同 a、不同 b"的曲线上的点，那里阶可能小/光滑，用少量交互恢复 `k mod (小因子)`，CRT 拼 `k`。
@@ -100,18 +116,85 @@ for b_test in range(p):
 
 ## 6. 奇异曲线（singular）
 
-**何时用**：判别式 `4a³+27b² ≡ 0 (mod p)`——曲线退化有奇点，可映射到加法/乘法群，离散对数变易。
+**何时用**：判别式 Δ ≡ 0 (mod p)——曲线退化有奇点，可映射到加法/乘法群，离散对数变易。
 
-```sage
-# 判奇异
-if (4*a^3 + 27*b^2) % p == 0:
-    print("奇异曲线!")
-# 奇点 x0 = 求导 3x²+a=0 的根
-# node (两切线): 映射到 Fp* 的离散对数
-# cusp (尖点):   映射到 Fp 的加法 (k = (m_Q)/(m_P) mod p)
+### 6.1 判别式与奇点
+
+短 Weierstrass（y²=x³+ax+b）: Δ = -16(4a³+27b²)。
+一般 Weierstrass（y²+a₁xy+a₃y=x³+a₂x²+a₄x+a₆）:
+```python
+b2 = a1**2 + 4*a2
+b4 = 2*a4 + a1*a3
+b6 = a3**2 + 4*a6
+b8 = a1**2*a6 + 4*a2*a6 - a1*a3*a4 + a2*a3**2 - a4**2
+Delta = -(b2**2)*b8 - 8*b4**3 - 27*b6**2 + 9*b2*b4*b6
+```
+奇点求解: 令 `A=6, B=4*a2+a1², C=2*a4+a1*a3`，解二次 `A*x²+B*x+C=0`，`y=(-a1*x-a3)*pow(2,-1,p)`。
+
+### 6.2 cusp（尖点）: 映射到加法群（阶 p）
+
+标准化后 `f = x³ - y²`。同态 `φ(x,y) = x/y, O→0`。
+
+```python
+twoinv = pow(2, -1, p)
+# 1. 平移到奇点 (0,0)
+f = f.subs(x=x+xp, y=y+yp)
+# 2. 消去 xy 交叉项
+xy_coeff = f.coefficient(x*y)
+f = f.subs(y=y+xy_coeff*twoinv*x)
+assert f == x**3 - y**2  # 确认 cusp
+# 3. 点也做同样平移
+Pxp = Px - xp;  Pyp = Py - yp - xy_coeff*twoinv*Pxp
+Qxp = Qx - xp;  Qyp = Qy - yp - xy_coeff*twoinv*Qxp
+# 4. 映射到 GF(p) 加法群: DLP 就是除法
+dp = (Qxp * pow(int(Qyp),-1,p)) * pow(int(Pxp * pow(int(Pyp),-1,p)),-1,p) % p
 ```
 
-**node 映射**：奇点 `(x0,0)`，令 `t=(y)/(x-x0)`，则点映射到 `t`，离散对数在 `Fp*`。
+### 6.3 node（结点）: split / nonsplit
+
+标准化后 `f = x³ + α*x² - y²`（即 `y² = x²(x+α)`）。
+
+```python
+if kronecker(alpha, p) == 1:   pass  # split: 映到 GF(p)*, 阶 p-1
+else:                          pass  # nonsplit: 映到范数1群, 阶 p+1
+```
+- **split**（α 是 QR）: `φ(x,y) = (y+√α·x)/(y-√α·x)`，√α ∈ GF(p)，映到 GF(p)*，阶 **p-1**
+- **nonsplit**（α 非 QR）: `φ(x,y) = (y+√α·x)/(y-√α·x)`，√α ∈ GF(p²)\GF(p)，映到范数 1 子群 `{u+v√α | u²-αv²=1}`，阶 **p+1**
+
+> ⚠ nonsplit 阶 = p+1（不是 p-1），检查光滑性/选攻击时查 **p+1** 的因子分解。
+
+### 6.4 自定义 EC 实现的离散对数（operation="other"）
+
+题目用自实现 EC（非 sage EllipticCurve），但群阶光滑时，用 `discrete_log(operation="other")` 复用 sage 的 Pohlig-Hellman:
+
+```python
+class ECPoint:  # 包装自定义点类型
+    def __init__(self, point): self.point = point
+    def is_zero(self): return self.point == ec.O
+    def __eq__(self, other): return self.point == other.point
+    def __hash__(self): return hash(self.point)
+
+add = lambda x,y: ECPoint(ec.add(x.point, y.point))
+inv = lambda x: ECPoint(ec.negate(x.point))
+dq = discrete_log(ECPoint(Q), ECPoint(P), ord=order,
+                  operation="other", identity=ECPoint(ec.O), inverse=inv, op=add)
+```
+
+### 6.5 复合环 Z_N（N=pq）上 EC 分解
+
+EC 定义在 Z_N（非 GF(p)）上时，标量乘可能因逆不存在而报错 → 从异常提取因子:
+
+```python
+FF = IntegerModRing(N)
+ec = EC(FF, (a1, a2, a3, a4, a6))
+try:
+    ec.scalar(N, P)
+except Exception as e:
+    # 异常: "inverse of Mod(t, ...) does not exist"
+    t, _ = map(int, str(e).lstrip("inverse of Mod(").rstrip(") does not exist").split(", "))
+    p = gcd(t, N);  q = N // p
+```
+> 原理: 若 EC(GF(p)) 是 cusp 则 ord=p，N·P 在 EC(N) 上模 p 侧需逆元 → 失败暴露 t，gcd(t,N)=p。与 Pollard/Fermat 并列的独立分解法。
 
 ## 7. 通用离散对数（无弱点时）
 

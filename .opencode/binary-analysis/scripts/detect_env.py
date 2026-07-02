@@ -14,7 +14,7 @@ usage:
 level: intermediate
 
 packages:
-  必需: capstone, unicorn, gmpy2, frida, Pillow, pyautogui, pyperclip, playwright, markdownify, requests, beautifulsoup4, lxml
+  必需: capstone, unicorn, gmpy2, frida, angr, triton, z3-solver, Pillow, pyautogui, pyperclip, playwright, markdownify, requests, beautifulsoup4, lxml
   playwright 需要额外安装浏览器二进制（playwright install chromium）
 """
 
@@ -32,6 +32,10 @@ CACHE_FILE = os.path.join(CACHE_DIR, "env_cache.json")
 CACHE_TTL = 86400
 
 REQUIRED_PACKAGES = {
+    # binary-analysis 反混淆/符号执行库（LLM 分析时写临时脚本可能用到）
+    "angr": {"required": True, "pip_name": "angr"},
+    "triton": {"required": True, "pip_name": "triton"},
+    "z3": {"required": True, "pip_name": "z3-solver"},
     "capstone": {"required": True, "pip_name": "capstone"},
     "unicorn": {"required": True, "pip_name": "unicorn"},
     "gmpy2": {"required": True, "pip_name": "gmpy2"},

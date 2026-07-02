@@ -1,487 +1,314 @@
 ---
-来源: https://www.mandiant.com/resources/blog/golang-internals-symbol-recovery
+来源: https://cloud.google.com/blog/topics/threat-intelligence/golang-internals-symbol-recovery
 类型: html
-获取日期: 2026-06-29
+获取日期: 2026-07-01
+说明: 原 URL mandiant.com 已迁移到 Google Cloud（Mandiant 被 Google 收购）
 ---
 
-Mandiant Cybersecurity Consulting | Google Cloud
+Threat Intelligence
 
-[**Get help now** for a security breach or possible incident.](https://cloud.google.com/security/report-incident)
+# Ready, Set, Go — Golang Internals and Symbol Recovery
 
-![Mandiant Logo](https://www.gstatic.com/bricks/image/58777d3f-ec3a-4151-984c-ec37ae1a3f8f.png)
+February 28, 2022
 
-# Mandiant Cybersecurity Consulting
+##### Mandiant
 
-Elevate your cyber defense, from incident response to business resilience.
+Written by: Stephen Eckels
 
-Talk to an expert
+---
 
-Explore all services
+Golang (Go) is a compiled language introduced by Google in 2009. The language, runtime, and tooling has evolved significantly since then. In recent years, Go features such as easy-to-use cross-compilation, self-contained executables, and excellent tooling have provided malware authors with a powerful new language to design cross-platform malware. Unfortunately for reverse engineers, the tooling to separate malware author code from Go runtime code has fallen behind.
 
-![Mandiant Logo](https://www.gstatic.com/bricks/image/58777d3f-ec3a-4151-984c-ec37ae1a3f8f.png)
+Today, Mandiant is releasing a tool named [GoReSym](https://github.com/mandiant/GoReSym) to parse Go symbol information and other embedded metadata. This blog post will discuss the internals of relevant structures and their evolution with each language version. It will also highlight challenges faced when analyzing packed, obfuscated, and stripped binaries.
 
-# Mandiant Cybersecurity Consulting
+## Design Decisions
 
-Elevate your cyber defense, from incident response to business resilience.
+Go is a bit different from other languages in that it generates binaries that are fully self-contained. A system that executes a compiled Go binary doesn’t require a runtime or additional dependencies to be installed. This contrasts with languages such as Java or .NET that require a user to install a runtime before binaries will execute correctly. With Go's approach, the compiler embeds runtime code for various language features (e.g., garbage collection, stack traces, type reflection) into each compiled program. This is a major reason why Go binaries are larger than an equivalent program written in a language such as C. In addition to the runtime code, the compiler also embeds metadata about the source code and its binary layout to support language features, the runtime, and debug tooling.
 
-Talk to an expert
+Some of this embedded information has been thoroughly documented, namely the pclntab, moduledata, and buildinfo structures. Each of these structures has seen major changes as Go has evolved. This evolution, combined with common obfuscator or packing tricks, can make type recovery trickier than expected. To effectively handle ever-changing runtime structures, GoReSym is based on the Go runtime source code to transparently handle all runtime versions. This makes supporting new Go versions trivial. We can also be more confident in edge cases since GoReSym uses the same parsers as the runtime.
 
-Explore all services
+## Matching Recovered Symbols to Language Features
 
-* [![Cyber Defense Summit 2026, Google Cloud Security](https://www.gstatic.com/bricks/image/7c353749-b5cb-40b2-bf0a-26ac0334f0b9.png)
+Go binaries without debug symbols, also referred to as stripped binaries, provide a unique challenge to reverse engineers. Without symbols, analyzing a binary can be extremely complex and time consuming. With symbols restored, a reverse engineer can begin to map disassembled code back to its original source. Figure 1 illustrates the importance of recovering symbols using the disassembly of two samples: one *without* symbols and another *with* symbols recovered using GoReSym.
 
-  Cyber Defense Summit 2026
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym1_itxv.max-2000x2000.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym1_itxv.max-2000x2000.png)
 
-  Register today to reserve your spot](https://cyberdefensesummit.mandiant.com)
-* [![M-Trends 2026](https://www.gstatic.com/bricks/image/8a79a498-a5c0-4d08-9405-60b2a4651c76.png)
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym1_itxv.max-2000x2000.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym1_itxv.max-2000x2000.png)
 
-  M-Trends 2026
+Figure 1: Stripped Go binary vs. symbols recovered by GoReSym
 
-  Stay ahead of the latest cyber threats](https://cloud.google.com/security/resources/m-trends)
-* [![The Defender's Advantage](https://www.gstatic.com/bricks/image/920579f1-040b-4a6a-9242-8dd97d1044bb.png)
+Before we examine how GoReSymextracts this information, we'll use recovered symbols to illustrate core Go concepts such as channels, Go routines, deferred routines, and function returns. The examples in the sections that follow depict a Go binary that has been annotated using function names recovered by GoReSym. Table 1 summarizes how these concepts map directly to the runtime functions described in each section.
 
-  The Defender's Advantage
+|  |  |  |
+| --- | --- | --- |
+| **Concept** | **Keyword** | **Runtime Function Names** |
+| Goroutines | go | runtime.newproc |
+| Channels | <- [recv channel] [send channel] <- | runtime.makechan runtime.chanrecv runtime.sendchan |
+| Deferred routines | defer | runtime.deferproc  runtime.deferprocStack  runtime.deferreturn |
 
-  A guide to activating cyber defense](https://cloud.google.com/security/resources/defenders-advantage)
+Table 1: Go keyword-to-runtime function mappings
 
-## Tackle breaches confidently
+### Go Routines and Channels
 
-Partner with world-renowned experts. Our team combines a deep understanding of global attacker behavior with over two decades of frontline experience to provide comprehensive [incident response services](https://cloud.google.com/security/consulting/mandiant-incident-response-services), including preparedness, technical response, and crisis management.
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym2a_jkpd.max-1800x1800.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym2a_jkpd.max-1800x1800.png)
 
-[![A good incident response plan turns chaos into clarity. Best practices for incident response planning](https://www.gstatic.com/bricks/image/a4b140c4-6bbe-4ef4-b3b0-e63b9af15015.png)
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym2a_jkpd.max-1800x1800.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym2a_jkpd.max-1800x1800.png)
 
-Read the guide](https://cloud.google.com/security/best-practices-for-incident-response-plans)
+Figure 2: Runtime functions implementing Go routines
 
-#### Get flexible access to experts with a Mandiant Retainer
+The go keyword starts a new thread of execution that cooperatively interlaces execution with the rest of the application. This is not an operating system thread; instead, multiple Go routines take turns executing on one thread. Communication across Go routines is done via "channels" in a message passing fashion. When a channel is allocated, an interface type is passed to the runtime routine runtime.makechan, defining the type of data flowing across the channel. Data can be sent and received across a channel using the <- operator. Based on the direction, the routine runtime.chansend or runtime.chanrecv will be present in the disassembly. Channel logic is often adjacent to Go routine code, which begins execution by passing a function pointer to the runtime routine runtime.newproc.
 
-Adapt to changing priorities and access the services you need, without reworking contracts. The [Mandiant Retainer](https://cloud.google.com/security/consulting/mandiant-retainer) is a flexible incident response retainer that gives organizations immediate access to cybersecurity experts with pre-negotiated terms, 2-hour response times, and proactive services to strengthen your defenses.
+### Deferring Cleanup
 
-#### Protect your brand with strategic crisis communications
+If you’re familiar with C++ destructors or finally blocks in C#, Go's defer keyword is similar. It allows Go programs to queue a routine for execution on function exit. This is commonly used to close handles or free resources. The runtime maintains a stack of functions to execute on scope exit in last-in, first-out (LIFO) order with each deferpushing to this stack. To add routines to the stack runtime.deferproc or its variant are called. To execute the routines on the stack the Go compiler places a call to runtime.deferreturn before the function exits. The source code and disassembly in Figure 3 illustrates this concept.
 
-Don't let a cyberattack define your brand. [Mandiant crisis communication services](https://cloud.google.com/security/solutions/crisis-communications) provide the strategic readiness you need to respond effectively to modern, multifaceted attacks. Partner with us to safeguard your stakeholders, mitigate reputational risk, and preserve the brand you've worked hard to build.
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym3_yayu.max-1900x1900.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym3_yayu.max-1900x1900.png)
 
-#### Uncover past and present threats in your network
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym3_yayu.max-1900x1900.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym3_yayu.max-1900x1900.png)
 
-Run a [c](https://services.google.com/fh/files/misc/ds-compromise-assessment-en.pdf)[ompromise assessment](https://services.google.com/fh/files/misc/ds-compromise-assessment-en.pdf) to discover if you've been breached and proactively hunt for hidden attackers. Our experts combine extensive incident response experience with real-time threat intelligence to find evidence of past or ongoing intrusions across your enterprise environment.
+Figure 3: Runtime functions implementing defer
 
-## Increase business resilience and strategic readiness
+### Return Values with Errors
 
-Outmaneuver today’s threats. [Secure your operations by proactively enhancing your security capabilities.](https://cloud.google.com/security/consulting/mandiant-strategic-readiness) Our experts can help you advance your approach to cyber risk management and be ready for complex challenges, from M&A due diligence to supply chain attacks and insider threats.
+Most Go functions return both a value and an optional error. Unlike C, most Go functions return two values. Prior to Go 1.17, these values were passed on the stack. In recent versions, Go introduced a register-based ABI so both values are often stored in registers.
 
-#### Manage cyber risk, make better business decisions
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym4_ntkx.max-1700x1700.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym4_ntkx.max-1700x1700.png)
 
-[Pinpoint the cyber risks most relevant to your organization](https://cloud.google.com/security/consulting/mandiant-cyber-risk-management) and understand their potential business impact. Translate critical findings and recommendations for executive leadership and stakeholders through [tabletop exercises](https://services.google.com/fh/files/misc/ds-tabletop-exercises-en.pdf), empowering you to make smarter security investments and mitigate future risks.
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym4_ntkx.max-1700x1700.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym4_ntkx.max-1700x1700.png)
 
-#### Assess and strengthen your defense capabilities
+Figure 4: Stack vs. register ABI in Go return values
 
-Run a [cyber defense assessment](https://services.google.com/fh/files/misc/ds-cyber-defense-assessment-en.pdf) to gain a clear understanding of your defensive capabilities and receive a prioritized roadmap to build a stronger, more resilient security program, prepared for any challenge. Harden your technical controls, and improve the performance of every critical defense function—from initial threat detection to [full environment recovery.](https://services.google.com/fh/files/misc/mandiant_cyber_resiliency_cire_whitepaper_en.pdf)
+Returning a single value and an error is a common idiom but Go doesn’t place a limit on the number of return values. It’s possible to see functions returning tens of values.
 
-#### Build frontline skills with Mandiant Academy
+Now that it's apparent why symbol recovery is significant, let's examine some important Go structures that GoReSym parses to extract symbol information, beginning with the pclntab structure.
 
-Prepare your team to combat real-world threats with reality-based case studies and training on the latest attacker TTPs from frontline incident response and threat intelligence experts. Choose from a [full range of learning formats](https://cloud.google.com/learn/security/mandiant-academy) that fit your needs, including on-demand courses, instructor-led classes, certification programs, and [immersive, hands-on exercises in the ThreatSpace™ cyber range](https://cloud.google.com/learn/security/mandiant-academy-threatspace).
+## PCLNTAB
 
-[![How ThreatSpace prepares customers for real-world threats with Google Cloud Security](https://www.gstatic.com/bricks/image/367cb407-76eb-44c2-a1e2-3ec70f07c573.png)
+The pclntab structure is short for “Program Counter Line Table”. The [design for this table is documented on this page](https://docs.google.com/document/d/1lyPIbmsYbXnpNj57a261hgOYVpNRcgydurVQIyZOz_o/pub), but has evolved in more recent Go versions. The table is used to map a virtual memory address back to the nearest symbol name to generate stack traces with function and file names. The original specification states this information can be used for language features such as garbage collection, but this doesn’t appear to be true in modern runtime versions. For symbol recovery purposes, the pclntab is important because it stores function names, function start and end addresses, file names, and more.
 
-2:45](https://www.youtube.com/watch?v=tougo8159t8)
+Locating the pclntab works differently depending on the file format. For ELF and Mach-O files, the pclntab is located in a named section within the binary. ELF files contain a section named .gopclntab that stores the pclntab while Mach-O files use a section named \_\_gopclntab. Locating the pclntab in PE files is more complex and begins with identifying a symbol table referred to in the Go source code as .symtab.
 
-## Test and strengthen your security program with real-world attacks
+For PE files, the .symtab symbol table is pointed to by the FileHeader.PointerToSymbolTable field. A symbol in this table named runtime.pclntab contains the address of the pclntab. ELF and Mach-O files also have a .symtab symbol table that contains a runtime.pclntab symbol but do not rely on it to locate the pclntab. To locate the .symtab in ELF files, look for a section named .symtab of type SH\_SYMTAB. In Mach-O files, the .symtab is referenced by an LC\_SYMTAB load command. The following is a list of relevant symbols present in the .symtab:
 
-Pressure-test your security program with [realistic, objective-based assessments](https://cloud.google.com/security/consulting/mandiant-technical-assurance). Our experts mimic genuine threat actor behavior—using the latest TTPs from the frontlines—to help you understand your weaknesses from an adversary’s perspective and build a truly resilient defense.
+* runtime.pclntab
+* runtime.epclntab
+* runtime.symtab
+* runtime.esymtab
+* pclntab
+* epclntab
+* symtab
+* esymtab
 
-[![Watch Mandiant Red Teamers in Action: Pushing the Limits of Red Teaming](https://www.gstatic.com/bricks/image/54b4cc48-08ee-43bb-a8e3-9b215b0519e1.png)
+Symbols without the runtime prefix are legacy symbols used instead of the runtime-prefixed ones. These won’t be referenced going forward but note that if the runtime-prefixed symbols are looked up and don’t exist, the legacy ones are usually attempted as a fallback. Symbols with an e prefix (e.g., epclntab) denote the end of a corresponding table.
 
-1:41](https://www.youtube.com/watch?v=cbuMxSfNV3c)
+The runtime.symtab symbol points to a second, Go-specific symbol table that is no longer filled with symbols as of Go 1.3. In ELF and Mach-O files, the runtime.symtab symbol points to a named section – .gosymtab and \_\_gosymtab, respectively – that stores this legacy table. Despite no longer being filled with symbols, many tools expect the symbol and section pointed to by this symbol to exist. The Go runtime, without modification, will refuse to parse binaries without this legacy symbol table.
 
-Watch Mandiant red teamers in action: Pushing the limits of red teaming
+The graphical overview in Figure 5 illustrates how the pclntab, the .symtab, and this legacy symbol table are related.
 
-#### Push the boundaries of red team assessments
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym5_fdkh.max-1900x1900.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym5_fdkh.max-1900x1900.png)
 
-See how your defenses perform against a sophisticated, goal-oriented adversary. Pushing beyond standard testing, our [red team assessments](https://services.google.com/fh/files/misc/ds-red-team-operations-en.pdf) emulate a real attacker pursuing custom objectives, revealing complex attack paths that conventional assessments often miss. This unique engagement provides an unparalleled opportunity to harden your defenses by combatting a realistic threat before it happens.
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym5_fdkh.max-1900x1900.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym5_fdkh.max-1900x1900.png)
 
-#### Harden your cloud with an architecture assessment
+Figure 5: Layout of a Go binary's symbol tables
 
-Secure your assets and data across any cloud environment with a [cloud architecture assessment](https://services.google.com/fh/files/misc/ds-cloud-architecture-assessment-000236-03.pdf)—from AWS and Azure to Google Cloud. Identify and mitigate commonly exploited misconfigurations, reduce your attack surface, and gain the visibility needed to effectively detect and respond to threats across your entire cloud estate.
+When a Go binary is stripped, the .symtab symbol table is zeroed out or not present. This removes the ability to find symbols such as runtime.pclntab. However, the data those symbols point to, such as the pclntab itself, is still present in the binary. For ELF and Mach-O files, the named sections (e.g., .gopclntab) are also still present and can be used to locate the pclntab . Therefore, manual location of the pclntab for both stripped and unstripped binaries can be performed in one of three ways, with earlier steps being preferred:
 
-#### Expose risks with offensive security and penetration testing
+1. Locate the .symtab symbols and resolve runtime.pclntab
+2. For ELF and Mach-O files, locate the .gopclntab or \_\_gopclntab section
+3. Scan the binary to locate the pclntab manually
 
-Improve your security team’s detection and response capabilities against realistic attack scenarios with a full range of [offensive security services](https://cloud.google.com/security/consulting/mandiant-technical-assurance), from collaborative assessments to testing specific assets and capabilities across technologies.
+The last option is the ultimate fallback mechanism for locating the table. Byte scanning is always required for stripped PE files and occasionally for ELF and Mach-O binaries with mutated section names. The byte scanning method involves searching for the pclntab header structure shown in Figure 6.
 
-## Elevate your cyber defense capabilities across all critical functions
+```
+type pcHeader struct {       // header of pclntab
+     magic          uint32 
+     pad1, pad2     uint8   // 0,0
+      …
+}
+```
 
-[Transform your core security processes and technologies.](https://cloud.google.com/security/consulting/mandiant-cybersecurity-transformation) Our experts help you up-level threat detection, containment, and remediation capabilities while optimizing your security operations and functions for a more mature and resilient defense.
+Figure 6: pclntab header structure
 
-#### Integrate and optimize Google SecOps with Mandiant
+The start of the pclntab is always a version-specific magic number. This number dictates table parsing behavior for each layout format, which changes at a different versioning cadence than the rest of the runtime. Valid magic numbers are found on this [GitHub page](https://github.com/golang/go/blob/2cb9042dc2d5fdf6013305a077d013dbbfbaac06/src/debug/gosym/pclntab.go#L172-L176). As a result, we can perform a linear byte scan for these magic numbers to identify the pclntab.
 
-Realize the full transformative potential of the [Google SecOps](https://cloud.google.com/security/products/security-operations) platform by operationalizing it within your organization. [Plan, optimize, and validate your Google SecOps deployment](https://services.google.com/fh/files/misc/mandiant_secops_transformation_services_ds.pdf) with guidance from Mandiant experts to ensure you achieve its full potential.
+Some packers such a UPX change section names and sizes. When scanning packed binaries, care must be taken to merge all section data prior to performing a scan. For some packed binaries, the pclntab spans two sections. If each section is scanned individually, only a partial pclntab may be discovered.
 
-#### Balance cyber risk with rapid business innovation
+GoReSym includes the following changes to the Go runtime code to locate the pclntab:
 
-Enable business innovation by translating complex security topics into the language of risk and value for executive leadership and the board. Bridge the gap between security and business objectives with [executive cybersecurity services](https://services.google.com/fh/files/misc/mandiant-executive-cybersecurity-services-000490-02.pdf) to establish security as a strategic enabler, helping the business achieve its innovation goals securely.
+* Modification of the file format parser to continue if the runtime.symtab symbol is missing. Since Go 1.3, this symbol, and the legacy table it points to, is not used but the runtime code validates it *always* exists, which is unnecessary.
+* When symbols are located, validate they point to plausibly correct data
+* If standard symbol or section-based location fails, perform byte scanning to locate the pclntab
+* Return additional information about the pclntab such as its virtual address
 
-#### Build a resilient cyber defense center
+Beyond storing important function metadata, the pclntab can also be used to locate a second metadata structure named moduledata.
 
-Improve your overall defense posture and [transition from a reactive incident response methodology to a predictive, mission-focused cyber defense center](https://services.google.com/fh/files/misc/ds-cyber-defense-center-dev-000045-05.pdf). Identify and close gaps in your security monitoring and response capabilities by building and implementing core processes aligned with an adaptive defense strategy.
+## MODULEDATA
 
-[![Discover the 6 critical functions of cyber defense. The Defender's Advantage: Guide to activating cyber defense](https://www.gstatic.com/bricks/image/b5f2fd5d-007a-4c63-af48-8f759296ccc6.png)
+The moduledata structure is an internal runtime table that stores information about the layout of the file as well as runtime information used to support core features such as garbage collection and reflection. Unlike the pclntab, this structure cannot be found via symbols. Its layout also changes much more frequently.
 
-Download the ebook](https://cloud.google.com/security/resources/defenders-advantage)
+To locate the structure, we first must examine how it is defined. There are two definitions that depend on the Go runtime version. In modern versions, the pclntab is found via an offset in the pcHeaderstructure shown in Figure 7.
 
-## Turn threat intelligence into confident decisions
+```
+type moduledata struct {
+     pcHeader     *pcHeader
+               …
+}
+type moduledata struct {
+     pclntable    []byte
+               …
+}
+```
 
-[Operationalize and maximize your threat intelligence sources with Mandiant](https://cloud.google.com/security/consulting/threat-intelligence-services). Build a program tailored to your specific environment, delivered through custom research, embedded expertise, and comprehensive skills development.
+Figure 7: Two variants of moduledata's structure
 
-[![M-Trends 2026 Report](https://www.gstatic.com/bricks/image/0e9b9660-47e4-4bf2-92db-f99adf13a17f.png)
+In older Go versions, the pclntab was directly embedded as a byte array or "slice" rather than referenced by an offset. The in-memory layout of both, however, is similar if we examine the format of a Go slice (Figure 8).
 
-Download the report](https://cloud.google.com/security/resources/m-trends)
+```
+type GoSlice struct {
+  data *byte;
+  len int;
+  capacity int;
+}
+```
 
-#### Accelerate decisions with custom Mandiant insights
+Figure 8: Go slice structure
 
-Inform and accelerate your security decisions with [customized cyber risk research and analysis](https://services.google.com/fh/files/misc/threat_diagnostic_datasheet.pdf), personalized for your specific environment, use cases, and stakeholder needs. Use these tailored insights to enhance your security posture, drive effective hunt missions, and strengthen your vulnerability management for a more resilient security program.
+Since a slice holds its data pointer as the first member, both versions of moduledata start as if they were defined like Figure 9.
 
-#### Embed frontline intelligence experts into your team
+```
+type moduledata struct {
+    pclntable *byte
+    ...starts to differ...
+}
+```
 
-Get access to world-class experts for [personalized reporting and part-time expertise](https://services.google.com/fh/files/misc/security_essential_intel_access_ds.pdf), providing timely, analyst-compiled responses from curated intelligence holdings. For deeper integration, get a [dedicated expert embedded with your team](https://services.google.com/fh/files/misc/advanced-intelligence-access-ds-en.pdf), providing early access to raw intelligence and a direct line to world-class tooling.
+Figure 9: Common moduledata memory layout
 
-#### Build best-in-class cyber threat intelligence capabilities
+Therefore, to locate the moduledata table, we can do a linear byte scan for the virtual address of the pclntab (i.e., search for a structure that holds a pointer to this address as the first member). Alternatively, moduledata can also be found by disassembling the function runtime.moduledataverify, which holds a pointer to the moduledata and walks it.
 
-[Apply best practices for the consumption, analysis, and practical application of threat intelligence](https://services.google.com/fh/files/misc/intelligence-capability-development-ds-en.pdf) to operationalize insights and maximize the value of your cyber threat intelligence (CTI) sources. Train your team with [a full range of CTI training, on-demand certifications, expert coaching, and immersive, real-world exercises](https://cloud.google.com/learn/security/mandiant-academy-courses).
+Unlike the pclntab, the runtime does not include a generic moduledata parser that works across all Go versions. To overcome this, GoReSym includes parsing logic for each supported runtime version. Despite the moduledata layout changing frequently, field encodings such as strings are more stable. As a result, it’s easy to write utility routines that handle common encodings. This eases the transition to a new runtime version as only a few utility routines and structure layouts need changed.
 
-## Secure your AI systems and leverage AI to strengthen your cyber defenses
+Within the moduledata array there is a list named typelinks. It stores type information for types defined in a Go program and is used for reflection and garbage collection. The structure stored in this list is named rtype and varies between runtime versions; however, in each format the name of the type can be extracted. This can be useful for situations like channels where types are passed around. Without the type name it's not possible to know the type of data being passed over the channel.
 
-AI technologies are transforming the way organizations operate. Mandiant experts can help you [utilize AI to enhance cyber defenses while safeguarding the use of your AI systems.](https://cloud.google.com/security/solutions/mandiant-ai-consulting)
+Here’s an example *before* type recovery where the runtime\_makechan function takes a pointer to an interface:
 
-#### Secure your use of AI, end-to-end
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym0_vloz.max-1100x1100.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym0_vloz.max-1100x1100.png)
 
-[Evaluate the end-to-end security of your AI systems](https://cloud.google.com/security/solutions/mandiant-ai-consulting) and implementation to assess and safeguard your training data, models, and custom applications before attackers can exploit them. Build upon the extensive, combined, real-world experience of Mandiant and Google in protecting production AI systems.
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym0_vloz.max-1100x1100.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym0_vloz.max-1100x1100.png)
 
-#### Battle-test your AI systems and defenses
+After type recovery we can name the interface:
 
-[Identify the critical insights needed to proactively harden your AI systems](https://cloud.google.com/security/solutions/mandiant-ai-consulting) and overall security posture. Measure the effectiveness of your controls against the latest AI-specific threats and assess your security team’s ability to detect and respond to a live attack in a controlled environment.
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym00_hpeu.max-1100x1100.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym00_hpeu.max-1100x1100.png)
 
-#### Pave the path towards an agentic defense future
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym00_hpeu.max-1100x1100.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym00_hpeu.max-1100x1100.png)
 
-[Understand how to augment your cyber defense capabilities and prepare for the future by leveraging the power of AI](https://cloud.google.com/security/solutions/mandiant-ai-consulting). Develop a strategic plan to integrate AI into your processes to reduce defender toil and increase investigation efficiency. Explore how to create AI-based detections and [practice AI-assisted incident response in a realistic, virtual cyber range with ThreatSpace™](https://cloud.google.com/learn/security/mandiant-academy-threatspace).
+This indicates the channel has Boolean values passed through it. Examining the Go source code for this call confirms the type:
 
-[![Stay ahead of threats by harnessing the power of AI, securely](https://www.gstatic.com/bricks/image/a0ffb899-f73d-46cf-a62c-9c173e81cb2f.png)
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym000_vqag.max-800x800.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym000_vqag.max-800x800.png)
 
-Read the report](https://cloud.google.com/security/resources/ai-risk-and-resilience)
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym000_vqag.max-800x800.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym000_vqag.max-800x800.png)
 
-## Tap specialists across a range of services that fit your business challenges
+Each rtype can have additional fields depending on the type it represents. For channels, the extended structure resembles the following, where the base rtype is embedded as the first member (Figure 10).
 
-Address your most unique and complex security challenges, from [ransomware and multifaceted extortion defense](https://cloud.google.com/security/solutions/ransomware?hl=en) to securing mission-critical [operational technology (OT) and industrial control systems (ICS)](https://cloud.google.com/security/solutions/mandiant-operational-technology), with a wide range of specialized consulting services. All of our engagements are delivered by experienced specialists and backed by real-time frontline threat intelligence, ensuring targeted guidance to build a stronger defense.
+```
+type chantype struct {
+    typ  _type
+    elem *_type
+    dir  uintptr
+}
+```
 
-Explore all services
+Figure 10: Extended channel rtype structure
 
-Download our services overview
+The dir field within this extended type structure allows us to recognize the direction of a channel (i.e., send, receive, or both). GoReSym handles all extended type structures and extracts additional relevant information. For types such as interface and struct, this extended information lists methods as well as fields and their offsets, which facilitates reconstruction of both internal and user-defined structures.
 
-## Mandiant cyber risk partners
+## BUILDINFO
 
-Mandiant collaborates with a global network of leading law firms, insurance providers and brokers, ransomware negotiators, and other specialized firms to help you mitigate risk and minimize liability from cyberattacks. This integrated ecosystem simplifies the cyber risk management process for executives and security teams by improving threat visibility, accelerating incident response, and preparing your organization for a crisis before it occurs.
+Starting in Go 1.18, additional metadata is provided in a table named buildinfo. This table is emitted by default but can be easily omitted with compiler flags. When present, the table can provide the following: compiler and linker flags, values of the environment variables GOOS and GOARCH, git information, and information about the package name of both the main and dependency packages. In previous Go versions, finding data such as the runtime version had to be done by linear scanning for string fragments like "go1.". This scan was required because the global value runtime.buildVersion is not referenced by any symbols, so locating it is difficult.
 
-Explore our partners
+The buildinfo structure has a named section in ELF and Mach-O files but the runtime disregards this information during the location process. To identify this information, the runtime reads the first 64KB of a file, performs a linear scan for the magic string "\xff Go buildinf:", and parses the data immediately after. When this information is present, GoReSym uses it and only relies on byte scanning techniques when the GOOS and GOVERSION values are missing.
 
-### Trusted by leading organizations
+## GoReSym Usage
 
-[![How UC Riverside aces digital safety for students, staff, and researchers](https://www.gstatic.com/bricks/image/56ee8d00-057f-4cf9-b330-c06ac6fdd470.jpg)
+GoReSym is a [standalone application](https://github.com/mandiant/GoReSym) that can be executed on the command line or incorporated into a larger batch processing script. It doesn’t perform additional binary analysis outside of Go’s symbols. As a result, data extraction typically finishes in 1-5 seconds for even the most complex binaries.
 
-The CIO of the University of California, Riverside describes how Mandiant delivers industry-leading expertise that combined with Google SecOps has transformed their security.
+By default, GoReSym prints concise output instead of all extracted information. Various flags can be used to alter GoReSym's behavior. The -t flag instructs GoReSym to emit type and interface lists, which are useful when reversing channels and other routines that accept types. In some cases, not all types present in the disassembly are listed in the typelinks array. Channel objects are a good example of this is. Figure 11 shows an unreferenced type being loaded into the rax register prior to the runtime\_newobject call.
 
-See the video](https://www.youtube.com/watch?v=Wv81ntozeBs)
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym11_qrca.max-800x800.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym11_qrca.max-800x800.png)
 
-[![The UK's largest homewares retailer lands a one-two punch against cyber threats](https://www.gstatic.com/bricks/image/e6d8a8a1-3c53-4b43-967a-da540efc4826.jpg)
+![https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym11_qrca.max-800x800.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/goresym11_qrca.max-800x800.png)
 
-The UK’s largest homewares retailer, Dunelm talks about landing a one-two punch against cyber threats with Google SecOps and a Mandiant Retainer.
+Figure 11: Unreferenced type 0x48D2A0
 
-See the video](https://www.youtube.com/watch?v=MUQGfgoJ7VY)
+In these instances the -m flag and the virtual address of the type can be passed to GoReSym as shown in Figure 12. Note the -human flag is used to emit flat output rather than JSON.
 
-[![Trends from the seat of a CISO](https://www.gstatic.com/bricks/image/82aefa63-409f-4b8a-aa2c-21b1acc311b4.jpg)
+```
+./GoReSym -m 0x48D2A0 -human ../gotests/example
+ 
+-TYPE STRUCTURES-
+VA: 0x48d2a0
+type struct {
+    .F         uintptr
+    .autotmp_11 int
+    .autotmp_13 chan int Direction: (Both)
+}
+```
 
-CISOs from AT&T and Coinbase join Mandiant's CTO to share and discuss firsthand experiences and insights from the frontlines on responding to nation-state actors and complex insider risk.
+Figure 12: Manual rtype structure extraction
 
-See the video](https://www.youtube.com/watch?v=VVzJq74Zyuw)
+The type at the provided address is parsed by GoReSym and printed, allowing us to see it’s related to the allocation of the channel. Other useful flags include -p to print file paths present in a binary and the -d flag to print information that has been classified as part of a default package.
 
-[![How the UK's biggest digital bank hunts threats faster with Google SecOps](https://www.gstatic.com/bricks/image/6d972f4c-6ff1-4259-ba4c-1ac447c453d1.jpg)
+Finally, some obfuscators remove Go runtime version information. Because types are version-specific, this prevents GoReSym from parsing types. To overcome this, the -v flag can be provided to suggest a runtime version. GoReSym will attempt to parse types using structures from the suggested version. Trial and error can be used to guess the correct version. Also, the pclntab version can be used as a hint for where to start; however, recall the pclntab version differs from the runtime version.
 
-Lloyds Banking Group is confident in its ability to detect sophisticated attacks and can now focus on what matters most — staying ahead of the next generation of threats.
+## Existing Tools
 
-See the video](https://www.youtube.com/watch?v=7gNyN3fBn00)
+There are public and commercial tools that support some, or perhaps all, of the type parsing logic addressed in GoReSym. Prior works such as Redress and IDAGolangHelper are excellent and should be celebrated. The primary difference between GoReSym and existing tools is that GoReSym is based on the Go runtime source code. This helps counter the rapid pace of Go internal structure evolution. Additionally, because the runtime is already cross-architecture, GoReSym is too. All new parsing logic takes care to correctly support 32 and 64-bit big and little-endian architectures. Care was also taken to handle unpacked or partially corrupted samples where possible, something other tools may struggle with. Overall, GoReSym is designed to work in cases where other tools fail and offers a way to ease tool maintenance as Go evolves.
 
-### **Recognized by industry analysts**
+## References and Credits
 
-* [![IDC](https://www.gstatic.com/bricks/image/33b16f76-a391-44be-ac2b-915f977fca00.png)
+The original package classification ideas, but not code, behind redress is used in GoReSym and the recursive type parsing idea from the JEB blog post helped when implementing typelink enumeration. Thanks to these authors for making their work publicly available.
 
-  Google is a Leader in the IDC MarketScape: Worldwide Incident Response 2025 Vendor Assessment
+* [Redress GitHub](https://github.com/goretk/redress)
+* [IDAGolangHelper GitHub](https://github.com/sibears/IDAGolangHelper)
+* [Analyzing Golang Executables post on the JEB Decompiler Blog](https://www.pnfsoftware.com/blog/analyzing-golang-executables/)
 
-  Read the report](https://cloud.google.com/resources/content/security-idc-marketscape-2025-incident-response)
-* [![Forrester](https://www.gstatic.com/bricks/image/9abe6d21-25d4-4abb-860c-e7cf77460960.png)
+Now go check out [GoReSym](https://github.com/mandiant/GoReSym)!
 
-  Google is a Leader in the Forrester Wave™: Cybersecurity Incident Response Services, Q2 2024
+Posted in
 
-  Read the report](https://cloud.google.com/resources/content/security/forrester-wave-incident-response-2024)
-* [![IDC](https://www.gstatic.com/bricks/image/992564c5-a33c-432a-9699-b2a7774ae4cb.png)
+* [Threat Intelligence](https://cloud.google.com/blog/topics/threat-intelligence)
+* [Security & Identity](https://cloud.google.com/blog/products/identity-security)
 
-  Google is a Leader in the IDC MarketScape: Worldwide Cybersecurity Consulting Services 2024 Vendor Assessment
+##### Related articles
 
-  Read the report](https://services.google.com/fh/files/misc/idc-marketscape-ww-cybersecurity-consulting-vendor-assessment-2024.pdf)
+[![https://storage.googleapis.com/gweb-cloudblog-publish/images/03_ThreatIntelligenceWebsiteBannerIdeas_BANN.max-700x700.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/03_ThreatIntelligenceWebsiteBannerIdeas_BANN.max-700x700.png)
 
-### Browse resources
+Threat Intelligence
 
-* [![Cyber Defense Summit 26, Google Cloud Security](https://www.gstatic.com/bricks/image/4da88ef5-8e54-4eb4-9c89-c1806b2d06aa.png)
+### The Bear Necessities: A Look at the Drivers, Dynamics, and Applications of the Pro-Russia Influence Ecosystem
 
-  Cyber Defense Summit 2026
+By Google Threat Intelligence Group • 16-minute read](https://cloud.google.com/blog/topics/threat-intelligence/pro-russia-influence-ecosystem)
 
-  Crafted to equip elite security professionals with the strategies, tools, and insights needed to outmaneuver increasingly sophisticated, AI-enabled adversaries and build resilient cyber ecosystems.
+[![https://storage.googleapis.com/gweb-cloudblog-publish/images/03_ThreatIntelligenceWebsiteBannerIdeas_BANN.max-700x700.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/03_ThreatIntelligenceWebsiteBannerIdeas_BANN.max-700x700.png)
 
-  Register now](https://cyberdefensesummit.mandiant.com/)
-* [![Next iconography in vivid colors](https://www.gstatic.com/bricks/image/fe9c6aeb-3ea9-4a70-abc9-16b3eb0f350b.png)
+Threat Intelligence
 
-  Google Cloud Next 2026
+### STOCKSTAY Another Day: The Latest Addition to Turla’s Intelligence Gathering Apparatus
 
-  Catch-up sessions on the keynotes and select sessions are now available on demand.
+By Google Threat Intelligence Group • 68-minute read](https://cloud.google.com/blog/topics/threat-intelligence/stockstay-turla-intelligence-gathering)
 
-  Explore content on-demand](https://www.googlecloudevents.com/next-vegas)
-* [![Yellow security lock ](https://www.gstatic.com/bricks/image/fc120bbf-c7b0-4ce8-9e04-df8f13e3b913.png)
+[![https://storage.googleapis.com/gweb-cloudblog-publish/images/03_ThreatIntelligenceWebsiteBannerIdeas_BANN.max-700x700.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/03_ThreatIntelligenceWebsiteBannerIdeas_BANN.max-700x700.png)
 
-  Security Talks
+Threat Intelligence
 
-  Join our security experts in this ongoing series as they explore the latest AI innovations across our security product portfolio, threat intelligence best practices, and more.
+### Zero-Day Exploitation of Vulnerability (CVE-2026-20245) in Cisco Catalyst SD-WAN Manager
 
-  Watch on-demand](https://cloudonair.withgoogle.com/events/google-cloud-security-talks-june-2026)
+By Mandiant • 16-minute read](https://cloud.google.com/blog/topics/threat-intelligence/zero-day-exploitation-cisco-catalyst-sd-wan-manager)
 
-View More
+[![https://storage.googleapis.com/gweb-cloudblog-publish/images/03_ThreatIntelligenceWebsiteBannerIdeas_BANN.max-700x700.png](https://storage.googleapis.com/gweb-cloudblog-publish/images/03_ThreatIntelligenceWebsiteBannerIdeas_BANN.max-700x700.png)
 
-* [![M-Trends 2026](https://www.gstatic.com/bricks/image/12b8b9ae-e444-42d8-a6ca-e7431b884953.png)
+Threat Intelligence
 
-  Mandiant M-Trends 2026
+### Public and Private Medical Community Targeted by China-Nexus Threat Actor Pursuing Artificial Intelligence, Cyber, Medical, and National Defense Research
 
-  Stay ahead of the latest cyber threats
-
-  Read the report](https://cloud.google.com/security/resources/m-trends)
-* [![Cybersecurity Forecast 2026](https://www.gstatic.com/bricks/image/e1580b44-7dfe-473e-8739-c9df09f54914.png)
-
-  Cybersecurity Forecast 2026
-
-  Forward-looking insights to plan for the year ahead.
-
-  Read the report](https://cloud.google.com/security/resources/cybersecurity-forecast)
-* [![Defender shield in white grid lines](https://www.gstatic.com/bricks/image/ee3f2220-52fb-4e61-bb94-38d1d56d0d6e.png)
-
-  The Defender's Advantage
-
-  A guide to activating cyber defense.
-
-  Read the eBook](https://cloud.google.com/security/resources/defenders-advantage)
-
-View More
-
-* [![TI blog](https://www.gstatic.com/bricks/image/091a2f69-2cc9-4142-a8c7-f25930177d83.png)
-
-  Google Threat Intelligence blog
-
-  The latest frontline investigations, analysis, and in-depth security research from Mandiant experts.
-
-  Read the blog](https://cloud.google.com/blog/topics/threat-intelligence)
-* [![GCS Blog](https://www.gstatic.com/bricks/image/94693feb-eb8f-46dd-ad07-370a40590342.png)
-
-  Google Cloud Security blog
-
-  News, tips, and inspiration to accelerate your security and AI transformation.
-
-  Read the blog](https://cloud.google.com/blog/products/identity-security)
-* [![Community blog](https://www.gstatic.com/bricks/image/2ac43e6e-9e9d-400e-a381-60cbd16c96c9.png)
-
-  Google Cloud Security Community blog
-
-  Insights, answers, and expert perspectives to optimize your security tools, from Googlers and seasoned users.
-
-  Read the blog](https://security.googlecloudcommunity.com/p/blog)
-
-View More
-
-* [![TDA podcast](https://www.gstatic.com/bricks/image/02c03a94-f8aa-4cf1-941c-4fdacc1efec5.png)
-
-  The Defender’s Advantage Podcast
-
-  Luke McNamara is joined by fellow cybersecurity experts providing frontline insights into the latest attacks, threat research, and trends. Dive deep on nation-state activity, malware, and more.
-
-  Listen now](https://podcasts.apple.com/us/podcast/the-defenders-advantage-podcast/id1073779629)
-* [![binary podcast](https://www.gstatic.com/bricks/image/e52553ab-76bf-46cf-96d0-dd03394dea7a.png)
-
-  Behind the Binary Podcast
-
-  Google FLARE team member Josh Stroschein uncovers the human stories and unique perspectives of the experts who secure our digital world through reverse engineering.
-
-  Listen now](https://open.spotify.com/show/3yWgmIuhWPtmTDFWDovtlc)
-* [![cloud sec podcast](https://www.gstatic.com/bricks/image/6c3171c3-db93-4b5b-a66b-db31d01e24da.png)
-
-  Cloud Security Podcast
-
-  Anton Chuvakin and Timothy Peacock tackle today’s most interesting cloud security stories, including what we’re doing at Google Cloud. Come for the no-nonsense insights; stay for the threat model questioning and bad puns.
-
-  Listen now](https://cloud.withgoogle.com/cloudsecurity/podcast/)
-
-View More
-
-* [![Team in discussion](https://www.gstatic.com/bricks/image/d0a5c773-911b-4526-be25-ee849769116a.png)
-
-  CISO Insights Hub
-
-  Expert perspectives, reports, and frameworks to help security leaders navigate today’s evolving threat landscape, with insights from Google Cloud’s Office of the CISO.
-
-  Learn more](https://cloud.google.com/solutions/security/leaders)
-* [![Man discussing with the team in conference room](https://www.gstatic.com/bricks/image/b429460d-2231-4d0e-a712-59ec25ad865c.png)
-
-  Board of Directors Insights Hub
-
-  Insights and best practices designed for boards to lead security decisions and ensure resilient, secure operations.
-
-  Learn more](https://cloud.google.com/solutions/security/board-of-directors)
-* [![Blue color Mike and earphone illustration](https://www.gstatic.com/bricks/image/ae39710b-31a8-41ab-aaf6-7ef600af255f.png)
-
-  The Cyber Savvy Boardroom
-
-  From Google Cloud's Office of the CISO, get monthly strategic insights from security leaders, executives, and board members to help you confidently shape your organization's security posture and future.
-
-  Listen now](https://www.youtube.com/playlist?list=PLkdSRxA6DyHt7kbj0wUuatxF9eYOFro7k)
-
-View More
-
-#### Events
-
-* [![Cyber Defense Summit 26, Google Cloud Security](https://www.gstatic.com/bricks/image/4da88ef5-8e54-4eb4-9c89-c1806b2d06aa.png)
-
-  Cyber Defense Summit 2026
-
-  Crafted to equip elite security professionals with the strategies, tools, and insights needed to outmaneuver increasingly sophisticated, AI-enabled adversaries and build resilient cyber ecosystems.
-
-  Register now](https://cyberdefensesummit.mandiant.com/)
-* [![Next iconography in vivid colors](https://www.gstatic.com/bricks/image/fe9c6aeb-3ea9-4a70-abc9-16b3eb0f350b.png)
-
-  Google Cloud Next 2026
-
-  Catch-up sessions on the keynotes and select sessions are now available on demand.
-
-  Explore content on-demand](https://www.googlecloudevents.com/next-vegas)
-* [![Yellow security lock ](https://www.gstatic.com/bricks/image/fc120bbf-c7b0-4ce8-9e04-df8f13e3b913.png)
-
-  Security Talks
-
-  Join our security experts in this ongoing series as they explore the latest AI innovations across our security product portfolio, threat intelligence best practices, and more.
-
-  Watch on-demand](https://cloudonair.withgoogle.com/events/google-cloud-security-talks-june-2026)
-
-View More
-
-#### Reports
-
-* [![M-Trends 2026](https://www.gstatic.com/bricks/image/12b8b9ae-e444-42d8-a6ca-e7431b884953.png)
-
-  Mandiant M-Trends 2026
-
-  Stay ahead of the latest cyber threats
-
-  Read the report](https://cloud.google.com/security/resources/m-trends)
-* [![Cybersecurity Forecast 2026](https://www.gstatic.com/bricks/image/e1580b44-7dfe-473e-8739-c9df09f54914.png)
-
-  Cybersecurity Forecast 2026
-
-  Forward-looking insights to plan for the year ahead.
-
-  Read the report](https://cloud.google.com/security/resources/cybersecurity-forecast)
-* [![Defender shield in white grid lines](https://www.gstatic.com/bricks/image/ee3f2220-52fb-4e61-bb94-38d1d56d0d6e.png)
-
-  The Defender's Advantage
-
-  A guide to activating cyber defense.
-
-  Read the eBook](https://cloud.google.com/security/resources/defenders-advantage)
-
-View More
-
-#### Blogs
-
-* [![TI blog](https://www.gstatic.com/bricks/image/091a2f69-2cc9-4142-a8c7-f25930177d83.png)
-
-  Google Threat Intelligence blog
-
-  The latest frontline investigations, analysis, and in-depth security research from Mandiant experts.
-
-  Read the blog](https://cloud.google.com/blog/topics/threat-intelligence)
-* [![GCS Blog](https://www.gstatic.com/bricks/image/94693feb-eb8f-46dd-ad07-370a40590342.png)
-
-  Google Cloud Security blog
-
-  News, tips, and inspiration to accelerate your security and AI transformation.
-
-  Read the blog](https://cloud.google.com/blog/products/identity-security)
-* [![Community blog](https://www.gstatic.com/bricks/image/2ac43e6e-9e9d-400e-a381-60cbd16c96c9.png)
-
-  Google Cloud Security Community blog
-
-  Insights, answers, and expert perspectives to optimize your security tools, from Googlers and seasoned users.
-
-  Read the blog](https://security.googlecloudcommunity.com/p/blog)
-
-View More
-
-#### Podcasts
-
-* [![TDA podcast](https://www.gstatic.com/bricks/image/02c03a94-f8aa-4cf1-941c-4fdacc1efec5.png)
-
-  The Defender’s Advantage Podcast
-
-  Luke McNamara is joined by fellow cybersecurity experts providing frontline insights into the latest attacks, threat research, and trends. Dive deep on nation-state activity, malware, and more.
-
-  Listen now](https://podcasts.apple.com/us/podcast/the-defenders-advantage-podcast/id1073779629)
-* [![binary podcast](https://www.gstatic.com/bricks/image/e52553ab-76bf-46cf-96d0-dd03394dea7a.png)
-
-  Behind the Binary Podcast
-
-  Google FLARE team member Josh Stroschein uncovers the human stories and unique perspectives of the experts who secure our digital world through reverse engineering.
-
-  Listen now](https://open.spotify.com/show/3yWgmIuhWPtmTDFWDovtlc)
-* [![cloud sec podcast](https://www.gstatic.com/bricks/image/6c3171c3-db93-4b5b-a66b-db31d01e24da.png)
-
-  Cloud Security Podcast
-
-  Anton Chuvakin and Timothy Peacock tackle today’s most interesting cloud security stories, including what we’re doing at Google Cloud. Come for the no-nonsense insights; stay for the threat model questioning and bad puns.
-
-  Listen now](https://cloud.withgoogle.com/cloudsecurity/podcast/)
-
-View More
-
-#### For the CISO
-
-* [![Team in discussion](https://www.gstatic.com/bricks/image/d0a5c773-911b-4526-be25-ee849769116a.png)
-
-  CISO Insights Hub
-
-  Expert perspectives, reports, and frameworks to help security leaders navigate today’s evolving threat landscape, with insights from Google Cloud’s Office of the CISO.
-
-  Learn more](https://cloud.google.com/solutions/security/leaders)
-* [![Man discussing with the team in conference room](https://www.gstatic.com/bricks/image/b429460d-2231-4d0e-a712-59ec25ad865c.png)
-
-  Board of Directors Insights Hub
-
-  Insights and best practices designed for boards to lead security decisions and ensure resilient, secure operations.
-
-  Learn more](https://cloud.google.com/solutions/security/board-of-directors)
-* [![Blue color Mike and earphone illustration](https://www.gstatic.com/bricks/image/ae39710b-31a8-41ab-aaf6-7ef600af255f.png)
-
-  The Cyber Savvy Boardroom
-
-  From Google Cloud's Office of the CISO, get monthly strategic insights from security leaders, executives, and board members to help you confidently shape your organization's security posture and future.
-
-  Listen now](https://www.youtube.com/playlist?list=PLkdSRxA6DyHt7kbj0wUuatxF9eYOFro7k)
-
-View More
-
-## Have cybersecurity questions? Contact us.
-
-Mandiant experts are ready to answer your cybersecurity consulting questions.
-
-Request a cybersecurity consult
-
-Incident response assistance
-
-[](https://www.gstatic.com/cgc/renaissance/video/MultiPath_2X_V2.webm)![](https://www.gstatic.com/cgc/renaissance/image/MultiPath_Bottom_2X_Centered_static.png)
+By Google Threat Intelligence Group • 21-minute read](https://cloud.google.com/blog/topics/threat-intelligence/prc-targets-us-medical-research)

@@ -148,6 +148,18 @@ def recover_lcg(s):
 
 若 `m` 已知：直接 `a = (s2-s1) * inverse(s1-s0, m) % m`，`c = (s1 - a*s0) % m`。
 
+### 反向：参数注入造循环（攻击者可控 a 时）
+
+当题目让攻击者选乘数 `a`（如"设计一个通过校验的 RNG"），选 `a` 为 `x^k - 1` 的非 1 单位根使种子周期循环:
+```python
+R.<x> = PolynomialRing(Zmod(p))
+eq = x^5 - 1
+for root, _ in eq.roots():
+    if root == 1: continue
+    a = root  # a^5 ≡ 1 mod p → s_{i+5} = s_i（周期 5 循环）
+    # 检验: 5 个 seed 成循环，满足 RNG 校验
+```
+
 ## 决策
 
 ```

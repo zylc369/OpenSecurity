@@ -82,6 +82,15 @@ sc = shellcraft.aarch64.linux.sh()
 
 > **实操结论**：ARM64 现代 pwn **优先走 data-oriented**（覆盖数据指针/落点），其次才是"重用已签名指针 + ret 链"。纯栈溢出打 ROP 在 PAC 开启后基本走不通。
 
+### PAC Key 提取（第三法：伪造合法签名）
+除上述两种方法外，若已有内核任意读（AAR），可提取 PAC key 自行签名:
+1. **context switch 存 key**: 内核线程切换时把 APIAKEY（128-bit = key0:key1）存入内核内存
+2. **扫描 direct map 找 saved context**: 用 AAR 扫描 direct map 区域，特征 `leak[6]==0xffffffff`（cpu_context 标志）且地址指向 direct map 内
+3. **提取 key0/key1**: 从 saved context 结构偏移读取
+4. **伪造签名**: 用 `pauth_computepac_architected(data, modifier, key0, key1)` 计算合法 PAC tag → 伪造任意函数指针的签名
+
+> 也可遍历 task_struct（`task+0x340` 是 tasks 链表，`task+0x5e8` 是 comm 名）定位当前进程 → 取 `task+0x5e0` 的 cred 直接改（绕过 PAC）。
+
 ## §5 pwntools ARM64 速查
 
 ```python

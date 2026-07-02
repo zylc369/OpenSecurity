@@ -15,7 +15,7 @@
 | 文件 | 来源 | 覆盖技术 |
 |------|------|---------|
 | goresym-readme.md | github.com/mandiant/GoReSym | Go 符号恢复: pclntab 解析, moduledata, 函数名/类型/源文件恢复, -t/-d/-p 参数, runtime_modulesinit 签名扫描修复 |
-| mandiant-golang-internals.md | mandiant.com/blog | Go 内部原理: pclntab 结构演进(1.2-1.20+), moduledata, GoReSym 工作原理, 符号恢复全流程 |
+| mandiant-golang-internals.md | cloud.google.com/blog（原 mandiant.com，已迁移） | Go 内部原理: pclntab 结构演进(1.2-1.20+), moduledata, GoReSym 工作原理, 符号恢复全流程 |
 
 ## IDA 版本变化
 

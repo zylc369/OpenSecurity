@@ -29,7 +29,7 @@
 - 属性内：`" onmouseover="alert(1)" `
 - JS 字符串内：`';alert(1);//`
 - URL 内：`javascript:alert(1)`
-- **Markdown 解析器注入**（详见下文 1.1.1）
+- **Markdown 解析器注入**（详见下文 §1.1.1）
 - 绕过 CSP：详见 `$AGENT_DIR/knowledge-base/csp-bypass.md`
 
 **关键检查点**：
@@ -296,7 +296,7 @@
 - 时间窗口内的双重使用
 - TOCTOU（检查时间/使用时间不一致）
 
-### 1.6 Middleware CT 覆盖漏洞
+### 5.3 Middleware CT 覆盖漏洞
 
 **场景**：框架中间件（如 Next.js middleware）允许请求中的 `Content-Type` 头覆盖响应的 Content-Type。
 
@@ -470,7 +470,7 @@ blob URL 继承创建者的 origin。当页面 `https://example.com` 上执行 `
 
 | 漏洞 | Payload 示例 | 原因 |
 |------|-------------|------|
-| URL 属性注入 | `![[x](url1)](url2 onerror=alert(1) x=)` | 解析器把 URL 后的内容当作 HTML 属性 |
+| URL 属性注入 | 见 §1.1.1 详解 | 解析器把 URL 后的内容当作 HTML 属性 |
 | alt 属性注入 | `!["><script>alert(1)</script>](url)` | alt 文本未转义 `"` 和 `<` |
 | href 属性注入 | `[link](javascript:alert(1))` | URL 未过滤 `javascript:` 协议 |
 | HTML 混合 | `<img src=x onerror=alert(1)>` | 解析器直接透传 HTML |

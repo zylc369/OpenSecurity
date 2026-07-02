@@ -12,9 +12,17 @@
 |---------|---------|---------|
 | UAF（free 后指针未置空） | 读/写已释放块 | tcache poisoning → 任意地址分配；或 house_of_botcake → 重叠块 |
 | OOB（越界读写） | 读/写相邻块 | 改 top chunk size → House of Tangerine；或改邻居 fd → tcache poisoning |
-| DF（double free） | 同一块进 freelist 两次 | tcache dup → 任意地址分配 |
+| DF（double free） | 同一块进 freelist 两次 | tcache dup → 任意地址分配（2.29+ 见下） |
 | 栈溢出 (BOF) | 覆盖返回地址 | ROP / ret2libc / canary 泄漏 |
 | 格式化字符串 | 任意读 + 任意写 | 直接泄漏 libc/栈 → 改 GOT / __malloc_hook（≤2.33） |
+
+**double free 绕过（glibc 2.29+ tcache key 检查后）**:
+连续双 free 同 bin 被 tcache key 拦截，剩 4 条路径:
+1. fastbin 双 free（不连续）
+2. 首次 fastbin、二次 tcache
+3. 首次 unsorted、二次 tcache
+4. 首次 unsorted、二次 fastbin
+路径 3/4 的关键: unsorted bin coalesce 改变 chunk size，使第二次 free 落入不同 bin 绕过 key 检查（如 0xa0 chunk 合并成 0x130 → 进 0x130 tcache）
 
 **关键转换**：大多数漏洞需要先升级为 **任意写**（写任意值到任意地址），再配合 §4 落点完成 RCE。
 
@@ -34,38 +42,55 @@ poisoned_fd = key ^ target_addr  # 构造毒化 fd
 原理：`(ptr ^ key) ^ key = ptr`，二次保护等于不保护。
 - 前提：已控制 tcache metadata（配合 House of Water，§6）
 - 限制：写原语需 4-bit 爆破（LSB 有 4 bit 随机性）；有递增能力则无需爆破
-- 源码参考: `how2heap-safe_link_double_protect.c`
 
 ### 方法 3：解密已毒化的指针
 ```python
 # 从 tcache fd 反推真实地址
 real_addr = encrypted_fd ^ (chunk_addr >> 12)
 ```
-- 源码参考: `how2heap-decrypt_safe_linking.c`
 
 ## §3 核心堆原语速查
 
-| 原语 | 输入要求 | 输出能力 | 版本边界 | 源码参考 |
-|------|---------|---------|---------|---------|
-| **tcache_poisoning** | UAF 或能改 tcache fd | 任意地址分配 | 2.26+（2.32+ 需绕 safe-linking） | how2heap-tcache_poisoning.c |
-| **large_bin_attack** | 能改 large bin 块的 bk_nextsize | 堆地址写到任意地址 | 2.30+ ⚠**2.42 已补** | how2heap-large_bin_attack.c |
-| **house_of_botcake** | UAF + 能 free 同一块两次 | 重叠块（同时 in tcache 和 unsorted） | 通用 | how2heap-house_of_botcake.c |
-| **tcache_stashing_unlink** | 能改 smallbin 块的 bk | smallbin 回填 tcache 时劫持 | 2.29+ | how2heap-tcache_stashing_unlink_attack.c |
-| **fastbin_reverse_into_tcache** | 能控制 fastbin | fastbin 释放时向 tcache 写堆地址 | 2.26-2.41 ⚠**2.42 已补** | how2heap-fastbin_reverse_into_tcache.c |
-| **poison_null_byte** | OOB 能写一个 \0 | off-by-one 制造重叠块 | 通用 | （how2heap 仓库） |
+| 原语 | 输入要求 | 输出能力 | 版本边界 |
+|------|---------|---------|---------|
+| **tcache_poisoning** | UAF 或能改 tcache fd | 任意地址分配 | 2.26+ |
+| **large_bin_attack** | 能改 large bin 块的 bk_nextsize | 堆地址写到任意地址 | 2.30+ ⚠**2.42 已补** |
+| **house_of_botcake** | double free 能力 | 重叠块（同时 in tcache 和 unsorted） | 通用 |
+| **tcache_stashing_unlink** | 能改 smallbin 块的 bk | smallbin 回填 tcache 时劫持 | 2.29+ |
+| **fastbin_reverse_into_tcache** | 能控制 fastbin | fastbin 释放时向 tcache 写堆地址 | 2.26-2.41 ⚠**2.42 已补** |
+| **poison_null_byte** | OOB 能写一个 \0 | off-by-one 制造重叠块 | 通用 |
 
-### large_bin_attack 详解（构造任意写的核心原语）
+### 原语操作详解
+
+#### tcache_poisoning（2.26+，2.32+ 新增三项检查）
+1. **safe-linking**: fd 经 `(pos>>12)^ptr` 加密，需先泄漏堆地址算 key（§2 方法 1/3）
+2. **count 检查**: fd 劫持前需先 free 一个**同 size** chunk 作 padding（否则 count=0 时 malloc 触发 abort）
+3. **对齐检查**: 目标地址须 **0x10 对齐**（glibc 检查返回地址对齐，不对齐 abort）
+
+#### large_bin_attack（构造任意写的核心原语，2.30+，⚠2.42 已补）
 ```
 前提: 一个块已在 large bin 中，且能改其 bk_nextsize
 步骤:
   1. malloc(0x428) 和 malloc(0x418)（同 large bin 但不同 size）
   2. free(p1)，大分配使 p1 入 large bin
-  3. 改 p1->bk_nextsize = &target - 0x20
-  4. free(p2)，再大分配把 p2（更小）插入
-  5. 执行 victim->bk_nextsize->fd_nextsize = victim → target 被写为 p2 地址
+  3. free(p2)（进 unsorted bin）
+  4. 改 p1->bk_nextsize = &target - 0x20
+  5. 大分配把 p2（更小）从 unsorted 插入 large bin
+  6. 执行 victim->bk_nextsize->fd_nextsize = victim → target 被写为 p2 地址
 结果: target 处被写入一个堆地址（配合 IO_FILE 攻击改 _IO_list_all 等）
-注意: glibc 2.42 已修补此路径
+注意: glibc 2.30 起加了双检查，但新插入 chunk 比当前最小还小时不检查 bk_nextsize 链——这是唯一可用路径，构造时 victim(p2) size 必须严格小于已在 bin 的 p1
 ```
+**2.42 补后替代**: House of Water / Tangerine / tcache_metadata_hijacking（§5/§6/§7）
+
+#### fastbin_reverse_into_tcache（2.26-2.41，⚠2.42 已补）
+1. **标准操作（所有版本）**: free 7 次填满 tcache → victim 进 fastbin → 再 free 6 次填满 fastbin（共 14 次 free）
+2. **2.32+ 额外**: 需堆泄漏（safe-linking）
+3. **优化路径**: 若能控制栈上 ≥8 字节，在栈上放 `stack_addr>>12`（safe-linking 加密的 NULL，即 `(pos>>12)^0`）作为 fake chunk 的 fd → 只需再 free 1 次即可终止 fastbin 遍历（省掉后 6 次 free）
+**2.42 补后替代**: tcache_metadata_hijacking（§7）
+
+#### tcache_stashing_unlink（2.29+）
+1. **必须用 calloc 触发**（calloc 跳过 tcache 直接取 smallbin，才触发"剩余 smallbin 回填 tcache"的逻辑；malloc 会先消费 tcache 不触发）
+2. **需一个 writable 地址**作 fake_chunk->bk（绕过 glibc 的 `bck->fd = bin` 检查，只读地址会 crash）
 
 ## §4 glibc 2.34+ 落点伪造模板
 
@@ -84,6 +109,25 @@ real_addr = encrypted_fd ^ (chunk_addr >> 12)
      使 __doallocate 落在 system / one_gadget
   4. 用 large_bin_attack 或任意写改 _IO_list_all 指向伪造的 _IO_FILE
   5. 调用 exit() → 遍历 _IO_list_all → 触发 _IO_wfile_overflow → vtable 调用 → RCE
+```
+
+**stderr 宽字符 vtable payload 模板**（覆盖 stderr，system(";sh") 触发）:
+```python
+# 偏移相对伪造的 _IO_FILE 起始
+fake = b""
+fake += p32(0xfbad0101) + b";sh\x00"             # +0x00 _flags（含 ";sh" 供 system 切分参数）
+fake = fake.ljust(0x58, b"\x00")
+fake += p64(libc.sym['system'])                    # +0x58 vtable->__doallocate → system
+fake = fake.ljust(0x88, b"\x00")
+fake += p64(addr_of_fake - 0x10)                   # +0x88 _wide_data → 指向自身（伪造 wide_data）
+fake = fake.ljust(0xa0, b"\x00")
+fake += p64(addr_of_fake - 0x10)                   # +0xa0 _wide_data 备份
+fake = fake.ljust(0xc0, b"\x00")
+fake += p32(1)                                     # +0xc0 _mode != 0（走 wide 路径）
+fake = fake.ljust(0xd0, b"\x00")
+fake += p64(addr_of_fake - 0x10)                   # +0xd0 _wide_data->vtable
+fake += p64(libc.sym['_IO_wfile_jumps'] + 0x18 - 0x58)  # +0xd8 vtable 偏移使 __doallocate 命中
+# 用任意写把 fake 写到已知地址 addr_of_fake，再改 stderr 指向它，触发 exit
 ```
 
 ### 落点 B：exit_funcs 劫持
@@ -120,44 +164,51 @@ real_addr = encrypted_fd ^ (chunk_addr >> 12)
 原理: 利用 sysmalloc 对 top chunk 的 _int_free（malloc.c:2913）
 步骤:
   1. malloc 探测当前 top size
-  2. OOB 改 top size 为页对齐（保留 PAGE_MASK 位绕过检查）
+  2. OOB 改 top size: new_top_size = top_size & PAGE_MASK（清掉非页对齐位，绕过 malloc.c:2599 检查）
   3. malloc(SIZE_3)（大于可用 top）→ 旧 top 经 _int_free 进 tcache
   4. 用堆泄漏计算 safe-linking，改 tcache next 指向目标
   5. 两次 malloc 取回目标地址
+关键约束:
+  - freed_top_size = (new_top_size - FENCEPOST) & MALLOC_MASK
+    FENCEPOST = 2*CHUNK_HDR_SZ = 0x20（两个 fencepost chunk 头）
+  - freed_top_size 必须等于目标 tcache size（如 0x40），否则进错 bin
+  - sysmalloc_int_free 适用范围更广（2.27/2.31/2.34/2.39），House of Tangerine 标称 2.34+；
+    2.27-2.33 的无 free 场景应优先用 sysmalloc_int_free
 需要: 5 次 malloc + 3 次 OOB
-源码: how2heap-house_of_tangerine.c（含详细 glibc 代码行引用）
 ```
 
 ### sysmalloc_int_free（同类技术）
-- 源码: how2heap-sysmalloc_int_free.c
 - 与 House of Tangerine 类似，利用 sysmalloc 对超大 top chunk 的 _int_free
+- 适用范围更广（2.27/2.31/2.34/2.39），House of Tangerine 标称 2.34+；2.27-2.33 应优先用此法
 
 ## §6 House of Water（glibc 2.36+，UAF → tcache metadata 控制）
 
 **场景**: 仅 UAF/双 free，无任意写，glibc 2.32-2.39
 
+**目标结构**: `tcache_perthread_struct` 是堆上第一个 chunk（0x290 字节），含 `counts[64]`（每 bin 计数）和 `entries[64]`（每 bin 头指针）。控制 entries[idx] 即可让 `malloc(对应size)` 返回任意地址。entries 存的是**原始指针**（未 safe-linking 加密）。
+
+**前提**: 需要 **arbitrary free** 原语（能 free 任意地址）。用于在 tcache metadata 上方伪造两个假的 chunk 头（size=0x331 和 0x321），使后续操作能控制 metadata。通常配合 house_of_botcake 获得任意 free。
+
 ```
-原理: 把 UAF 转换为 tcache_perthread_struct 元数据控制（任意地址分配）
+核心思路: 把 UAF 转化为对 tcache_perthread_struct 的控制
 步骤:
-  1. 布置 relative_chunk（紧邻 tcache metadata，共享 ASLR 第二 nibble=2）
-  2. 伪造 0x331/0x321 头部使 small_start/end 头部进 0x330/0x320 tcache
-  3. 三块进 unsorted bin，大分配归入同一 small bin
-  4. UAF 改 small_start 的 fd 和 small_end 的 bk 低位为 0x00
-     → 指向 tcache metadata 上的 fake chunk
-  5. 排空 tcache → 从 small bin 取出 → 第三次分配返回 fake chunk
-     → 控制 tcache 元数据 → 任意地址分配
-优势: smallbin 变体无需 4-bit 爆破
-源码: how2heap-house_of_water.c（317 行，含 step-by-step 注释）
+  1. 布置堆布局: 在紧邻 tcache metadata 的位置放两个 chunk（利用它们地址的低位相同）
+  2. 用 arbitrary free 在 metadata 上方伪造假 chunk 头（0x331/0x321），使其被当作 smallbin chunk
+  3. 三块进 unsorted bin → 大分配归入同一 small bin
+  4. UAF 改 smallbin chunk 的 fd/bk 低位为 0x00 → 指向 metadata 上的假 chunk
+  5. 排空 tcache → 从 small bin 取出 → 第三次分配返回 metadata → 改 entries[idx] → 任意地址分配
 ```
 
+**为什么无需 4-bit 爆破**: tcache_perthread_struct 是堆第一个 chunk，地址低 12 位 ≈ 0x290。步骤 1 放的 chunk 紧邻 metadata（同页内），ASLR 第二 nibble（bit 12-15）相同。步骤 4 改 fd/bk 的 LSB 为 0x00 即可让指针落到 metadata 上（metadata+0x200 附近），无需猜测 nibble。
+
 ## §7 版本边界速查（哪些技术在哪个版本被补）
+
+> 以下仅列 §3 速查表未覆盖的版本变化。large_bin_attack / fastbin_reverse 的版本与替代见 §3 原语操作详解。
 
 | 技术 | 有效版本 | 被补版本 | 替代方案 |
 |------|---------|---------|---------|
 | `__malloc_hook`/`__free_hook` | ≤ 2.33 | 2.34 移除 | IO_FILE / exit_funcs / _rtld_global |
-| large_bin_attack | 2.30+ | **2.42 补** | House of Water / Tangerine |
-| fastbin_reverse_into_tcache | 2.26+ | **2.42 补** | tcache_metadata_hijacking |
-| fastbin_dup / house_of_mind_fastbin | < 2.43 | **2.43 补** | 同上 |
+| fastbin_dup / house_of_mind_fastbin | < 2.43 | **2.43 补** | tcache_metadata_hijacking |
 | safe-linking | ≥ 2.32 新增 | 未补 | 泄漏法 / double_protect / unsorted bin |
 
 > **glibc 2.42+ 策略**：优先 House of Water / Tangerine / tcache_metadata_hijacking / exit_funcs / _rtld_global，避开已补的原语。

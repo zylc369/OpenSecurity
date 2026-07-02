@@ -62,7 +62,7 @@ leak = u64(p.recv(6).ljust(8, b'\x00'))
 libc_base = leak - (libc.symbols['main_arena'] + 96)  # 按实际版本调
 
 # 泄漏堆基址（解 safe-linking）
-heap_key = leaked_fd >> 12  # 通常为 0
+heap_key = leaked_fd >> 12  # = fd 字段所在堆页的页号，必须先泄漏堆地址
 ```
 
 ### 步骤 6：落点选择
@@ -94,7 +94,7 @@ patchelf --set-interpreter <ld_path> --set-rpath <libc_dir> <binary>
 | PIE | 代码地址随机 | 先泄漏代码基址（格式化字符串 / 任意读） |
 | Canary | 栈溢出被检测 | 泄漏 canary / 爆破（fork 进程）/ TLS 覆盖法 |
 | NX/DEP | 不可执行 shellcode | ROP / ret2libc / ret2csu |
-| ASLR | 地址随机化 | 信息泄漏（unsorted bin / 格式化字符串） |
+| ASLR | 地址随机化 | 信息泄漏（unsorted bin / 格式化字符串）。注: Linux 5.18+ 弱化了 64-bit 可执行文件 ASLR；32-bit 且库 ≥2MB 时 ASLR 完全失效（影响爆破概率） |
 | seccomp(ORW) | 禁 execve | open→read→write 链；禁 open 则 openat / memfd_create |
 | FORTIFY | 限制危险函数 | 换等价函数绕过 |
 | **内核** SMEP | 内核不可执行用户页 | 内核 ROP / 栈迁移 / pt_regs 做内核 ROP |
@@ -122,7 +122,7 @@ patchelf --set-interpreter <ld_path> --set-rpath <libc_dir> <binary>
 ```python
 # PROTECT_PTR(pos, ptr): encrypted = (pos >> 12) ^ ptr  (pos = fd 字段所在地址, ptr = 目标地址)
 # REVEAL_PTR(pos, enc):  ptr = enc ^ (pos >> 12)
-# 绕过: 泄漏堆地址得到 pos>>12（通常首次为0），或 safe_link_double_protect 无泄漏法
+# 绕过: 泄漏堆地址得到 pos>>12（堆页号，非 0），或 safe_link_double_protect 无泄漏法
 ```
 
 **无 free 函数的场景** → House of Tangerine / sysmalloc_int_free（详见 `pwn-heap-methodology.md`）。
@@ -143,6 +143,7 @@ patchelf --set-interpreter <ld_path> --set-rpath <libc_dir> <binary>
 | 利用链崩在 CFI/PAC | 改用非函数指针落点：modprobe_path / Dirty PageTable / 任意文件写 |
 | 远程超时 | 用 `context.log_level='debug'` 检查交互时序；pwntools `p.recvuntil` 而非 `sleep` |
 | **栈迁移**（溢出空间小，ROP 链放不下） | 方法 A `leave;ret`：覆写 saved rbp = `chain_addr-8`、ret = `leave;ret` gadget → sp 迁到 chain。方法 B `xchg rsp,rax;ret`（rax 持堆/bss 指针）。方法 C `pop rsp;ret`。ARM64：找 `mov sp,x29` 控 x29 |
+| **off-by-null 栈迁移** | off-by-null 清 saved rbp 最低字节（15/16 概率 rbp 偏移到可控 buffer）→ `leave;ret`（等价 `mov rsp,rbp;pop rbp`）→ main 返回时 RSP 落入被 overflow 的 buffer。buffer 铺满 `ret` gadget（ret sled）提高命中概率，末尾放真实 ROP 链 |
 | **格式化字符串偏移定位** | x86-64：`%1`~`%5` 读 rsi/rdx/rcx/r8/r9，`%6` 起读栈。发 `AAAAAAAA %6$p` 数到 `0x4141414141414141`。一键构造：`fmtstr_payload(offset, {addr: val}, write_size='byte')`。ARM64：`%1`~`%8` 读 x0-x7，`%9` 起读栈 |
 | **无泄漏途径（socket fd 操纵法）** | 线程服务器 + BOF 能改 fd：① BOF 替换 fd → close 原 fd ② 给另一个等待 `read` 的 socket 发 RST 包 → `read` 返回 -1 ③ 未初始化栈缓冲通过被替换的 fd 泄漏到另一个 socket |
 | **core_pattern 攻击面** | 脆弱程序注册在 `/proc/sys/kernel/core_pattern` → 构造畸形 ELF 触发崩溃 → core dump 处理器解析 ELF symtab/strtab 时 OOB 读 flag |
