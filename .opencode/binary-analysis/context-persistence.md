@@ -72,11 +72,11 @@ async (input: {
 
 ### 路径自定位机制
 
-Plugin 通过 `import.meta.url` 自定位：插件文件位于扩展目录下的 `plugins/security-analysis.ts`，由此推导 `PLUGIN_DIR`（plugins/）和扩展根目录（Plugin 的父目录）。Agent 脚本目录由 Plugin 根据映射表（如 `binary-analysis` → `<扩展根>/binary-analysis`）推导并注入到系统提示，不依赖 config.json 中的路径配置。此机制同时支持项目级（`.opencode/`）和全局（`~/.config/opencode/`）安装。
+Plugin 通过 `import.meta.url` 自定位：插件文件位于扩展目录下的 `plugins/security-analysis.ts`，由此推导 `PLUGIN_DIR`（plugins/）和扩展根目录（Plugin 的父目录）。Agent 脚本目录由 Plugin 根据映射表（如 `binary-analysis` → `<扩展根>/binary-analysis`）推导并注入到系统提示，不依赖外部配置。此机制同时支持项目级（`.opencode/`）和全局（`~/.config/opencode/`）安装。
 
 ### 数据流
 
-1. **环境信息**（每轮）: `~/bw-security-analysis/config.json`（ida_path + tools）+ `env_cache.json` → Plugin 读取，按 Agent 过滤 tools → `system.transform` 注入到系统提示
+1. **环境信息**（每轮）: `$OPENCODE_ROOT/.ai_env`（IDA_PRO_HOME 等环境变量）+ `env_cache.json`（检测结果）→ Plugin 读取 env_cache，`system.transform` 注入到系统提示
 2. **分析规则**（压缩时）: Plugin 动态生成 COMPACT_REMINDER（按 agentName） → `compacting` hook 注入
 3. **分析状态**（压缩时）: Plugin 动态生成 compaction context（通用部分 + 按 agent 追加） → 告知压缩模型保留分析结论
 4. **知识库**（按需）: Agent 通过 Read 工具按需加载 `knowledge-base/` 下的文档

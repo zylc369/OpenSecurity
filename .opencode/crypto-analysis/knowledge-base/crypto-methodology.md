@@ -17,8 +17,9 @@
 | PRNG、随机数、状态恢复 | 伪随机 | 按子类（LCG/LFSR/Mersenne Twister）查通用资料；LCG 恢复见 `symmetric-and-hash.md` §6 |
 | 构造满足整除/模运算/位运算约束的输入（非给密文求明文） | 数论构造题 | `number-theory-construction.md` |
 | circom/snarkjs/halo2 电路、Σ 协议、`c=H(transcript)` Fiat-Shamir | ZKP（零知识证明） | §5 ZQP 攻击速查（Fiat-Shamir 伪造/欠约束电路/Castryck-Decru SIDH） |
-| 加密/评估 oracle（SEAL/CKKS/BFV）、LWE 参数、噪声预算 | FHE（全同态加密） | §5 速查（噪声/oracle 滥用 → LWE 格归约恢复密钥） |
+| 加密/评估 oracle（SEAL/CKKS/BFV）、LWE 参数、噪声预算 | FHE（全同态加密） | `fhe-attacks.md`（方案识别/密钥恢复/galois/CKKS精度/oracle）；密钥恢复见 `lattice-attacks.md` |
 | Kyber/ML-KEM、Dilithium、LWE/RLWE 公式、SIDH 辅助点映像 | PQC（后量子） | LWE→`lattice-attacks.md`；SIDH→§5 ZQP 攻击速查（Castryck-Decru） |
+| `.sol`/Foundry(`foundry.toml`)/Hardhat、`pragma solidity`、`isSolved()`、RPC 端点 | 智能合约（blockchain） | `blockchain-attacks.md`（delegatecall/重入/access control/整数/签名/随机数/flash loan） |
 
 **判断不清时**：把题目所有参数列出来，看"哪个参数异常"（e 太小/太大、hint 数量、比特长度关系）——异常点就是攻击方向。
 
@@ -153,6 +154,20 @@ phi = (p-1)*(q-1)
 - 共享密钥用 j 不变量恢复: `shared = Ea.isogeny(phiPb+recovered*phiQb, algorithm='factored').codomain().j_invariant()`
 - Fp² → int 密钥: `key = (int(shared[1])<<84) + int(shared[0])`（shared[0]=实部, shared[1]=i 系数）
 - 性能: `proof.arithmetic(False)` + monkey patch `vector_space`/`dimension`；Oudompheng 改进（直接同源）SIKEp434: 10min→22s
+
+### FHE（全同态加密）参数
+
+> 详见 `$AGENT_DIR/knowledge-base/fhe-attacks.md`（方案识别/攻击向量决策树/galois滥用/CKKS精度/oracle）
+
+| 参数特征 | 攻击方向 |
+|---------|---------|
+| SEAL/TenSEAL/PALISADE + BFV/CKKS 参数 | FHE 题 → 按交互选路（密钥恢复/galois/CKKS精度/oracle） |
+| 参数弱（N≤1024、q 小）+ 多密文 | RLWE 格归约恢复密钥（见 lattice-attacks.md） |
+| 题目给 galois elements 选择权 | galois 滥用：旋转系数提取/聚合 |
+| CKKS + 精度/解码差异 | 精度泄露/枚举 |
+| 提供加密/评估/解密 oracle | oracle 滥用（选择明文/评估/解密逼近） |
+
+先算噪声预算：BFV 初始 ≈ log2(q/t) bit，`decryptor.invariant_noise_budget(ct)` 查剩余（>0 才能解密）。
 
 ## 6. Coppersmith 变种速查
 

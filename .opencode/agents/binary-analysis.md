@@ -270,6 +270,7 @@ $PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" --output "$TASK_DIR/env.json"
 | `verification-patterns.md` | 需要验证分析结果（license/key/password） |
 | `gui-automation.md` | GUI 自动化操作（视觉驱动方案） |
 | `web-rendering.md` | webfetch 失败后需要渲染 SPA 页面、获取页面截图 |
+| `forensics-methodology.md` | 取证题：拿到 pcap/内存镜像/磁盘镜像/.evtx 日志时 |
 | `process-patch-reference.md` | 使用 process_patch.py 时的完整参数参考 |
 | `arm64-reverse-methodology.md` | arm64 无符号二进制中定位函数和数据（ADRP 搜索、调用约定） |
 | `frida-native-shell-tricks.md` | Frida 中 Java bridge 不可用时的 native 替代方案（popen/fgets） |

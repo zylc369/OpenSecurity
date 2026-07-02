@@ -499,3 +499,49 @@ $text = preg_replace_callback('/!\[(.*?)\]\((.*?)\)/', function($m) {
 - [ ] **重点测试嵌套/非标准结构**（解析器的最大弱点）
 - [ ] 确认渲染后页面的 CSP 保护
 - [ ] 如果是自定义解析器，检查源码中是否有 decode→reprocess 模式
+
+## 9. PHP 特有漏洞
+
+> PHP 语言特性导致的经典漏洞。遇到 PHP 站点（`.php` 文件 / `X-Powered-By: PHP/x.x` 响应头）时逐项检查。
+
+### 9.1 类型混淆（Type Juggling / 弱类型比较）
+PHP `==` 松散比较会隐式转换类型：
+- `"0e12345" == "0e99999"` → **true**（科学计数法都等于 0；哈希以 `0e` 开头全数字可碰撞）
+- `"abc" == 0` → **true**（PHP **<8.0**，字符串转 int 为 0；≥8.0 为 false）
+- `null == false == 0 == ""`（松散相等网）
+- 利用：密码/token/哈希校验用 `==` → 构造 `"0e..."` 哈希或数组 `md5[]=1`（使 md5() 报错返回 null）绕过
+- 防御对照：用 `===` 严格比较
+
+### 9.2 反序列化漏洞
+`unserialize()` 触发对象的魔术方法（`__wakeup`/`__destruct`/`__toString`/`__get`）。若类中这些方法有危险操作（eval/file/include）→ 构造 **POP 链**。
+- 入口：`unserialize($_COOKIE/$_POST/...)`；**phar 反序列化**：`phar://archive.phar` 触发元数据反序列化（无需 unserialize 调用）
+- `__wakeup` 绕过（CVE-2016-7124，PHP <5.6.25 / <7.0.10）：序列化串里属性数声明**大于实际**时 `__wakeup` 不调用
+- 工具：phpggc 生成常见框架（Laravel/Symfony/Monolog）的 payload
+
+### 9.3 伪协议（Stream Wrapper）利用
+LFI 升级为读源码/RCE：
+- `php://filter/convert.base64-encode/resource=index.php` → 读 PHP 源码（绕过执行）
+- `php://input` + POST body（`<?php system($_GET['c']);?>`）→ RCE（需 allow_url_include=On）
+- `data://text/plain;base64,PD9waHAg...` → 直接执行（需 allow_url_include=On）
+- `phar://x.phar` → 触发反序列化（见 9.2）
+- `zip://upload.jpg#shell.php` → 配合上传的 zip 内 shell
+
+### 9.4 disable_functions 绕过
+`disable_functions` 禁用 system/exec/shell_exec 等时的绕过：
+- **LD_PRELOAD**：`putenv("LD_PRELOAD=evil.so")` + `mail()`/`error_log()`（启动 sendmail 子进程加载 so）
+- **iconv（CVE-2024-2961）**：glibc iconv 缓冲区溢出，影响 PHP <8.3.7 / <7.4.30，可 RCE
+- **FFI**：`$ffi = FFI::cdef(...); $ffi->system(...)`（需 FFI.enable）
+- **imap_open / pcntl_exec / mail mta**：未禁用的函数
+
+### 9.5 其他 PHP 高频点
+- 命令注入：`system($cmd)` 未过滤 → `; | && || $()` 分隔符
+- `preg_replace('/pat/e', $replace, $subj)`：`/e` 修饰符对 `$replace` 做 eval（PHP **<7.0**）
+- 参数污染：`?a[]=1&a[]=2` 让期望标量的函数收到数组（类型混淆绕过）
+- `intval()` 截断：`intval("0123")`=83（八进制）、`intval("1e5")`=1
+
+### 检查清单
+- [ ] 比较 token/密码/哈希用 `==` 还是 `===`？（9.1）
+- [ ] 有无 `unserialize` 入口 / phar 处理？（9.2）
+- [ ] LFI 能否用伪协议读源码或 RCE？（9.3）
+- [ ] `disable_functions` 列了什么？哪些可用（mail/putenv/FFI）？（9.4）
+- [ ] PHP 版本？（决定 <8.0 弱类型、<7 的 `/e`、iconv CVE 是否适用）

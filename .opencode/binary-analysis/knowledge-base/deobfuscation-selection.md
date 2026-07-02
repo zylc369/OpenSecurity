@@ -21,6 +21,7 @@
 | 反调试/CRC 校验 | ptrace/rdtsc/TracerPid 检测 + 完整性校验 | Frida hook（返假）/ patch 检测函数 | IDA 条件断点改返回值 |
 | 无混淆纯逻辑 | 反编译可读 | 反编译直读 / angr 反向求解 | — |
 | 自定义密码 | 高熵查找表 / S-box / 魔数常量 | FindCrypt/Signsrch 识别 + Unicorn 建表 | angr 反向爆破 |
+| 自修改代码 (SMC) | `.text` 段运行时被解密/改写；静态看是加密/乱码块，含写代码区的 XOR/解密循环 | **动态 dump 解密后 .text** | Unicorn 模拟解密 routine |
 
 ## §2 控制流平坦化 (CFF) 还原
 
@@ -105,7 +106,46 @@ GoReSym -t -d -p -strings <binary> > symbols.json
 - IDA 9.0+ 内置 Rust FLIRT（1.77-1.81）
 - 关键：demangle + 识别 panic/Option/Result 模式
 
-## §6 关联文件
+## §6 自修改代码 (SMC)
+
+### 识别
+- 静态：`.text` 段含大块高熵/加密数据；存在解密循环（XOR/ADD/查表）且**写目标在 `.text` 段**；写完后跳转执行该区域
+- 反汇编在加密区显示乱码/无效指令；运行后才显真实指令
+- 常配套反调试（防运行时 dump）
+
+### 方法 1：动态 dump（首选）
+解密完成、真实代码执行前下断，dump `.text` 段：
+1. 在解密循环结束处（通常是 `jmp`/`call` 到解密目标）下断
+2. 运行到断点，dump 目标区内存
+3. IDAPython 把 dump 的 bytes 写回 IDB 并重新分析：
+```python
+import idaapi
+data = idaapi.get_bytes(ea, size)   # 运行时读解密后的字节（调试态）
+# 或从外部 dump 文件读
+idaapi.patch_bytes(ea, data)        # 写回 IDB
+idaapi.auto_wait()                  # 重新分析
+```
+
+### 方法 2：Unicorn 模拟解密（无法动态跑时）
+反调试强或环境缺失时，用 Unicorn 离线模拟解密 routine：
+1. 提取解密函数代码 + 加密的 `.text` 数据段
+2. Unicorn 映射内存，把加密数据和 key 载入，执行解密 routine
+3. 从映射的 `.text` 区读出解密后 bytes，再静态分析
+- 模拟执行模板见 `$SHARED_DIR/knowledge-base/unicorn-templates.md`
+
+### 方法 3：静态分析解密算法（解密简单时）
+解密是单字节 XOR / 固定 key / 简单变换时，离线逆运算：
+1. 识别 key 与运算（从解密循环反编译）
+2. IDAPython 对加密区应用逆运算后 `patch_bytes` 写回
+
+### 检查清单
+- `.text` 段是否有写操作（非只读，违反 W^X）
+- 解密 routine 的入口/出口（确定 dump 时机：解密完成、执行前）
+- 是否多层解密（逐层 dump，每层解密后再找下一层）
+
+---
+
+## §7 关联文件
 
 - `$SHARED_DIR/knowledge-base/packer-handling.md` — 加壳/脱壳处理（本文件不含加壳）
 - `$SHARED_DIR/knowledge-base/unicorn-templates.md` — Unicorn 批量模拟模板
