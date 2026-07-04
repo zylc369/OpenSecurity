@@ -68,6 +68,7 @@ python ai-dialogue.py delete -s <session_id>
 |------|--------|------|
 | `--host` | `127.0.0.1` | opencode serve 地址 |
 | `--port` | `4096` | opencode serve 端口 |
+| `--timeout` | `600` | HTTP 请求超时秒数（模型生成长内容时可调大） |
 
 ## --agent 参数说明
 
