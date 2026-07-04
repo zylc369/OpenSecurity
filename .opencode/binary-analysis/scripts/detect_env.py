@@ -86,6 +86,16 @@ def _warn(msg, exc=None, detail=None):
         parts.append(str(detail))
     print(": ".join(parts), file=sys.stderr)
 
+
+_STDERR_TAIL = 600  # 子进程 stderr 诊断截断长度（防日志过长）
+
+
+def _stderr_tail(result):
+    """提取 subprocess 结果的 stderr 前 _STDERR_TAIL 字符（去首尾空白）。
+    用于 _warn 的 detail 参数，统一截断逻辑。"""
+    return (result.stderr or "").strip()[:_STDERR_TAIL]
+
+
 _AI_ENV_TEMPLATE = """\
 # bw-security-analysis 环境变量配置
 # 按需填写，填完保存即可（detect_env 下次自动读取）
@@ -370,7 +380,7 @@ def _detect_package(name, version_via=None):
         if result.returncode == 0:
             return {"available": True, "version": result.stdout.strip() or "unknown"}
         # returncode≠0：记录 stderr 帮助区分"未安装"和"包损坏"
-        _warn(f"检测 {name} 失败（退出码 {result.returncode}）", detail=(result.stderr or "").strip()[:200])
+        _warn(f"检测 {name} 失败（退出码 {result.returncode}）", detail=_stderr_tail(result))
     except subprocess.TimeoutExpired as e:
         _warn(f"检测 {name} 超时（import 可能较慢或卡死）", exc=e)
     except OSError as e:
@@ -384,7 +394,7 @@ def _install_package(pip_name, timeout=60):
         result = subprocess.run(pip_cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode == 0:
             return True
-        _warn(f"pip install {pip_name} 失败（退出码 {result.returncode}）", detail=(result.stderr or "").strip()[:200])
+        _warn(f"pip install {pip_name} 失败（退出码 {result.returncode}）", detail=_stderr_tail(result))
     except subprocess.TimeoutExpired as e:
         _warn(f"pip install {pip_name} 超时（{timeout}s）", exc=e)
     except OSError as e:
@@ -418,7 +428,7 @@ def _detect_playwright_browser():
         if result.returncode == 0 and "True" in result.stdout:
             return True
         if result.returncode != 0:
-            _warn("Playwright 浏览器检测失败（退出码非 0）", detail=(result.stderr or "").strip()[:200])
+            _warn("Playwright 浏览器检测失败（退出码非 0）", detail=_stderr_tail(result))
     except subprocess.TimeoutExpired as e:
         _warn("Playwright 浏览器检测超时（启动可能较慢）", exc=e)
     except OSError as e:
@@ -437,7 +447,7 @@ def _post_install_playwright(timeout=300):
         if result.returncode == 0:
             print("[+] Playwright Chromium 安装成功")
             return True
-        _warn(f"Playwright 浏览器安装失败（退出码 {result.returncode}）", detail=(result.stderr or "").strip()[:200])
+        _warn(f"Playwright 浏览器安装失败（退出码 {result.returncode}）", detail=_stderr_tail(result))
     except subprocess.TimeoutExpired as e:
         _warn(f"Playwright 浏览器安装超时（{timeout}s）", exc=e)
     except OSError as e:
