@@ -92,30 +92,9 @@ permission:
 
 ---
 
-## 阶段 0：任务初始化（强制）
+## 任务初始化
 
-> 每次分析前必须执行，不可跳过。
-
-### 0.1 创建父任务目录
-
-执行以下命令创建任务目录：
-
-```
-$PYTHON_CMD "$SHARED_DIR/scripts/create_task_dir.py"
-```
-
-`$PYTHON_CMD` 和 `$SHARED_DIR` 是 Plugin 注入到上下文中的值，不是 shell 环境变量——执行时替换为实际路径。
-
-**禁止手动 mkdir 或自造目录名**：必须走 `create_task_dir.py`，因为脚本会注册 sessionID 映射，用于压缩恢复。
-
-### 0.2 变量初始化
-
-从 Plugin 注入的环境信息提取：
-
-| 变量 | 来源 | 说明 |
-|------|------|------|
-| `$OPENCODE_ROOT` | 环境信息"配置根目录" | 配置根目录 |
-| `$SHARED_DIR` | 环境信息"共享目录" | binary-analysis/（含 create_task_dir.py） |
+> 用户口头指定最大分析时长（如"分析 2 小时"）时，执行 `$PYTHON_CMD "$SHARED_DIR/scripts/update_max_duration.py" --max-duration <小时数>` 更新。
 
 ---
 
@@ -199,7 +178,7 @@ $TASK_DIR/summary.md
 
 | 纪律 | 规则 |
 |------|------|
-| **阶段 0 强制** | 必须先执行 `$PYTHON_CMD "$SHARED_DIR/scripts/create_task_dir.py"`，拿到 `$TASK_DIR` 后才能进入阶段 1 |
+| **任务目录** | `$TASK_DIR` 由 Plugin 自动创建并注入，可直接使用；分发给子 Agent 时把实际路径写入子 Agent prompt（如 `$TASK_DIR = /path/...`），子 Agent 共用此目录 |
 | **子任务失败** | 子 Agent 返回错误 → 分析原因，决定重试还是调整方案，不要静默跳过 |
 | **上下文控制** | 子 Agent 结果较长时，优先读取磁盘上的报告文件，避免将全部内容塞入上下文 |
 | **用户确认** | 不需要确认，直接分发执行。如果所需工具未安装，停止并告知用户去安装 |

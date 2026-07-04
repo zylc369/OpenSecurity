@@ -56,15 +56,11 @@ permission:
 
 ---
 
-## 阶段 0：任务初始化（强制）
-
-{{buwai-rule:task-initialization}}
-
----
-
 ## 分析执行框架（强制）
 
 > **所有分析型需求必须按此框架执行，不允许跳过任何阶段。**
+
+> 用户口头指定最大分析时长（如"分析 2 小时"）时，执行 `$PYTHON_CMD "$SHARED_DIR/scripts/update_max_duration.py" --max-duration <小时数>` 更新。
 
 ### 阶段 A：信息收集（自动、强制）
 

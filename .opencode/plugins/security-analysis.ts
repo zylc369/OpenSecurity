@@ -259,70 +259,132 @@ type EnvironmentCheckResult = {
   message: string; // ready=true 时为空；否则是给用户看的错误消息
 };
 
-// 预装依赖检查：调 detect_env --check-preinstall <agent>，返回结构化结果。
-// 纯函数——永远 resolve，不 reject（包括 detect_env 崩溃、超时的情况）。
-async function checkPreinstall(
+// 确保任务目录存在（根 session 首次消息时调用）。
+// create_task_dir.py 从 SESSION_ID 环境变量读 sessionID，创建目录 + 注册映射 + 写 .persistence.json。
+// 幂等：同一 sessionID 重复调用返回已有目录（create_task_dir.py 已保证）。
+// 纯函数——永远 resolve，不 reject（包括 create_task_dir 崩溃、超时的情况）。
+async function ensureTaskDir(
+  pythonCmd: string,
+  sessionID: string,
+): Promise<EnvironmentCheckResult> {
+  const script = join(SHARED_DIR, "scripts", "create_task_dir.py");
+  // create_task_dir.py 从 SESSION_ID 环境变量读取（shell.env hook 对 AI 的 bash 注入，
+  // 但 Plugin 直接 spawn 时要显式传）。runProcess 合并 process.env + options.env，PATH 等不丢。
+  const r = await runProcess(
+    pythonCmd,
+    [script],
+    { timeout: 10000, env: { SESSION_ID: sessionID } },
+  );
+  const createdPath = (r.stdout || "").trim();
+  debugLog(
+    `ensureTaskDir: sessionID=${sessionID} status=${r.status} signal=${r.signal}` +
+      ` stdout=${createdPath}` +
+      ` stderr=${(r.stderr || "").slice(0, 200)}`,
+    sessionID,
+  );
+  if (r.error) {
+    return { ready: false, message: `[任务目录创建失败] 无法执行 create_task_dir：${r.error.message}` };
+  }
+  if (r.status !== 0) {
+    return { ready: false, message: `[任务目录创建失败] create_task_dir 退出码 ${r.status}：${(r.stdout || r.stderr || "").slice(0, 200)}` };
+  }
+  // 映射文件已落盘，getTaskDir 现在能读到（null 不缓存，无需 clearTaskDirCache）
+  const taskDir = getTaskDir(sessionID);
+  if (!taskDir) {
+    return { ready: false, message: `[任务目录创建失败] create_task_dir 执行完成但映射未注册（sessionID=${sessionID}）` };
+  }
+  debugLog(`ensureTaskDir: 任务目录已就绪 sessionID=${sessionID} taskDir=${taskDir}`, sessionID);
+  return { ready: true, message: "" };
+}
+
+// 合并的环境检测：调 detect_env.py --agent <name>，一次完成全量检测 + 预装依赖检查。
+// 替代旧的 checkPreinstall（--check-preinstall 模式）。detect_env stdout 输出纯 JSON，
+// 进度日志走 stderr。失败时 errors 含 install_hint 供用户排查。
+// 纯函数——永远 resolve，不 reject。
+async function runDetectEnv(
   agent: string,
   pythonCmd: string,
   sessionID: string,
 ): Promise<EnvironmentCheckResult> {
   const detectEnv = join(SHARED_DIR, "scripts", "detect_env.py");
-
-  // 用统一的跨平台包装函数（Windows 内部用 Bun.spawn 绕开 spawnSync bug，
-  // Unix 内部用 spawnSync）。平台特殊逻辑详见 lib/spawn.ts 的注释。
+  // --agent 触发全量检测后合并 _check_preinstall(agent) 的 errors
+  // --output 把结果写到 $TASK_DIR/env.json（供 agent 分析时参考）；子 session 无 TASK_DIR 时不写
+  const args = [detectEnv, "--agent", agent];
+  const taskDir = getTaskDir(sessionID);
+  if (taskDir) {
+    args.push("--output", join(taskDir, "env.json"));
+  }
   // OPENCODE_ROOT 显式传入子进程（detect_env.py 读它定位 .ai_env）；
-  // 不依赖全局 process.env 副作用，调用处自包含。
+  // CONDA_CMD 供 detect_env 生成准确的 conda 安装提示。
   const condaCmd = getCondaCmd();
   const childEnv: Record<string, string> = { OPENCODE_ROOT };
   if (condaCmd) childEnv.CONDA_CMD = condaCmd;
   const r = await runProcess(
     pythonCmd,
-    [detectEnv, "--check-preinstall", agent],
-    { timeout: 8000, env: childEnv },
+    args,
+    { timeout: 60000, env: childEnv },
   );
 
   debugLog(
-    `check-preinstall 结果: agent=${agent} status=${r.status} signal=${r.signal}` +
-      ` error=${r.error?.message ?? "无"}` +
-      ` stdout=${(r.stdout || "").slice(0, 500)}` +
+    `runDetectEnv: agent=${agent} sessionID=${sessionID} status=${r.status} signal=${r.signal}` +
+      ` stdout_len=${(r.stdout || "").length}` +
       ` stderr=${(r.stderr || "").slice(0, 300)}`,
     sessionID,
   );
   if (r.error) {
-    return { ready: false, message: `[预装检查失败] 无法执行 detect_env（${agent}）：${r.error.message}` };
+    return { ready: false, message: `[环境检测失败] 无法执行 detect_env（${agent}）：${r.error.message}` };
   }
-  if (r.status !== 0) {
-    return { ready: false, message: `[预装检查失败] detect_env 退出码 ${r.status}（${agent}）：${(r.stdout || r.stderr || "").slice(0, 200)}` };
-  }
-  let result: { success?: boolean; errors?: Array<{ package?: string; install_hint?: string }> };
+  let result: { success?: boolean; errors?: Array<string | { package?: string; install_hint?: string }> };
   try {
     result = JSON.parse(r.stdout);
   } catch (e) {
     const msg = (e as Error)?.message ?? String(e);
-    return { ready: false, message: `[预装检查失败] detect_env 输出非合法 JSON（${agent}）：${msg}` };
+    return { ready: false, message: `[环境检测失败] detect_env 输出非合法 JSON（${agent}）：${msg}` };
   }
   if (result.success !== true) {
-    const hints = Array.isArray(result.errors)
-      ? result.errors.map((e) => e.install_hint).filter(Boolean).join("\n")
-      : "";
+    // errors 混合两类：全量检测返回字符串，preinstall 返回 {package, install_hint}
+    const errs = Array.isArray(result.errors) ? result.errors : [];
+    const hints = errs
+      .map((e) => typeof e === "string" ? e : (e.install_hint || e.package || ""))
+      .filter(Boolean)
+      .join("\n");
     return {
       ready: false,
       message: hints
-        ? `[预装依赖缺失] ${agent} 需要的预装依赖未就绪。请先安装：\n${hints}\n装完后重新发送消息。`
-        : `[预装检查未通过] ${agent}：detect_env 返回 success 非 true 但无 errors`,
+        ? `[环境检测未通过] ${agent} 需要的依赖未就绪：\n${hints}\n装完后重新发送消息。`
+        : `[环境检测未通过] ${agent}：detect_env 返回 success 非 true 但无 errors`,
     };
   }
   return { ready: true, message: "" };
 }
 
-// 统一环境检测入口（chat.message 调用此函数，不直接调 checkPreinstall）
-// 检测顺序：conda env 可用性 → 预装依赖
+// 统一环境检测入口（chat.message 调用此函数）
+// 检测顺序：PythonCmd 可用性 → 任务目录初始化（仅根 session）→ 环境检测（全量+预装）
 async function checkEnvironment(agent: string, sessionID: string): Promise<EnvironmentCheckResult> {
   const pythonCmd = getPythonCmd();
   if (!pythonCmd) {
     return { ready: false, message: getCondaInstallHint() };
   }
-  return await checkPreinstall(agent, pythonCmd, sessionID);
+
+  // 任务目录初始化（仅根 session；子 session 共用父 TASK_DIR，由 Coordinator 文字传递）
+  const session = ctx.sessionManager.get(sessionID);
+  const isRootSession = !session?.parentSessionID;
+  if (isRootSession) {
+    const existingTaskDir = getTaskDir(sessionID);
+    if (!existingTaskDir) {
+      debugLog(`checkEnvironment: 根 session 首次消息，初始化任务目录 sessionID=${sessionID}`, sessionID);
+      const taskResult = await ensureTaskDir(pythonCmd, sessionID);
+      if (!taskResult.ready) {
+        return taskResult;
+      }
+    } else {
+      debugLog(`checkEnvironment: 任务目录已存在 sessionID=${sessionID} taskDir=${existingTaskDir}`, sessionID);
+    }
+  } else {
+    debugLog(`checkEnvironment: 子 session，跳过任务目录初始化 sessionID=${sessionID} parentSessionID=${session?.parentSessionID}`, sessionID);
+  }
+
+  return await runDetectEnv(agent, pythonCmd, sessionID);
 }
 
 // 终止 session 并保存错误信息到 sessionData（由 session.idle 事件取出输出）。
@@ -697,7 +759,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     },
 
     // 工具执行前触发（awaited）
-    // 职责：记录时间线（环境变量注入已迁移到 shell.env hook；预装依赖检查由 chat.message 的 checkPreinstall 兜底）
+    // 职责：记录时间线（环境变量注入已迁移到 shell.env hook；任务初始化+环境检测由 chat.message 的 checkEnvironment 兜底）
     "tool.execute.before": async (input, output) => {
       try {
         const sid = input.sessionID;

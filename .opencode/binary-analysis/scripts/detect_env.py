@@ -87,6 +87,13 @@ def _warn(msg, exc=None, detail=None):
     print(": ".join(parts), file=sys.stderr)
 
 
+def _log(msg):
+    """正常进度日志，打到 stderr。
+    stdout 独占给 JSON 输出（默认模式末尾 print(output_json)、--check-preinstall 的 print(json.dumps)），
+    供 Plugin JSON.parse(stdout)。所有 [*]/[+]/[!] 进度必须走 _log 或 _warn，不能直接 print 到 stdout。"""
+    print(msg, file=sys.stderr)
+
+
 _STDERR_TAIL = 600  # 子进程 stderr 诊断截断长度（防日志过长）
 
 
@@ -116,9 +123,7 @@ def _ensure_ai_env_template() -> None:
         os.makedirs(os.path.dirname(AI_ENV_FILE), exist_ok=True)
         with open(AI_ENV_FILE, "w", encoding="utf-8") as f:
             f.write(_AI_ENV_TEMPLATE)
-        # 打到 stderr：--check-preinstall 模式下 Plugin 用 JSON.parse(stdout) 解析输出，
-        # 此提示若走 stdout 会污染 JSON（首次使用 .ai_env 不存在时必现）
-        print(f"[+] 已创建环境变量配置模板: {AI_ENV_FILE}（按需填写后保存）", file=sys.stderr)
+        _log(f"[+] 已创建环境变量配置模板: {AI_ENV_FILE}（按需填写后保存）")
     except OSError as e:
         _warn("创建 .ai_env 模板失败", exc=e)
 
@@ -438,14 +443,14 @@ def _detect_playwright_browser():
 
 def _post_install_playwright(timeout=300):
     """安装 Playwright Chromium 浏览器二进制（约 150-200MB）。"""
-    print("[*] 正在安装 Playwright Chromium 浏览器（首次安装约 150-200MB）...")
+    _log("[*] 正在安装 Playwright Chromium 浏览器（首次安装约 150-200MB）...")
     try:
         result = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
             capture_output=True, text=True, timeout=timeout,
         )
         if result.returncode == 0:
-            print("[+] Playwright Chromium 安装成功")
+            _log("[+] Playwright Chromium 安装成功")
             return True
         _warn(f"Playwright 浏览器安装失败（退出码 {result.returncode}）", detail=_stderr_tail(result))
     except subprocess.TimeoutExpired as e:
@@ -463,7 +468,7 @@ def _check_playwright_post_install(skip_install, errors):
         return
     manual_cmd = f"{sys.executable} -m playwright install chromium"
     if skip_install:
-        print("[!] Playwright 浏览器未安装（--skip-install）")
+        _log("[!] Playwright 浏览器未安装（--skip-install）")
         errors.append(f"Playwright 浏览器未安装。请运行: {manual_cmd}")
     else:
         if not _post_install_playwright():
@@ -583,12 +588,12 @@ def _check_preinstall(agent):
 def run_detection(skip_install=False):
     errors = []
 
-    print(f"[+] Python: {sys.executable}")
+    _log(f"[+] Python: {sys.executable}")
 
-    print("[*] 正在检测 C/C++ 编译器...")
+    _log("[*] 正在检测 C/C++ 编译器...")
     compiler = _detect_compiler()
     if compiler["available"]:
-        print(f"[+] 编译器: {compiler['type']} — {compiler['path']}")
+        _log(f"[+] 编译器: {compiler['type']} — {compiler['path']}")
     else:
         system = platform.system()
         if system == "Windows":
@@ -599,20 +604,20 @@ def run_detection(skip_install=False):
             hint = "请运行: sudo apt install build-essential (Debian/Ubuntu) 或 sudo yum groupinstall 'Development Tools' (RHEL/CentOS)"
         msg = f"C/C++ 编译器未找到。{hint}"
         errors.append(msg)
-        print(f"[!] {msg}")
+        _log(f"[!] {msg}")
 
-    print("[*] 正在检测 Python 架构...")
+    _log("[*] 正在检测 Python 架构...")
     python_arch = platform.architecture()[0]
-    print(f"[+] Python 架构: {python_arch}")
+    _log(f"[+] Python 架构: {python_arch}")
 
     packages = {}
     for dep in PYTHON_PACKAGES:
         if dep.preinstall:
             continue  # 预装依赖不在此处自动装，由 --check-preinstall 单独检查
-        print(f"[*] 正在检测 {dep.name}...")
+        _log(f"[*] 正在检测 {dep.name}...")
         pkg_info = _detect_package(dep.name, version_via=dep.version_via)
         if not pkg_info["available"] and not skip_install:
-            print(f"[*] {dep.name} 未安装，正在自动安装...")
+            _log(f"[*] {dep.name} 未安装，正在自动安装...")
             if _install_package(dep.pip_name):
                 pkg_info = _detect_package(dep.name, version_via=dep.version_via)
                 if not pkg_info["available"]:
@@ -623,42 +628,42 @@ def run_detection(skip_install=False):
                     # 处理 post_install（如 playwright 需要额外安装浏览器）
                     if dep.post_install and dep.name == "playwright":
                         _check_playwright_post_install(skip_install, errors)
-                    print(f"[+] {dep.name} 安装成功: {pkg_info['version']}")
+                    _log(f"[+] {dep.name} 安装成功: {pkg_info['version']}")
                 else:
-                    print(f"[!] {dep.name} 安装后仍无法导入")
+                    _log(f"[!] {dep.name} 安装后仍无法导入")
             else:
                 manual_cmd = f"{sys.executable} -m pip install {dep.pip_name}"
                 if dep.required:
                     errors.append(f"{dep.name} 安装失败，请手动运行: {manual_cmd}")
                 else:
-                    print(f"[!] {dep.name} 安装失败（可选包，不影响核心流程）。手动安装: {manual_cmd}")
+                    _log(f"[!] {dep.name} 安装失败（可选包，不影响核心流程）。手动安装: {manual_cmd}")
         elif pkg_info["available"]:
             # 已安装的包也需要检查 post_install
             if dep.post_install and dep.name == "playwright":
                 _check_playwright_post_install(skip_install, errors)
-            print(f"[+] {dep.name}: {pkg_info['version']}")
+            _log(f"[+] {dep.name}: {pkg_info['version']}")
         else:
             if dep.required:
                 manual_cmd = f"{sys.executable} -m pip install {dep.pip_name}"
                 errors.append(f"{dep.name} 未安装。请运行: {manual_cmd}")
-            print(f"[!] {dep.name} 未安装（--skip-install）")
+            _log(f"[!] {dep.name} 未安装（--skip-install）")
         packages[dep.name] = pkg_info
 
-    print("[*] 正在检测 IDA Pro...")
+    _log("[*] 正在检测 IDA Pro...")
     ida_pro = _detect_ida_pro()
     if ida_pro["available"]:
-        print(f"[+] IDA Pro: {ida_pro['path']}")
+        _log(f"[+] IDA Pro: {ida_pro['path']}")
     else:
-        print("[!] IDA Pro 未配置")
+        _log("[!] IDA Pro 未配置")
 
-    print("[*] 正在检测外部工具...")
+    _log("[*] 正在检测外部工具...")
     tools = _detect_tools()
     for name, info in tools.items():
         if info["available"]:
             ver = info["version"] or "未知版本"
-            print(f"[+] {name}: {ver}")
+            _log(f"[+] {name}: {ver}")
         else:
-            print(f"[!] {name}: 未找到")
+            _log(f"[!] {name}: 未找到")
 
     data = {
         "compiler": compiler,
@@ -685,6 +690,9 @@ def main():
     parser.add_argument("--skip-install", action="store_true", help="跳过自动安装缺失的包")
     parser.add_argument("--check-preinstall", metavar="AGENT",
                         help="检查指定 Agent 的预装依赖是否就绪（不自动装、不缓存），输出 JSON 后退出")
+    parser.add_argument("--agent", metavar="AGENT",
+                        help="当前 agent 名（如 binary-analysis）。传入时在全量检测后额外检查该 agent 的预装依赖，"
+                             "errors 合并到结果。Plugin 用此模式一次调用完成全量+预装检查")
     args = parser.parse_args()
 
     # --check-preinstall：独立的预装依赖检查模式，早退（不走全量检测/缓存）
@@ -697,13 +705,20 @@ def main():
     if cached and not args.force:
         if cached.get("packages"):
             result = {"success": True, "data": cached, "errors": []}
-            print("[*] 使用缓存的环境检测结果（使用 --force 强制重新检测）")
+            _log("[*] 使用缓存的环境检测结果（使用 --force 强制重新检测）")
         else:
-            print("[!] 缓存数据不完整，重新检测...")
+            _log("[!] 缓存数据不完整，重新检测...")
             cached = None
 
     if not cached or args.force:
         result = run_detection(skip_install=args.skip_install)
+
+    # --agent 模式：在全量检测后合并预装依赖检查（preinstall 不缓存，每次实时查）
+    if args.agent:
+        preinstall_result = _check_preinstall(args.agent)
+        if not preinstall_result["success"]:
+            result["errors"].extend(preinstall_result["errors"])
+            result["success"] = False
 
     output_json = json.dumps(result, indent=2, ensure_ascii=False)
 
@@ -711,9 +726,11 @@ def main():
         os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(output_json)
-        print(f"\n[+] 结果已写入: {args.output}")
-    else:
-        print(f"\n{output_json}")
+        _log(f"[+] 结果已写入: {args.output}")
+
+    # stdout 始终输出 JSON（Plugin runDetectEnv 从 stdout 解析；
+    # --output 文件是给 agent 的额外副本，两者内容相同）
+    print(output_json)
 
     if not result["success"]:
         sys.exit(1)

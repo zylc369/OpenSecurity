@@ -66,13 +66,33 @@ def _init_persistence(task_dir, max_duration_hours=DEFAULT_MAX_DURATION_HOURS):
 
 
 def create(max_duration_hours=DEFAULT_MAX_DURATION_HOURS):
-    """创建新任务目录并注册映射"""
+    """创建新任务目录并注册映射。
+
+    幂等：同一 sessionID 重复调用时返回已映射的目录，不新建。
+    防止 Plugin ensureTaskDir 和 agent prompt 命令双重触发时产生孤儿目录。
+    映射文件损坏（非法 JSON / 路径失效）时降级到新建流程。
+    """
+    session_id = os.environ.get("SESSION_ID", "")
+
+    # 幂等检查：sessionID 已有映射则直接返回已有目录
+    if session_id:
+        mapping_file = os.path.join(TASK_SESSIONS, f"{session_id}.json")
+        if os.path.isfile(mapping_file):
+            try:
+                with open(mapping_file) as f:
+                    existing = json.load(f)
+                existing_dir = existing.get("task_dir", "")
+                if existing_dir and os.path.isdir(existing_dir):
+                    print(existing_dir)
+                    return
+            except (json.JSONDecodeError, OSError):
+                pass  # 映射文件损坏，走新建流程覆盖
+
     os.makedirs(WORKSPACE, exist_ok=True)
     name = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + format(random.randint(0, 65535), "04x")
     task_dir = os.path.join(WORKSPACE, name)
     os.makedirs(task_dir, exist_ok=True)
 
-    session_id = os.environ.get("SESSION_ID", "")
     _register(session_id, task_dir)
 
     # 创建 .persistence.json 配置

@@ -31,15 +31,11 @@ permission:
 
 ---
 
-## 阶段 0：任务初始化（强制）
-
-{{buwai-rule:task-initialization}}
-
----
-
 ## 分析执行框架（强制）
 
 > 所有求解型需求按此框架，不跳阶段。
+
+> 用户口头指定最大分析时长（如"分析 2 小时"）时，执行 `$PYTHON_CMD "$SHARED_DIR/scripts/update_max_duration.py" --max-duration <小时数>` 更新。
 
 ### 阶段 A：识别密码学类型（强制）
 
