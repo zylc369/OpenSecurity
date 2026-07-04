@@ -9,7 +9,7 @@ description:
   必需依赖缺失时返回 success: false，Agent 应停止并提示用户安装。
 
 usage:
-  $PYTHON_CMD detect_env.py [--output PATH] [--force] [--skip-install] [--agent AGENT_NAME]
+  $PYTHON_CMD detect_env.py [--output PATH] [--force] [--skip-install] [--check-preinstall AGENT]
 
 level: intermediate
 
@@ -57,6 +57,7 @@ class Dependency:
     # --- tool 专属 ---
     version_cmd: list[str] = field(default_factory=list)
     env_var: str = ""                      # 路径来源(空=靠 PATH which; IDA=IDA_PRO_HOME)
+    executable: str = ""                   # env_var 模式下拼接的可执行名(如 idat); 空=靠 PATH which
 
 
 def _get_opencode_root() -> str:
@@ -71,6 +72,19 @@ def _get_opencode_root() -> str:
 
 
 AI_ENV_FILE = os.path.join(_get_opencode_root(), ".ai_env")
+
+
+def _warn(msg, exc=None, detail=None):
+    """统一的 stderr 诊断日志。
+    所有失败/异常诊断走此函数，确保：格式一致 + 不污染 stdout 的 JSON 输出
+    （--check-preinstall 模式 Plugin 用 JSON.parse(stdout)，诊断信息必须走 stderr）。
+    msg: 操作描述；exc: 异常对象（附带类型名）；detail: 附加信息（如子进程 stderr 片段）。"""
+    parts = [f"[!] {msg}"]
+    if exc is not None:
+        parts.append(f"{type(exc).__name__}: {exc}")
+    if detail:
+        parts.append(str(detail))
+    print(": ".join(parts), file=sys.stderr)
 
 _AI_ENV_TEMPLATE = """\
 # bw-security-analysis 环境变量配置
@@ -92,9 +106,11 @@ def _ensure_ai_env_template() -> None:
         os.makedirs(os.path.dirname(AI_ENV_FILE), exist_ok=True)
         with open(AI_ENV_FILE, "w", encoding="utf-8") as f:
             f.write(_AI_ENV_TEMPLATE)
-        print(f"[+] 已创建环境变量配置模板: {AI_ENV_FILE}（按需填写后保存）")
+        # 打到 stderr：--check-preinstall 模式下 Plugin 用 JSON.parse(stdout) 解析输出，
+        # 此提示若走 stdout 会污染 JSON（首次使用 .ai_env 不存在时必现）
+        print(f"[+] 已创建环境变量配置模板: {AI_ENV_FILE}（按需填写后保存）", file=sys.stderr)
     except OSError as e:
-        print(f"[!] 创建 .ai_env 模板失败: {e}", file=sys.stderr)
+        _warn("创建 .ai_env 模板失败", exc=e)
 
 
 def _load_ai_env() -> None:
@@ -116,8 +132,8 @@ def _load_ai_env() -> None:
                 value = value.strip()
                 if key:
                     os.environ.setdefault(key, value)
-    except OSError:
-        pass
+    except OSError as e:
+        _warn("读取 .ai_env 失败（环境变量未加载，IDA_PRO_HOME 等配置不生效）", exc=e)
 
 PYTHON_PACKAGES: list[Dependency] = [
     # binary-analysis 反混淆/符号执行库（LLM 分析时写临时脚本可能用到）
@@ -149,6 +165,7 @@ EXTERNAL_TOOLS: list[Dependency] = [
         agents=["binary-analysis"], required=True,
         description="反汇编/反编译平台（付费）",
         env_var="IDA_PRO_HOME",
+        executable="idat",
         install_hint=(
             "IDA Pro 未检测到。解决方式：\n"
             "  1. 在 .ai_env 设置 IDA_PRO_HOME（IDA Pro 安装目录）：\n"
@@ -207,8 +224,8 @@ def _load_cache(force=False):
             cache = json.load(f)
         if time.time() - cache.get("timestamp", 0) < CACHE_TTL:
             return cache.get("data")
-    except (json.JSONDecodeError, KeyError):
-        pass
+    except (json.JSONDecodeError, KeyError) as e:
+        _warn("env_cache.json 解析失败或字段缺失，将重新检测", exc=e)
     return None
 
 
@@ -265,8 +282,8 @@ def _detect_msvc():
                         "vcvarsall": vcvarsall,
                     }
                     return result
-        except (subprocess.TimeoutExpired, OSError):
-            pass
+        except (subprocess.TimeoutExpired, OSError) as e:
+            _warn("vswhere 执行失败，改用目录扫描 fallback", exc=e)
 
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
     vs_dir = os.path.join(program_files_x86, "Microsoft Visual Studio")
@@ -352,8 +369,12 @@ def _detect_package(name, version_via=None):
             )
         if result.returncode == 0:
             return {"available": True, "version": result.stdout.strip() or "unknown"}
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+        # returncode≠0：记录 stderr 帮助区分"未安装"和"包损坏"
+        _warn(f"检测 {name} 失败（退出码 {result.returncode}）", detail=(result.stderr or "").strip()[:200])
+    except subprocess.TimeoutExpired as e:
+        _warn(f"检测 {name} 超时（import 可能较慢或卡死）", exc=e)
+    except OSError as e:
+        _warn(f"检测 {name} 异常", exc=e)
     return {"available": False, "version": None}
 
 
@@ -363,11 +384,11 @@ def _install_package(pip_name, timeout=60):
         result = subprocess.run(pip_cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode == 0:
             return True
-        print(f"[!] pip install {pip_name} 失败: {result.stderr.strip()}", file=sys.stderr)
-    except subprocess.TimeoutExpired:
-        print(f"[!] pip install {pip_name} 超时 ({timeout}s)", file=sys.stderr)
+        _warn(f"pip install {pip_name} 失败（退出码 {result.returncode}）", detail=(result.stderr or "").strip()[:200])
+    except subprocess.TimeoutExpired as e:
+        _warn(f"pip install {pip_name} 超时（{timeout}s）", exc=e)
     except OSError as e:
-        print(f"[!] pip install {pip_name} 异常: {e}", file=sys.stderr)
+        _warn(f"pip install {pip_name} 异常", exc=e)
     return False
 
 
@@ -396,8 +417,12 @@ def _detect_playwright_browser():
         )
         if result.returncode == 0 and "True" in result.stdout:
             return True
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+        if result.returncode != 0:
+            _warn("Playwright 浏览器检测失败（退出码非 0）", detail=(result.stderr or "").strip()[:200])
+    except subprocess.TimeoutExpired as e:
+        _warn("Playwright 浏览器检测超时（启动可能较慢）", exc=e)
+    except OSError as e:
+        _warn("Playwright 浏览器检测异常", exc=e)
     return False
 
 
@@ -412,26 +437,43 @@ def _post_install_playwright(timeout=300):
         if result.returncode == 0:
             print("[+] Playwright Chromium 安装成功")
             return True
-        print(f"[!] Playwright 浏览器安装失败: {result.stderr.strip()}", file=sys.stderr)
-    except subprocess.TimeoutExpired:
-        print(f"[!] Playwright 浏览器安装超时 ({timeout}s)", file=sys.stderr)
+        _warn(f"Playwright 浏览器安装失败（退出码 {result.returncode}）", detail=(result.stderr or "").strip()[:200])
+    except subprocess.TimeoutExpired as e:
+        _warn(f"Playwright 浏览器安装超时（{timeout}s）", exc=e)
     except OSError as e:
-        print(f"[!] Playwright 浏览器安装异常: {e}", file=sys.stderr)
+        _warn("Playwright 浏览器安装异常", exc=e)
     return False
+
+
+def _check_playwright_post_install(skip_install, errors):
+    """检测并按需安装 Playwright Chromium 浏览器（post_install 步骤）。
+    包已安装但浏览器二进制可能缺失（需额外 playwright install chromium）。
+    skip_install=True 时仅检测不装，缺失记 error 提示用户手动安装。"""
+    if _detect_playwright_browser():
+        return
+    manual_cmd = f"{sys.executable} -m playwright install chromium"
+    if skip_install:
+        print("[!] Playwright 浏览器未安装（--skip-install）")
+        errors.append(f"Playwright 浏览器未安装。请运行: {manual_cmd}")
+    else:
+        if not _post_install_playwright():
+            errors.append(f"Playwright 浏览器安装失败。请手动运行: {manual_cmd}")
 
 
 def _resolve_tool(dep: Dependency) -> tuple[str, bool]:
     """统一的工具路径解析，由 dep 字段驱动。
     有 env_var: 读环境变量（系统 env > .ai_env，_load_ai_env 已 setdefault 合并）指向的目录，
-                拼接 idat（当前仅 IDA Pro 使用此模式）
+                拼接 dep.executable（如 ida_pro 拼 idat）
     无 env_var: 靠 PATH which（apktool/jadx 等）
     返回 (resolved_path, found)。"""
     if dep.env_var:
         home = os.environ.get(dep.env_var, "")
         if home:
-            idat = "idat.exe" if os.name == "nt" else "idat"
-            cand = os.path.join(home, idat)
-            if os.path.isfile(cand):
+            exe = dep.executable  # env_var 模式由 dep.executable 提供可执行名（如 ida_pro="idat"）
+            if os.name == "nt" and exe and not exe.endswith(".exe"):
+                exe += ".exe"
+            cand = os.path.join(home, exe)
+            if exe and os.path.isfile(cand):
                 return (cand, True)
         return ("", False)
     resolved = shutil.which(dep.name)
@@ -460,8 +502,10 @@ def _get_tool_version(resolved_path, version_cmd):
         r = subprocess.run([resolved_path] + version_cmd, capture_output=True, text=True, timeout=10)
         if r.returncode == 0:
             return (r.stdout.strip() or r.stderr.strip()).split("\n")[0] or None
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+    except subprocess.TimeoutExpired as e:
+        _warn(f"{resolved_path} 版本检测超时", exc=e)
+    except OSError as e:
+        _warn(f"{resolved_path} 版本检测异常", exc=e)
     return None
 
 
@@ -503,7 +547,7 @@ def _check_preinstall(agent):
                 spec = importlib.util.find_spec(dep.name)  # 查找但不执行（毫秒级，不像 import sage 那样慢）
             except Exception as e:
                 # 不静默吞：打印并上抛，让 detect_env 非零退出 → plugin 报 [预装检查失败] 暴露问题
-                print(f"[!] _check_preinstall: find_spec({dep.name}) 异常: {e}", file=sys.stderr)
+                _warn(f"_check_preinstall: find_spec({dep.name}) 异常", exc=e)
                 raise
             missing = spec is None
         else:  # tool
@@ -526,7 +570,7 @@ def _check_preinstall(agent):
     return {"success": len(errors) == 0, "errors": errors}
 
 
-def run_detection(skip_install=False, agent=None):
+def run_detection(skip_install=False):
     errors = []
 
     print(f"[+] Python: {sys.executable}")
@@ -568,12 +612,7 @@ def run_detection(skip_install=False, agent=None):
                 if pkg_info["available"]:
                     # 处理 post_install（如 playwright 需要额外安装浏览器）
                     if dep.post_install and dep.name == "playwright":
-                        if not _detect_playwright_browser():
-                            if not _post_install_playwright():
-                                errors.append(
-                                    "Playwright 浏览器安装失败。请手动运行: "
-                                    f"{sys.executable} -m playwright install chromium"
-                                )
+                        _check_playwright_post_install(skip_install, errors)
                     print(f"[+] {dep.name} 安装成功: {pkg_info['version']}")
                 else:
                     print(f"[!] {dep.name} 安装后仍无法导入")
@@ -586,19 +625,7 @@ def run_detection(skip_install=False, agent=None):
         elif pkg_info["available"]:
             # 已安装的包也需要检查 post_install
             if dep.post_install and dep.name == "playwright":
-                if not _detect_playwright_browser():
-                    if not skip_install:
-                        if not _post_install_playwright():
-                            errors.append(
-                                "Playwright 浏览器安装失败。请手动运行: "
-                                f"{sys.executable} -m playwright install chromium"
-                            )
-                    else:
-                        print("[!] Playwright 浏览器未安装（--skip-install）")
-                        errors.append(
-                            "Playwright 浏览器未安装。请运行: "
-                            f"{sys.executable} -m playwright install chromium"
-                        )
+                _check_playwright_post_install(skip_install, errors)
             print(f"[+] {dep.name}: {pkg_info['version']}")
         else:
             if dep.required:
@@ -646,13 +673,9 @@ def main():
     parser.add_argument("--output", "-o", help="输出 JSON 文件路径")
     parser.add_argument("--force", "-f", action="store_true", help="强制重新检测（忽略缓存）")
     parser.add_argument("--skip-install", action="store_true", help="跳过自动安装缺失的包")
-    parser.add_argument("--agent", help="仅检测指定 Agent 需要的工具（如 binary-analysis, mobile-analysis）",
-                        default=os.environ.get("AGENT_NAME"))
     parser.add_argument("--check-preinstall", metavar="AGENT",
                         help="检查指定 Agent 的预装依赖是否就绪（不自动装、不缓存），输出 JSON 后退出")
     args = parser.parse_args()
-
-    agent = args.agent
 
     # --check-preinstall：独立的预装依赖检查模式，早退（不走全量检测/缓存）
     if args.check_preinstall:
@@ -670,7 +693,7 @@ def main():
             cached = None
 
     if not cached or args.force:
-        result = run_detection(skip_install=args.skip_install, agent=agent)
+        result = run_detection(skip_install=args.skip_install)
 
     output_json = json.dumps(result, indent=2, ensure_ascii=False)
 

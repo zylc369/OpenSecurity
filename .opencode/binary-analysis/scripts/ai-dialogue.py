@@ -15,9 +15,7 @@ agent 参数决定目标模型运行的 agent 上下文（system prompt、工具
 
 import json
 import logging
-import socket
 import sys
-import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
@@ -26,8 +24,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 4096
 DEFAULT_TIMEOUT = 600
-DEFAULT_IDLE_TIMEOUT = 600
-SSE_POLL_INTERVAL = 15  # socket timeout for SSE read polling
 
 
 def _base_url(host: str, port: int) -> str:
@@ -96,93 +92,34 @@ def session_messages(host: str, port: int, session_id: str) -> list[dict]:
     return _request("GET", f"{_base_url(host, port)}/session/{session_id}/messages")
 
 
-# ── 发送消息（核心，v2 API + SSE 空闲超时） ──────────────────
+# ── 发送消息（核心） ──────────────────────────────────────────
 
 def send_message(host: str, port: int, session_id: str, content: str,
                  model_id: str | None = None, provider_id: str | None = None,
-                 timeout: int = DEFAULT_TIMEOUT,
-                 idle_timeout: int = DEFAULT_IDLE_TIMEOUT) -> dict:
-    """向会话发送消息，返回 {"content": "回复文本", "session_id": "...", ...}
+                 timeout: int = DEFAULT_TIMEOUT) -> dict:
+    """向会话发送消息，返回 {"content": "回复文本", "session_id": "...", "message_id": "..."}
 
-    使用 v2 API：提交 prompt（立即返回）→ 监听 SSE 事件流 → 空闲超时检测 → 取最终消息。
-    空闲超时：只要持续有事件（模型输出块、工具执行等），就不会超时。
-    只有连续 idle_timeout 秒无任何事件才超时。
+    使用 v1 同步端点 POST /session/:id/message——阻塞直到模型完整生成后返回。
+    timeout 控制 HTTP 请求超时（socket 级别，模型生成长内容时可能需要调大）。
+
+    TODO: opencode serve 的 v2 API（prompt + SSE + wait）支持空闲超时检测——
+    只要事件流持续推送（text.delta 等）就不超时。但当前实例 v2 执行引擎不可用
+    （session.wait 返回 503），暂时回退 v1。
     """
-    base = _base_url(host, port)
+    body: dict = {
+        "parts": [{"type": "text", "text": content}],
+        "tools": {},
+    }
+    if model_id and provider_id:
+        body["model"] = {"providerID": provider_id, "modelID": model_id}
 
-    # 1. 提交 prompt（v2 API，立即返回）
-    _request("POST", f"{base}/api/session/{session_id}/prompt", {
-        "prompt": {"parts": [{"type": "text", "text": content}]},
-    }, timeout=30)
-
-    # 2. 监听 SSE 事件流，检测空闲超时
-    _monitor_session_activity(host, port, session_id, idle_timeout)
-
-    # 3. 取最新消息（用 v1 端点，返回格式与现有解析一致）
-    result = _request("GET", f"{base}/session/{session_id}/messages")
-    messages = result if isinstance(result, list) else result.get("data", result)
-
-    # 找最新的 assistant 消息
-    for msg in reversed(messages):
-        role = msg.get("info", {}).get("role", msg.get("role", ""))
-        if role == "assistant":
-            return _parse_message_response(msg, session_id)
-
-    return {"session_id": session_id, "content": "", "message_id": ""}
-
-
-def _monitor_session_activity(host: str, port: int, session_id: str, idle_timeout: int):
-    """监听 SSE 事件流，等待 session 处理完成。空闲超时：连续 idle_timeout 秒无事件则放弃。"""
-    base = _base_url(host, port)
-    url = f"{base}/api/event"
-    req = Request(url)
-    req.add_header("Accept", "text/event-stream")
-
-    last_activity = time.time()
-    buf = ""
-
-    try:
-        with urlopen(req, timeout=SSE_POLL_INTERVAL) as resp:
-            while True:
-                try:
-                    chunk = resp.read(4096)
-                    if not chunk:
-                        break
-                    buf += chunk.decode()
-                    last_activity = time.time()
-
-                    while "\n\n" in buf:
-                        raw_event, buf = buf.split("\n\n", 1)
-                        event = _parse_sse_event(raw_event)
-                        if not event:
-                            continue
-                        if event.get("sessionID") != session_id:
-                            continue
-                        etype = event.get("type", "")
-                        if etype in ("session.next.step.ended", "session.next.step.failed"):
-                            return
-                except socket.timeout:
-                    idle = time.time() - last_activity
-                    if idle > idle_timeout:
-                        raise TimeoutError(
-                            f"Idle timeout: no activity for {idle:.0f}s (limit: {idle_timeout}s)"
-                        )
-    except TimeoutError:
-        raise
-    except Exception:
-        pass  # SSE 连接异常不致命，继续取消息
-
-
-def _parse_sse_event(raw: str) -> dict | None:
-    """解析单个 SSE 事件块，提取 data JSON"""
-    for line in raw.strip().split("\n"):
-        if line.startswith("data:"):
-            data = line[5:].strip()
-            try:
-                return json.loads(data)
-            except json.JSONDecodeError:
-                return None
-    return None
+    result = _request(
+        "POST",
+        f"{_base_url(host, port)}/session/{session_id}/message",
+        body,
+        timeout=timeout,
+    )
+    return _parse_message_response(result, session_id)
 
 
 # ── 响应解析 ──────────────────────────────────────────────────
@@ -279,8 +216,6 @@ def build_parser():
                          help=f"opencode serve 端口（默认: {DEFAULT_PORT}）")
         cmd.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                          help=f"HTTP 请求超时秒数（默认: {DEFAULT_TIMEOUT}）")
-        cmd.add_argument("--idle-timeout", type=int, default=DEFAULT_IDLE_TIMEOUT,
-                         help=f"SSE 空闲超时秒数——连续无事件则放弃（默认: {DEFAULT_IDLE_TIMEOUT}）")
 
     return p
 
@@ -311,7 +246,7 @@ def _dispatch(args) -> dict:
 
     if cmd == "send":
         return send_message(args.host, args.port, args.session_id, args.prompt,
-                            timeout=args.timeout, idle_timeout=args.idle_timeout)
+                            timeout=args.timeout)
 
     if cmd == "chat":
         sess = session_create(args.host, args.port, args.target_model,
@@ -320,7 +255,7 @@ def _dispatch(args) -> dict:
         sid = sess["session_id"]
         try:
             msg = send_message(args.host, args.port, sid, args.prompt,
-                               timeout=args.timeout, idle_timeout=args.idle_timeout)
+                               timeout=args.timeout)
             msg["mode"] = "chat"
             return msg
         finally:

@@ -24,6 +24,7 @@ venv/
 ENV/
 env/
 .venv
+.venv_test
 uv.lock
 
 # IDEs
