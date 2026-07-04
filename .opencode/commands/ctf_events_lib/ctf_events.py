@@ -78,6 +78,27 @@ def fmt_weight(w):
     return ("⭐" if w >= WEIGHT_STAR else "") + f"{w:g}"
 
 
+# 赛制/参赛限制的中文标注映射; 未知值原样返回(不强行翻译,避免猜错)
+FORMAT_LABELS = {
+    "Jeopardy": "Jeopardy（解题赛）",
+    "Attack-Defense": "Attack-Defense（攻防赛）",
+    "King of the Hill": "King of the Hill（占点赛）",
+}
+RESTRICTION_LABELS = {
+    "Open": "Open（开放）",
+    "Restricted": "Restricted（限制）",
+    "Individual": "Individual（限个人）",
+}
+
+
+def fmt_format(fmt):
+    return FORMAT_LABELS.get(fmt, fmt or "-")
+
+
+def fmt_restriction(r):
+    return RESTRICTION_LABELS.get(r, r or "-")
+
+
 def venue(e):
     return "现场" if e.get("onsite") else "线上"
 
@@ -114,13 +135,13 @@ def render_ongoing(rows, now):
     if not rows:
         return "### 🔴 进行中\n\n暂无进行中的比赛。\n"
     out = ["### 🔴 进行中（按剩余时间降序）\n"]
-    out.append("| 标题 | 剩余 | 持续 | 格式 | 线上/现场 | 地点 | 权重 | 链接 |")
+    out.append("| 标题 | 剩余 | 持续 | 赛制 | 线上/现场 | 地点 | 权重 | 链接 |")
     out.append("|------|------|------|------|----------|------|------|------|")
     for e, s, f in rows:
         loc = e.get("location") or "-"
         out.append(
             f"| {title(e)} | {fmt_remaining(f, now)} | {fmt_date_range(s, f)} | "
-            f"{e.get('format', '-')} | {venue(e)} | {loc} | "
+            f"{fmt_format(e.get('format'))} | {venue(e)} | {loc} | "
             f"{fmt_weight(e.get('weight', 0))} | {link(e)} |"
         )
     return "\n".join(out) + "\n"
@@ -130,12 +151,12 @@ def render_upcoming(rows):
     if not rows:
         return "### 🟢 即将开始\n\n暂无即将开始的线上比赛。\n"
     out = ["### 🟢 即将开始（按开赛时间升序，⭐=权重≥30）\n"]
-    out.append("| 标题 | 开赛(本地) | 持续 | 格式 | 权限 | 权重 | 链接 |")
+    out.append("| 标题 | 开赛(本地时区) | 持续 | 赛制 | 参赛限制 | 权重 | 链接 |")
     out.append("|------|-----------|------|------|------|------|------|")
     for e, s, f in rows:
         out.append(
             f"| {title(e)} | {fmt_local(s)} | {fmt_date_range(s, f)} | "
-            f"{e.get('format', '-')} | {e.get('restrictions', '-')} | "
+            f"{fmt_format(e.get('format'))} | {fmt_restriction(e.get('restrictions'))} | "
             f"{fmt_weight(e.get('weight', 0))} | {link(e)} |"
         )
     return "\n".join(out) + "\n"

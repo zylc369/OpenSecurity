@@ -26,39 +26,176 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
+from typing import Literal
 
 CACHE_DIR = os.path.expanduser("~/bw-security-analysis")
 CACHE_FILE = os.path.join(CACHE_DIR, "env_cache.json")
 CACHE_TTL = 86400
 
-REQUIRED_PACKAGES = {
+
+@dataclass
+class Dependency:
+    """统一的依赖元数据结构，驱动 Python 包和外部工具的检测分发。
+
+    kind="python": pip/conda 安装的包，用 import/find_spec 检测
+    kind="tool":   外部可执行工具，用 env_var(IDA Pro) 或 PATH which(apktool 等) 定位
+    """
+    name: str                              # python: import名; tool: 标识名(ida_pro/apktool)
+    kind: Literal["python", "tool"]
+    required: bool = True
+    preinstall: bool = False               # True=用户预装只检测不自动装; False=自动安装
+    agents: list[str] = field(default_factory=list)   # 空=所有 agent
+    description: str = ""
+    install_hint: str = ""                 # 缺失时展示给用户的具体指引
+    # --- python 专属 ---
+    pip_name: str | None = None
+    conda_name: str | None = None
+    installer: Literal["pip", "conda"] = "pip"
+    post_install: bool = False
+    version_via: str | None = None         # None | "importlib:PKG"
+    # --- tool 专属 ---
+    version_cmd: list[str] = field(default_factory=list)
+    env_var: str = ""                      # 路径来源(空=靠 PATH which; IDA=IDA_PRO_HOME)
+
+
+def _get_opencode_root() -> str:
+    """获取 OPENCODE_ROOT。优先环境变量（Plugin 启动时写入 process.env.OPENCODE_ROOT），
+    fallback 从脚本位置推导（脚本位于 OPENCODE_ROOT/binary-analysis/scripts/detect_env.py，
+    往上三级即 OPENCODE_ROOT）。两条调用路径都覆盖：agent bash 跑（环境变量在）+
+    Plugin checkPreinstall 直接 spawn（环境变量由 process.env 传播）。"""
+    env = os.environ.get("OPENCODE_ROOT")
+    if env and os.path.isdir(env):
+        return env
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+AI_ENV_FILE = os.path.join(_get_opencode_root(), ".ai_env")
+
+_AI_ENV_TEMPLATE = """\
+# bw-security-analysis 环境变量配置
+# 按需填写，填完保存即可（detect_env 下次自动读取）
+
+# IDA Pro 安装目录（你安装 IDA Pro 的位置，该目录下需有 idat 可执行文件）
+# macOS: /Applications/IDA Professional 9.1.app/Contents/MacOS
+# Linux: /opt/ida-9.0
+# Windows: C:\\Program Files\\IDA Pro 9.0
+IDA_PRO_HOME=
+"""
+
+
+def _ensure_ai_env_template() -> None:
+    """检测到 .ai_env 不存在时自动创建带注释模板（存在则跳过，不重写用户内容）。"""
+    if os.path.isfile(AI_ENV_FILE):
+        return
+    try:
+        os.makedirs(os.path.dirname(AI_ENV_FILE), exist_ok=True)
+        with open(AI_ENV_FILE, "w", encoding="utf-8") as f:
+            f.write(_AI_ENV_TEMPLATE)
+        print(f"[+] 已创建环境变量配置模板: {AI_ENV_FILE}（按需填写后保存）")
+    except OSError as e:
+        print(f"[!] 创建 .ai_env 模板失败: {e}", file=sys.stderr)
+
+
+def _load_ai_env() -> None:
+    """读取 .ai_env（KEY=VALUE），用 setdefault 合并进 os.environ。
+    系统 env 优先级高于 .ai_env（setdefault 不覆盖已存在的 key）。
+    忽略空行和 # 注释行。"""
+    if not os.path.isfile(AI_ENV_FILE):
+        return
+    try:
+        with open(AI_ENV_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                if key:
+                    os.environ.setdefault(key, value)
+    except OSError:
+        pass
+
+PYTHON_PACKAGES: list[Dependency] = [
     # binary-analysis 反混淆/符号执行库（LLM 分析时写临时脚本可能用到）
-    "angr": {"required": True, "pip_name": "angr"},
-    "triton": {"required": True, "pip_name": "triton"},
-    "z3": {"required": True, "pip_name": "z3-solver"},
-    "capstone": {"required": True, "pip_name": "capstone"},
-    "unicorn": {"required": True, "pip_name": "unicorn"},
-    "gmpy2": {"required": True, "pip_name": "gmpy2"},
-    "frida": {"required": True, "pip_name": "frida"},
-    "PIL": {"required": True, "pip_name": "Pillow"},
-    "pyautogui": {"required": True, "pip_name": "pyautogui"},
-    "pyperclip": {"required": True, "pip_name": "pyperclip"},
-    "playwright": {"required": True, "pip_name": "playwright", "post_install": True, "version_via": "importlib:playwright"},
-    "markdownify": {"required": True, "pip_name": "markdownify", "version_via": "importlib:markdownify"},
+    Dependency(name="angr", kind="python", pip_name="angr"),
+    Dependency(name="triton", kind="python", pip_name="triton"),
+    Dependency(name="z3", kind="python", pip_name="z3-solver"),
+    Dependency(name="capstone", kind="python", pip_name="capstone"),
+    Dependency(name="unicorn", kind="python", pip_name="unicorn"),
+    Dependency(name="gmpy2", kind="python", pip_name="gmpy2"),
+    Dependency(name="frida", kind="python", pip_name="frida"),
+    Dependency(name="PIL", kind="python", pip_name="Pillow"),
+    Dependency(name="pyautogui", kind="python", pip_name="pyautogui"),
+    Dependency(name="pyperclip", kind="python", pip_name="pyperclip"),
+    Dependency(name="playwright", kind="python", pip_name="playwright", post_install=True, version_via="importlib:playwright"),
+    Dependency(name="markdownify", kind="python", pip_name="markdownify", version_via="importlib:markdownify"),
     # Web 安全分析包
-    "requests":      {"required": True,  "pip_name": "requests"},
-    "bs4":           {"required": True,  "pip_name": "beautifulsoup4"},
-    "lxml":          {"required": True,  "pip_name": "lxml"},
+    Dependency(name="requests", kind="python", pip_name="requests"),
+    Dependency(name="bs4", kind="python", pip_name="beautifulsoup4"),
+    Dependency(name="lxml", kind="python", pip_name="lxml"),
     # 预装依赖（preinstall）：体积大、不自动装，由 --check-preinstall 按需检查；仅特定 agent 需要
-    "sage": {
-        "required": False,
-        "pip_name": "sagemath-standard",
-        "conda_name": "sage",
-        "agents": ["crypto-analysis"],
-        "preinstall": True,
-        "installer": "conda",
-    },
-}
+    Dependency(name="sage", kind="python", required=False, pip_name="sagemath-standard",
+               conda_name="sage", agents=["crypto-analysis"], preinstall=True, installer="conda"),
+]
+
+
+EXTERNAL_TOOLS: list[Dependency] = [
+    Dependency(
+        name="ida_pro", kind="tool", preinstall=True,
+        agents=["binary-analysis"], required=True,
+        description="反汇编/反编译平台（付费）",
+        env_var="IDA_PRO_HOME",
+        install_hint=(
+            "IDA Pro 未检测到。解决方式：\n"
+            "  1. 在 .ai_env 设置 IDA_PRO_HOME（IDA Pro 安装目录）：\n"
+            "     IDA_PRO_HOME=/Applications/IDA Professional 9.1.app/Contents/MacOS\n"
+            "  2. 或设置系统环境变量 IDA_PRO_HOME（shell export，优先级高于 .ai_env）"
+        ),
+    ),
+    Dependency(
+        name="apktool", kind="tool", preinstall=True,
+        agents=["mobile-analysis"], required=True,
+        version_cmd=["--version"],
+        description="APK 解包+反汇编工具",
+        install_hint="apktool 未找到。安装: brew install apktool (macOS) / 参考 https://ibotpeaches.github.io/Apktool/install/",
+    ),
+    Dependency(
+        name="jadx", kind="tool", preinstall=True,
+        agents=["mobile-analysis"], required=True,
+        version_cmd=["--version"],
+        description="DEX→Java 反编译器",
+        install_hint="jadx 未找到。安装: brew install jadx (macOS) / 参考 https://github.com/skylot/jadx",
+    ),
+    Dependency(
+        name="adb", kind="tool", preinstall=True,
+        agents=["mobile-analysis"], required=True,
+        version_cmd=["version"],
+        description="Android Debug Bridge",
+        install_hint="adb 未找到。安装: brew install --cask android-platform-tools (macOS) / 参考 https://developer.android.com/tools/adb",
+    ),
+    Dependency(
+        name="otool", kind="tool", preinstall=True,
+        agents=["mobile-analysis"], required=False,
+        description="Mach-O 文件查看器（macOS 自带）",
+        install_hint="otool 未找到（macOS 自带，非 macOS 无需配置）",
+    ),
+    Dependency(
+        name="ldid", kind="tool", preinstall=True,
+        agents=["mobile-analysis"], required=False,
+        description="iOS 伪签名工具",
+        install_hint="ldid 未找到。安装: brew install ldid (macOS)",
+    ),
+    Dependency(
+        name="GoReSym", kind="tool", preinstall=True,
+        agents=["binary-analysis"], required=False,
+        description="Go 符号恢复工具",
+        install_hint="GoReSym 未找到。参考 https://github.com/mandiant/GoReSym",
+    ),
+]
 
 def _load_cache(force=False):
     if force:
@@ -234,16 +371,15 @@ def _install_package(pip_name, timeout=60):
     return False
 
 
-def _build_install_cmd(info):
-    """根据 info 的 installer 字段生成安装命令（配置驱动，不硬编码包名）。
+def _build_install_cmd(dep: Dependency):
+    """根据 dep 的 installer 字段生成安装命令（配置驱动，不硬编码包名）。
     用于 _check_preinstall 生成给用户看的 install_hint。
     sys.prefix 在 conda env 里指向 env 根目录（跨平台）。"""
-    installer = info.get("installer", "pip")
-    if installer == "conda":
-        name = info.get("conda_name") or info["pip_name"]
+    if dep.installer == "conda":
+        name = dep.conda_name or dep.pip_name
         conda_cmd = os.environ.get("CONDA_CMD", "conda")
         return f"{conda_cmd} install -p '{sys.prefix}' -y {name}"
-    return f"{sys.executable} -m pip install {info['pip_name']}"
+    return f"{sys.executable} -m pip install {dep.pip_name}"
 
 
 def _detect_playwright_browser():
@@ -284,38 +420,36 @@ def _post_install_playwright(timeout=300):
     return False
 
 
-def _detect_ida_pro():
-    config_file = os.path.join(CACHE_DIR, "config.json")
-    if not os.path.isfile(config_file):
-        return {"available": False, "path": None}
-    try:
-        with open(config_file, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        ida_path = config.get("ida_path", "")
-        idat_name = "idat.exe" if platform.system() == "Windows" else "idat"
-        if ida_path and os.path.isfile(os.path.join(ida_path, idat_name)):
-            return {"available": True, "path": ida_path}
-    except (json.JSONDecodeError, OSError):
-        pass
-    return {"available": False, "path": None}
-
-
-def _resolve_tool_path(path):
-    """解析工具路径：绝对路径检查文件存在性，裸名通过 which 查找。
-    跨平台：Windows 上 shutil.which 自动处理 PATHEXT。"""
-    if os.path.isabs(path):
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            return (path, True)
-        if os.name == "nt":
-            for ext in os.environ.get("PATHEXT", ".exe;.cmd;.bat").split(";"):
-                candidate = path + ext
-                if os.path.isfile(candidate):
-                    return (candidate, True)
-        return (path, False)
-    resolved = shutil.which(path)
+def _resolve_tool(dep: Dependency) -> tuple[str, bool]:
+    """统一的工具路径解析，由 dep 字段驱动。
+    有 env_var: 读环境变量（系统 env > .ai_env，_load_ai_env 已 setdefault 合并）指向的目录，
+                拼接 idat（当前仅 IDA Pro 使用此模式）
+    无 env_var: 靠 PATH which（apktool/jadx 等）
+    返回 (resolved_path, found)。"""
+    if dep.env_var:
+        home = os.environ.get(dep.env_var, "")
+        if home:
+            idat = "idat.exe" if os.name == "nt" else "idat"
+            cand = os.path.join(home, idat)
+            if os.path.isfile(cand):
+                return (cand, True)
+        return ("", False)
+    resolved = shutil.which(dep.name)
     if resolved:
         return (resolved, True)
-    return (path, False)
+    return (dep.name, False)
+
+
+def _detect_ida_pro():
+    """检测 IDA Pro。路径来自 IDA_PRO_HOME 环境变量（系统 env > .ai_env）。
+    返回 idat_path（供 Plugin 拼 $IDAT）。"""
+    ida_dep = next((d for d in EXTERNAL_TOOLS if d.name == "ida_pro"), None)
+    if not ida_dep:
+        return {"available": False, "path": None, "idat_path": None}
+    resolved, found = _resolve_tool(ida_dep)
+    if found:
+        return {"available": True, "path": os.path.dirname(resolved), "idat_path": resolved}
+    return {"available": False, "path": None, "idat_path": None}
 
 
 def _get_tool_version(resolved_path, version_cmd):
@@ -331,56 +465,64 @@ def _get_tool_version(resolved_path, version_cmd):
     return None
 
 
-def _detect_tools(config, agent=None, errors=None):
-    """从 config.json 读取 tools 配置，逐个检测可用性。"""
-    if errors is None:
-        errors = []
-    tools = config.get("tools", {})
+def _detect_tools():
+    """遍历 EXTERNAL_TOOLS registry 全量检测可用性（写入 env_cache 供 Plugin 读取）。
+    IDA Pro 由 _detect_ida_pro 单独处理，此处跳过。
+    env_cache 是全局共享的，故全量检测（不按 agent 过滤）；必需性检查由 --check-preinstall 按 agent 负责。"""
     result = {}
-    for name, cfg in tools.items():
-        if agent and cfg.get("agents") and agent not in cfg.get("agents", []):
-            continue
-        path = cfg.get("path", "")
-        version_cmd = cfg.get("version_cmd", [])
-        resolved, found = _resolve_tool_path(path)
+    for dep in EXTERNAL_TOOLS:
+        if dep.name == "ida_pro":
+            continue  # IDA Pro 由 _detect_ida_pro 单独处理
+        resolved, found = _resolve_tool(dep)
         if found:
-            version = _get_tool_version(resolved, version_cmd)
-            result[name] = {"available": True, "version": version}
+            version = _get_tool_version(resolved, dep.version_cmd)
+            result[dep.name] = {"available": True, "version": version,
+                                "description": dep.description, "resolved_path": resolved}
         else:
-            result[name] = {"available": False, "version": None}
-            if cfg.get("required", False):
-                errors.append(f"必需工具 {name} 未找到: {path}")
+            result[dep.name] = {"available": False, "version": None,
+                                "description": dep.description, "resolved_path": None}
     return result
 
 
 def _check_preinstall(agent):
     """检查指定 Agent 的预装依赖（preinstall 类型）是否就绪。
+    遍历 PYTHON_PACKAGES + EXTERNAL_TOOLS 中 preinstall=True 且 agents 匹配的条目，
+    按 kind 分发检测：python→find_spec，tool→_resolve_tool。
     不自动装、不走 24h 缓存（必须反映用户刚装好的状态）。
-    返回 {success: bool, errors: [{package, install_hint}]}，与 detect_env 输出形状一致。
-    当前进程即 conda env python（由 $PYTHON_CMD 调用），find_spec 直接查 env site-packages。"""
+    缺失一次性收集到 errors（含 install_hint）返回。"""
     import importlib.util
     errors = []
-    for name, info in REQUIRED_PACKAGES.items():
-        if not info.get("preinstall"):
+    for dep in PYTHON_PACKAGES + EXTERNAL_TOOLS:
+        if not dep.preinstall:
             continue
-        if agent not in info.get("agents", []):
+        if dep.agents and agent not in dep.agents:
             continue
-        try:
-            spec = importlib.util.find_spec(name)  # 查找但不执行（毫秒级，不像 import sage 那样慢）
-        except Exception as e:
-            # 不静默吞：打印并上抛，让 detect_env 非零退出 → plugin 报 [预装检查失败] 暴露问题
-            print(f"[!] _check_preinstall: find_spec({name}) 异常: {e}", file=sys.stderr)
-            raise
-        if spec is None:
-            install_cmd = _build_install_cmd(info)
-            # 从条目字段动态生成描述（配置驱动，不硬编码安装器类型）
-            agents_str = "/".join(info.get("agents", []))
-            installer = info.get("installer", "pip")
-            pkg_name = info.get("conda_name") or info["pip_name"]
-            preinstall_desc_part1 = f"预装依赖 {name}（{installer}: {pkg_name}）未安装"
-            desc = f"{agents_str} 需要的{preinstall_desc_part1}" if agents_str else preinstall_desc_part1
-            install_hint = f"{desc}\n安装命令：{install_cmd}"
-            errors.append({"package": name, "install_hint": install_hint})
+        # 按 kind 分发检测
+        if dep.kind == "python":
+            try:
+                spec = importlib.util.find_spec(dep.name)  # 查找但不执行（毫秒级，不像 import sage 那样慢）
+            except Exception as e:
+                # 不静默吞：打印并上抛，让 detect_env 非零退出 → plugin 报 [预装检查失败] 暴露问题
+                print(f"[!] _check_preinstall: find_spec({dep.name}) 异常: {e}", file=sys.stderr)
+                raise
+            missing = spec is None
+        else:  # tool
+            _, found = _resolve_tool(dep)
+            missing = not found
+        if missing:
+            if not dep.required:
+                continue  # 可选依赖缺失不阻塞（required=False），仅全量检测时提示
+            # install_hint 优先用 dep 字段（EXTERNAL_TOOLS 自带），否则 python 包动态生成
+            if dep.install_hint:
+                hint = dep.install_hint
+            else:
+                install_cmd = _build_install_cmd(dep)
+                agents_str = "/".join(dep.agents)
+                pkg_name = dep.conda_name or dep.pip_name
+                preinstall_desc_part1 = f"预装依赖 {dep.name}（{dep.installer}: {pkg_name}）未安装"
+                desc = f"{agents_str} 需要的{preinstall_desc_part1}" if agents_str else preinstall_desc_part1
+                hint = f"{desc}\n安装命令：{install_cmd}"
+            errors.append({"package": dep.name, "install_hint": hint})
     return {"success": len(errors) == 0, "errors": errors}
 
 
@@ -410,40 +552,40 @@ def run_detection(skip_install=False, agent=None):
     print(f"[+] Python 架构: {python_arch}")
 
     packages = {}
-    for name, info in REQUIRED_PACKAGES.items():
-        if info.get("preinstall"):
+    for dep in PYTHON_PACKAGES:
+        if dep.preinstall:
             continue  # 预装依赖不在此处自动装，由 --check-preinstall 单独检查
-        print(f"[*] 正在检测 {name}...")
-        pkg_info = _detect_package(name, version_via=info.get("version_via"))
+        print(f"[*] 正在检测 {dep.name}...")
+        pkg_info = _detect_package(dep.name, version_via=dep.version_via)
         if not pkg_info["available"] and not skip_install:
-            print(f"[*] {name} 未安装，正在自动安装...")
-            if _install_package(info["pip_name"]):
-                pkg_info = _detect_package(name, version_via=info.get("version_via"))
+            print(f"[*] {dep.name} 未安装，正在自动安装...")
+            if _install_package(dep.pip_name):
+                pkg_info = _detect_package(dep.name, version_via=dep.version_via)
                 if not pkg_info["available"]:
                     # 首次 import 可能因动态库初始化延迟失败（如 macOS PyObjC），重试一次
                     time.sleep(1)
-                    pkg_info = _detect_package(name, version_via=info.get("version_via"))
+                    pkg_info = _detect_package(dep.name, version_via=dep.version_via)
                 if pkg_info["available"]:
                     # 处理 post_install（如 playwright 需要额外安装浏览器）
-                    if info.get("post_install") and name == "playwright":
+                    if dep.post_install and dep.name == "playwright":
                         if not _detect_playwright_browser():
                             if not _post_install_playwright():
                                 errors.append(
                                     "Playwright 浏览器安装失败。请手动运行: "
                                     f"{sys.executable} -m playwright install chromium"
                                 )
-                    print(f"[+] {name} 安装成功: {pkg_info['version']}")
+                    print(f"[+] {dep.name} 安装成功: {pkg_info['version']}")
                 else:
-                    print(f"[!] {name} 安装后仍无法导入")
+                    print(f"[!] {dep.name} 安装后仍无法导入")
             else:
-                manual_cmd = f"{sys.executable} -m pip install {info['pip_name']}"
-                if info["required"]:
-                    errors.append(f"{name} 安装失败，请手动运行: {manual_cmd}")
+                manual_cmd = f"{sys.executable} -m pip install {dep.pip_name}"
+                if dep.required:
+                    errors.append(f"{dep.name} 安装失败，请手动运行: {manual_cmd}")
                 else:
-                    print(f"[!] {name} 安装失败（可选包，不影响核心流程）。手动安装: {manual_cmd}")
+                    print(f"[!] {dep.name} 安装失败（可选包，不影响核心流程）。手动安装: {manual_cmd}")
         elif pkg_info["available"]:
             # 已安装的包也需要检查 post_install
-            if info.get("post_install") and name == "playwright":
+            if dep.post_install and dep.name == "playwright":
                 if not _detect_playwright_browser():
                     if not skip_install:
                         if not _post_install_playwright():
@@ -457,13 +599,13 @@ def run_detection(skip_install=False, agent=None):
                             "Playwright 浏览器未安装。请运行: "
                             f"{sys.executable} -m playwright install chromium"
                         )
-            print(f"[+] {name}: {pkg_info['version']}")
+            print(f"[+] {dep.name}: {pkg_info['version']}")
         else:
-            if info["required"]:
-                manual_cmd = f"{sys.executable} -m pip install {info['pip_name']}"
-                errors.append(f"{name} 未安装。请运行: {manual_cmd}")
-            print(f"[!] {name} 未安装（--skip-install）")
-        packages[name] = pkg_info
+            if dep.required:
+                manual_cmd = f"{sys.executable} -m pip install {dep.pip_name}"
+                errors.append(f"{dep.name} 未安装。请运行: {manual_cmd}")
+            print(f"[!] {dep.name} 未安装（--skip-install）")
+        packages[dep.name] = pkg_info
 
     print("[*] 正在检测 IDA Pro...")
     ida_pro = _detect_ida_pro()
@@ -473,23 +615,13 @@ def run_detection(skip_install=False, agent=None):
         print("[!] IDA Pro 未配置")
 
     print("[*] 正在检测外部工具...")
-    config_file = os.path.join(CACHE_DIR, "config.json")
-    tools = {}
-    if os.path.isfile(config_file):
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            tools = _detect_tools(config, agent=agent, errors=errors)
-            for name, info in tools.items():
-                if info["available"]:
-                    ver = info["version"] or "未知版本"
-                    print(f"[+] {name}: {ver}")
-                else:
-                    print(f"[!] {name}: 未找到")
-        except (json.JSONDecodeError, OSError) as e:
-            print(f"[!] 读取工具配置失败: {e}")
-    else:
-        print("[*] config.json 不存在，跳过外部工具检测")
+    tools = _detect_tools()
+    for name, info in tools.items():
+        if info["available"]:
+            ver = info["version"] or "未知版本"
+            print(f"[+] {name}: {ver}")
+        else:
+            print(f"[!] {name}: 未找到")
 
     data = {
         "compiler": compiler,
@@ -508,6 +640,8 @@ def run_detection(skip_install=False, agent=None):
 
 
 def main():
+    _ensure_ai_env_template()
+    _load_ai_env()
     parser = argparse.ArgumentParser(description="逆向分析环境检测")
     parser.add_argument("--output", "-o", help="输出 JSON 文件路径")
     parser.add_argument("--force", "-f", action="store_true", help="强制重新检测（忽略缓存）")

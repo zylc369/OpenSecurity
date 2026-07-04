@@ -88,9 +88,10 @@ $OPENCODE_ROOT/                              # 由插件注入，项目级 .open
 
 Plugin hooks:
   chat.message                      — 追踪 session 的当前 agent 和主 agent
-  experimental.session.compacting   — 压缩时注入分析状态保留提示 + 关键规则
-  experimental.chat.system.transform — 每轮注入环境信息 + 占位符展开（{{buwai-rule:xxx}}）
-  tool.execute.before               — 注入 SESSION_ID 环境变量
+  shell.env                         — 注入环境变量（$SESSION_ID/$PYTHON_CMD/$IDAT 等）到 bash 命令
+  experimental.session.compacting   — 压缩时注入分析状态保留提示 + TASK_DIR + 分析持续性；置 justCompacted 标识
+  experimental.chat.system.transform — 每轮注入环境信息 + 占位符展开；检测 justCompacted 强制重注入
+  tool.execute.before               — 记录工具执行时间线
   event                             — 管理 session 生命周期 + 子 session 继承
 ```
 
