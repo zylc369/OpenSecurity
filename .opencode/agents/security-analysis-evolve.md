@@ -448,7 +448,7 @@ Plugin hooks:
 | Agent prompt（.md 文件） | 检查展开后行数 < 450 + 核心规则仍在 + 知识库索引完整 |
 
 通用规则:
-- 使用 `~/bw-security-analysis/config.json` 中配置的 idat 路径
+- 使用 `$OPENCODE_ROOT/.ai_env` 的 `IDA_PRO_HOME` 配置的 idat 路径（detect_env 检测后写入 env_cache.json）
 - 验证前做数据库锁检测，验证后清理 .id0/.id1/.nam/.til 临时文件
 
 ### 规则 7: 长文档编辑策略

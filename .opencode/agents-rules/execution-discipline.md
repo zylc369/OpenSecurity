@@ -19,7 +19,7 @@
 2. **禁止位置**：workspace 根目录（`~/bw-security-analysis/workspace/`）、项目根目录、系统临时目录
 3. **敏感信息**：Cookie/Token 等必须在 `$TASK_DIR` 中存储
 4. **临时脚本**：仍写入 `$TASK_DIR`（如 `$TASK_DIR/test_xss.py`），不写入其他位置
-5. **异常**：`env_cache.json`、`config.json` 等全局配置文件写入 `~/bw-security-analysis/`（已在 task-initialization 中定义）
+5. **异常**：`env_cache.json` 写入 `~/bw-security-analysis/`，`.ai_env` 写入 `$OPENCODE_ROOT/`（已在 task-initialization 中定义）
 
 ### 自主探索规则
 

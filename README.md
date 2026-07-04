@@ -77,14 +77,14 @@ ln -s "$(pwd)/.opencode" ~/.config/opencode
 
 ### 配置 IDA Pro
 
-首次在 Agent 会话中提到 IDA 时，Agent 会询问 IDA 路径并写入 `~/bw-security-analysis/config.json`。也可以手动配置：
+IDA Pro 路径通过 `IDA_PRO_HOME` 环境变量指定（IDA Pro 安装目录）。detect_env.py 每次运行检查 `$OPENCODE_ROOT/.ai_env`，文件不存在时创建模板，填入 IDA 安装目录即可：
 
-```bash
-# 启动 OpenCode 后，在任意 Agent 会话中执行：
-$PYTHON_CMD "$SHARED_DIR/scripts/detect_env.py"
+```ini
+# $OPENCODE_ROOT/.ai_env
+IDA_PRO_HOME=<IDA Pro 安装目录>
 ```
 
-脚本会自动检测 IDA Pro、编译器、Python 包，并写入 `~/bw-security-analysis/config.json`。
+也可设置系统环境变量 `IDA_PRO_HOME`（优先级高于 .ai_env）。detect_env.py 自动检测 IDA Pro、编译器、Python 包及外部工具，结果写入 `~/bw-security-analysis/env_cache.json`。
 
 ### 第一次分析
 

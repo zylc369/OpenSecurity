@@ -164,25 +164,19 @@ $PYTHON_CMD "$SHARED_DIR/scripts/detect_env.py" --force
 
 如有缺失工具，脚本会给出具体安装指引。
 
-## 配置文件结构
+## 环境变量配置（.ai_env）
 
-`~/bw-security-analysis/config.json` 结构：
+`.ai_env`（KEY=VALUE 纯文本）存放需要用户指定的路径。detect_env.py 每次运行检查，文件不存在时创建模板（创建后不再重写，保留用户填写内容）。
 
-```json
-{
-  "ida_path": "<IDA Pro 安装路径>",
-  "tools": {
-    "tool_name": {
-      "path": "<可执行文件路径或裸名>",
-      "agents": ["agent-name"],
-      "required": true,
-      "version_cmd": ["--version"],
-      "description": "工具描述"
-    }
-  }
-}
+```ini
+# IDA Pro 安装目录（你安装 IDA Pro 的位置，该目录下需有 idat 可执行文件）
+IDA_PRO_HOME=<IDA Pro 安装目录>
 ```
 
-- `tools` 字段为可选，仅移动端分析需要配置
-- `path` 支持裸名（如 `apktool`，通过 PATH 查找）或绝对路径
-- `agents` 指定哪些 Agent 需要此工具，`detect_env.py --agent` 按此过滤
+**IDA_PRO_HOME 示例**:
+- macOS: `/Applications/IDA Professional 9.1.app/Contents/MacOS`
+- Linux: `/opt/ida-9.0`
+- Windows: `C:\Program Files\IDA Pro 9.0`
+
+- 系统环境变量（shell export）优先级高于 `.ai_env`（detect_env 用 setdefault 合并，不覆盖已存在的系统 env）
+- IDA Pro 靠 `IDA_PRO_HOME` 定位（必须配置）；其他外部工具靠 PATH 检测，清单见 detect_env.py 的 EXTERNAL_TOOLS（不在文档维护，避免与代码脱节）

@@ -206,7 +206,7 @@ Plugin 在 system.transform 阶段把占位符替换为 `agents-rules/<name>.md`
 
 `tool.execute.before` hook 做两件事：
 
-- **拦截未初始化的命令**：`config.json` 不存在时，只放行 `create_task_dir`/`detect_env` 等初始化命令，其他全部拦截并提示用户先跑环境检测
+- **预装依赖拦截**：detect_env.py 的 `--check-preinstall` 在 chat.message 检查必需预装依赖（IDA Pro/外部工具/sage），缺失时拦截整个 agent 并提示安装命令
 - **注入环境变量**：每次 bash 命令前缀 `SESSION_ID=... AGENT_NAME=...`，让 Python 脚本能识别当前 session（用于日志路由、task 目录映射）
 
 ## 五、几个"反直觉"但关键的设计

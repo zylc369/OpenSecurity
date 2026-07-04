@@ -12,6 +12,10 @@ export class SessionData {
   readonly parentSessionID?: string;
   /** system.transform hook 触发次数。用于控制环境信息注入频率（前 3 次必注入，之后按频率注入） */
   systemTransformCount = 0;
+  /** 压缩标识。compacting hook 置 true，system.transform 检测到后强制注入环境信息并清 false。
+   *  确保压缩后首次 system.transform 必定注入（不靠频率），防止 compacting 注入的 output.context 被二次压缩删除后变量丢失。
+   *  与 agentSwitchedFrom 同构（设标识 → system.transform 消费 → 清空）。*/
+  justCompacted = false;
   /** 用户最后发消息的时间戳（毫秒）。chat.message 时更新。用于 auto-resume 超时判断：从最后一次用户交互开始计时，而非 session 创建时间 */
   lastUserMessageAt: number;
   /** agent 切换标记。upsert 检测到 agentName 变化时置为旧 agent 名，system.transform 读取后清空 */

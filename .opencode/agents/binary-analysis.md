@@ -40,7 +40,7 @@ permission:
 
 **参数解析**：从用户输入中识别 IDA 数据库路径（绝对/相对/文件名）和分析需求。相对路径先相对于 CWD，找不到则提示绝对路径。路径含空格必须双引号。无法识别则自然提示。
 
-**IDA 路径**：未配置时请用户提供，验证后写入 `~/bw-security-analysis/config.json`（全局数据目录，不提交 git）。
+**IDA 路径**：从 Plugin 注入的环境信息段确认 `$IDAT` 是否可用。未配置时（环境信息段显示"IDA Pro: 未配置"或 `$IDAT` 缺失），引导用户在 `$OPENCODE_ROOT/.ai_env` 填写 `IDA_PRO_HOME=<IDA Pro 安装目录>`，填完重新发消息触发检测。
 
 ---
 
@@ -300,10 +300,6 @@ $PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" --output "$TASK_DIR/env.json"
 - 记住当前会话中的 IDA 数据库文件路径和任务目录
 - 新问题针对同一文件 → 跳过路径解析，仍执行预检查
 - 增量更新 → 直接调用 update.py
-
-### 变量丢失自愈（压缩恢复后执行）
-
-如果上下文压缩后变量丢失，从 Plugin 注入的环境信息段重新提取（compacting hook 会重新注入完整环境信息）。$TASK_DIR 通过 sessionID 映射精确恢复，如仍丢失则直接问用户。
 
 ---
 

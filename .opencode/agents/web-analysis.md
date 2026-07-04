@@ -299,10 +299,6 @@ from bot_analyze import analyze_bot_file
 - 新问题针对同一目标 → 跳过信息收集，直接分析
 - 发现新攻击面 → 增量分析
 
-### 变量丢失自愈（压缩恢复后执行）
-
-如果上下文压缩后变量丢失，从 Plugin 注入的环境信息段重新提取（compacting hook 会重新注入完整环境信息）。$TASK_DIR 通过 sessionID 映射精确恢复，如仍丢失则直接问用户。
-
 ---
 
 ## 任务存档

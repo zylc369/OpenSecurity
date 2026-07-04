@@ -77,14 +77,14 @@ ln -s "$(pwd)/.opencode" ~/.config/opencode
 
 ### Configure IDA Pro
 
-When an agent session first mentions IDA, the agent will ask for the IDA path and write it to `~/bw-security-analysis/config.json`. You can also configure it manually:
+IDA Pro path is specified via the `IDA_PRO_HOME` environment variable (IDA Pro install directory). detect_env.py checks `$OPENCODE_ROOT/.ai_env` on each run, creating a template if absent; fill in the IDA install directory:
 
-```bash
-# After starting OpenCode, run in any agent session:
-$PYTHON_CMD "$SHARED_DIR/scripts/detect_env.py"
+```ini
+# $OPENCODE_ROOT/.ai_env
+IDA_PRO_HOME=<IDA Pro install directory>
 ```
 
-The script auto-detects IDA Pro, compiler, Python packages, and writes to `~/bw-security-analysis/config.json`.
+You can also set the system environment variable `IDA_PRO_HOME` (takes precedence over .ai_env). detect_env.py auto-detects IDA Pro, compiler, Python packages, and external tools, writing results to `~/bw-security-analysis/env_cache.json`.
 
 ### Your First Analysis
 

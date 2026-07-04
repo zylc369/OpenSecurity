@@ -221,9 +221,9 @@ permission:
 - 新问题针对同一文件 → 跳过文件类型检测，仍执行环境检测
 - 需要切换分析路径 → 重新读取 mobile-methodology.md
 
-### 变量丢失自愈（压缩恢复后执行）
+### 压缩后设备状态校验
 
-如果上下文压缩后变量丢失，从 Plugin 注入的环境信息段重新提取（compacting hook 会重新注入完整环境信息）。$TASK_DIR 通过 sessionID 映射精确恢复，如仍丢失则直接问用户。device.json 从 `$TASK_DIR/device.json` 读取，但**必须重新校验设备在线状态**。
+上下文压缩后，device.json 从 `$TASK_DIR/device.json` 读取，但**必须重新校验设备在线状态**（压缩期间设备可能断开）。
 
 ---
 

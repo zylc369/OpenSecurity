@@ -6,7 +6,6 @@ import {
   PLUGIN_DIR,
   OPENCODE_ROOT,
   DATA_DIR,
-  CONFIG_FILE,
   ENV_CACHE_FILE,
   WORKSPACE_DIR,
   TASK_SESSIONS_DIR,
@@ -33,19 +32,6 @@ import { maybeResumeAnalysis } from "./lib/persistence";
 import { recordTimeline, flushTimeline } from "./lib/timeline";
 import { runProcess } from "./lib/spawn";
 
-interface ToolConfig {
-  path: string;
-  agents?: string[];
-  required?: boolean;
-  version_cmd?: string[];
-  description?: string;
-}
-
-interface ConfigData {
-  ida_path?: string;
-  tools?: Record<string, ToolConfig>;
-}
-
 interface EnvData {
   data?: {
     venv_python?: string;
@@ -56,18 +42,18 @@ interface EnvData {
       vcvarsall?: string;
     };
     packages?: Record<string, { available: boolean; version: string }>;
-    tools?: Record<string, { available: boolean; version: string | null }>;
+    ida_pro?: {
+      available: boolean;
+      path: string | null;
+      idat_path?: string | null;
+    };
+    tools?: Record<string, {
+      available: boolean;
+      version: string | null;
+      description?: string;
+      resolved_path?: string | null;
+    }>;
   };
-}
-
-function getToolsForAgent(
-  agentName: string,
-  config: ConfigData,
-): Array<ToolConfig & { name: string }> {
-  if (!config.tools) return [];
-  return Object.entries(config.tools)
-    .filter(([, tool]) => !tool.agents || tool.agents.includes(agentName))
-    .map(([name, tool]) => ({ name, ...tool }));
 }
 
 // 根据 agent 名获取脚本目录；不在映射表中时返回 undefined
@@ -80,22 +66,16 @@ function getScriptDir(
 function getCompactionReminder(agentName: string | undefined): string {
   if (agentName) {
     const promptPath = join(AGENTS_DIR, `${agentName}.md`);
-    const scriptsDir = getScriptDir(agentName);
-    const restoreVars = scriptsDir
-      ? `$OPENCODE_ROOT、$AGENT_DIR、$SHARED_DIR、$TASK_DIR`
-      : `$OPENCODE_ROOT、$TASK_DIR`;
     return `## 压缩恢复指令（压缩时必须保留）
 
 上下文刚被压缩。继续分析前必须：
-1. 重新读取 agent prompt（${promptPath}）获取完整规则
-2. 恢复 ${restoreVars} 等关键变量（见 agent prompt 的"变量丢失自愈"章节）`;
+1. 重新读取 agent prompt（${promptPath}）获取完整规则`;
   }
   return `## 压缩恢复指令（压缩时必须保留）
 
 上下文刚被压缩。继续分析前必须：
 1. 请告知当前使用的是哪个 Agent（如 ${AGENT_BINARY_ANALYSIS}、${AGENT_MOBILE_ANALYSIS}、${AGENT_WEB_ANALYSIS}）
-2. 根据 Agent 名读取 ${AGENTS_DIR}/<agent-name>.md
-3. 恢复 $OPENCODE_ROOT、$AGENT_DIR、$SHARED_DIR、$TASK_DIR 等关键变量`;
+2. 根据 Agent 名读取 ${AGENTS_DIR}/<agent-name>.md`;
 }
 
 function getCompactionContext(agentName: string | undefined): string {
@@ -157,7 +137,6 @@ function getCompactionContext(agentName: string | undefined): string {
 
 async function buildEnvSection(
   agentName: string | undefined,
-  config: ConfigData,
   envInfo: EnvData["data"],
   sessionID?: string,
 ): Promise<string> {
@@ -165,6 +144,7 @@ async function buildEnvSection(
     const scriptsDir = getScriptDir(agentName);
 
     let envSection = `\n## 全局环境和目录位置信息\n**Agent需要这些信息，它们非常关键。如果Agent忽略这些信息，Agent的运行将不符合预期！**\n`;
+    envSection += `> 括号内 \`$XXX\` 为 bash 命令中可直接引用的环境变量名（由 Plugin 注入），不要在命令里写死路径。\n`;
     envSection += `- 项目的OpenCode配置根目录 ($OPENCODE_ROOT)路径，即项目的\`.opencode\`路径，它里面包含项目的所有Agents、Plugins、知识库、工具、脚本: ${OPENCODE_ROOT}\n`;
 
     if (scriptsDir) {
@@ -172,11 +152,10 @@ async function buildEnvSection(
     }
 
     envSection += `- 共享目录 ($SHARED_DIR)路径，它里面有共享的通用的知识、工具和脚本: ${SHARED_DIR}\n`;
-    const idaPath = config.ida_path || "未配置";
-    if (idaPath !== "未配置") {
-      const idatPath = join(idaPath, "idat");
-      envSection += `- IDA Pro: ${idaPath}\n`;
-      envSection += `- IDAT ($IDAT): ${idatPath}\n`;
+    const idaPro = envInfo?.ida_pro;
+    if (idaPro?.available && idaPro.idat_path) {
+      envSection += `- IDA Pro: ${idaPro.path}\n`;
+      envSection += `- IDA Pro 命令行工具 idat ($IDAT): ${idaPro.idat_path}\n`;
     } else {
       envSection += `- IDA Pro: 未配置\n`;
     }
@@ -204,21 +183,14 @@ async function buildEnvSection(
       }
     }
 
-    // 注入外部工具（按 agent 过滤；agent 未知时不过滤，注入全部）
-    if (config.tools) {
-      const tools = agentName
-        ? getToolsForAgent(agentName, config)
-        : Object.entries(config.tools).map(([name, tool]) => ({
-            name,
-            ...tool,
-          }));
-      const envTools = envInfo?.tools || {};
-      for (const tool of tools) {
-        const toolStatus = envTools[tool.name];
-        if (toolStatus?.available) {
-          const ver = toolStatus.version || "可用";
-          envSection += `- ${tool.description || tool.name}: ${tool.path} (${ver})\n`;
-        }
+    // 注入外部工具（状态来自 env_cache.json，detect_env 已按 agent 过滤写入）
+    const envTools = envInfo?.tools || {};
+    for (const [name, toolStatus] of Object.entries(envTools)) {
+      if (toolStatus.available) {
+        const ver = toolStatus.version || "可用";
+        const desc = toolStatus.description || name;
+        const resolved = toolStatus.resolved_path || "";
+        envSection += `- ${desc}: ${resolved} (${ver})\n`;
       }
     }
 
@@ -384,14 +356,12 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   debugLog(`  PLUGIN_DIR: ${PLUGIN_DIR}`);
   debugLog(`  OPENCODE_ROOT: ${OPENCODE_ROOT}`);
   debugLog(`  DATA_DIR: ${DATA_DIR}`);
-  debugLog(`  CONFIG_FILE: ${CONFIG_FILE}`);
   debugLog(`  ENV_CACHE_FILE: ${ENV_CACHE_FILE}`);
   debugLog(`  WORKSPACE_DIR: ${WORKSPACE_DIR}`);
   debugLog(`  TASK_SESSIONS_DIR: ${TASK_SESSIONS_DIR}`);
   debugLog(`  LOGS_DIR: ${LOGS_DIR}`);
   debugLog(`  DEFAULT_LOG: ${DEFAULT_LOG}`);
   debugLog(`  directory param: ${directory}`);
-  debugLog(`  config exists: ${existsSync(CONFIG_FILE)}`);
   debugLog(`  env_cache exists: ${existsSync(ENV_CACHE_FILE)}`);
   debugLog(`  ctx.client: ${!!ctx.client}`);
   debugLog(`  PYTHON_CMD: ${getPythonCmd() ?? "未初始化（等待首次 chat.message 触发）"}`);
@@ -481,15 +451,16 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           return;
         }
         const agentName = session.agentName;
+        // 置压缩标识：system.transform 检测到后强制注入环境信息（不靠频率），注入后清理
+        session.justCompacted = true;
         debugLog(
-          `compacting: sessionID=${sid} agent=${agentName}`,
+          `compacting: sessionID=${sid} agent=${agentName} (justCompacted=true)`,
           sid,
         );
-        const config = readJsonSafe<ConfigData>(CONFIG_FILE, sid);
         const envData = readJsonSafe<EnvData>(ENV_CACHE_FILE, sid);
         const envInfo = envData?.data;
 
-        const envSection = await buildEnvSection(agentName, config || {}, envInfo, sid);
+        const envSection = await buildEnvSection(agentName, envInfo, sid);
         output.context.push(envSection);
         const compactionCtx = getCompactionContext(agentName);
         const compactionReminder = getCompactionReminder(agentName);
@@ -606,23 +577,6 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           );
         }
 
-        const config = readJsonSafe<ConfigData>(CONFIG_FILE, sessionID);
-        if (!config) {
-          debugLog(
-            `[ERROR] system.transform: config.json 不存在（${CONFIG_FILE}），终止会话`,
-            sessionID,
-          );
-          await abortSession(
-            sessionID ?? "",
-            `config.json 不存在（${CONFIG_FILE}），环境未初始化，应该由 AI 调用 detect_env.py 脚本完成初始化工作，但是 AI 没有做到这一点`,
-          );
-          return;
-        }
-        debugLog(
-          `[INFO] system.transform: config.json 加载成功 sessionID=${sessionID}`,
-          sessionID,
-        );
-
         // 环境信息注入频率：
         // 前 3 次都注入（新会话 step=1 时标题生成请求先触发 #1，主聊天 #2，首次工具调用 #3，
         //   都需要拿到环境信息才能正确解析 $SHARED_DIR 等变量）
@@ -630,7 +584,8 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         session.systemTransformCount++;
         const shouldInject =
           session.systemTransformCount <= 3 ||
-          session.systemTransformCount % ENV_INJECTION_FREQUENCY === 0;
+          session.systemTransformCount % ENV_INJECTION_FREQUENCY === 0 ||
+          session.justCompacted;
         // const shouldInject = true; // 目前调试阶段每次都注入，确认稳定后改回按频率注入
 
         if (!shouldInject) {
@@ -644,8 +599,13 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         const envData = readJsonSafe<EnvData>(ENV_CACHE_FILE, sessionID);
         const envInfo = envData?.data;
 
-        const envSection = await buildEnvSection(agentName, config, envInfo, sessionID);
+        const envSection = await buildEnvSection(agentName, envInfo, sessionID);
         output.system.push(envSection);
+        // 注入成功后清理压缩标识（异常时不清理，下次 system.transform 重试注入——比 finally 清理更安全）
+        if (session.justCompacted) {
+          session.justCompacted = false;
+          debugLog(`[INFO] system.transform: 压缩后强制注入完成，清理 justCompacted sessionID=${sessionID}`, sessionID);
+        }
         debugLog(
           `[INFO] system.transform: #${session.systemTransformCount} 注入环境信息 sessionID=${sessionID}, agent=${agentName}, length=${envSection.length}, envSection=\n${envSection}`,
           sessionID,
@@ -712,10 +672,11 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           output.env.TASK_DIR = taskDir;
         }
 
-        // IDAT（从 config.json 读取 ida_path + /idat）
-        const config = readJsonSafe<ConfigData>(CONFIG_FILE, sessionID);
-        if (config?.ida_path) {
-          output.env.IDAT = join(config.ida_path, "idat");
+        // IDAT（从 env_cache.json 的 ida_pro.idat_path 读取，detect_env 检测后写入）
+        const envData = readJsonSafe<EnvData>(ENV_CACHE_FILE, sessionID);
+        const idatPath = envData?.data?.ida_pro?.idat_path;
+        if (idatPath) {
+          output.env.IDAT = idatPath;
         }
 
         debugLog(
@@ -738,9 +699,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     },
 
     // 工具执行前触发（awaited）
-    // 职责：
-    //   1. config.json 不存在时拦截命令（兜底：system.transform 已 abort，此处防竞争条件）
-    //   2. 记录时间线（环境变量注入已迁移到 shell.env hook）
+    // 职责：记录时间线（环境变量注入已迁移到 shell.env hook；预装依赖检查由 chat.message 的 checkPreinstall 兜底）
     "tool.execute.before": async (input, output) => {
       try {
         const sid = input.sessionID;
@@ -767,33 +726,6 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         });
         // 记录开始时间用于计算耗时
         toolStartTimes.set(input.callID, Date.now());
-
-        if (input.tool.toLowerCase() !== "bash") return;
-        const cmd = output.args?.command;
-        if (typeof cmd !== "string" || !cmd) return;
-
-        // config.json 不存在时：只放行初始化相关命令，拦截其他所有命令
-        const configExists = existsSync(CONFIG_FILE);
-        if (!configExists) {
-          const isInitCommand =
-            cmd.includes("create_task_dir") ||
-            cmd.includes("detect_env") ||
-            cmd.includes("config.json");
-          if (!isInitCommand) {
-            const isPowerShell = !!process.env.PSModulePath;
-            const blockedMsg =
-              `[被 Plugin 拦截] 致命错误 config.json 不存在，禁止执行分析命令。` +
-              `请先运行数据初始化：$PYTHON_CMD "$SHARED_DIR/scripts/detect_env.py"`;
-            output.args.command = isPowerShell
-              ? `Write-Error '${blockedMsg}'; exit 1`
-              : `echo '${blockedMsg}' >&2; exit 1`;
-            debugLog(
-              `tool.execute.before: BLOCKED (no config.json) cmd=${cmd.slice(0, 80)}`,
-              sid,
-            );
-            return;
-          }
-        }
       } catch (e) {
         debugLog(`tool.execute.before: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`, input.sessionID);
       }
