@@ -270,11 +270,15 @@ async function checkPreinstall(
 
   // 用统一的跨平台包装函数（Windows 内部用 Bun.spawn 绕开 spawnSync bug，
   // Unix 内部用 spawnSync）。平台特殊逻辑详见 lib/spawn.ts 的注释。
+  // OPENCODE_ROOT 显式传入子进程（detect_env.py 读它定位 .ai_env）；
+  // 不依赖全局 process.env 副作用，调用处自包含。
   const condaCmd = getCondaCmd();
+  const childEnv: Record<string, string> = { OPENCODE_ROOT };
+  if (condaCmd) childEnv.CONDA_CMD = condaCmd;
   const r = await runProcess(
     pythonCmd,
     [detectEnv, "--check-preinstall", agent],
-    { timeout: 8000, env: condaCmd ? { CONDA_CMD: condaCmd } : undefined },
+    { timeout: 8000, env: childEnv },
   );
 
   debugLog(
