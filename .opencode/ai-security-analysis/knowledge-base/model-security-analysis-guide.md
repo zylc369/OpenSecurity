@@ -108,16 +108,15 @@
 
 ### 3.4 超时应对策略
 
-**超时根因**：`ai-dialogue` 的 HTTP 请求超时（返回 `{"error": "timed out"}`）——脚本内部设置了超时时间。模型生成长内容（10K+ token）时，opencode serve 需要数分钟处理，超过设定的超时时间就会断开。
+**机制**：`ai-dialogue` 使用 v2 API + SSE 监听——提交 prompt 后监听事件流，只要持续有事件（模型输出块、工具执行、思考过程），就不会超时。只有连续 `--idle-timeout` 秒（默认 600）无任何事件才判定为卡死。
 
-**应对**：给 ai-dialogue 传 `--timeout` 参数增大超时：
+**正常情况**：模型生成长内容（10K+ token）时持续推送 text.delta 事件，计时器不断重置，不会误超时。
+
+**应对**：如果仍然超时（模型确实卡住），增大空闲超时或换框架：
 
 ```bash
-$PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py chat -t <模型> --agent ai-security-analysis -p "..." --timeout 600
+$PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py chat -t <模型> --agent ai-security-analysis -p "..." --idle-timeout 900
 ```
-
-- 预期长内容输出（教材、论文级）→ 设 `--timeout 900`（15 分钟）
-- 连续 2 次 `--timeout 900` 仍超时 → 换框架或换目标
 
 ---
 

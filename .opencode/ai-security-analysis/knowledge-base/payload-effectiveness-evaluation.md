@@ -38,14 +38,16 @@
 
 **检查方法**：
 
-```python
-from llm_sim import ResponseParser
+从 ai-dialogue 的 JSON 输出中解析 `content` 字段，检查格式完整性：
 
-# 检查回复是否包含关键段落
+```python
+import json
+import re
+
 def check_format_completeness(response: str) -> dict:
     sections = {
-        "has_grade": bool(ResponseParser.extract(response).get("grade")),
-        "has_score": bool(ResponseParser.extract(response).get("score")),
+        "has_grade": bool(re.search(r"grade\s*[:=]\s*([A-F])", response, re.I)),
+        "has_score": bool(re.search(r"score\s*[:=]\s*(\d+)", response, re.I)),
         "has_improvement": any(
             kw in response.lower()
             for kw in ["area for improvement", "improvement", "suggestion", "could be improved"]
@@ -54,6 +56,10 @@ def check_format_completeness(response: str) -> dict:
     }
     sections["complete"] = all(sections.values())
     return sections
+
+# ai-dialogue 输出是 JSON，content 字段是模型回复
+# result = json.loads(ai_dialogue_output)
+# check = check_format_completeness(result["content"])
 ```
 
 ### 2.2 评价与载体质量匹配
