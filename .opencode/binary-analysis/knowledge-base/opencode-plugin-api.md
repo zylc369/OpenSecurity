@@ -75,6 +75,8 @@ async (input: {
 
 **来源**: `vendor/oh-my-openagent/src/index.ts:113-127`
 
+> **注**: security-analysis.ts 未采用 restore 阶段——状态恢复由 compacting hook 在压缩前注入（分析状态保留 + TASK_DIR）+ system.transform 的 justCompacted 强制重注入环境信息；event hook 的 `session.compacted` 仅记录日志。
+
 ---
 
 ### `experimental.chat.messages.transform`

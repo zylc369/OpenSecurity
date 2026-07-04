@@ -67,7 +67,7 @@
     {
       "name": "create_task_dir",
       "file": "create_task_dir.py",
-      "description": "任务目录创建与映射注册：创建时间戳目录 + 注册 sessionID→task_dir 映射（压缩后精确恢复）。SESSION_ID 由 Plugin tool.execute.before hook 注入",
+      "description": "任务目录创建与映射注册：创建时间戳目录 + 注册 sessionID→task_dir 映射（压缩后精确恢复）。SESSION_ID 由 Plugin shell.env hook 注入",
       "params": [],
       "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/create_task_dir.py",
       "added_at": "2026-04-28",

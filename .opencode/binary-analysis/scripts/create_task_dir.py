@@ -15,7 +15,7 @@
                     超过此时间后安全分析 Agent 不再自动恢复。
                     Agent 可在初始化时通过此参数传入用户指定的值。
 
-    sessionID 从环境变量 SESSION_ID 读取（由 Plugin tool.execute.before hook 注入）。
+    sessionID 从环境变量 SESSION_ID 读取（由 Plugin shell.env hook 注入）。
     如果 SESSION_ID 为空，则只创建目录不注册映射。
 
 依赖: 仅标准库（os, json, random, datetime, argparse）

@@ -63,22 +63,20 @@ function getScriptDir(
   return AGENT_SCRIPT_DIRS[agentName || ""] || undefined;
 }
 
-function getCompactionReminder(agentName: string | undefined): string {
-  if (agentName) {
-    const promptPath = join(AGENTS_DIR, `${agentName}.md`);
+function getCompactionReminder(agentName: string): string {
+  // agent prompt 在系统提示（不随压缩丢失），环境信息由 system.transform 强制注入（justCompacted 机制）。
+  // 已知 agent 时无需恢复指令；仅在 agent 身份未知时（如插件重启后 session 恢复丢失 agentName）提示确认。
+  if (!agentName) {
     return `## 压缩恢复指令（压缩时必须保留）
-
-上下文刚被压缩。继续分析前必须：
-1. 重新读取 agent prompt（${promptPath}）获取完整规则`;
-  }
-  return `## 压缩恢复指令（压缩时必须保留）
 
 上下文刚被压缩。继续分析前必须：
 1. 请告知当前使用的是哪个 Agent（如 ${AGENT_BINARY_ANALYSIS}、${AGENT_MOBILE_ANALYSIS}、${AGENT_WEB_ANALYSIS}）
 2. 根据 Agent 名读取 ${AGENTS_DIR}/<agent-name>.md`;
+  }
+  return "";
 }
 
-function getCompactionContext(agentName: string | undefined): string {
+function getCompactionContext(agentName: string): string {
   let context = `## 分析状态（压缩时必须保留）
 
 当总结此会话时，如果包含分析相关内容，你必须保留以下信息：
@@ -457,20 +455,16 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           `compacting: sessionID=${sid} agent=${agentName} (justCompacted=true)`,
           sid,
         );
-        const envData = readJsonSafe<EnvData>(ENV_CACHE_FILE, sid);
-        const envInfo = envData?.data;
-
-        const envSection = await buildEnvSection(agentName, envInfo, sid);
-        output.context.push(envSection);
         const compactionCtx = getCompactionContext(agentName);
         const compactionReminder = getCompactionReminder(agentName);
         output.context.push(compactionCtx);
-        output.context.push(compactionReminder);
+        if (compactionReminder) {
+          output.context.push(compactionReminder);
+        }
 
         debugLog(`=== compacting 注入内容开始 ===`, sid);
         debugLog(`sid:${sid}\n`, sid);
         debugLog(`agent:${agentName}\n`, sid);
-        debugLog(`envSection:\n${envSection}\n`, sid);
         debugLog(`compactionCtx:\n${compactionCtx}\n`, sid);
         debugLog(`compactionReminder:\n${compactionReminder}`, sid);
         debugLog(`=== compacting 注入内容结束 ===`, sid);

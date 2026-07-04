@@ -33,9 +33,10 @@ OpenCode 长对话中存在三类上下文丢失问题：
 | Hook | 作用 | 触发时机 |
 |------|------|---------|
 | `chat.message` | 追踪 session 的当前 agent 和主 agent（primaryAgent），支持子 session 继承 | 用户发送消息时 |
-| `experimental.session.compacting` | 按Agent注入分析状态保留提示 + 动态COMPACT_REMINDER | 上下文压缩前 |
-| `experimental.chat.system.transform` | 按Agent注入环境信息（IDA路径、编译器、工具包、外部工具） | 每轮对话 |
-| `tool.execute.before` | 注入 SESSION_ID 环境变量到 bash 命令 | 工具执行前 |
+| `shell.env` | 注入环境变量（$SESSION_ID/$PYTHON_CMD/$IDAT/$TASK_DIR 等）到 bash 命令 | bash 命令执行前 |
+| `experimental.session.compacting` | 注入分析状态保留提示 + TASK_DIR + 分析持续性；置 justCompacted 标识触发 system.transform 强制重注入 | 上下文压缩前 |
+| `experimental.chat.system.transform` | 注入环境信息（IDA路径、编译器、工具包、外部工具）+ 占位符展开；检测 justCompacted 强制注入 | 每轮对话 |
+| `tool.execute.before` | 记录工具执行时间线 | 工具执行前 |
 | `event` | 管理 session 生命周期（created/deleted/compacted），子 session primaryAgent 继承 | session 状态变化 |
 
 ### Hook API 签名（基于 oh-my-openagent 源码确认）
@@ -76,10 +77,9 @@ Plugin 通过 `import.meta.url` 自定位：插件文件位于扩展目录下的
 
 ### 数据流
 
-1. **环境信息**（每轮）: `$OPENCODE_ROOT/.ai_env`（IDA_PRO_HOME 等环境变量）+ `env_cache.json`（检测结果）→ Plugin 读取 env_cache，`system.transform` 注入到系统提示
-2. **分析规则**（压缩时）: Plugin 动态生成 COMPACT_REMINDER（按 agentName） → `compacting` hook 注入
-3. **分析状态**（压缩时）: Plugin 动态生成 compaction context（通用部分 + 按 agent 追加） → 告知压缩模型保留分析结论
-4. **知识库**（按需）: Agent 通过 Read 工具按需加载 `knowledge-base/` 下的文档
+1. **环境信息**（每轮/压缩后强制）: `$OPENCODE_ROOT/.ai_env`（IDA_PRO_HOME 等环境变量）+ `env_cache.json`（检测结果）→ Plugin 读取 env_cache，`system.transform` 注入到系统提示；compacting 置 justCompacted 标识，触发 system.transform 强制重注入
+2. **分析状态**（压缩时）: Plugin 生成 compaction context（通用部分 + 按 agent 追加）→ 告知压缩模型保留分析结论；同时注入 TASK_DIR + 分析持续性提示
+3. **知识库**（按需）: Agent 通过 Read 工具按需加载 `knowledge-base/` 下的文档
 
 ### 环境数据缓存
 
@@ -94,4 +94,4 @@ Plugin 通过 `import.meta.url` 自定位：插件文件位于扩展目录下的
 ## 扩展方向
 
 - **分析状态持久化**: 将分析中的关键发现写入 `~/bw-security-analysis/workspace/<task_id>/findings.json`，跨 session 复用
-- **压缩后自动恢复**: 通过 `event` hook 的 `session.compacted` 事件，自动读取 findings.json 并注入
+- **压缩后恢复**: compacting hook 在压缩前注入分析状态保留提示 + TASK_DIR（告知压缩模型保留分析结论）；event hook 的 `session.compacted` 仅记录日志（状态恢复已由 compacting 在压缩前完成）

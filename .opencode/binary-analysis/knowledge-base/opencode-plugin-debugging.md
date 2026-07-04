@@ -21,7 +21,7 @@ node --check .opencode/plugins/security-analysis.ts
 2. 发送一条消息
 3. 观察：
    - 如果 `system.transform` 正常工作，Agent 的系统提示中应包含环境信息段
-   - 如果 `compacting` hook 正常工作，压缩后 Agent 应仍遵守关键规则
+   - 如果 `compacting` hook 正常工作，压缩后 Agent 应仍能看到分析状态保留（TASK_DIR、已完成的分析结论）
    - 如果 `event` hook 正常工作，session 创建/删除不会报错
 
 ### 3. 环境信息注入验证
@@ -43,9 +43,11 @@ node --check .opencode/plugins/security-analysis.ts
 
 **验证方法**:
 1. 启动长对话，让上下文积累到触发压缩
-2. 压缩后让 Agent "列出 BinaryAnalysis 的关键规则"
-3. 如果 Agent 能列出 ①-⑧ 规则 → compacting hook 正常
-4. 如果 Agent 完全不知道规则 → compacting hook 未生效
+2. 压缩后让 Agent "描述当前的任务目录和已完成的分析结论"
+3. 如果 Agent 能说出 TASK_DIR 路径和之前的分析进度 → compacting hook 正常（分析状态保留 + justCompacted 触发 system.transform 重注入环境信息）
+4. 如果 Agent 完全不知道任务目录或分析进度 → compacting hook 未生效（检查 output.context.push 和 justCompacted 标识）
+
+**注**: agent prompt 本身在系统提示（不随压缩丢失），无需验证"规则保留"——规则丢失说明系统提示注入有问题，不是 compacting 问题。
 
 **触发压缩的快捷方式**: 对话足够长后，OpenCode 会自动压缩。也可以在 OpenCode 设置中调低压缩阈值来加速测试。
 
@@ -147,11 +149,11 @@ oh-my-openagent 使用 `src/shared/logger.ts` 写日志，包含 hook 创建、�
 3. 问"当前环境有哪些工具？"
 4. 验证：Agent 应列出 capstone、unicorn、gmpy2 等信息
 
-### 场景 3: 压缩后规则保持测试
+### 场景 3: 压缩后分析状态保持测试
 
-1. 进行长对话（直到触发压缩）
-2. 压缩后问"BinaryAnalysis 有哪些关键规则？"
-3. 验证：Agent 应至少知道"禁止作弊式验证"、"计算密集型用 C"等核心规则
+1. 进行长对话（直到触发压缩），期间产出分析结论（如已识别的函数地址）
+2. 压缩后问"当前任务目录在哪？之前分析了什么？"
+3. 验证：Agent 应能说出 $TASK_DIR 路径和已完成的分析结论（compacting 注入分析状态 + justCompacted 触发环境信息重注入）
 
 ---
 
@@ -161,6 +163,6 @@ oh-my-openagent 使用 `src/shared/logger.ts` 写日志，包含 hook 创建、�
 |------|------|------|
 | Plugin 语法检查通过但不生效 | 导出名称不匹配 | 确认 `export const SecurityAnalysisPlugin` |
 | 环境信息为空 | env_cache.json 不存在 | 运行 `detect_env.py --force` 生成 |
-| 压缩后规则丢失 | compacting hook 未注入 | 检查 output.context.push() 调用 |
+| 压缩后环境信息/分析状态丢失 | compacting 未注入或 justCompacted 未触发 system.transform 重注入 | 检查 output.context.push() + session.justCompacted 标识 |
 | Agent 未在 Tab 列表中显示 | frontmatter 格式错误 | 检查 YAML --- 分隔符 |
 | Agent 加载但不读知识库 | prompt 中引用路径错误 | 确认使用 `$SHARED_DIR/knowledge-base/` |
