@@ -173,7 +173,7 @@ $PYTHON_CMD "$SHARED_DIR/scripts/detect_env.py" --force
 IDA_PRO_HOME=<IDA Pro 安装目录>
 ```
 
-**IDA_PRO_HOME 示例**:
+**IDA_PRO_HOME 是指 IDA Pro 的安装根目录，示例**:
 - macOS: `/Applications/IDA Professional 9.1.app/Contents/MacOS`
 - Linux: `/opt/ida-9.0`
 - Windows: `C:\Program Files\IDA Pro 9.0`
