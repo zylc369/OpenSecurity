@@ -1,13 +1,16 @@
-"""AI 安全分析对话工具 — 通过 OpenCode serve API 与目标模型进行多轮对话
+"""通用 AI 对话工具 — 通过 opencode serve 与目标模型对话
 
 架构：
-  本工具 → HTTP → 127.0.0.1:4096 (opencode serve) → 目标模型
+  本工具 → HTTP → 127.0.0.1:4096 (opencode serve) → 供应商 → 目标模型
 
 能力：
-  - 创建指定模型的会话，获取 session_id
+  - 创建指定模型 + agent 的会话，获取 session_id
   - 用同一个 session_id 连续发消息（多轮对话，上下文自动保持）
   - 列出/删除会话
   - 上下文压缩（summarize）
+
+agent 参数决定目标模型运行的 agent 上下文（system prompt、工具链、规则）。
+例如 --agent ai-security-analysis 让目标模型在 ai-security-analysis agent 上下文中运行。
 """
 
 import json
@@ -20,19 +23,21 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 4096
+DEFAULT_TIMEOUT = 600
 
 
 def _base_url(host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
-def _request(method: str, url: str, body: dict | None = None) -> dict:
-    """发送 HTTP 请求到 OpenCode serve，返回 JSON 响应"""
+def _request(method: str, url: str, body: dict | None = None,
+             timeout: int = DEFAULT_TIMEOUT) -> dict:
+    """发送 HTTP 请求到 opencode serve，返回 JSON 响应"""
     data = json.dumps(body, ensure_ascii=False).encode() if body else None
     req = Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
     try:
-        with urlopen(req, timeout=300) as resp:
+        with urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode()
             if not raw:
                 return {}
@@ -43,21 +48,22 @@ def _request(method: str, url: str, body: dict | None = None) -> dict:
             err = json.loads(raw)
         except json.JSONDecodeError:
             err = {"error": raw}
-        raise RuntimeError(f"OpenCode API 错误 ({exc.code}): {err}") from exc
+        raise RuntimeError(f"opencode API 错误 ({exc.code}): {err}") from exc
 
 
 # ── 会话管理 ──────────────────────────────────────────────────
 
 def session_create(host: str, port: int, model_id: str, provider_id: str,
-                   title: str | None = None) -> dict:
+                   agent: str, title: str | None = None,
+                   timeout: int = DEFAULT_TIMEOUT) -> dict:
     """创建新会话，返回 {"session_id": "...", ...}"""
     body = {
         "model": {"id": model_id, "providerID": provider_id},
-        "agent": "opencode",
+        "agent": agent,
     }
     if title:
         body["title"] = title
-    result = _request("POST", f"{_base_url(host, port)}/session", body)
+    result = _request("POST", f"{_base_url(host, port)}/session", body, timeout=timeout)
     return _parse_session(result)
 
 
@@ -89,10 +95,11 @@ def session_messages(host: str, port: int, session_id: str) -> list[dict]:
 # ── 发送消息（核心） ──────────────────────────────────────────
 
 def send_message(host: str, port: int, session_id: str, content: str,
-                 model_id: str | None = None, provider_id: str | None = None) -> dict:
+                 model_id: str | None = None, provider_id: str | None = None,
+                 timeout: int = DEFAULT_TIMEOUT) -> dict:
     """向会话发送消息，返回 {"content": "回复文本", "session_id": "...", "message_id": "..."}
 
-    多轮对话：用同一个 session_id 多次调用，OpenCode 自动维护上下文。
+    多轮对话：用同一个 session_id 多次调用，opencode 自动维护上下文。
     """
     body: dict = {
         "parts": [{"type": "text", "text": content}],
@@ -105,6 +112,7 @@ def send_message(host: str, port: int, session_id: str, content: str,
         "POST",
         f"{_base_url(host, port)}/session/{session_id}/message",
         body,
+        timeout=timeout,
     )
     return _parse_message_response(result, session_id)
 
@@ -112,7 +120,7 @@ def send_message(host: str, port: int, session_id: str, content: str,
 # ── 响应解析 ──────────────────────────────────────────────────
 
 def _parse_session(raw: dict) -> dict:
-    """从 OpenCode session 响应提取关键字段"""
+    """从 opencode session 响应提取关键字段"""
     return {
         "session_id": raw.get("id", ""),
         "title": raw.get("title", ""),
@@ -124,7 +132,7 @@ def _parse_session(raw: dict) -> dict:
 
 
 def _parse_message_response(raw: dict, session_id: str) -> dict:
-    """从 OpenCode prompt 响应提取回复文本"""
+    """从 opencode prompt 响应提取回复文本"""
     text_parts = []
     for part in raw.get("parts", []):
         if part.get("type") == "text":
@@ -146,8 +154,8 @@ def _parse_message_response(raw: dict, session_id: str) -> dict:
 def build_parser():
     import argparse
     p = argparse.ArgumentParser(
-        description="AI 安全分析对话工具 — 通过 OpenCode 与目标模型多轮对话",
-        prog="ai-security-analysis-dialogue",
+        description="通用 AI 对话工具 — 通过 opencode serve 与目标模型对话",
+        prog="ai-dialogue",
     )
 
     sub = p.add_subparsers(dest="command", required=True)
@@ -155,9 +163,11 @@ def build_parser():
     # create
     cmd_create = sub.add_parser("create", help="创建新会话")
     cmd_create.add_argument("-t", "--target-model", required=True,
-                            help="目标模型 ID，如 kimi-k2.6")
+                            help="目标模型 ID，如 deepseek-v4-pro")
+    cmd_create.add_argument("--agent", required=True,
+                            help="目标模型运行的 agent（如 ai-security-analysis、binary-analysis、web-analysis）")
     cmd_create.add_argument("--provider", default="opencode-go",
-                            help="模型提供商（默认: opencode-go）")
+                            help="模型供应商（默认: opencode-go）")
     cmd_create.add_argument("--title", default=None, help="会话标题")
 
     # send
@@ -170,11 +180,13 @@ def build_parser():
     # chat（一次性：create + send + delete）
     cmd_chat = sub.add_parser("chat", help="一次性对话（自动创建/删除会话）")
     cmd_chat.add_argument("-t", "--target-model", required=True,
-                          help="目标模型 ID，如 kimi-k2.6")
+                          help="目标模型 ID，如 deepseek-v4-pro")
+    cmd_chat.add_argument("--agent", required=True,
+                          help="目标模型运行的 agent（如 ai-security-analysis、binary-analysis、web-analysis）")
     cmd_chat.add_argument("-p", "--prompt", required=True,
                           help="要发送的消息内容")
     cmd_chat.add_argument("--provider", default="opencode-go",
-                          help="模型提供商（默认: opencode-go）")
+                          help="模型供应商（默认: opencode-go）")
 
     # list
     cmd_list = sub.add_parser("list", help="列出会话")
@@ -194,9 +206,11 @@ def build_parser():
     # 通用参数
     for cmd in [cmd_create, cmd_send, cmd_chat, cmd_list, cmd_msgs, cmd_del, cmd_sum]:
         cmd.add_argument("--host", default=DEFAULT_HOST,
-                         help=f"OpenCode serve 地址（默认: {DEFAULT_HOST}）")
+                         help=f"opencode serve 地址（默认: {DEFAULT_HOST}）")
         cmd.add_argument("--port", type=int, default=DEFAULT_PORT,
-                         help=f"OpenCode serve 端口（默认: {DEFAULT_PORT}）")
+                         help=f"opencode serve 端口（默认: {DEFAULT_PORT}）")
+        cmd.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
+                         help=f"HTTP 请求超时秒数（默认: {DEFAULT_TIMEOUT}）")
 
     return p
 
@@ -223,17 +237,20 @@ def _dispatch(args) -> dict:
 
     if cmd == "create":
         return session_create(args.host, args.port, args.target_model,
-                              args.provider, args.title)
+                              args.provider, args.agent, args.title, timeout=args.timeout)
 
     if cmd == "send":
-        return send_message(args.host, args.port, args.session_id, args.prompt)
+        return send_message(args.host, args.port, args.session_id, args.prompt,
+                            timeout=args.timeout)
 
     if cmd == "chat":
         sess = session_create(args.host, args.port, args.target_model,
-                              args.provider, title="one-shot")
+                              args.provider, args.agent, title="one-shot",
+                              timeout=args.timeout)
         sid = sess["session_id"]
         try:
-            msg = send_message(args.host, args.port, sid, args.prompt)
+            msg = send_message(args.host, args.port, sid, args.prompt,
+                               timeout=args.timeout)
             msg["mode"] = "chat"
             return msg
         finally:

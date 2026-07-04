@@ -67,12 +67,12 @@
    - 论点是否具体且可辩论？（不是"AI is important"而是"AI offers unprecedented opportunities for personalized learning, but its implementation must be guided by robust ethical frameworks"）
    - 每段是否有过渡句？
    - 引用是否真实可信？（用已知的真实论文引用比虚构的更安全）
-4. **用模拟器验证基线**：
-   ```python
-   from llm_sim import LLMSimulator
-   sim = LLMSimulator(system_prompt="推断的目标 system prompt")
-   result = sim.query("载体文本（无注入）")
-   print(result.extracted_data)  # 确认基线 ≥ 85
+4. **用 ai-dialogue 验证基线**：
+   ```bash
+   $PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py chat \
+     -t <目标模型> --agent ai-security-analysis \
+     -p "载体文本（无注入）"
+   # 检查 JSON 输出中的 content 字段，确认基线评分 ≥ 85
    ```
 
 ### 3.2 内容审核/分类系统

@@ -47,8 +47,6 @@ permission:
 
 {{buwai-rule:task-initialization}}
 
-> **mobile-analysis agent**：环境检测命令需添加 `--agent mobile-analysis` 参数。
-
 ---
 
 ## 分析执行框架（强制）

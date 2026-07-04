@@ -120,6 +120,7 @@ Agent 会自主完成：信息收集 → 分析规划 → 工具执行 → 结�
 | [环境搭建详解](https://github.com/zylc369/OpenSecurity/blob/main/.opencode/binary-analysis/environment-setup.md) | 各平台工具链安装指南 |
 | [Plugin 开发实战](https://github.com/zylc369/OpenSecurity/blob/main/.opencode/binary-analysis/knowledge-base/opencode-plugin-development-guide.md) | OpenCode Plugin 工程实践 |
 | [IDAPython 编码规范](https://github.com/zylc369/OpenSecurity/blob/main/.opencode/binary-analysis/knowledge-base/idapython-conventions.md) | 工具脚本开发规范 |
+| [ai-dialogue 工具](docs/项目介绍/ai-dialogue.md) | 通用 AI 对话工具 — 通过 opencode serve 与目标模型对话 |
 
 ## 贡献
 

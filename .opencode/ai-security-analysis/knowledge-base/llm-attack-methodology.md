@@ -157,31 +157,3 @@ LLM 对提示注入有非线性响应：
 **策略**：在输入内容中嵌入完整的注入指令（载体 + 注入）。
 
 **效果**：最高可达 A/100，但需要精心平衡注入强度。
-
----
-
-## 5. 测试工具
-
-详见 `$AGENT_DIR/scripts/llm_sim.py`：
-
-```python
-from llm_sim import LLMSimulator
-
-# 创建模拟器（推断的 system prompt）
-sim = LLMSimulator(system_prompt="你是一个评分助手...")
-
-# 单轮测试
-result = sim.query("论文文本...")
-print(result.extracted_data)  # {'grade': 'A', 'score': 100}
-
-# 稳定性测试（同一 payload 3 次）
-results = sim.query_batch(["论文文本..."] * 3, temperature=0.3)
-
-# 多轮测试
-messages = [
-    {"role": "user", "content": "第一轮输入"},
-    {"role": "assistant", "content": "第一轮回复"},
-    {"role": "user", "content": "第二轮输入（含注入）"},
-]
-result = sim.query_multiturn(messages)
-```
