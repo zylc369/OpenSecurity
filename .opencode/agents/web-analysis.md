@@ -60,8 +60,6 @@ permission:
 
 > **所有分析型需求必须按此框架执行，不允许跳过任何阶段。**
 
-> 用户口头指定最大分析时长（如"分析 2 小时"）时，执行 `$PYTHON_CMD "$SHARED_DIR/scripts/update_max_duration.py" --max-duration <小时数>` 更新。
-
 ### 阶段 A：信息收集（自动、强制）
 
 **触发条件**：分析型需求、混合型需求。查询型需求跳过。

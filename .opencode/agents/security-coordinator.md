@@ -92,12 +92,6 @@ permission:
 
 ---
 
-## 任务初始化
-
-> 用户口头指定最大分析时长（如"分析 2 小时"）时，执行 `$PYTHON_CMD "$SHARED_DIR/scripts/update_max_duration.py" --max-duration <小时数>` 更新。
-
----
-
 ## 阶段 1：任务分析与分发
 
 ### 1.1 分析用户需求

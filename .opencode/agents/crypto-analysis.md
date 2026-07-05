@@ -35,8 +35,6 @@ permission:
 
 > 所有求解型需求按此框架，不跳阶段。
 
-> 用户口头指定最大分析时长（如"分析 2 小时"）时，执行 `$PYTHON_CMD "$SHARED_DIR/scripts/update_max_duration.py" --max-duration <小时数>` 更新。
-
 ### 阶段 A：识别密码学类型（强制）
 
 从题目脚本/参数/密文特征判断类别：
