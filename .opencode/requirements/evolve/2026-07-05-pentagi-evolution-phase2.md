@@ -98,8 +98,9 @@
 - Graphiti 是嵌入式 Python 库——不是独立进程，不需要 detach 模式
 
 **graphiti_manager.py 设计**：
-- `init` → 连接 Neo4j（从环境变量读 NEO4J_URL/NEO4J_USER/NEO4J_PASSWORD）+ 初始化 Graphiti（配置 LLM provider 和 embedder）+ 保存实例到全局
-- `close` → 关闭 Graphiti driver 连接
+- 配置读取：`os.environ.get` 带默认值（NEO4J_URL=`bolt://localhost:17687`、NEO4J_USER=`opensecurity`、NEO4J_PASSWORD=`opensecurity_pwd`），用户可在 .ai_env 覆盖
+- `init` → 检测 Neo4j 是否运行（`neo4j status`），没运行则自动 `neo4j start` + 等待就绪 → 连接 Neo4j + 初始化 Graphiti（配置 LLM provider 和 embedder）+ 保存实例到全局。**输出 JSON `{"url": "bolt://localhost:17687"}` 到 stdout**（供 Plugin 读取实际 URL——端口可能因冲突自动调整）。失败时退出码非零（供 Plugin reportErrorAndAbort 判断）
+- `close` → 关闭 Graphiti driver 连接（不 stop Neo4j，让它继续跑供下次使用）
 - `health` → 检查 Graphiti + Neo4j 是否可用
 
 **graphiti_tool.py 设计**（agent 通过 bash 调用）：
@@ -249,8 +250,13 @@
 - **预估行数**: graphiti_manager.py ~100 行 + graphiti_tool.py ~80 行 + README ~30 行
 - **改动内容**:
   - graphiti_manager.py：
-    - `init` → 连接 Neo4j（从 NEO4J_URL/NEO4J_USER/NEO4J_PASSWORD）+ 初始化 Graphiti（配置 LLM/embedder）+ 保存实例
-    - `close` → 关闭 Graphiti driver
+    - 配置读取：`NEO4J_URL = os.environ.get('NEO4J_URL', 'bolt://localhost:17687')`，USER/PASSWORD 同理带默认值（`opensecurity` / `opensecurity_pwd`）
+    - `init` 流程：
+      1. `subprocess.run(['neo4j', 'status'])` 检测是否在运行
+      2. 没运行 → `subprocess.run(['neo4j', 'start'])` 自动拉起 + 等待就绪（轮询端口或重试连接，最多 10 秒）
+      3. 连接 Neo4j + 初始化 Graphiti（配置 LLM/embedder）+ 保存实例
+      4. 退出码非零 → Plugin 的 checkEnvironment 调 reportErrorAndAbort
+    - `close` → 关闭 Graphiti driver（不 stop Neo4j，让它继续跑供下次使用）
     - `health` → 检查 Graphiti + Neo4j 可用性
   - graphiti_tool.py（agent 通过 bash 调用）：
     - `add --name "..." --content "..." --source "..."` → 添加事件
@@ -261,8 +267,10 @@
   - README.md：使用说明 + 配置要求
 - **验证点**:
   - 语法检查通过
-  - Neo4j 不可用时 `health` 返回不可用（不崩溃）
-  - Neo4j 可用时 `init` → `add` → `search` 端到端测试
+  - `init` 流程正确：Neo4j 未运行时自动 `neo4j start` + 等待就绪 → 连接成功
+  - Neo4j 已运行时 `init` 跳过启动直接连接
+  - `init` 失败时退出码非零（供 Plugin 的 reportErrorAndAbort 判断）
+  - `init` → `add` → `search` 端到端测试
   - `registry.json` 有 `graphiti_tool` 条目
 - **依赖**: 无（graphiti-core Python 包由 detect_env 检测安装）
 
@@ -293,8 +301,8 @@
   - PYTHON_PACKAGES 加 `sqlite-vec`（`agents=["all"]`，同上）
   - **统一 agents 逻辑**：将所有 `agents=[]`（空列表=所有 agent）改为 `agents=["all"]`，`_agent_matches` 函数加 `"all"` 判断，统一语义
   - 不检测 GRAPHITI_URL（没有独立 Graphiti 服务）
-  - Neo4j 连接配置从 .ai_env 读取（NEO4J_URL/NEO4J_USER/NEO4J_PASSWORD），可选
-  - .ai_env 模板增加 Neo4j + Graphiti LLM 配置占位符（NEO4J_URL=、NEO4J_USER=、NEO4J_PASSWORD=、GRAPHITI_LLM_MODEL=、GRAPHITI_LLM_BASE_URL= 等）
+  - **不检测 Neo4j**：Neo4j 是 Graphiti 的硬依赖，由 Plugin 的 checkEnvironment 检测（`neo4j --version`），不归 detect_env 管
+  - **Neo4j 配置不放 .ai_env**：连接配置（NEO4J_URL/NEO4J_USER/NEO4J_PASSWORD）是 Python 脚本层的事，graphiti_manager.py / graphiti_tool.py 内部用 `os.environ.get` 带默认值（`bolt://localhost:17687` / `opensecurity` / `opensecurity_pwd`），用户想改时在 .ai_env 里加对应变量覆盖即可（可选）
 - **验证点**:
   - 语法检查通过
   - `--check-preinstall all` 检测到 graphiti-core 和 sqlite-vec（已安装时）或提示安装（未安装时）
@@ -320,16 +328,23 @@
 ### 步骤 7. 修改 Plugin — Graphiti 生命周期管理
 
 - **文件**: `plugins/security-analysis.ts`（修改）
-- **预估行数**: ~40 行
+- **预估行数**: ~50 行
 - **改动内容**:
-  - Plugin 初始化时调 `$PYTHON_CMD $OPENCODE_ROOT/tools/Graphiti/graphiti_manager.py init`（Neo4j 不可用时跳过，不阻塞启动）
+  - **checkEnvironment 增加 Neo4j 硬依赖检测**：
+    - `spawnSync('neo4j', ['--version'])` 检测是否安装
+    - 失败 → `reportErrorAndAbort("Neo4j 未安装，请运行 brew install neo4j")`
+    - 成功 → 继续（Neo4j 是否在运行由 graphiti_manager.py init 内部自动拉起，Plugin 不管）
+  - Plugin 初始化时调 `$PYTHON_CMD $OPENCODE_ROOT/tools/Graphiti/graphiti_manager.py init`
+    - 读取 stdout 的 JSON `{"url": "bolt://localhost:17687"}`，保存到 sessionData 或全局变量（graphiti_tool.py 从同一配置读 URL，不需要 Plugin 传递）
+    - init 退出码非零 → `reportErrorAndAbort("Graphiti 初始化失败: <stderr 内容>")`
+    - init 成功 → 用 debugLog 记录（含实际 URL）
   - Plugin 退出时的 Graphiti close 合并到步骤 8 的信号处理器（统一 cleanup 路径）
-  - 用 debugLog 记录 init 结果
-  - Neo4j 不可用时 init 失败不阻塞 Plugin 启动（Graphiti 功能降级，其他功能不受影响）
+  - 用 debugLog 记录每个关键节点（neo4j 检测结果、init 调用、init 结果）
 - **验证点**:
   - 语法检查通过
+  - `neo4j --version` 检测正确（neo4j 在 PATH 里时通过，不在时报错 abort）
   - Neo4j 可用时 init 成功（debugLog 记录）
-  - Neo4j 不可用时 init 跳过（debugLog 记录，不崩溃）
+  - Neo4j 不可用时 init 失败 → reportErrorAndAbort 触发（debugLog 记录错误信息）
 - **依赖**: 步骤 3
 
 ### 步骤 8. 修改 Plugin — 信号处理器 + PID 注册
@@ -536,7 +551,7 @@
 |--------|---------|
 | 依赖方向 | 不违反现有架构 |
 | 文件放置 | 新文件在正确位置 |
-| 可选依赖 | Neo4j/ZHIPU_API_KEY 缺失时不崩溃，对应功能降级 |
+| 硬依赖阻断 | Neo4j 未安装时 Plugin abort 并提示安装；ZHIPU_API_KEY 缺失时 embedding 功能报错提示 |
 
 ---
 
