@@ -3,13 +3,13 @@
 
 description:
   通过 adb shell screencap 截取 Android 设备屏幕，pull 到本地，
+  经 image_optimize.py 自动优化（PNG/JPEG 竞争取更小者），
   输出图片 + 元数据 JSON。
   适用于 WebView 等混合架构场景，配合 MCP 视觉工具识别控件。
-  默认 JPEG quality=50（高分屏平板截图体积显著小于 PNG，MCP 识别零损失）。
 
 usage:
   $PYTHON_CMD mobile_screenshot.py --output-dir $TASK_DIR/views --name step1_initial
-  $PYTHON_CMD mobile_screenshot.py --output-dir $TASK_DIR/views --name step1_initial --serial emulator5554 --format png
+  $PYTHON_CMD mobile_screenshot.py --output-dir $TASK_DIR/views --name step1_initial --serial emulator5554
 
 level: basic
 """
@@ -20,20 +20,23 @@ import os
 import re
 import sys
 
-# 脚本位于 mobile-analysis/scripts/，library 在同级目录
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+# 脚本位于 mobile-analysis/scripts/，library 在同级目录，image_optimize 在 $SHARED_DIR/scripts/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from library import adb
+
+# image_optimize.py 在 binary-analysis/scripts/（$SHARED_DIR/scripts/）
+_SHARED_SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "binary-analysis", "scripts")
+sys.path.insert(0, _SHARED_SCRIPTS)
+from image_optimize import optimize_for_mcp
 
 
 def _fail(error):
-    """输出失败 JSON 到 stdout 并退出（exit code 2）。"""
     result = {"success": False, "error": error}
     print(json.dumps(result, ensure_ascii=False))
     sys.exit(2)
 
 
 def _log(msg):
-    """进度日志打到 stderr，stdout 留给 JSON 输出。"""
     print(msg, file=sys.stderr)
 
 
@@ -42,24 +45,18 @@ def _parse_args():
     parser.add_argument("--output-dir", required=True, help="输出目录")
     parser.add_argument("--name", default="screenshot", help="输出文件名前缀（不含扩展名）")
     parser.add_argument("--serial", default=None, help="设备序列号（多设备时必填，单设备自动检测）")
-    parser.add_argument("--format", default="jpeg", choices=["jpeg", "png"], help="图片格式（默认 jpeg）")
-    parser.add_argument("--quality", type=int, default=50, help="JPEG 质量（1-100，仅 jpeg 有效）")
     return parser.parse_args()
 
 
 def main():
     args = _parse_args()
 
-    if args.quality < 1 or args.quality > 100:
-        _fail("--quality 必须在 1-100 范围内")
-
-    # 创建输出目录
     try:
         os.makedirs(args.output_dir, exist_ok=True)
     except OSError as e:
         _fail(f"创建输出目录失败: {e}")
 
-    # 解析设备序列号（非交互模式：多设备且未指定 --serial 时报错，不调 resolve_device 避免 input() 挂起）
+    # 非交互设备检测（不调 resolve_device 避免 input() 挂起）
     _log("[*] 正在检测 Android 设备...")
     devices = adb.get_devices()
     if not devices:
@@ -75,63 +72,50 @@ def main():
     else:
         _fail(f"检测到多台设备 ({', '.join(devices)})，请用 --serial 指定目标设备")
 
-    # 设备临时文件路径（sanitize name: 只允许字母数字下划线连字符）
     safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', args.name)
     if safe_name != args.name:
         _log(f"[!] 文件名含特殊字符，已替换为: {safe_name}")
     remote_path = f"/sdcard/{safe_name}.png"
 
-    # Step 1: adb shell screencap 截图到设备（screencap 原生输出 PNG）
+    # 截图到设备
     _log(f"[*] 正在截取设备屏幕（设备: {serial}）...")
     result = adb.adb_shell(serial, f"screencap -p {remote_path}")
     if result.returncode != 0:
         _fail(f"screencap 失败: {result.stderr.strip() or '未知错误'}")
 
-    # Step 2: adb pull 到本地（pull 失败时仍清理设备临时文件）
-    png_path = os.path.join(args.output_dir, f"{safe_name}.png")
-    _log(f"[*] 正在拉取截图到本地: {png_path}")
+    # pull 到本地临时文件
+    tmp_png = os.path.join(args.output_dir, f"{safe_name}_raw.png")
+    _log(f"[*] 正在拉取截图到本地...")
     try:
-        adb.pull_file(serial, remote_path, png_path)
+        adb.pull_file(serial, remote_path, tmp_png)
     except adb.AdbError as e:
-        adb.adb_shell(serial, f"rm -f {remote_path}")  # 清理设备临时文件
+        adb.adb_shell(serial, f"rm -f {remote_path}")
         _fail(f"拉取截图失败: {e}")
 
-    # Step 3: 清理设备临时文件
+    # 清理设备临时文件
     adb.adb_shell(serial, f"rm -f {remote_path}")
 
-    # Step 4: 格式转换（默认 JPEG quality=50，与 gui_capture.py 一致）
-    final_path = png_path
-    final_format = "png"
-    final_file = f"{safe_name}.png"
+    # 优化图片（PNG/JPEG 竞争）
+    _log("[*] 正在优化图片...")
+    opt = optimize_for_mcp(tmp_png, args.output_dir, safe_name)
+    os.remove(tmp_png)
 
-    if args.format == "jpeg":
-        from PIL import Image
-        jpeg_path = os.path.join(args.output_dir, f"{safe_name}.jpg")
-        _log(f"[*] 正在转换为 JPEG（quality={args.quality}）...")
-        img = Image.open(png_path)
-        img.save(jpeg_path, "JPEG", quality=args.quality)
-        img.close()
-        os.remove(png_path)
-        final_path = jpeg_path
-        final_format = "jpeg"
-        final_file = f"{safe_name}.jpg"
-        _log("[+] JPEG 转换成功")
+    _log(f"[+] 优化完成: {opt['format']} ({opt['size'] // 1024}KB)")
 
-    # Step 5: 输出元数据 JSON
+    # 输出元数据 JSON
     meta = {
         "success": True,
-        "file": final_file,
-        "format": final_format,
-        "quality": args.quality if final_format == "jpeg" else None,
+        "file": opt["file"],
+        "format": opt["format"],
         "device": serial,
-        "screenshot_path": os.path.abspath(final_path),
+        "screenshot_path": opt["path"],
     }
 
     meta_path = os.path.join(args.output_dir, f"{safe_name}.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
 
-    _log(f"[+] 截图已保存: {final_path}")
+    _log(f"[+] 截图已保存: {opt['path']}")
     _log(f"[+] 元数据已保存: {meta_path}")
     print(json.dumps(meta, indent=2, ensure_ascii=False))
 

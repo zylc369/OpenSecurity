@@ -71,9 +71,9 @@
     "file": "mobile_screenshot.py",
     "language": "python",
     "runner": "$PYTHON_CMD",
-    "usage": "$PYTHON_CMD $AGENT_DIR/scripts/mobile_screenshot.py --output-dir $TASK_DIR/views --name <名称> [--serial <设备ID>] [--format jpeg|png] [--quality 50]",
-    "output_format": "PNG 图片 + JSON 元数据写入 --output-dir 目录",
-    "note": "需要 adb（PATH 可用）。非交互设备检测（多设备需 --serial）。配合 MCP 视觉工具用于 WebView 场景",
+    "usage": "$PYTHON_CMD $AGENT_DIR/scripts/mobile_screenshot.py --output-dir $TASK_DIR/views --name <名称> [--serial <设备ID>]",
+    "output_format": "优化后图片（PNG/JPEG 自适应）+ JSON 元数据写入 --output-dir 目录",
+    "note": "需要 adb + PIL。PNG/JPEG 竞争压缩取更小者，PSNR≥35dB 自适应 quality",
     "requires_venv": false
   }
 ]

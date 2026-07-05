@@ -15,6 +15,7 @@ packages: playwright, markdownify
 
 import argparse
 import json
+import os
 import sys
 
 
@@ -77,8 +78,23 @@ def render_page(url, fmt="markdown", screenshot=None, screenshot_full_page=False
                 # 截图
                 screenshot_path = None
                 if screenshot:
-                    page.screenshot(path=screenshot, full_page=screenshot_full_page)
-                    screenshot_path = screenshot
+                    # 先截到临时 PNG，再优化（tempfile.NamedTemporaryFile 避免 mktemp 弃用）
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                        tmp_png = tf.name
+                    try:
+                        page.screenshot(path=tmp_png, full_page=screenshot_full_page)
+
+                        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                        from image_optimize import optimize_for_mcp
+
+                        shot_dir = os.path.dirname(os.path.abspath(screenshot))
+                        shot_name = os.path.splitext(os.path.basename(screenshot))[0]
+                        opt = optimize_for_mcp(tmp_png, shot_dir, shot_name)
+                        screenshot_path = opt["path"]
+                    finally:
+                        if os.path.exists(tmp_png):
+                            os.remove(tmp_png)
             finally:
                 browser.close()
 

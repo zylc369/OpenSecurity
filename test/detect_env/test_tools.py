@@ -51,6 +51,22 @@ class TestDependency:
         assert sage.agents == ["crypto-analysis"]
         assert sage.conda_name == "sage"
 
+    def test_pil_entry_agents(self, env):
+        """PIL agents 覆盖三个截图场景的 agent（binary/mobile/web 都用 image_optimize）。"""
+        pil = next(d for d in env.PYTHON_PACKAGES if d.name == "PIL")
+        assert pil.pip_name == "Pillow"
+        assert pil.preinstall is True
+        # 三个 agent 都调用 image_optimize.py → 都需要 PIL
+        for agent in ["binary-analysis", "mobile-analysis", "web-analysis"]:
+            assert agent in pil.agents
+
+    def test_sympy_entry_exists(self, env):
+        """sympy 条目存在且覆盖 crypto-analysis（CRT/数论构造）。"""
+        sympy = next(d for d in env.PYTHON_PACKAGES if d.name == "sympy")
+        assert sympy.pip_name == "sympy"
+        assert sympy.preinstall is True
+        assert "crypto-analysis" in sympy.agents
+
 
 class TestBuildInstallCmd:
     """_build_install_cmd(dep) 根据 installer 字段生成安装命令。"""

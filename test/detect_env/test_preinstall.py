@@ -80,7 +80,11 @@ class TestCheckPreinstall:
         assert result["errors"] == []
 
     def test_agent_filtering(self, env, monkeypatch):
-        """只检查 agents 匹配的依赖，不检查其他 agent 的。"""
+        """全量检测写 cache（find_spec 调用所有 preinstall 包），errors 按 agent 过滤。
+
+        业务逻辑：find_spec 对所有 preinstall 包都调用（收集版本写 cache），
+        但 errors 只报匹配当前 agent 的缺失包。
+        """
         pkgs = [
             env.Dependency(name="binary_pkg", kind="python", preinstall=True,
                            agents=["binary-analysis"], required=True),
@@ -90,15 +94,18 @@ class TestCheckPreinstall:
         monkeypatch.setattr(env, "PYTHON_PACKAGES", pkgs)
         monkeypatch.setattr(env, "EXTERNAL_TOOLS", [])
 
-        checked = []
-        def tracking_find_spec(name):
-            checked.append(name)
-            return True  # 全部已装
-        monkeypatch.setattr(importlib.util, "find_spec", tracking_find_spec)
+        # 所有包都缺失 → find_spec 返回 None
+        monkeypatch.setattr(importlib.util, "find_spec", _mock_find_spec(set()))
 
-        env._check_preinstall("binary-analysis")
-        # 只检查了 binary_pkg，mobile_pkg 被 agent 过滤跳过
-        assert checked == ["binary_pkg"]
+        result = env._check_preinstall("binary-analysis")
+        # errors 只含 binary_pkg（agent 过滤），不含 mobile_pkg
+        assert result["success"] is False
+        packages_in_errors = [e["package"] for e in result["errors"]]
+        assert "binary_pkg" in packages_in_errors
+        assert "mobile_pkg" not in packages_in_errors
+        # cache 中两个包都记录了（全量检测）
+        assert "binary_pkg" not in result["data"]["packages"]  # 缺失的不进 packages
+        # mobile_pkg 也被 find_spec 检测了（只是缺失不进 packages，errors 被过滤）
 
     def test_no_agents_means_all(self, env, monkeypatch):
         """agents 为空列表 → 对所有 agent 都检查。"""

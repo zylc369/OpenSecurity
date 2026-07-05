@@ -168,7 +168,7 @@ adb shell am start -n <package>/<activity>
 - `zai-mcp-server_ui_to_artifact`（output_type='spec'）: 获取 UI 设计规范
 
 **MCP 调用参数**:
-- image_source: `$TASK_DIR/views/step1_initial.jpg`
+- image_source: 脚本输出的 JSON 中 `screenshot_path` 字段（格式由脚本自动决定，.png 或 .jpg）
 - prompt: "识别截图中所有可交互控件（按钮、输入框、下拉框等），返回每个控件的文字内容和中心坐标 (x, y)"
 
 #### Step 3: 执行操作（连续执行，中间不截图）
@@ -195,10 +195,10 @@ adb shell input keyevent 9   # 2
 
 使用 MCP 判断结果:
 - **首选**: `zai-mcp-server_ui_diff_check`（对比 step1_initial 和 step2_result）
-  - expected_image_source: `$TASK_DIR/views/step1_initial.jpg`
-  - actual_image_source: `$TASK_DIR/views/step2_result.jpg`
+  - expected_image_source: step1 截图 JSON 中的 `screenshot_path`
+  - actual_image_source: step2 截图 JSON 中的 `screenshot_path`
   - prompt: "对比这两张截图，识别所有视觉变化（新弹窗、文字变化、控件状态变化等），判断操作是否成功"
-- **退化**: `zai-mcp-server_extract_text_from_screenshot`（提取 step2_result 文字，由 agent 判断）
+- **退化**: `zai-mcp-server_extract_text_from_screenshot`（提取 step2 截图文字，由 agent 判断）
 
 ### 坐标系统说明
 

@@ -97,8 +97,9 @@ $PYTHON_CMD "$SHARED_DIR/scripts/web_render.py" --url "https://example.com" --ti
 - 获取图表/数据可视化内容
 
 示例流程：
-1. `web_render.py --screenshot $TASK_DIR/page.jpg` 截图
-2. 使用图像分析工具读取截图，分析页面内容
+1. `web_render.py --screenshot $TASK_DIR/page` 截图（扩展名由脚本自动决定）
+2. 读取返回 JSON 中的 `screenshot` 字段获取实际文件路径
+3. 使用图像分析工具读取截图，分析页面内容
 
 ## 常见问题
 
