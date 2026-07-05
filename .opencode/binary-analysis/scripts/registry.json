@@ -65,15 +65,6 @@
       "verified": false
     },
     {
-      "name": "create_task_dir",
-      "file": "create_task_dir.py",
-      "description": "任务目录创建与映射注册：创建时间戳目录 + 注册 sessionID→task_dir 映射（压缩后精确恢复）。SESSION_ID 由 Plugin shell.env hook 注入",
-      "params": [],
-      "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/create_task_dir.py",
-      "added_at": "2026-04-28",
-      "verified": false
-    },
-    {
       "name": "web_render",
       "file": "web_render.py",
       "description": "Playwright 无头浏览器网页渲染：支持 JavaScript 执行，可获取 SPA 页面渲染后内容（markdown/text/html）和页面截图",

@@ -5,17 +5,20 @@ description:
   支持 Windows/Linux/macOS。
   Python 包安装在 Plugin 管理的虚拟环境（~/bw-security-analysis/.venv）中。
   C/C++ 编译器缺失时通知用户。
-  结果缓存 24 小时。
-  必需依赖缺失时返回 success: false，Agent 应停止并提示用户安装。
+  --check-preinstall 模式不自动装包、不读缓存（实时检测），Plugin chat.message 用此模式。
+  默认模式读 24h 缓存；--force 强制重新检测。
+  必需依赖缺失时返回 success: false，Plugin 终止并提示用户安装。
 
 usage:
-  $PYTHON_CMD detect_env.py [--output PATH] [--force] [--skip-install] [--check-preinstall AGENT]
+  $PYTHON_CMD detect_env.py [--output PATH] [--force] [--check-preinstall AGENT]
+  AGENT=all 时检测所有依赖（Coordinator 用）
 
 level: intermediate
 
 packages:
   必需: capstone, unicorn, gmpy2, frida, angr, triton, z3-solver, Pillow, pyautogui, pyperclip, playwright, markdownify, requests, beautifulsoup4, lxml
   playwright 需要额外安装浏览器二进制（playwright install chromium）
+  每个 Python 包在 PYTHON_PACKAGES 里标记 agents（按 agent 过滤检测）
 """
 
 import argparse
@@ -151,23 +154,23 @@ def _load_ai_env() -> None:
         _warn("读取 .ai_env 失败（环境变量未加载，IDA_PRO_HOME 等配置不生效）", exc=e)
 
 PYTHON_PACKAGES: list[Dependency] = [
-    # binary-analysis 反混淆/符号执行库（LLM 分析时写临时脚本可能用到）
-    Dependency(name="angr", kind="python", pip_name="angr"),
-    Dependency(name="triton", kind="python", pip_name="triton"),
-    Dependency(name="z3", kind="python", pip_name="z3-solver"),
-    Dependency(name="capstone", kind="python", pip_name="capstone"),
-    Dependency(name="unicorn", kind="python", pip_name="unicorn"),
-    Dependency(name="gmpy2", kind="python", pip_name="gmpy2"),
-    Dependency(name="frida", kind="python", pip_name="frida"),
-    Dependency(name="PIL", kind="python", pip_name="Pillow"),
-    Dependency(name="pyautogui", kind="python", pip_name="pyautogui"),
-    Dependency(name="pyperclip", kind="python", pip_name="pyperclip"),
-    Dependency(name="playwright", kind="python", pip_name="playwright", post_install=True, version_via="importlib:playwright"),
-    Dependency(name="markdownify", kind="python", pip_name="markdownify", version_via="importlib:markdownify"),
-    # Web 安全分析包
-    Dependency(name="requests", kind="python", pip_name="requests"),
-    Dependency(name="bs4", kind="python", pip_name="beautifulsoup4"),
-    Dependency(name="lxml", kind="python", pip_name="lxml"),
+    # binary-analysis 逆向分析包
+    Dependency(name="angr", kind="python", pip_name="angr", preinstall=True, agents=["binary-analysis"]),
+    Dependency(name="triton", kind="python", pip_name="triton", preinstall=True, agents=["binary-analysis"]),
+    Dependency(name="z3", kind="python", pip_name="z3-solver", preinstall=True, agents=["binary-analysis", "crypto-analysis"]),
+    Dependency(name="capstone", kind="python", pip_name="capstone", preinstall=True, agents=["binary-analysis"]),
+    Dependency(name="unicorn", kind="python", pip_name="unicorn", preinstall=True, agents=["binary-analysis"]),
+    Dependency(name="gmpy2", kind="python", pip_name="gmpy2", preinstall=True, agents=["binary-analysis", "crypto-analysis"]),
+    Dependency(name="frida", kind="python", pip_name="frida", preinstall=True, agents=["binary-analysis", "mobile-analysis"]),
+    Dependency(name="PIL", kind="python", pip_name="Pillow", preinstall=True, agents=["binary-analysis"]),
+    Dependency(name="pyautogui", kind="python", pip_name="pyautogui", preinstall=True, agents=["binary-analysis"]),
+    Dependency(name="pyperclip", kind="python", pip_name="pyperclip", preinstall=True, agents=["binary-analysis"]),
+    # web 安全分析包
+    Dependency(name="playwright", kind="python", pip_name="playwright", preinstall=True, agents=["web-analysis", "ai-security-analysis"], post_install=True, version_via="importlib:playwright"),
+    Dependency(name="markdownify", kind="python", pip_name="markdownify", preinstall=True, agents=["web-analysis"], version_via="importlib:markdownify"),
+    Dependency(name="requests", kind="python", pip_name="requests", preinstall=True, agents=["web-analysis", "ai-security-analysis"]),
+    Dependency(name="bs4", kind="python", pip_name="beautifulsoup4", preinstall=True, agents=["web-analysis"]),
+    Dependency(name="lxml", kind="python", pip_name="lxml", preinstall=True, agents=["web-analysis"]),
     # 预装依赖（preinstall）：体积大、不自动装，由 --check-preinstall 按需检查；仅特定 agent 需要
     Dependency(name="sage", kind="python", required=False, pip_name="sagemath-standard",
                conda_name="sage", agents=["crypto-analysis"], preinstall=True, installer="conda"),
@@ -543,46 +546,99 @@ def _detect_tools():
     return result
 
 
+def _build_install_hint(dep):
+    """生成缺失依赖的安装提示。
+    优先用 dep.install_hint（EXTERNAL_TOOLS 自带），否则动态生成。"""
+    if dep.install_hint:
+        return dep.install_hint
+    install_cmd = _build_install_cmd(dep)
+    agents_str = "/".join(dep.agents)
+    pkg_name = dep.conda_name or dep.pip_name
+    preinstall_desc_part1 = f"预装依赖 {dep.name}（{dep.installer}: {pkg_name}）未安装"
+    desc = f"{agents_str} 需要的{preinstall_desc_part1}" if agents_str else preinstall_desc_part1
+    return f"{desc}\n安装命令：{install_cmd}"
+
+
 def _check_preinstall(agent):
-    """检查指定 Agent 的预装依赖（preinstall 类型）是否就绪。
-    遍历 PYTHON_PACKAGES + EXTERNAL_TOOLS 中 preinstall=True 且 agents 匹配的条目，
-    按 kind 分发检测：python→find_spec，tool→_resolve_tool。
-    不自动装、不走 24h 缓存（必须反映用户刚装好的状态）。
-    缺失一次性收集到 errors（含 install_hint）返回。"""
+    """检查指定 Agent 的所有依赖是否就绪 + 生成 env_cache。
+
+    agent="all" 时检测所有依赖（errors 不做 agent 过滤），用于 Coordinator。
+
+    检测范围：Python 包（find_spec + 版本）+ 编译器 + IDA Pro + 外部工具。
+    不自动装、不读缓存（实时检测，每次反映最新状态）。
+    data 全量写入 env_cache.json（供 Plugin buildEnvSection/shell.env 读取）；
+    errors 按当前 agent 过滤（只报该 agent 缺的包）。"""
     import importlib.util
+    import importlib.metadata
     errors = []
-    for dep in PYTHON_PACKAGES + EXTERNAL_TOOLS:
+    packages = {}
+    tools = {}
+
+    def _agent_matches(dep):
+        """all = 不过滤；否则 dep.agents 为空或包含当前 agent 即匹配"""
+        if agent == "all":
+            return True
+        return not dep.agents or agent in dep.agents
+
+    # --- Python 包检测（全量检测写 cache，errors 按 agent 过滤）---
+    for dep in PYTHON_PACKAGES:
         if not dep.preinstall:
             continue
-        if dep.agents and agent not in dep.agents:
+        try:
+            spec = importlib.util.find_spec(dep.name)
+        except Exception as e:
+            _warn(f"_check_preinstall: find_spec({dep.name}) 异常", exc=e)
+            raise
+        if spec is None:
+            if dep.required and _agent_matches(dep):
+                errors.append({"package": dep.name, "install_hint": _build_install_hint(dep)})
             continue
-        # 按 kind 分发检测
-        if dep.kind == "python":
-            try:
-                spec = importlib.util.find_spec(dep.name)  # 查找但不执行（毫秒级，不像 import sage 那样慢）
-            except Exception as e:
-                # 不静默吞：打印并上抛，让 detect_env 非零退出 → plugin 报 [预装检查失败] 暴露问题
-                _warn(f"_check_preinstall: find_spec({dep.name}) 异常", exc=e)
-                raise
-            missing = spec is None
-        else:  # tool
-            _, found = _resolve_tool(dep)
-            missing = not found
-        if missing:
-            if not dep.required:
-                continue  # 可选依赖缺失不阻塞（required=False），仅全量检测时提示
-            # install_hint 优先用 dep 字段（EXTERNAL_TOOLS 自带），否则 python 包动态生成
-            if dep.install_hint:
-                hint = dep.install_hint
-            else:
-                install_cmd = _build_install_cmd(dep)
-                agents_str = "/".join(dep.agents)
-                pkg_name = dep.conda_name or dep.pip_name
-                preinstall_desc_part1 = f"预装依赖 {dep.name}（{dep.installer}: {pkg_name}）未安装"
-                desc = f"{agents_str} 需要的{preinstall_desc_part1}" if agents_str else preinstall_desc_part1
-                hint = f"{desc}\n安装命令：{install_cmd}"
-            errors.append({"package": dep.name, "install_hint": hint})
-    return {"success": len(errors) == 0, "errors": errors}
+        # 版本收集（importlib.metadata 只查 distribution metadata，不 import 包本身）
+        try:
+            version = importlib.metadata.version(dep.pip_name or dep.name)
+        except importlib.metadata.PackageNotFoundError:
+            version = "unknown"
+        except Exception:
+            version = "unknown"
+        packages[dep.name] = {"available": True, "version": version}
+
+    # --- 编译器 ---
+    compiler = _detect_compiler()
+
+    # --- IDA Pro（全量检测写 cache，errors 按 agent 过滤）---
+    ida_pro = _detect_ida_pro()
+    if not ida_pro["available"]:
+        ida_dep = next((d for d in EXTERNAL_TOOLS if d.name == "ida_pro"), None)
+        if ida_dep and ida_dep.required and _agent_matches(ida_dep):
+            errors.append({"package": "ida_pro", "install_hint": _build_install_hint(ida_dep)})
+
+    # --- 外部工具（跳过 ida_pro，已单独处理；全量检测写 cache，errors 按 agent 过滤）---
+    for dep in EXTERNAL_TOOLS:
+        if not dep.preinstall:
+            continue
+        if dep.name == "ida_pro":
+            continue
+        resolved, found = _resolve_tool(dep)
+        if found:
+            version = _get_tool_version(resolved, dep.version_cmd)
+            tools[dep.name] = {"available": True, "version": version,
+                               "description": dep.description, "resolved_path": resolved}
+        else:
+            tools[dep.name] = {"available": False, "version": None,
+                               "description": dep.description, "resolved_path": None}
+            if dep.required and _agent_matches(dep):
+                errors.append({"package": dep.name, "install_hint": _build_install_hint(dep)})
+
+    # --- 组装 data + 写 cache ---
+    data = {
+        "compiler": compiler,
+        "packages": packages,
+        "ida_pro": ida_pro,
+        "tools": tools,
+    }
+    _save_cache(data)
+
+    return {"success": len(errors) == 0, "data": data, "errors": errors}
 
 
 def run_detection(skip_install=False):
@@ -687,20 +743,24 @@ def main():
     parser = argparse.ArgumentParser(description="逆向分析环境检测")
     parser.add_argument("--output", "-o", help="输出 JSON 文件路径")
     parser.add_argument("--force", "-f", action="store_true", help="强制重新检测（忽略缓存）")
-    parser.add_argument("--skip-install", action="store_true", help="跳过自动安装缺失的包")
     parser.add_argument("--check-preinstall", metavar="AGENT",
-                        help="检查指定 Agent 的预装依赖是否就绪（不自动装、不缓存），输出 JSON 后退出")
-    parser.add_argument("--agent", metavar="AGENT",
-                        help="当前 agent 名（如 binary-analysis）。传入时在全量检测后额外检查该 agent 的预装依赖，"
-                             "errors 合并到结果。Plugin 用此模式一次调用完成全量+预装检查")
+                        help="检查指定 Agent 的依赖是否就绪（不自动装、不缓存），输出 JSON 后退出。"
+                             "AGENT=all 时检测所有依赖（Coordinator 用）")
     args = parser.parse_args()
 
-    # --check-preinstall：独立的预装依赖检查模式，早退（不走全量检测/缓存）
+    # --check-preinstall：按 agent 的依赖检查模式，早退（Plugin chat.message 用此模式）
     if args.check_preinstall:
         result = _check_preinstall(args.check_preinstall)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        output_json = json.dumps(result, ensure_ascii=False, indent=2)
+        if args.output:
+            os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(output_json)
+            _log(f"[+] 结果已写入: {args.output}")
+        print(output_json)
         return
 
+    # 默认模式：缓存命中时用缓存；未命中/--force 时全量实时检测
     cached = _load_cache(force=args.force)
     if cached and not args.force:
         if cached.get("packages"):
@@ -711,14 +771,7 @@ def main():
             cached = None
 
     if not cached or args.force:
-        result = run_detection(skip_install=args.skip_install)
-
-    # --agent 模式：在全量检测后合并预装依赖检查（preinstall 不缓存，每次实时查）
-    if args.agent:
-        preinstall_result = _check_preinstall(args.agent)
-        if not preinstall_result["success"]:
-            result["errors"].extend(preinstall_result["errors"])
-            result["success"] = False
+        result = _check_preinstall("all")
 
     output_json = json.dumps(result, indent=2, ensure_ascii=False)
 
@@ -728,8 +781,7 @@ def main():
             f.write(output_json)
         _log(f"[+] 结果已写入: {args.output}")
 
-    # stdout 始终输出 JSON（Plugin runDetectEnv 从 stdout 解析；
-    # --output 文件是给 agent 的额外副本，两者内容相同）
+    # stdout 始终输出 JSON（--output 文件是额外副本，两者内容相同）
     print(output_json)
 
     if not result["success"]:

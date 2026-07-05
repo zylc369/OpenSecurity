@@ -226,10 +226,6 @@ OpenCode 删除 session 时递归删除所有子 session，每个子 session 都
 - 恢复方式：通过 `client.session.promptAsync()` 发送恢复消息
 - 选择 `promptAsync` 而非 `prompt` 的原因：event hook 是 fire-and-forget，`promptAsync` 立即返回不阻塞宿主；`prompt` 流式消费响应会阻塞 event hook
 - **v1 SDK 调用格式**: `{ path: { id: sessionID }, body: { parts: [{ type: "text" as const, text: "..." }] } }`（与 v2 SDK 的扁平格式 `{ sessionID, parts: [...] }` 不同）
-- 持续性状态文件：`$TASK_DIR/.persistence.json`，格式 `{"max_duration_hours": 6, "resume_count": 3, "last_resume_at": "..."}`
-  - 由 `create_task_dir.py` 在任务初始化时创建（默认 6 小时，resume_count=0）
-  - 每次成功恢复后 resume_count +1，last_resume_at 更新为当前时间
-  - 用户或 Agent 可修改 `max_duration_hours` 自定义最大持续时间（0 < hours ≤ 24）
 
 ## 五、Plugin 数据架构模式
 

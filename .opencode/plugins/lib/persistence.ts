@@ -151,7 +151,7 @@ async function sendResume(sessionID: string): Promise<void> {
     debugLog(`sendResume: session 不存在或非 Security Agent，跳过 sessionID=${sessionID}`, sessionID);
     return;
   }
-  debugLog(`session.idle: 恢复分析 sessionID=${sessionID} agent=${session.agentName} resume_count=${session.resumeCount}`, sessionID);
+  debugLog(`session.idle: 恢复分析 sessionID=${sessionID} agent=${session.agentName} resumeCount=${session.resumeCount}`, sessionID);
   const { prompt, marker } = getResumePrompt();
   await ctx.client.session.promptAsync({
     path: { id: sessionID },
@@ -225,7 +225,7 @@ export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
     const cooldown = Math.min((session.resumeCount + 1) * RESUME_COOLDOWN_STEP_MS, RESUME_COOLDOWN_MAX_MS);
     if (sinceLastResume >= 0 && sinceLastResume < cooldown) {
       const wait = cooldown - sinceLastResume;
-      debugLog(`session.idle: 冷却中，${Math.ceil(wait / 1000)}s 后恢复 sessionID=${sessionID}（backoff=${cooldown / 1000}s resume_count=${session.resumeCount}）`, sessionID);
+      debugLog(`session.idle: 冷却中，${Math.ceil(wait / 1000)}s 后恢复 sessionID=${sessionID}（backoff=${cooldown / 1000}s resumeCount=${session.resumeCount}）`, sessionID);
       session.clearPendingResume();
       session.pendingResumeTimer = setTimeout(() => {
         session.pendingResumeTimer = null;
