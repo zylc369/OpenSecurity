@@ -92,12 +92,6 @@ permission:
 
 ---
 
-## 运行环境
-
-{{buwai-rule:running-environment}}
-
----
-
 ## 阶段 0：任务初始化（强制）
 
 {{buwai-rule:task-initialization}}
@@ -293,18 +287,6 @@ permission:
 **核心约束**：
 - 不修改目标文件
 - 失败时说明原因，不静默跳过
-
----
-
-## 运行环境
-
-{{buwai-rule:running-environment}}
-
----
-
-## 阶段 0：任务初始化（强制）
-
-{{buwai-rule:task-initialization}}
 
 ---
 

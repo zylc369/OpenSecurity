@@ -190,15 +190,7 @@ Plugin 监听 `session.idle` 事件，当主 session 空闲且任务目录存在
 
 ### 4. 占位符展开
 
-Agent prompt 里大量使用 `{{buwai-rule:片段名}}` 引用共享片段：
-
-```markdown
-## 运行环境
-{{buwai-rule:running-environment}}
-
-## 阶段 0：任务初始化（强制）
-{{buwai-rule:task-initialization}}
-```
+Agent prompt 里大量使用 `{{buwai-rule:片段名}}` 引用共享片段。
 
 Plugin 在 system.transform 阶段把占位符替换为 `agents-rules/<name>.md` 的实际内容。修改共享规则只需改一个文件，所有 Agent 同步生效。带 mtime 缓存，文件改完下次调用立即生效。
 

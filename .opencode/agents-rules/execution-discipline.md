@@ -10,8 +10,52 @@
 | **进度输出** | 用户不应看到超过 30 秒的无输出间隔 |
 | **禁止重复** | 失败后必须记录失败原因和已尝试的方向，避免重复 |
 | **文件放置** | 所有中间文件（脚本、输出、调试数据、HTML 保存）写入 `$TASK_DIR`，禁止写入 workspace 根目录或项目根目录 |
-| **长驻进程控制** | 需要外部服务时优先使用在线托管平台（webhook.site、requestbin 等）。确实需要本地 HTTP server（如让 Bot 访问恶意页面）时，用 `$PYTHON_CMD` 运行带超时的短命 server 脚本（脚本内设置 `timeout` 或 `sys.exit`），禁止启动无超时保护的长驻进程（如裸 `python -m http.server`、`cloudflared`、`ngrok`） |
+| **长驻进程** | 长驻进程用 detach 模式（见**长驻进程 detach 模式**节）。目标能出公网时可用在线托管平台（webhook.site）；目标在内网时用 detach 起本地监听 |
 | **长文档分段** | 生成/修改超过 300 行的文档（解题报告、分析报告等）时，必须拆分为多次 Edit 调用，每次只改一个小节。禁止用 Write 工具一次生成超过 300 行的文档 |
+
+### 长驻进程 detach 模式
+
+**适用场景**：需要持续运行的服务——反弹 shell 监听（`nc -lvp`）、SSRF 回调接收、Bot 监听（XSS/CSRF）、中间人代理（`mitmproxy`）、浏览器自动化服务。
+
+**detach 命令模板**：
+```bash
+setsid timeout -k 5 600 <command> > $TASK_DIR/<name>.log 2>&1 &
+echo $! > $TASK_DIR/<name>.pid
+```
+
+**拆解**：
+| 标志 | 作用 |
+|------|------|
+| `setsid` | 创建新会话（独立进程组），确保 kill PID 时整个进程树退出 |
+| `timeout -k 5 600` | 600 秒后发 SIGTERM，再 5 秒后发 SIGKILL（内核级硬保证） |
+| `> log 2>&1` | 输出重定向到日志文件（后续用 `cat log` 检查结果） |
+| `& echo $! > pid` | 后台运行 + 记录 PID（后续用 `kill $(cat pid)` 清理） |
+
+**为什么 setsid 在 timeout 外面**：setsid exec timeout（PID 不变），timeout fork 出实际命令。kill PID → timeout 收到信号 → 转发给子进程 → 全部退出。如果 setsid 在 timeout 里面，命令会脱离 timeout 的进程组，kill 时收不到信号。
+
+**timeout 上限**：
+- 默认 600 秒（10 分钟）——覆盖反弹 shell / SSRF 回调 / Bot 监听
+- 允许显式调高到 1800 秒（30 分钟）——用于 mitmproxy 等长任务
+- 最高不超过 1800 秒
+
+**使用流程**：
+```
+1. 启动 detach 进程 → 拿到 PID + 日志路径
+2. 做别的事（注入 payload、触发漏洞）
+3. cat $TASK_DIR/<name>.log → 检查结果
+4. kill $(cat $TASK_DIR/<name>.pid) → 清理
+```
+
+**约束**：
+- 单任务最多 5 个并发 detach 进程
+- 每个进程必须有独立的日志和 PID 文件
+- 分析结束前必须 kill 所有 detach 进程
+- 启动前检查端口是否被占用（`lsof -i:PORT`），被占则先 kill 旧的
+
+**与在线托管平台的关系**：
+- 目标能出公网 → 可用 webhook.site / interactsh（公网回调）
+- 目标在内网 → 必须用 detach 起本地监听
+- 两条路径并列，按目标网络情况选
 
 ### 文件放置规则
 
@@ -71,6 +115,26 @@
 
 ### 卡住预防
 
-- 所有命令依赖 Bash 工具的默认超时（120 秒），不需要手动设置超时
-- 如果命令预期耗时超过 120 秒（如长时间运行的 Python 脚本），应使用 `$PYTHON_CMD` 运行并在脚本内部实现超时控制
+- 非后台命令依赖 Bash 工具的默认超时（120 秒），不需要手动设置超时
+- 后台命令（detach 模式）不受 120 秒限制，但必须用 `timeout` 命令包装（见**长驻进程 detach 模式**节）
+- 如果命令预期耗时超过 120 秒（如长时间运行的 Python 脚本），考虑用 detach 模式或脚本内部实现超时控制
 - 连续 2 次工具调用无有效输出（空输出 / 超时提示）→ 暂停评估当前方向是否可行
+
+### 输出最小化
+
+工具命令的默认输出经常包含大量冗余信息（banner、进度条、中间过程），这些会浪费上下文 token。**始终使用输出精简标志**：
+
+| 工具 | 精简标志 | 效果 |
+|------|---------|------|
+| nmap | `--open` | 只显示开放端口（不显示 closed/filtered） |
+| nmap | `-q`（安静模式） | 不显示运行时统计 |
+| msfconsole | `-q` | 跳过启动 banner（省 30+ 行） |
+| sqlmap | `--batch` | 非交互模式（不提示用户选择） |
+| gobuster | `-q` | 安静模式（只显示结果） |
+| ffuf | `-s` | 安静模式 |
+| 通用 | `2>/dev/null` | 丢弃 stderr（当只关心 stdout 时） |
+| 通用 | `\| head -N` | 截断输出（只看前 N 行） |
+| 通用 | `\| grep <pattern>` | 过滤输出（只看匹配行） |
+| 通用 | `--no-color` / `--no-progress` | 去除颜色/进度（减少控制字符） |
+
+**原则**：如果输出预期很长（扫描结果、日志、文件列表），**先加精简标志再运行**。不要等输出爆炸了再截断。

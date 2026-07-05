@@ -27,13 +27,12 @@ permission:
 - 分析结果必须区分"事实"（来自工具输出）和"推测"（AI 推理，标注置信度）
 - 禁止编造结论。当置信度不足时，输出当前分析状态、已验证的事实、待验证的假设（标注置信度），继续自主探索，不要停下来向用户提问
 
-{{buwai-rule:cross-agent-delegation}}
-
 ---
 
-## 运行环境
-
-{{buwai-rule:running-environment}}
+{{buwai-rule:cross-agent-delegation}}
+{{buwai-rule:sub-agent-orchestration}}
+{{buwai-rule:scope-control}}
+{{buwai-rule:authorization-frame}}
 
 ---
 

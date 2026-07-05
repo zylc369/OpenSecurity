@@ -25,9 +25,10 @@ permission:
 
 ---
 
-## 运行环境
-
-{{buwai-rule:running-environment}}
+{{buwai-rule:cross-agent-delegation}}
+{{buwai-rule:sub-agent-orchestration}}
+{{buwai-rule:scope-control}}
+{{buwai-rule:authorization-frame}}
 
 ---
 

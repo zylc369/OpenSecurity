@@ -110,3 +110,114 @@ A: 默认超时 30 秒，复杂页面可能需要更长。使用 `--timeout 60` 
 
 **Q: playwright 未安装？**
 A: 运行 `$PYTHON_CMD "$SHARED_DIR/scripts/detect_env.py" --force` 自动安装 playwright 和 Chromium 浏览器。
+
+---
+
+## 浏览器自动化服务（web_render_server.py）
+
+当需要**多次渲染**、**保持登录状态**、**多步骤交互**（点击/输入/提交）或**页面操作自动化**时，使用常驻浏览器服务。
+
+### 与 web_render.py 的关系
+
+| 场景 | 用什么 | 理由 |
+|------|--------|------|
+| 单次页面渲染 | web_render.py | 轻量，无需启动服务 |
+| 截图 | web_render.py | 单次操作 |
+| 爬取网站多个页面 | **web_render_server.py** | 复用浏览器，避免冷启动 |
+| 需要登录后访问 | **web_render_server.py** | cookie/session 自动保持 |
+| XSS 交互验证 | **web_render_server.py** | 多步骤操作 + JS 执行 |
+| CSRF 操作模拟 | **web_render_server.py** | 点击/输入/提交 |
+| 业务逻辑漏洞（多步骤攻击链） | **web_render_server.py** | 状态保持 |
+
+### 启动服务
+
+```bash
+# 启动持久浏览器服务（detach 模式）
+bash $SHARED_DIR/scripts/start_browser_server.sh
+# → 输出: http://localhost:8888
+```
+
+### API 端点
+
+#### 基础渲染
+
+```bash
+# 健康检查
+curl -s http://localhost:8888/health
+
+# 渲染页面（和 web_render.py 兼容）
+curl -s http://localhost:8888/render -d '{"url":"https://example.com","format":"markdown"}'
+
+# 截图
+curl -s http://localhost:8888/screenshot -d '{"url":"https://example.com","path":"$TASK_DIR/shot.jpg"}'
+```
+
+#### 交互操作（共享活跃 page）
+
+```bash
+# 导航到 URL
+curl -s http://localhost:8888/navigate -d '{"url":"https://target.com/login"}'
+
+# 输入文本
+curl -s http://localhost:8888/type -d '{"selector":"#username","text":"admin"}'
+
+# 点击元素
+curl -s http://localhost:8888/click -d '{"selector":"#submit"}'
+
+# 提交表单（无 selector 时自动找 form）
+curl -s http://localhost:8888/submit -d '{"selector":"#login-form"}'
+
+# 获取当前页面内容
+curl -s http://localhost:8888/content -d '{"format":"markdown"}'
+```
+
+#### 会话管理
+
+```bash
+# 执行 JavaScript
+curl -s http://localhost:8888/execute -d '{"script":"return document.title"}'
+
+# 获取所有 cookie
+curl -s http://localhost:8888/cookies -d '{}'
+
+# 设置 cookie
+curl -s http://localhost:8888/cookies -d '{"name":"session","value":"abc123","domain":"target.com"}'
+
+# 重置 context（清空所有状态）
+curl -s http://localhost:8888/reset -d '{}'
+```
+
+### 典型场景
+
+#### 认证后渗透
+
+```bash
+# 1. 登录
+curl -s http://localhost:8888/navigate -d '{"url":"https://target.com/login"}'
+curl -s http://localhost:8888/type -d '{"selector":"#username","text":"admin"}'
+curl -s http://localhost:8888/type -d '{"selector":"#password","text":"pass"}'
+curl -s http://localhost:8888/click -d '{"selector":"#submit"}'
+
+# 2. 登录成功后 cookie 自动保持，访问受限页面
+curl -s http://localhost:8888/navigate -d '{"url":"https://target.com/admin/dashboard"}'
+curl -s http://localhost:8888/content -d '{"format":"markdown"}'
+```
+
+#### XSS 交互验证
+
+```bash
+# 注入 payload 后检查效果
+curl -s http://localhost:8888/navigate -d '{"url":"https://target.com/search?q=<script>document.title=\"XSS\"</script>"}'
+curl -s http://localhost:8888/execute -d '{"script":"return document.title"}'
+# → 返回 "XSS" 则证明脚本执行了
+```
+
+### 清理
+
+服务有三层清理保障，不需要手动管理：
+
+1. **空闲自动关闭**（硬约束）：10 分钟无请求 → 服务自动退出
+2. **timeout 强制杀死**（硬约束）：`setsid timeout -k 5 3600` → 最多 1 小时后内核 SIGKILL
+3. **手动 kill**（可选）：`kill $(cat $TASK_DIR/browser_server.pid)`
+
+服务关闭后，下次调用 `start_browser_server.sh` 会检测到服务不可用并自动重启。
