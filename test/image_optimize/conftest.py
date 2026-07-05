@@ -58,6 +58,35 @@ def gradient_image():
     return img
 
 
+# ---------- playwright 可用性检测（集成测试用）----------
+
+def _playwright_available():
+    """检测 playwright + chromium 是否可用。"""
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception:
+        return False
+
+
+# session 级缓存，避免重复启动浏览器
+_pw_available = None
+
+
+@pytest.fixture(scope="session")
+def playwright_ok():
+    """如果 playwright + chromium 可用返回 True，否则 skip 测试。"""
+    global _pw_available
+    if _pw_available is None:
+        _pw_available = _playwright_available()
+    if not _pw_available:
+        pytest.skip("playwright + chromium 不可用（集成测试需要真实浏览器）")
+    return True
+
+
 @pytest.fixture
 def complex_image():
     """500x500 二维正弦渐变图片（接近真实截图复杂度）。

@@ -30,6 +30,33 @@ def render_mod():
     return mod
 
 
+# ---------- playwright 可用性检测（集成测试用）----------
+
+def _playwright_available():
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception:
+        return False
+
+
+_pw_available = None
+
+
+@pytest.fixture(scope="session")
+def playwright_ok():
+    """playwright + chromium 可用时返回 True，否则 skip。"""
+    global _pw_available
+    if _pw_available is None:
+        _pw_available = _playwright_available()
+    if not _pw_available:
+        pytest.skip("playwright + chromium 不可用")
+    return True
+
+
 # ---------- Fake Playwright 组件 ----------
 
 class FakeResponse:
