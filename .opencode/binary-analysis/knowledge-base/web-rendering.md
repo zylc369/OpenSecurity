@@ -176,7 +176,7 @@ curl -s http://localhost:8888/content -d '{"format":"markdown"}'
 
 ```bash
 # 执行 JavaScript
-curl -s http://localhost:8888/execute -d '{"script":"return document.title"}'
+curl -s http://localhost:8888/execute -d '{"script":"document.title"}'
 
 # 获取所有 cookie
 curl -s http://localhost:8888/cookies -d '{}'
@@ -209,7 +209,7 @@ curl -s http://localhost:8888/content -d '{"format":"markdown"}'
 ```bash
 # 注入 payload 后检查效果
 curl -s http://localhost:8888/navigate -d '{"url":"https://target.com/search?q=<script>document.title=\"XSS\"</script>"}'
-curl -s http://localhost:8888/execute -d '{"script":"return document.title"}'
+curl -s http://localhost:8888/execute -d '{"script":"document.title"}'
 # → 返回 "XSS" 则证明脚本执行了
 ```
 
