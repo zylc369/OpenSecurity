@@ -113,7 +113,7 @@
 **应对**：
 
 ```bash
-$PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py chat -t <模型> --agent ai-security-analysis -p "..." --timeout 900
+$PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py chat -t <模型> --agent build -p "..." --timeout 900
 ```
 
 - 默认 600 秒（10 分钟），大多数请求够用

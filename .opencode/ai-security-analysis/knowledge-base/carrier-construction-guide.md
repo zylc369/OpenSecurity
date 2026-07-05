@@ -70,7 +70,7 @@
 4. **用 ai-dialogue 验证基线**：
    ```bash
    $PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py chat \
-     -t <目标模型> --agent ai-security-analysis \
+     -t <目标模型> --agent build \
      -p "载体文本（无注入）"
    # 检查 JSON 输出中的 content 字段，确认基线评分 ≥ 85
    ```

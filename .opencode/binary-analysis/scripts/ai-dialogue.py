@@ -10,7 +10,7 @@
   - 上下文压缩（summarize）
 
 agent 参数决定目标模型运行的 agent 上下文（system prompt、工具链、规则）。
-例如 --agent ai-security-analysis 让目标模型在 ai-security-analysis agent 上下文中运行。
+例如 --agent build 让目标模型在 build agent 上下文中运行（裸模型基线）。
 """
 
 import json
@@ -170,7 +170,7 @@ def build_parser():
     cmd_create.add_argument("-t", "--target-model", required=True,
                             help="目标模型 ID，如 deepseek-v4-pro")
     cmd_create.add_argument("--agent", required=True,
-                            help="目标模型运行的 agent（如 ai-security-analysis、binary-analysis、web-analysis）")
+                            help="目标模型运行的 agent（推荐 build：裸模型基线；其他如 binary-analysis）")
     cmd_create.add_argument("--provider", default="opencode-go",
                             help="模型供应商（默认: opencode-go）")
     cmd_create.add_argument("--title", default=None, help="会话标题")
@@ -187,7 +187,7 @@ def build_parser():
     cmd_chat.add_argument("-t", "--target-model", required=True,
                           help="目标模型 ID，如 deepseek-v4-pro")
     cmd_chat.add_argument("--agent", required=True,
-                          help="目标模型运行的 agent（如 ai-security-analysis、binary-analysis、web-analysis）")
+                          help="目标模型运行的 agent（推荐 build：裸模型基线；其他如 binary-analysis）")
     cmd_chat.add_argument("-p", "--prompt", required=True,
                           help="要发送的消息内容")
     cmd_chat.add_argument("--provider", default="opencode-go",
@@ -208,8 +208,15 @@ def build_parser():
     cmd_sum = sub.add_parser("summarize", help="压缩会话上下文")
     cmd_sum.add_argument("-s", "--session-id", required=True, help="会话 ID")
 
+    # scan（批量探测：按策略文件多轮对话，聚合输出）
+    cmd_scan = sub.add_parser("scan", help="批量探测（按策略文件多轮对话，聚合输出 JSON）")
+    cmd_scan.add_argument("--strategy", required=True,
+                          help="策略文件路径（JSON，含 target_model/agent/stages）")
+    cmd_scan.add_argument("--output", default=None,
+                          help="输出文件路径（可选，默认输出到 stdout）")
+
     # 通用参数
-    for cmd in [cmd_create, cmd_send, cmd_chat, cmd_list, cmd_msgs, cmd_del, cmd_sum]:
+    for cmd in [cmd_create, cmd_send, cmd_chat, cmd_list, cmd_msgs, cmd_del, cmd_sum, cmd_scan]:
         cmd.add_argument("--host", default=DEFAULT_HOST,
                          help=f"opencode serve 地址（默认: {DEFAULT_HOST}）")
         cmd.add_argument("--port", type=int, default=DEFAULT_PORT,
@@ -235,6 +242,60 @@ def main():
     except Exception as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         sys.exit(1)
+
+
+def scan_run(host, port, strategy_file, output_file=None, timeout=DEFAULT_TIMEOUT):
+    """按策略文件批量探测：create → 按 stages 顺序 send → 聚合 → delete
+
+    策略文件格式（JSON）:
+        {
+          "target_model": "deepseek-v4-pro",
+          "provider": "opencode-go",
+          "agent": "build",
+          "stages": [
+            {"name": "baseline", "prompts": ["问题1", "问题2"]},
+            {"name": "injection", "prompts": ["payload1"]}
+          ]
+        }
+    """
+    with open(strategy_file, "r", encoding="utf-8") as f:
+        strategy = json.load(f)
+
+    target_model = strategy["target_model"]
+    provider = strategy.get("provider", "opencode-go")
+    agent = strategy["agent"]
+    stages = strategy.get("stages", [])
+
+    sess = session_create(host, port, target_model, provider, agent,
+                          title="scan", timeout=timeout)
+    sid = sess["session_id"]
+
+    results = []
+    try:
+        for stage in stages:
+            stage_name = stage.get("name", "")
+            for prompt in stage.get("prompts", []):
+                msg = send_message(host, port, sid, prompt, timeout=timeout)
+                results.append({
+                    "stage": stage_name,
+                    "prompt": prompt,
+                    "reply": msg.get("content", ""),
+                })
+    finally:
+        session_delete(host, port, sid)
+
+    output = {
+        "session_id": sid,
+        "target_model": target_model,
+        "agent": agent,
+        "results": results,
+    }
+
+    if output_file:
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(output, f, ensure_ascii=False, indent=2)
+
+    return output
 
 
 def _dispatch(args) -> dict:
@@ -276,6 +337,10 @@ def _dispatch(args) -> dict:
     if cmd == "summarize":
         ok = session_summarize(args.host, args.port, args.session_id)
         return {"session_id": args.session_id, "summarized": ok}
+
+    if cmd == "scan":
+        return scan_run(args.host, args.port, args.strategy,
+                        args.output, timeout=args.timeout)
 
     return {"error": f"未知命令: {cmd}"}
 

@@ -18,7 +18,7 @@ python ai-dialogue.py create -t <模型ID> --agent <agent> --provider opencode-g
 
 返回 `session_id`，后续用同一个 ID 多次 `send` 即为多轮对话。
 
-`--agent` 必传，指定目标模型运行的 agent 上下文（如 `ai-security-analysis`、`build`）。
+`--agent` 必传，指定目标模型运行的 agent 上下文（推荐 `build`；如 `ai-security-analysis`）。
 
 ### send — 发送消息（多轮对话核心）
 
@@ -62,6 +62,30 @@ python ai-dialogue.py summarize -s <session_id>
 python ai-dialogue.py delete -s <session_id>
 ```
 
+### scan — 批量探测
+
+按策略文件多轮对话，一次跑完返回聚合 JSON。适合基线探测、多向量初扫等可预先结构化的场景。
+
+策略文件（JSON）：
+
+```json
+{
+  "target_model": "deepseek-v4-pro",
+  "provider": "opencode-go",
+  "agent": "build",
+  "stages": [
+    {"name": "baseline", "prompts": ["正常问题1"]},
+    {"name": "injection", "prompts": ["payload1"]}
+  ]
+}
+```
+
+```bash
+python ai-dialogue.py scan --strategy <策略文件.json> [--output <结果.json>]
+```
+
+自动创建会话、按 stages 顺序发送、收集回复、删除会话，输出聚合 JSON（每条含 stage/prompt/reply）。
+
 ## 通用参数
 
 | 参数 | 默认值 | 说明 |
@@ -76,20 +100,23 @@ python ai-dialogue.py delete -s <session_id>
 
 | agent | 上下文 | 适用场景 |
 |-------|--------|---------|
-| `ai-security-analysis` | AI 安全分析编排器（编程约束、安全分析工具链） | 测试模型在 AI 安全分析 agent 部署下的行为 |
-| `build` | 通用构建 agent（无特定约束） | 测试模型在通用 agent 部署下的行为 |
+| `build`（推荐） | 通用 agent，无自定义 system prompt（裸模型基线） | 测模型本身的安全防线，不注入额外指令 |
+| `ai-security-analysis` | AI 安全分析编排器（含越狱方法论、攻击工具链） | 测试模型部署为安全分析 agent 时的行为 |
 | 其他自定义 agent | 对应 agent 的上下文 | 测试特定 agent 部署场景 |
 
 ## 多轮攻防工作流
 
+根据攻击目标自主选择工具组合：
+
+- **广度扫描**：`scan`（策略文件批量探测，适合基线/多向量初扫）
+- **深度突破**：`create` + 多次 `send`（适合逐轮动态调整）
+
 ```
-1. create -t deepseek-v4-pro --agent ai-security-analysis --title "实验"  → 拿到 session_id
-2. send -s <id> -p "正常输入"                    → 建立基线
-3. send -s <id> -p "轻微注入试探"                → 试探边界
-4. send -s <id> -p "加强注入"                    → 逐步引诱
-5. send -s <id> -p "最终 payload"               → 发起攻击
-6. summarize -s <id>                            → 上下文过长时压缩
-7. delete -s <id>                               → 清理会话
+1. scan（基线 + 多向量初扫）→ 聚合 JSON，识别薄弱方向
+2. create -t <模型> --agent build --title "实验"  → session_id
+3. send -s <id> -p "渐进式注入"  → 突破防线
+4. summarize -s <id>             → 上下文过长时压缩
+5. delete -s <id>                → 清理会话
 ```
 
 ## 可用模型

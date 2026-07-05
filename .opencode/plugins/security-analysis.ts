@@ -1,5 +1,6 @@
 import { writeFileSync, existsSync } from "fs";
 import { join, dirname, delimiter } from "path";
+import { tmpdir } from "os";
 import type { Plugin } from "@opencode-ai/plugin";
 import type { Event } from "@opencode-ai/sdk";
 import {
@@ -255,7 +256,7 @@ async function abortSession(sessionID: string, reason: string): Promise<void> {
 const toolStartTimes = new Map<string, number>();
 
 // 确保任务目录存在（根 session 首次消息时调用）。
-// 调 createTaskDir（TS 直接创建目录+映射+persistence.json，不 spawn Python 脚本）。
+// 调 createTaskDir（TS 直接创建目录+映射，不 spawn Python 脚本）。
 // 幂等：同一 sessionID 重复调用返回已有目录（createTaskDir 内部保证）。
 async function ensureTaskDir(
   sessionID: string,
@@ -478,6 +479,16 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     "experimental.chat.system.transform": async (input, output) => {
       try {
         const sessionID = input.sessionID;
+
+        // ── 通用层：所有会话（含靶子 build、explore 等非安全 agent）──
+        // 临时文件放置规则 + 本机白名单目录绝对路径（与 global.ts 白名单基准同源）
+        // 放在 requireSecurityAgent 之前：通用信息所有会话都该知道；专属层只给 SECURITY_AGENTS
+        output.system.push(
+          `\n## 临时文件放置\n` +
+          `如需写临时文件，写到 ${join(tmpdir(), "opencode")}/ 下。\n` +
+          `> 该目录权限已放行，不会触发权限申请。`,
+        );
+
         const session = ctx.sessionManager.requireSecurityAgent(
           "system.transform",
           sessionID,

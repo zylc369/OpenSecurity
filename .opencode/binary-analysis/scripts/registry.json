@@ -94,9 +94,9 @@
     {
       "name": "ai_dialogue",
       "file": "ai-dialogue.py",
-      "description": "通用 AI 对话工具 — 通过 opencode serve 与目标模型对话。支持创建/发送/销毁 session，多轮对话上下文自动保持。--agent 参数指定目标模型运行的 agent 上下文",
-      "params": ["create -t <model> --agent <agent> [--provider opencode-go] [--title]", "send -s <session_id> -p <prompt>", "chat -t <model> --agent <agent> -p <prompt> [--provider opencode-go]", "list", "messages -s <session_id>", "delete -s <session_id>", "summarize -s <session_id>"],
-      "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py chat -t deepseek-v4-pro --agent ai-security-analysis -p \"你好\"",
+      "description": "通用 AI 对话工具 — 通过 opencode serve 与目标模型对话。支持创建/发送/销毁 session，多轮对话上下文自动保持，scan 批量探测。--agent 参数指定目标模型运行的 agent 上下文",
+      "params": ["create -t <model> --agent <agent> [--provider opencode-go] [--title]", "send -s <session_id> -p <prompt>", "chat -t <model> --agent <agent> -p <prompt> [--provider opencode-go]", "scan --strategy <strategy.json> [--output <file>]", "list", "messages -s <session_id>", "delete -s <session_id>", "summarize -s <session_id>"],
+      "example_call": "$PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py chat -t deepseek-v4-pro --agent build -p \"你好\"",
       "added_at": "2026-07-03",
       "verified": true
     }
