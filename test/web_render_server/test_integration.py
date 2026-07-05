@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import requests
+requests = pytest.importorskip("requests")
 
 VENV_PYTHON = os.path.expanduser("~/bw-security-analysis/.venv/bin/python")
 SCRIPT_PATH = (
@@ -112,7 +112,17 @@ def test_screenshot_creates_file(tmp_path):
     assert d["size"] > 0
     assert "format" in d
     assert os.path.isfile(d["screenshot"])
-    assert os.path.getsize(d["screenshot"]) > 0
+
+    # 验证输出是有效图片（不是损坏文件）
+    from PIL import Image
+    img = Image.open(d["screenshot"])
+    assert img.size == (1280, 720)  # 视口分辨率
+    assert img.mode == "RGB"
+
+    # 响应 format/size 与实际文件一致
+    actual_size = os.path.getsize(d["screenshot"])
+    assert d["size"] == actual_size
+    assert d["screenshot"].endswith(f".{d['format']}")
 
 
 def test_screenshot_full_page(tmp_path):
@@ -121,7 +131,12 @@ def test_screenshot_full_page(tmp_path):
     d = r.json()
     assert d["success"] is True
     assert os.path.isfile(d["screenshot"])
-    assert os.path.getsize(d["screenshot"]) > 0
+
+    # 全页截图高度应 >= 视口高度（720）
+    from PIL import Image
+    img = Image.open(d["screenshot"])
+    assert img.size[0] == 1280
+    assert img.size[1] >= 720
 
 
 def test_screenshot_missing_url():

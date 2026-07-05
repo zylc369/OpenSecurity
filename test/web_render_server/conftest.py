@@ -27,7 +27,12 @@ _SCRIPT_PATH = _SCRIPTS_DIR / "web_render_server.py"
 
 @pytest.fixture(scope="session")
 def server_mod():
-    """加载 web_render_server.py 为模块。"""
+    """加载 web_render_server.py 为模块。
+
+    web_render_server.py 模块级 import playwright，缺失时 sys.exit(1)。
+    先检测 playwright 可用性，缺失时 skip 整个测试模块。
+    """
+    pytest.importorskip("playwright")
     spec = importlib.util.spec_from_file_location("web_render_server", _SCRIPT_PATH)
     mod = importlib.util.module_from_spec(spec)
     sys.modules["web_render_server"] = mod
