@@ -16,15 +16,6 @@ export function readJsonSafe<T>(filePath: string, sessionID?: string): T | null 
   return null;
 }
 
-/** 获取 task 目录（带缓存）。调 getTaskDirRaw + debugLog。 */
-export function getTaskDir(sessionID: string): string | null {
-  const result = getTaskDirRaw(sessionID);
-  if (!result.path && result.error) {
-    debugLog(`getTaskDir: ${result.error}`, sessionID);
-  }
-  return result.path;
-}
-
 /** 删除 task session 映射文件 + 清除缓存 */
 export function removeTaskSession(sessionID: string): void {
   clearTaskDirCache(sessionID);

@@ -2,6 +2,11 @@ import type { OpencodeClient } from "@opencode-ai/sdk";
 import { SECURITY_AGENTS } from "./constants";
 import { debugLog } from "./logging";
 import { Result } from "./result";
+import { createTaskDir } from "./task-session";
+
+function localIsSecurityAgent(agentName: string): boolean {
+  return SECURITY_AGENTS.includes(agentName);
+}
 
 export class SessionData {
   /** session 创建时间戳（毫秒）。调试参考，不用于业务逻辑 */
@@ -10,6 +15,7 @@ export class SessionData {
   agentName: string;
   /** 父 session ID。如果是编排 agent 创建的子 session 则有值。当前未使用，预留 */
   readonly parentSessionID?: string;
+  private taskDir?: string | null = null; // 任务目录（绝对路径），由 createFromAPI 创建时获取。可能为 null（映射文件不存在或读取失败）
   /** system.transform hook 触发次数。用于控制环境信息注入频率（前 3 次必注入，之后按频率注入） */
   systemTransformCount = 0;
   /** 压缩标识。compacting hook 置 true，system.transform 检测到后强制注入环境信息并清 false。
@@ -45,7 +51,7 @@ export class SessionData {
   }
 
   isSecurityAgent(): boolean {
-    return SECURITY_AGENTS.includes(this.agentName);
+    return localIsSecurityAgent(this.agentName);
   }
 
   /** 当前未使用，预留给编排 agent 子任务方案 */
@@ -63,6 +69,14 @@ export class SessionData {
       return true;
     }
     return false;
+  }
+
+  setTaskDir(taskDir: string | null | undefined): void {
+    this.taskDir = taskDir;
+  }
+
+  getTaskDir(): string | null | undefined {
+    return this.taskDir;
   }
 }
 
@@ -135,6 +149,14 @@ export class SessionDataManager {
     return this.sessions.get(sessionID);
   }
 
+  getTaskDir(sessionID: string): string | null | undefined {
+    const session = this.sessions.get(sessionID);
+    if (!session) {
+      return null;
+    }
+    return session.getTaskDir();
+  }
+
   /** 删除（session.deleted 时调用）。同时清理 pending Map。 */
   delete(sessionID: string): void {
     this.sessions.delete(sessionID);
@@ -181,6 +203,17 @@ export class SessionDataManager {
       `SessionDataManager: 创建 sessionID=${sessionID} agent=${agentName} parentID=${parentSessionID || "无"}`,
       sessionID,
     );
+
+    const taskDir = this.getOrCreateTaskDir(sessionID, agentName); // 创建 task_dir 映射文件（幂等，已存在则返回已有）
+    session.setTaskDir(taskDir);
     return session;
+  }
+
+
+  private getOrCreateTaskDir(sessionID: string, agentName: string): string | null {
+    if (!localIsSecurityAgent(agentName)) {
+      return null;
+    }
+    return createTaskDir(sessionID);
   }
 }

@@ -26,7 +26,7 @@ import {
 import { ctx } from "./lib/context";
 import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
-import { readJsonSafe, getTaskDir, removeTaskSession, createTaskDir } from "./lib/task-session";
+import { readJsonSafe, removeTaskSession } from "./lib/task-session";
 import { getPythonCmd, getCondaCmd, getCondaInstallHint } from "./lib/venv";
 import { hasBuwaiExtensionId, loadSnippet } from "./lib/snippet";
 import { maybeResumeAnalysis } from "./lib/persistence";
@@ -255,25 +255,8 @@ async function abortSession(sessionID: string, reason: string): Promise<void> {
 // 工具开始执行时间戳（tool.execute.before → tool.execute.after 配对计算耗时）
 const toolStartTimes = new Map<string, number>();
 
-// 确保任务目录存在（根 session 首次消息时调用）。
-// 调 createTaskDir（TS 直接创建目录+映射，不 spawn Python 脚本）。
-// 幂等：同一 sessionID 重复调用返回已有目录（createTaskDir 内部保证）。
-async function ensureTaskDir(
-  sessionID: string,
-): Promise<EnvironmentCheckResult> {
-  try {
-    const taskDir = createTaskDir(sessionID);
-    debugLog(`ensureTaskDir: 任务目录已就绪 sessionID=${sessionID} taskDir=${taskDir}`, sessionID);
-    return { ready: true, message: "" };
-  } catch (e) {
-    const msg = (e as Error)?.message ?? String(e);
-    debugLog(`ensureTaskDir: 创建失败 sessionID=${sessionID} error=${msg}`, sessionID);
-    return { ready: false, message: `[任务目录创建失败] ${msg}` };
-  }
-}
-
 // 统一环境检测入口（chat.message 调用此函数）
-// 检测顺序：PythonCmd 可用性 → 任务目录初始化（仅根 session）→ 环境检测（全量+预装）
+// 检测顺序：PythonCmd 可用性 → 环境检测（全量+预装）
 async function checkEnvironment(agent: string, sessionID: string): Promise<EnvironmentCheckResult> {
   // 确保 .ai_env 存在（首次启动时 Plugin 自动创建，避免 detect_env 报错）
   const aiEnvPath = join(OPENCODE_ROOT, ".ai_env");
@@ -286,24 +269,6 @@ async function checkEnvironment(agent: string, sessionID: string): Promise<Envir
   const pythonCmd = getPythonCmd();
   if (!pythonCmd) {
     return { ready: false, message: getCondaInstallHint() };
-  }
-
-  // 任务目录初始化（仅根 session；子 session 共用父 TASK_DIR，由 Coordinator 文字传递）
-  const session = ctx.sessionManager.get(sessionID);
-  const isRootSession = !session?.parentSessionID;
-  if (isRootSession) {
-    const existingTaskDir = getTaskDir(sessionID);
-    if (!existingTaskDir) {
-      debugLog(`checkEnvironment: 根 session 首次消息，初始化任务目录 sessionID=${sessionID}`, sessionID);
-      const taskResult = await ensureTaskDir(sessionID);
-      if (!taskResult.ready) {
-        return taskResult;
-      }
-    } else {
-      debugLog(`checkEnvironment: 任务目录已存在 sessionID=${sessionID} taskDir=${existingTaskDir}`, sessionID);
-    }
-  } else {
-    debugLog(`checkEnvironment: 子 session，跳过任务目录初始化 sessionID=${sessionID} parentSessionID=${session?.parentSessionID}`, sessionID);
   }
 
   return await runDetectEnv(agent, pythonCmd, sessionID);
@@ -388,7 +353,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         // 判断是否为 resume prompt 回声（synthetic message）。
         // maybeResumeAnalysis 发 prompt 后同步设 resumeMarker；resume prompt 触发 chat.message 时它还非空。
         // 用它区分：synthetic 回声不刷新 lastUserMessageAt（否则 max_duration 超时检查形同虚设）。
-        const existing = ctx.sessionManager.get(sessionID);
+        // 为了补偿opencode重启后会话数据丢失的问题。
+        const existingResult = await ctx.sessionManager.create(sessionID);
+        const existing = existingResult.data;
         const isResumeEcho = !!existing?.resumeMarker;
 
         sessionData = await ctx.sessionManager.upsert(sessionID, agent, isResumeEcho);
@@ -403,17 +370,17 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
 
         debugLog(`chat.message: sessionID=${sessionID} agent=${agent}${isResumeEcho ? " [resume-echo]" : ""}`, sessionID);
 
-      // 环境检测：不 ready → 存错误信息到 sessionData + 终止（不 throw，不调 session.prompt）
-      const envCheck = await checkEnvironment(agent, sessionID);
-      if (!envCheck.ready) {
-        debugLog(`chat.message: 环境检测未通过 agent=${agent}，输出错误并终止`, sessionID);
-        await reportErrorAndAbort(ctx.client, sessionID, sessionData, envCheck.message);
-        return;
-      }
-      sessionData.activelyTerminated = false;
-      sessionData.pendingErrorMessage = null;
-      // 用户新消息 = 新一轮对话，上一轮植入的 resumeMarker 不再相关，清空避免误判
-      sessionData.resumeMarker = null;
+        // 环境检测：不 ready → 存错误信息到 sessionData + 终止（不 throw，不调 session.prompt）
+        const envCheck = await checkEnvironment(agent, sessionID);
+        if (!envCheck.ready) {
+          debugLog(`chat.message: 环境检测未通过 agent=${agent}，输出错误并终止`, sessionID);
+          await reportErrorAndAbort(ctx.client, sessionID, sessionData, envCheck.message);
+          return;
+        }
+        sessionData.activelyTerminated = false;
+        sessionData.pendingErrorMessage = null;
+        // 用户新消息 = 新一轮对话，上一轮植入的 resumeMarker 不再相关，清空避免误判
+        sessionData.resumeMarker = null;
       } catch (e) {
         // 兜底：chat.message 里的任何意外异常都不能 throw（会变 defect → 用户空白）
         const msg = (e as Error)?.message ?? String(e);
@@ -458,7 +425,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         debugLog(`=== compacting 注入内容结束 ===`, sid);
 
         if (sid) {
-          const taskDir = getTaskDir(sid);
+          const taskDir = session.getTaskDir();
           if (taskDir) {
             debugLog(`compacting: TASK_DIR recovered=${taskDir}`, sid);
             output.context.push(`## TASK_DIR（不可省略 — 压缩后必须保留）
@@ -659,7 +626,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         }
 
         // TASK_DIR（从 task session mapping 读取，可能为空）
-        const taskDir = getTaskDir(sessionID);
+        const taskDir = session.getTaskDir();
         if (taskDir) {
           output.env.TASK_DIR = taskDir;
         }
