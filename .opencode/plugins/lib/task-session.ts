@@ -33,13 +33,22 @@ export function removeTaskSession(sessionID: string): void {
   }
 }
 
+function createTaskDirName(agentName: string): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+    `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const rand = Math.floor(Math.random() * 0xffff).toString(16).padStart(4, "0");
+  return `${ts}_${rand}_${agentName}`;
+}
+
 /**
  * 创建任务目录并注册 sessionID 映射（替代已删除的 create_task_dir.py）。
  * 幂等：同一 sessionID 重复调用返回已有目录（映射存在且目录有效时）。
  * 新建时：时间戳+随机hex 目录名 + 注册 .task_sessions/{sessionID}.json 映射。
  * 返回 task_dir 绝对路径。
  */
-export function createTaskDir(sessionID: string): string {
+export function createTaskDir(sessionID: string, agentName: string, baseDir?: string | null): string {
   // 幂等检查：已有映射且目录存在 → 返回已有
   const existing = getTaskDirRaw(sessionID);
   if (existing.path && existsSync(existing.path)) {
@@ -47,14 +56,12 @@ export function createTaskDir(sessionID: string): string {
     return existing.path;
   }
 
+  const realBaseDir = baseDir || WORKSPACE_DIR;
+
   // 创建目录
-  mkdirSync(WORKSPACE_DIR, { recursive: true });
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
-    `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-  const rand = Math.floor(Math.random() * 0xffff).toString(16).padStart(4, "0");
-  const taskDir = join(WORKSPACE_DIR, `${ts}_${rand}`);
+  mkdirSync(realBaseDir, { recursive: true });
+  const taskDirName = createTaskDirName(agentName);
+  const taskDir = join(realBaseDir, taskDirName);
   mkdirSync(taskDir, { recursive: true });
 
   // 注册映射（sessionID 非空时）

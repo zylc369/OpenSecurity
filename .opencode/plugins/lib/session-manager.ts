@@ -1,3 +1,4 @@
+import { join } from "path";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { SECURITY_AGENTS } from "./constants";
 import { debugLog } from "./logging";
@@ -13,8 +14,12 @@ export class SessionData {
   readonly createdAt: number;
   /** 当前 agent 名（如 "binary-analysis"）。由 chat.message 更新。保证非空——createFromAPI 在缺失时抛异常 */
   agentName: string;
-  /** 父 session ID。如果是编排 agent 创建的子 session 则有值。当前未使用，预留 */
+  readonly sessionID: string; // 当前 session ID（唯一标识符）
+  /** 根 session ID（沿 parentID 链追溯到的顶层 session）。task_dir 共用根 session 的 */
+  readonly rootSessionID: string;
+  /** 直接父 session ID。子 session（编排 agent 创建）时有值，用于判定子 session 分支 */
   readonly parentSessionID?: string;
+  rootTaskDir: string | null | undefined; // 根 session 的 task_dir（绝对路径），由 createFromAPI 创建时获取。可能为 null（映射文件不存在或读取失败）
   private taskDir?: string | null = null; // 任务目录（绝对路径），由 createFromAPI 创建时获取。可能为 null（映射文件不存在或读取失败）
   /** system.transform hook 触发次数。用于控制环境信息注入频率（前 3 次必注入，之后按频率注入） */
   systemTransformCount = 0;
@@ -43,10 +48,12 @@ export class SessionData {
   /** 冷却中 pending 的 setTimeout handle。新 resume 前或用户手动发消息时清除。 */
   pendingResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(agentName: string, parentSessionID?: string) {
+  constructor(agentName: string, sessionID: string, rootSessionID: string, parentSessionID?: string) {
     this.createdAt = Date.now();
     this.lastUserMessageAt = this.createdAt;
     this.agentName = agentName;
+    this.sessionID = sessionID;
+    this.rootSessionID = rootSessionID;
     this.parentSessionID = parentSessionID;
   }
 
@@ -196,24 +203,53 @@ export class SessionDataManager {
     if (!agentName) {
       throw new Error(`SessionDataManager: API 未返回 agent 字段 sessionID=${sessionID}`);
     }
+    let rootSessionID: string | undefined = undefined;
+    let parentSession: SessionData | undefined = undefined;
     const parentSessionID = (sessionInfo as { parentID?: string })?.parentID;
-    const session = new SessionData(agentName, parentSessionID);
+    if (parentSessionID) {
+      // 子 session（非根 session）需要沿用根 session 的 task_dir。先创建父 session 再获取 rootSessionID。
+      const parentSessionResult = await this.create(parentSessionID);
+      parentSession = parentSessionResult.data;
+      if (!parentSession) {
+        throw new Error(`SessionDataManager: 父 session 创建失败 sessionID=${sessionID} parentID=${parentSessionID} error=${parentSessionResult.errorMessage}`);
+      }
+      rootSessionID = parentSession.rootSessionID;
+    } else {
+      rootSessionID = sessionID;
+    }
+    const session = new SessionData(agentName, sessionID, rootSessionID, parentSessionID);
     this.sessions.set(sessionID, session);
     debugLog(
       `SessionDataManager: 创建 sessionID=${sessionID} agent=${agentName} parentID=${parentSessionID || "无"}`,
       sessionID,
     );
 
-    const taskDir = this.getOrCreateTaskDir(sessionID, agentName); // 创建 task_dir 映射文件（幂等，已存在则返回已有）
+    // 创建 task_dir 映射文件（幂等，已存在则返回已有）
+    const taskDir = this.getOrCreateTaskDir(sessionID, agentName, parentSession);
     session.setTaskDir(taskDir);
+    if (!parentSessionID) {
+      session.rootTaskDir = taskDir; // 根 session 任务目录
+    } else {
+      session.rootTaskDir = parentSession?.rootTaskDir;
+    }
     return session;
   }
 
+  private getOrCreateTaskDir(sessionID: string, agentName: string, parentSession: SessionData | undefined): string | null | undefined {
+    const isCurrentPrimaryAgent = !parentSession?.sessionID;
+    let baseDir = parentSession?.rootTaskDir;
 
-  private getOrCreateTaskDir(sessionID: string, agentName: string): string | null {
-    if (!localIsSecurityAgent(agentName)) {
-      return null;
+    if (isCurrentPrimaryAgent) {
+      if (!localIsSecurityAgent(agentName)) {
+        debugLog(`getOrCreateTaskDir: 根 session 且非 Security Agent，不创建 task_dir sessionID=${sessionID} agent=${agentName}`, sessionID);
+        return null;
+      }
+    } else {
+      if (baseDir) {
+        baseDir = join(baseDir, "subtasks");
+      }
     }
-    return createTaskDir(sessionID);
+    
+    return createTaskDir(sessionID, agentName, baseDir);
   }
 }
