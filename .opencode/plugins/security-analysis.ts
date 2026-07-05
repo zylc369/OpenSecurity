@@ -1,4 +1,4 @@
-import { writeFileSync, existsSync } from "fs";
+import { writeFileSync, existsSync, openSync, closeSync } from "fs";
 import { join, dirname, delimiter } from "path";
 import { tmpdir } from "os";
 import type { Plugin } from "@opencode-ai/plugin";
@@ -275,6 +275,14 @@ async function ensureTaskDir(
 // 统一环境检测入口（chat.message 调用此函数）
 // 检测顺序：PythonCmd 可用性 → 任务目录初始化（仅根 session）→ 环境检测（全量+预装）
 async function checkEnvironment(agent: string, sessionID: string): Promise<EnvironmentCheckResult> {
+  // 确保 .ai_env 存在（首次启动时 Plugin 自动创建，避免 detect_env 报错）
+  const aiEnvPath = join(OPENCODE_ROOT, ".ai_env");
+  if (!existsSync(aiEnvPath)) {
+    debugLog(`checkEnvironment: .ai_env 不存在，自动创建 sessionID=${sessionID}`, sessionID);
+    closeSync(openSync(aiEnvPath, 'w')); 
+
+  }
+
   const pythonCmd = getPythonCmd();
   if (!pythonCmd) {
     return { ready: false, message: getCondaInstallHint() };

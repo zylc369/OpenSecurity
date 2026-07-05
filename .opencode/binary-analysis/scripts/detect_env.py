@@ -16,9 +16,10 @@ usage:
 level: intermediate
 
 packages:
-  必需: capstone, unicorn, gmpy2, frida, angr, triton, z3-solver, Pillow, pyautogui, pyperclip, playwright, markdownify, requests, beautifulsoup4, lxml
+  必需: capstone, unicorn, gmpy2, frida, angr, triton(Linux only), z3-solver, Pillow, pyautogui, pyperclip, playwright, markdownify, requests, beautifulsoup4, lxml
   playwright 需要额外安装浏览器二进制（playwright install chromium）
   每个 Python 包在 PYTHON_PACKAGES 里标记 agents（按 agent 过滤检测）
+  platforms 字段标记平台特有依赖（如 triton 仅 Linux）
 """
 
 import argparse
@@ -48,6 +49,7 @@ class Dependency:
     kind: Literal["python", "tool"]
     required: bool = True
     preinstall: bool = False               # True=用户预装只检测不自动装; False=自动安装
+    platforms: list[str] | None = None     # None=所有平台；["Linux","Darwin","Windows"] 限制目标平台，当前平台不匹配时跳过检测
     agents: list[str] = field(default_factory=list)   # 空=所有 agent
     description: str = ""
     install_hint: str = ""                 # 缺失时展示给用户的具体指引
@@ -159,8 +161,9 @@ PYTHON_PACKAGES: list[Dependency] = [
                agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
                description="二进制分析/符号执行框架，用于程序状态探索、漏洞发现、自动利用生成"),
     Dependency(name="triton", kind="python", pip_name="triton", preinstall=True,
+               platforms=["Linux"],
                agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
-               description="动态二进制分析框架，用于符号执行、污点分析、约束求解"),
+               description="动态二进制分析框架，用于符号执行、污点分析、约束求解（Linux only，依赖 CUDA）"),
     Dependency(name="z3", kind="python", pip_name="z3-solver", preinstall=True,
                agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis", "ai-security-analysis"],
                description="Microsoft Z3 定理证明器，用于约束求解、符号执行中的路径条件判定"),
@@ -667,8 +670,12 @@ def _check_preinstall(agent):
         return not dep.agents or agent in dep.agents
 
     # --- Python 包检测（全量检测写 cache，errors 按 agent 过滤）---
+    current_platform = platform.system()
     for dep in PYTHON_PACKAGES:
         if not dep.preinstall:
+            continue
+        # 平台过滤：platforms 不为 None 时，当前平台不在列表中则跳过
+        if dep.platforms is not None and current_platform not in dep.platforms:
             continue
         try:
             spec = importlib.util.find_spec(dep.name)

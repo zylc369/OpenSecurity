@@ -58,3 +58,5 @@ node_modules/
 
 /tmp
 /.privacy-data
+
+.ai_env

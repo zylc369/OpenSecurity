@@ -82,7 +82,7 @@ export function interpretDetectEnvResult(
     return {
       ready: false,
       message: hints
-        ? `[环境检测未通过] ${agent} 需要的依赖未就绪：\n${hints}\n装完后重新发送消息。`
+        ? `[环境检测未通过] ${agent} 需要的依赖未就绪：\n> 你可以切换到内置Agent，让内置Agent帮你阅读这条消息并安装。\n${hints}\n装完后重新发送消息。`
         : `[环境检测未通过] ${agent}：detect_env 返回 success 非 true 但无 errors`,
     };
   }
