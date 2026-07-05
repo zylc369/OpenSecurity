@@ -138,3 +138,83 @@ adb shell input keyevent DEL
 adb shell am force-stop <package>
 adb shell am start -n <package>/<activity>
 ```
+
+---
+
+## WebView 场景: 视觉驱动方案
+
+> 当 `uiautomator dump` 只返回 WebView 壳节点（看不到 DOM 内部控件）时使用此方案。
+> 原理：截图 → MCP 视觉模型识别控件坐标 → `adb shell input tap` 操作 → 再截图验证。
+
+### 触发条件
+
+`uiautomator dump` 输出中满足以下任一条件:
+- 只有 `<android.webkit.WebView>` 节点，无子控件
+- 混合架构 App（Cordova/Ionic/React Native WebView 模式）
+- 控件在 dump 中完全不可见（动态渲染、Canvas 绘制）
+
+### 标准操作流程
+
+#### Step 1: 设备截图
+
+```bash
+"$PYTHON_CMD" "$AGENT_DIR/scripts/mobile_screenshot.py" --output-dir "$TASK_DIR/views" --name step1_initial
+```
+
+#### Step 2: MCP 视觉分析
+
+使用 MCP 工具分析截图（两种方式任选）:
+- `zai-mcp-server_extract_text_from_screenshot`（推荐）: 提取所有控件文字和坐标
+- `zai-mcp-server_ui_to_artifact`（output_type='spec'）: 获取 UI 设计规范
+
+**MCP 调用参数**:
+- image_source: `$TASK_DIR/views/step1_initial.jpg`
+- prompt: "识别截图中所有可交互控件（按钮、输入框、下拉框等），返回每个控件的文字内容和中心坐标 (x, y)"
+
+#### Step 3: 执行操作（连续执行，中间不截图）
+
+```bash
+# 点击按钮/输入框（MCP 返回的坐标直接用）
+adb shell input tap <x> <y>
+
+# 输入英文文本
+adb shell input text "username"
+
+# 输入数字（必须用 keyevent，见上方映射表）
+adb shell input keyevent 8   # 1
+adb shell input keyevent 9   # 2
+```
+
+> **注意**: `adb shell input text` 不支持中文。中文输入需用 `adb shell input text` + URL 编码，或改用 Frida Hook 输入法。
+
+#### Step 4: 截图验证结果
+
+```bash
+"$PYTHON_CMD" "$AGENT_DIR/scripts/mobile_screenshot.py" --output-dir "$TASK_DIR/views" --name step2_result
+```
+
+使用 MCP 判断结果:
+- **首选**: `zai-mcp-server_ui_diff_check`（对比 step1_initial 和 step2_result）
+  - expected_image_source: `$TASK_DIR/views/step1_initial.jpg`
+  - actual_image_source: `$TASK_DIR/views/step2_result.jpg`
+  - prompt: "对比这两张截图，识别所有视觉变化（新弹窗、文字变化、控件状态变化等），判断操作是否成功"
+- **退化**: `zai-mcp-server_extract_text_from_screenshot`（提取 step2_result 文字，由 agent 判断）
+
+### 坐标系统说明
+
+`adb shell screencap` 截图坐标与 `adb shell input tap` 坐标系统完全一致。MCP 返回的图片坐标 (460, 320) 可直接传给 `adb shell input tap 460 320`，无需映射。
+
+### 产物管理
+
+1. 截图存储到 `$TASK_DIR/views/`（脚本自动创建目录）
+2. 文件名按操作阶段命名: step1_initial、step2_result、step3_diagnosis
+3. 操作序列: 拿到坐标后连续执行所有 tap/text，中间不截图
+4. 上下文压缩后: 操作前必须重新截图确认当前状态
+
+### 适用范围
+
+- ✅ Android 原生 WebView
+- ✅ Cordova/Ionic 混合 App
+- ✅ React Native WebView 组件
+- ❌ iOS（无 adb，需另设方案）
+- ❌ Flutter 自绘 UI（uiautomator 也看不到控件，但不是 WebView 场景）

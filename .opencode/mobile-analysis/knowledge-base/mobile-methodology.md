@@ -85,7 +85,13 @@ Payload/
 │     2. 检查 assets/ 下的 HTML/JS/CSS 文件
 │     3. 搜索 JS Bridge 接口（addJavascriptInterface、shouldOverrideUrlLoading）
 │     4. 如需抓包 → 使用 mitmproxy/Charles 抓取 HTTPS 流量
-│   知识库加载: android-tools.md
+│     5. 如需动态操作 WebView 内部 GUI（填表单、点按钮）→ 视觉驱动方案
+│        a. mobile_screenshot.py 截图
+│        b. MCP extract_text_from_screenshot 识别控件坐标
+│        c. adb shell input tap/text 操作
+│        d. 再截图 + MCP ui_diff_check 验证
+│        详见 android-ui-automation.md「WebView 场景: 视觉驱动方案」
+│   知识库加载: android-tools.md + android-ui-automation.md
 │
 └── 路径 5: Java ↔ Native 跨层调用（JNI）
       触发: Java 声明 native 方法、JNI_OnLoad、需要跨层追踪

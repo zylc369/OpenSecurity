@@ -1,4 +1,5 @@
 import subprocess
+import sys
 
 from .log import log
 
@@ -170,7 +171,7 @@ def mkdir_p(serial: str, path: str) -> None:
     if result.returncode != 0:
         msg = f"创建目录失败 '{path}': {result.stderr}"
         log.error(msg)
-        raise AdbError(msg)
+        raise AdbError(msg, ErrorCode.ADB_CMD_FAILED)
     log.info("目录创建成功: %s", path)
 
 
@@ -185,8 +186,23 @@ def push_file(serial: str, local_path: str, remote_path: str) -> None:
     if result.returncode != 0:
         msg = f"推送文件失败: {result.stderr}"
         log.error(msg)
-        raise AdbError(msg)
+        raise AdbError(msg, ErrorCode.ADB_CMD_FAILED)
     log.info("文件推送成功")
+
+
+def pull_file(serial: str, remote_path: str, local_path: str) -> None:
+    """Run: adb -s <serial> pull <remote_path> <local_path>
+
+    Raises AdbError on failure.
+    """
+    args = _adb_base_args(serial) + ["pull", remote_path, str(local_path)]
+    log.info("正在从设备拉取文件: %s -> %s", remote_path, local_path)
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        msg = f"拉取文件失败: {result.stderr}"
+        log.error(msg)
+        raise AdbError(msg, ErrorCode.ADB_CMD_FAILED)
+    log.info("文件拉取成功")
 
 
 def check_su_available(serial: str) -> bool:

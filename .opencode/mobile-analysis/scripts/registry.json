@@ -64,5 +64,16 @@
     "output_format": "签名 APK 文件写入 --output 路径",
     "note": "需要 Android SDK（ANDROID_HOME）。自动检测 build-tools 和 platform。支持标准项目结构和扁平结构",
     "requires_venv": false
+  },
+  {
+    "name": "mobile_screenshot",
+    "description": "Android 设备截图工具（adb screencap + pull），输出图片 + 元数据 JSON",
+    "file": "mobile_screenshot.py",
+    "language": "python",
+    "runner": "$PYTHON_CMD",
+    "usage": "$PYTHON_CMD $AGENT_DIR/scripts/mobile_screenshot.py --output-dir $TASK_DIR/views --name <名称> [--serial <设备ID>] [--format jpeg|png] [--quality 50]",
+    "output_format": "PNG 图片 + JSON 元数据写入 --output-dir 目录",
+    "note": "需要 adb（PATH 可用）。非交互设备检测（多设备需 --serial）。配合 MCP 视觉工具用于 WebView 场景",
+    "requires_venv": false
   }
 ]

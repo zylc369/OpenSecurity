@@ -121,6 +121,7 @@ permission:
 | 脚本 | 用途 | 典型命令 |
 |------|------|---------|
 | build_apk.py | 命令行 APK 构建（无需 Gradle） | `$PYTHON_CMD $AGENT_DIR/scripts/build_apk.py --src dir --output $TASK_DIR/<apk文件名>.apk` |
+| mobile_screenshot.py | Android 设备截图（adb screencap + pull） | `$PYTHON_CMD $AGENT_DIR/scripts/mobile_screenshot.py --output-dir $TASK_DIR/views --name <名称>` |
 
 ### IDA Pro 脚本（通过 $SHARED_DIR 调用）
 
@@ -157,7 +158,7 @@ permission:
 | 文档 | 触发条件 |
 |------|---------|
 | `android-tools.md` | APK 分析时（初始加载） |
-| `android-ui-automation.md` | 需要 adb 输入文本、点击按钮、uiautomator 操作时 |
+| `android-ui-automation.md` | 需要 adb 输入文本、点击按钮、uiautomator 操作、WebView 视觉分析时 |
 | `ios-tools.md` | IPA 分析时（初始加载） |
 | `mobile-methodology.md` | 分析规划阶段（阶段 B） |
 | `mobile-frida.md` | 需要 Frida Hook、设备操作时 |
