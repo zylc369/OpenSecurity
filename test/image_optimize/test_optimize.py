@@ -28,22 +28,25 @@ class TestOptimizeForMcp:
         # JPEG 候选应被删除
         assert not os.path.exists(os.path.join(str(tmp_path / "out"), "step1.jpg"))
 
-    def test_noise_image_prefers_jpeg(self, opt_mod, noise_image, tmp_path):
-        """噪声图片 JPEG 更小 → 输出 JPEG。"""
+    def test_noise_image_falls_back_to_png(self, opt_mod, noise_image, tmp_path):
+        """纯随机噪声 JPEG 无法达到 PSNR≥35dB → 回退到 PNG（无损）。
+
+        这是质量保障的核心：当 JPEG 搜索范围内无解时，
+        optimize_for_mcp 不产出不达标 JPEG，而是输出 PNG 保证质量。
+        """
         src = tmp_path / "input.png"
         noise_image.save(src, "PNG")
 
         result = opt_mod.optimize_for_mcp(str(src), str(tmp_path / "out"), "step2")
 
-        assert result["format"] == "jpg"
-        assert result["quality"] is not None
-        assert isinstance(result["quality"], int)
-        assert result["file"] == "step2.jpg"
-        assert result["path"].endswith("step2.jpg")
+        assert result["format"] == "png"
+        assert result["quality"] is None
+        assert result["file"] == "step2.png"
+        assert result["path"].endswith("step2.png")
         assert result["size"] > 0
         assert os.path.exists(result["path"])
-        # PNG 候选应被删除
-        assert not os.path.exists(os.path.join(str(tmp_path / "out"), "step2.png"))
+        # 不应生成 .jpg 文件
+        assert not os.path.exists(os.path.join(str(tmp_path / "out"), "step2.jpg"))
 
     def test_creates_output_dir(self, opt_mod, solid_image, tmp_path):
         """output_dir 不存在时自动创建。"""
@@ -74,14 +77,18 @@ class TestOptimizeForMcp:
 
         assert os.path.isabs(result["path"])
 
-    def test_output_file_smaller_than_raw_png(self, opt_mod, noise_image, tmp_path):
-        """优化后文件比原始 PNG 小（JPEG 场景）。"""
+    def test_jpeg_output_smaller_than_raw_png(self, opt_mod, complex_image, tmp_path):
+        """复杂图片 JPEG 输出比原始 PNG 小（JPEG 有损压缩生效）。
+
+        用 500x500 二维正弦渐变图验证（JPEG ~10KB vs PNG ~149KB）。
+        """
         src = tmp_path / "input.png"
-        noise_image.save(src, "PNG")
+        complex_image.save(src, "PNG")
         raw_size = os.path.getsize(src)
 
         result = opt_mod.optimize_for_mcp(str(src), str(tmp_path / "out"), "small")
 
+        assert result["format"] == "jpg"  # 复杂图 JPEG 应胜出
         assert result["size"] < raw_size
 
     def test_jpeg_quality_meets_psnr_threshold(self, opt_mod, gradient_image, tmp_path):

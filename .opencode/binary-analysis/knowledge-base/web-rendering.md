@@ -33,11 +33,11 @@ $PYTHON_CMD "$SHARED_DIR/scripts/web_render.py" --url "https://example.com" --fo
 # 获取原始 HTML
 $PYTHON_CMD "$SHARED_DIR/scripts/web_render.py" --url "https://example.com" --format html
 
-# 同时截图
-$PYTHON_CMD "$SHARED_DIR/scripts/web_render.py" --url "https://example.com" --format markdown --screenshot "$TASK_DIR/page.jpg"
+# 同时截图（路径不含扩展名，格式由图片内容自动决定）
+$PYTHON_CMD "$SHARED_DIR/scripts/web_render.py" --url "https://example.com" --format markdown --screenshot "$TASK_DIR/page"
 
 # 全页截图
-$PYTHON_CMD "$SHARED_DIR/scripts/web_render.py" --url "https://example.com" --format markdown --screenshot "$TASK_DIR/page.jpg" --screenshot-full-page
+$PYTHON_CMD "$SHARED_DIR/scripts/web_render.py" --url "https://example.com" --format markdown --screenshot "$TASK_DIR/page" --screenshot-full-page
 
 # 等待特定元素出现（适用于已知页面结构的情况）
 $PYTHON_CMD "$SHARED_DIR/scripts/web_render.py" --url "https://example.com" --wait-selector ".content-loaded" --format markdown
@@ -55,7 +55,7 @@ $PYTHON_CMD "$SHARED_DIR/scripts/web_render.py" --url "https://example.com" --ti
 |------|------|--------|------|
 | `--url` | ✅ | - | 目标 URL（必须 http:// 或 https://） |
 | `--format` | ❌ | markdown | 输出格式：markdown / text / html |
-| `--screenshot` | ❌ | - | 截图保存路径（支持 jpg/png） |
+| `--screenshot` | ❌ | - | 截图保存路径（不含扩展名，格式由图片内容自动决定） |
 | `--screenshot-full-page` | ❌ | false | 全页截图（默认仅视口 1280×720） |
 | `--timeout` | ❌ | 30 | 渲染超时秒数（最大 120） |
 | `--wait-selector` | ❌ | - | 等待 CSS 选择器匹配的元素出现 |
@@ -149,8 +149,8 @@ curl -s http://localhost:8888/health
 # 渲染页面（和 web_render.py 兼容）
 curl -s http://localhost:8888/render -d '{"url":"https://example.com","format":"markdown"}'
 
-# 截图
-curl -s http://localhost:8888/screenshot -d '{"url":"https://example.com","path":"$TASK_DIR/shot.jpg"}'
+# 截图（path 不含扩展名，格式由图片内容自动决定）
+curl -s http://localhost:8888/screenshot -d '{"url":"https://example.com","path":"$TASK_DIR/shot"}'
 ```
 
 #### 交互操作（共享活跃 page）

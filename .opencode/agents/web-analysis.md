@@ -182,7 +182,8 @@ permission:
 
 | 脚本 | 用途 | 关键参数 |
 |------|------|---------|
-| `$SHARED_DIR/scripts/web_render.py` | Playwright 无头浏览器渲染（JS 执行 + 截图） | `--url <URL> --format markdown\|text\|html --screenshot <PATH>` |
+| `$SHARED_DIR/scripts/web_render.py` | 一次性渲染（每次启动+关闭浏览器） | `--url <URL> --format markdown\|text\|html --screenshot <PATH>` |
+| `$SHARED_DIR/scripts/web_render_server.py` | 持久化 HTTP 服务（浏览器常驻，多请求共享 session/cookie） | curl 调用 `/render` `/screenshot` `/navigate` `/click` `/type` `/submit` 等端点 |
 
 **页面内容获取工具选择**：
 
@@ -191,8 +192,10 @@ permission:
 | 获取静态页面 HTML | webfetch | 快速，无 JS 执行开销 |
 | 获取 API/JSON 响应 | webfetch | 不需要渲染 |
 | 页面需要 JS 渲染才能看到内容（SPA） | web_render.py | 需要 JS 执行 |
-| 需要页面截图 | web_render.py | webfetch 无法截图 |
-| 需要登录后的页面内容 | 编写 Playwright 脚本（`$TASK_DIR/render_auth.py`），在脚本中设置 Cookie/Token 后渲染 | web_render.py 不支持传入认证信息，需要自行编写带认证的渲染脚本 |
+| 单次页面截图 | web_render.py | 轻量，无需启动服务 |
+| 需要登录后的页面内容 | web_render_server.py | cookie/session 自动保持，navigate→type→submit→render |
+| 多步骤交互（CSRF/XSS 验证/业务逻辑） | web_render_server.py | 浏览器常驻，多请求共享活跃 page |
+| 爬取网站多个页面 | web_render_server.py | 复用浏览器，避免冷启动 |
 | 获取 CTF writeup / 技术文章 | webfetch | 文章类页面通常不需要 JS |
 
 ### 源码分析工具
@@ -269,7 +272,7 @@ from bot_analyze import analyze_bot_file
 
 | 文档 | 触发条件 |
 |------|---------|
-| `web-rendering.md` | webfetch 失败后需要渲染 SPA 页面、获取页面截图 |
+| `web-rendering.md` | webfetch 失败后需要渲染 SPA 页面、获取页面截图、多步骤浏览器交互（登录/CSRF/XSS 验证） |
 
 ---
 

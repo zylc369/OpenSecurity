@@ -251,12 +251,19 @@ class RenderHandler(BaseHTTPRequestHandler):
         full_page = params.get("full_page", False)
         timeout = min(max(params.get("timeout", 30), 5), 120) * 1000
 
+        # path 是输出路径前缀（不含扩展名，格式由 optimize 自动决定）
+        shot_dir = os.path.dirname(os.path.abspath(path))
+        shot_name = os.path.splitext(os.path.basename(path))[0]
+
         page = None
         try:
+            from image_optimize import capture_and_optimize
+
             page = browser_mgr.context.new_page()
             page.goto(url, timeout=timeout, wait_until="domcontentloaded")
-            page.screenshot(path=path, full_page=full_page)
-            self._send_json({"success": True, "url": url, "screenshot": path})
+            opt = capture_and_optimize(page, shot_dir, shot_name, full_page=full_page)
+            self._send_json({"success": True, "url": url, "screenshot": opt["path"],
+                             "format": opt["format"], "size": opt["size"]})
         except Exception as e:
             self._send_json({"success": False, "url": url, "error": str(e)})
         finally:

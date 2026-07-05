@@ -20,6 +20,7 @@ packages: Pillow (PIL)
 import io
 import math
 import os
+import tempfile
 
 from PIL import Image, ImageChops, ImageStat
 
@@ -51,12 +52,14 @@ def _calculate_psnr(original: Image.Image, quality: int) -> float:
     return 10 * math.log10(255 ** 2 / mse)
 
 
-def _find_min_jpeg_quality(img: Image.Image) -> int:
+def _find_min_jpeg_quality(img: Image.Image) -> int | None:
     """二分搜索 PSNR ≥ PSNR_THRESHOLD_DB 的最低 JPEG quality。
 
     返回加上安全余量后的 quality 值。
+    返回 None 表示搜索范围内无 quality 能达到阈值（图片内容过于复杂，
+    JPEG 无法在可接受失真范围内压缩），调用方应回退到 PNG（无损）。
     """
-    lo, hi, best = JPEG_Q_SEARCH_MIN, JPEG_Q_SEARCH_MAX, JPEG_Q_SEARCH_MAX
+    lo, hi, best = JPEG_Q_SEARCH_MIN, JPEG_Q_SEARCH_MAX, None
     while lo <= hi:
         mid = (lo + hi) // 2
         if _calculate_psnr(img, mid) >= PSNR_THRESHOLD_DB:
@@ -64,6 +67,8 @@ def _find_min_jpeg_quality(img: Image.Image) -> int:
             hi = mid - 1  # 尝试更低的 quality
         else:
             lo = mid + 1  # 需要更高的 quality
+    if best is None:
+        return None  # 搜索范围内无解，调用方应回退 PNG
     return min(best + QUALITY_SAFETY_MARGIN, 100)
 
 
@@ -91,14 +96,19 @@ def optimize_for_mcp(source_path: str, output_dir: str, name: str) -> dict:
     png_size = os.path.getsize(png_path)
 
     # 候选 2: JPEG（二分搜索最低 quality 使 PSNR ≥ 35dB）
+    # 若搜索范围内无 quality 达标（图片过于复杂），跳过 JPEG，PNG 直接胜出
     jpeg_quality = _find_min_jpeg_quality(img)
-    jpg_path = os.path.join(output_dir, f"{name}.jpg")
-    img.save(jpg_path, "JPEG", quality=jpeg_quality)
-    jpg_size = os.path.getsize(jpg_path)
+    if jpeg_quality is not None:
+        jpg_path = os.path.join(output_dir, f"{name}.jpg")
+        img.save(jpg_path, "JPEG", quality=jpeg_quality)
+        jpg_size = os.path.getsize(jpg_path)
+    else:
+        jpg_size = float("inf")  # JPEG 不可用，确保 PNG 胜出
 
     # 竞争：取更小者，删除另一个
     if png_size <= jpg_size:
-        os.remove(jpg_path)
+        if jpeg_quality is not None:
+            os.remove(jpg_path)
         return {
             "format": "png",
             "quality": None,
@@ -115,3 +125,31 @@ def optimize_for_mcp(source_path: str, output_dir: str, name: str) -> dict:
             "path": os.path.abspath(jpg_path),
             "size": jpg_size,
         }
+
+
+def capture_and_optimize(page, output_dir: str, name: str, full_page: bool = False) -> dict:
+    """Playwright Page 截图 + optimize_for_mcp 优化（统一入口）。
+
+    截图到临时 PNG，再调 optimize_for_mcp 优化（PNG/JPEG 竞争取更小者），
+    最终输出由图片内容自动决定格式。临时文件在 finally 中清理。
+
+    Args:
+        page: Playwright Page 对象（需有 .screenshot(path=..., full_page=...) 方法）
+        output_dir: 输出目录
+        name: 输出文件名前缀（不含扩展名）
+        full_page: 是否全页截图（默认仅视口）
+
+    Returns:
+        optimize_for_mcp 的返回值: {"format", "quality", "file", "path", "size"}
+
+    Raises:
+        page.screenshot 或 optimize_for_mcp 的异常原样上抛
+    """
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+        tmp_png = tf.name
+    try:
+        page.screenshot(path=tmp_png, full_page=full_page)
+        return optimize_for_mcp(tmp_png, output_dir, name)
+    finally:
+        if os.path.exists(tmp_png):
+            os.remove(tmp_png)

@@ -106,15 +106,14 @@ class TestContentExtraction:
 class TestScreenshot:
     """render_page() 截图优化逻辑。"""
 
-    def test_screenshot_calls_optimize(self, render_mod, fake_playwright, monkeypatch, tmp_path):
-        """指定 screenshot 参数时调用 optimize_for_mcp。"""
+    def test_screenshot_calls_capture_and_optimize(self, render_mod, fake_playwright, monkeypatch, tmp_path):
+        """指定 screenshot 参数时调用 capture_and_optimize（截图+优化统一入口）。"""
         called = {}
 
-        def fake_optimize(source_path, output_dir, name):
-            called["source_path"] = source_path
+        def fake_capture(page, output_dir, name, full_page=False):
             called["output_dir"] = output_dir
             called["name"] = name
-            # 返回假结果
+            called["full_page"] = full_page
             return {
                 "format": "png", "quality": None,
                 "file": f"{name}.png",
@@ -122,48 +121,40 @@ class TestScreenshot:
                 "size": 100,
             }
 
-        # web_render 在函数内 import optimize_for_mcp，需要注入到它能找到的位置
         import sys
         fake_mod = type(sys)("image_optimize")
-        fake_mod.optimize_for_mcp = fake_optimize
-        # web_render 用 sys.path.insert + from image_optimize import，
-        # 所以注入 sys.modules 即可被 from ... import 拾取
+        fake_mod.capture_and_optimize = fake_capture
         monkeypatch.setitem(sys.modules, "image_optimize", fake_mod)
 
         shot_path = str(tmp_path / "page")
         result = render_mod.render_page("https://example.com", screenshot=shot_path)
 
         assert called["name"] == "page"
+        assert called["full_page"] is False
         assert result["screenshot"] == str(tmp_path / "page.png")
+
+    def test_screenshot_full_page_passed_through(self, render_mod, fake_playwright, monkeypatch, tmp_path):
+        """screenshot_full_page=True 传递给 capture_and_optimize。"""
+        called = {}
+
+        def fake_capture(page, output_dir, name, full_page=False):
+            called["full_page"] = full_page
+            return {"format": "png", "quality": None,
+                    "file": f"{name}.png", "path": str(tmp_path / f"{name}.png"), "size": 100}
+
+        import sys
+        fake_mod = type(sys)("image_optimize")
+        fake_mod.capture_and_optimize = fake_capture
+        monkeypatch.setitem(sys.modules, "image_optimize", fake_mod)
+
+        render_mod.render_page("https://example.com", screenshot=str(tmp_path / "page"),
+                               screenshot_full_page=True)
+        assert called["full_page"] is True
 
     def test_no_screenshot_returns_none(self, render_mod, fake_playwright):
         """不指定 screenshot → result['screenshot'] 为 None。"""
         result = render_mod.render_page("https://example.com")
         assert result["screenshot"] is None
-
-    def test_temp_png_cleaned_up(self, render_mod, fake_playwright, monkeypatch, tmp_path):
-        """截图优化后临时 PNG 被删除。"""
-        def fake_optimize(source_path, output_dir, name):
-            # 记录临时文件是否存在
-            assert os.path.exists(source_path)
-            return {
-                "format": "jpg", "quality": 80,
-                "file": f"{name}.jpg",
-                "path": str(tmp_path / f"{name}.jpg"),
-                "size": 200,
-            }
-
-        import sys
-        fake_mod = type(sys)("image_optimize")
-        fake_mod.optimize_for_mcp = fake_optimize
-        monkeypatch.setitem(sys.modules, "image_optimize", fake_mod)
-
-        render_mod.render_page("https://example.com", screenshot=str(tmp_path / "shot"))
-
-        # 临时文件（tempfile.NamedTemporaryFile 生成）应被清理
-        # 检查 tmp_path 下没有残留的纯 tempfile 文件
-        temp_files = [f for f in os.listdir(str(tmp_path)) if not f.startswith("shot")]
-        assert len(temp_files) == 0
 
 
 class TestWaitSelector:

@@ -75,26 +75,17 @@ def render_page(url, fmt="markdown", screenshot=None, screenshot_full_page=False
                 elif fmt == "html":
                     content = page.content()
 
-                # 截图
+                # 截图 + 优化（格式由图片内容自动决定）
                 screenshot_path = None
                 if screenshot:
-                    # 先截到临时 PNG，再优化（tempfile.NamedTemporaryFile 避免 mktemp 弃用）
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                        tmp_png = tf.name
-                    try:
-                        page.screenshot(path=tmp_png, full_page=screenshot_full_page)
+                    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                    from image_optimize import capture_and_optimize
 
-                        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-                        from image_optimize import optimize_for_mcp
-
-                        shot_dir = os.path.dirname(os.path.abspath(screenshot))
-                        shot_name = os.path.splitext(os.path.basename(screenshot))[0]
-                        opt = optimize_for_mcp(tmp_png, shot_dir, shot_name)
-                        screenshot_path = opt["path"]
-                    finally:
-                        if os.path.exists(tmp_png):
-                            os.remove(tmp_png)
+                    shot_dir = os.path.dirname(os.path.abspath(screenshot))
+                    shot_name = os.path.splitext(os.path.basename(screenshot))[0]
+                    opt = capture_and_optimize(page, shot_dir, shot_name,
+                                               full_page=screenshot_full_page)
+                    screenshot_path = opt["path"]
             finally:
                 browser.close()
 
@@ -127,7 +118,7 @@ def main():
     parser.add_argument("--url", required=True, help="目标 URL（必须 http:// 或 https://）")
     parser.add_argument("--format", choices=["markdown", "text", "html"], default="markdown",
                         help="输出格式（默认 markdown）")
-    parser.add_argument("--screenshot", help="截图保存路径（JPEG/PNG 由扩展名决定）")
+    parser.add_argument("--screenshot", help="截图保存路径（不含扩展名，格式由图片内容自动决定）")
     parser.add_argument("--screenshot-full-page", action="store_true", help="全页截图（默认仅视口）")
     parser.add_argument("--timeout", type=int, default=30, help="渲染超时秒数（默认 30，最大 120）")
     parser.add_argument("--wait-selector", help="等待特定 CSS 选择器出现")

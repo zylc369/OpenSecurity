@@ -49,10 +49,33 @@ def noise_image():
 
 @pytest.fixture
 def gradient_image():
-    """100x100 水平渐变图片（中等复杂度）。"""
+    """100x100 水平渐变图片（简单内容，用于验证 PSNR 单调性等基本属性）。"""
     img = Image.new("RGB", (100, 100))
     pixels = img.load()
     for y in range(100):
         for x in range(100):
             pixels[x, y] = (x * 2, x * 2, x * 2)
+    return img
+
+
+@pytest.fixture
+def complex_image():
+    """500x500 二维正弦渐变图片（接近真实截图复杂度）。
+
+    用于验证 JPEG 竞争胜出场景：该图 JPEG 远小于 PNG（10KB vs 149KB），
+    且需要 quality>MIN+margin 才能达 PSNR≥35dB。
+    """
+    import math
+    img = Image.new("RGB", (500, 500))
+    pixels = img.load()
+    for y in range(500):
+        for x in range(500):
+            r = int(128 + 100 * math.sin(x * 0.05) + 50 * math.cos(y * 0.03))
+            g = int(128 + 80 * math.cos(x * 0.03) + 60 * math.sin(y * 0.04))
+            b = int(128 + 60 * math.sin((x + y) * 0.02))
+            pixels[x, y] = (
+                max(0, min(255, r)),
+                max(0, min(255, g)),
+                max(0, min(255, b)),
+            )
     return img
