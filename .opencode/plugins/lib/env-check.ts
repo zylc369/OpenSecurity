@@ -8,7 +8,7 @@
  */
 import { join } from "path";
 import type { ProcessResult } from "./spawn";
-import { SHARED_DIR, AGENT_SECURITY_COORDINATOR } from "./constants";
+import { SHARED_DIR, AGENT_SECURITY_COORDINATOR, OPENCODE_ROOT } from "./constants";
 import { getTaskDir } from "./task-session";
 import { getCondaCmd } from "./venv";
 import { runProcess } from "./spawn";
