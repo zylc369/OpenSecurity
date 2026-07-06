@@ -10,7 +10,7 @@
 
 > **OpenSecurity 面向真实安全分析场景，不是 CTF 工具。** CTF 只是训练和验证 agent 能力的手段。所有决策必须以"真实场景下是否必要"为标尺。
 
-### 1.3 阶段 2 的 6 项改动概览
+### 1.3 阶段 2 的 7 项改动概览
 
 | # | 能力 | 类型 | 解决的问题 |
 |---|------|------|-----------|
@@ -20,6 +20,7 @@
 | 4 | 持久化子 agent | 新脚本 + Plugin 改动 | 多轮迭代不浪费 token |
 | 5 | 条件触发的 Adviser | Plugin 改动 | 避免走错反而省 token |
 | 6 | 进程清理（信号处理器） | Plugin 改动 | opencode 退出时自动 kill 子进程 |
+| 7 | 工种 Agent 架构 | 新 agent .md + 领域 agent 改 + Plugin 改 | 6 工种独立 agent + 三层 Task 嵌套 + 领域 agent 互相委派 |
 
 ### 1.4 后续阶段
 
@@ -172,6 +173,78 @@
 - `tool.execute.before` 钩子检测后台命令的 PID（从 `echo $! > pid` 文件读取）→ 注册到 process-registry
 - 与现有 `timeline.ts` 的 `process.on("exit")` 合并到统一的 cleanup 模块
 
+### 2.7 工种 Agent 架构
+
+**问题**：当前"工种"（searcher/pentester/coder/adviser/memorist/installer）只是 `agents-rules/sub-agent-orchestration.md` 里的 prompt 模板，不是独立的 agent。这导致：
+- 工种没有独立的 model 配置（searcher 应该用便宜模型，coder 用强模型）
+- 工种没有独立的工具集（adviser 应该无工具，pentester 有终端工具）
+- LLM 调 Task 时不传 `subagent_type`，子 session 的 agentName 可能是 `general` → Plugin 的现有 `requireSecurityAgent` 过滤掉 → 环境变量不注入
+
+**方案**：为 6 个工种创建独立 agent .md 文件，让领域 agent 能创建三层 Task 嵌套。
+
+#### 架构总览
+
+```
+用户直接选领域 agent（根 session，天然有 task 权限）
+├── 跨领域委派：Task(binary-analysis/crypto-analysis/...)
+│   └── 被委派的领域 agent（子 session，有 task:allow → 可继续委派）
+│       └── 领域内工种：Task(searcher/pentester/coder/adviser/memorist/installer)
+└── 领域内工种：Task(searcher/pentester/coder/...)
+    └── 工种（叶子节点，无 task 权限，不能递归）
+```
+
+- 用户直接选领域 agent 开始（不需要 coordinator 作为必须入口）
+- 领域 agent 之间可跨领域委派（web-analysis → Task(binary-analysis)）
+- 领域 agent 创建工种子 session（binary-analysis → Task(searcher)）
+- 工种是叶子节点，不能再创建子 session（opencode 原生权限阻止）
+
+#### 6 个工种 agent .md 文件
+
+每个工种 `.opencode/agents/<name>.md`：
+
+| 工种 | model 策略 | mode | 工具能力 |
+|------|-----------|------|---------|
+| searcher | 便宜模型（快速搜索） | subagent + hidden | browser + search 脚本 |
+| pentester | 强模型（攻击决策） | subagent + hidden | terminal + browser |
+| coder | 强模型（代码质量） | subagent + hidden | terminal + file |
+| adviser | 强模型（策略分析） | subagent + hidden | 无工具（纯文本咨询） |
+| memorist | 便宜模型（检索任务） | subagent + hidden | file + graphiti/vector_store |
+| installer | 便宜模型（环境配置） | subagent + hidden | terminal + file |
+
+每个工种的 frontmatter：
+- `mode: subagent`（不在 @ 菜单显示，只能被 Task 调用）
+- `hidden: true`
+- **不加 `permission: { task: { "*": "allow" } }`** → 工种永远是叶子节点
+- system prompt 包含工种角色定义 + vector store / Graphiti 使用规则
+
+#### 领域 agent 加 task:allow
+
+5 个领域 agent（binary-analysis / web-analysis / mobile-analysis / ai-security-analysis / crypto-analysis）的 frontmatter 加：
+
+```yaml
+permission:
+  task:
+    "*": allow
+```
+
+这让领域 agent 作为子 session 时不会被注入 `task: deny`，可以继续创建工种子 session。
+
+> **注意**：`canTask` 判断用 `rule.permission === "task"` 精确匹配（`subagent-permissions.ts:18`），`*: allow` 不算数。必须显式写 `task: allow`。
+
+#### Plugin 改造
+
+1. **新增 `WORKER_AGENTS` map**（`constants.ts`）：独立于 `SECURITY_AGENTS`，key 是工种名，value 是配置对象（含 compactionContext 等字段）
+
+2. **`requireSecurityAgent` 改为 `requireAgent`**（`session-manager.ts`）：同时匹配 `SECURITY_AGENTS` 和 `WORKER_AGENTS`，返回值标识 agent 类型（security / worker）
+
+3. **各 hook 适配**：
+   - `shell.env`：工种通过过滤 → 正常注入环境变量（$AGENT_DIR 因 `getScriptDir` 返回 undefined 而不注入——工种没有自己的目录，用 $SHARED_DIR）
+   - `compacting`：工种用 `WORKER_AGENTS[name].compactionContext`（不混入 `getCompactionContext` 的领域 agent 逻辑）
+   - `system.transform`：工种通过过滤 → 正常注入环境信息
+   - `tool.execute`：工种通过过滤 → 正常记录 timeline
+
+4. **`getTaskDir` 父链回溯**（`shell.env` + `compacting`）：子 session 的 `getTaskDir(sessionID)` 返回 null 时，沿 `parentSessionID` 链回溯查父 session 的 taskDir，确保工种子 session 能拿到 `$TASK_DIR`
+
 ---
 
 ## §3 实施规范
@@ -186,17 +259,29 @@
 | `.opencode/tools/Graphiti/graphiti_tool.py` | 新建 | 步骤 3 |
 | `.opencode/tools/Graphiti/README.md` | 新建 | 步骤 3 |
 | `binary-analysis/scripts/sub_agent_manager.py` | 新建 | 步骤 4 |
-| `binary-analysis/scripts/detect_env.py` | 修改（加 graphiti-core/sqlite-vec 包 + Neo4j 配置 + agents=["all"] 统一） | 步骤 5 |
+| `binary-analysis/scripts/detect_env.py` | 修改（加 graphiti-core/sqlite-vec 包 + agents=["all"] 统一） | 步骤 5 |
 | `binary-analysis/scripts/registry.json` | 修改（注册新脚本） | 步骤 1-4 |
 | `plugins/lib/process-registry.ts` | 新建 | 步骤 6 |
-| `plugins/security-analysis.ts` | 修改（Graphiti 生命周期 + 信号处理器 + Adviser + PID 注册） | 步骤 7-9 |
-| `agents-rules/sub-agent-orchestration.md` | 修改（工种 Task prompt 模板 + memorist 三层检索） | 步骤 10 |
-| `agents-rules/cross-agent-delegation.md` | 修改（委派策略加 vector store / Graphiti 使用说明） | 步骤 10 |
-| `agents/*.md`（5 个分析 agent） | 可能修改（引用更新） | 步骤 10 |
-| `test/embedding_client/` | 新建（单元测试） | 步骤 11 |
-| `test/vector_store/` | 新建（单元测试 + 集成测试） | 步骤 11 |
-| `test/graphiti_tool/` | 新建（单元测试） | 步骤 11 |
-| `test/sub_agent_manager/` | 新建（单元测试） | 步骤 11 |
+| `plugins/security-analysis.ts` | 修改（Graphiti 生命周期 + 信号处理器 + Adviser + PID 注册 + WORKER_AGENTS + requireAgent + getTaskDir 回溯） | 步骤 7-9、12 |
+| `plugins/lib/constants.ts` | 修改（新增 WORKER_AGENTS map） | 步骤 12 |
+| `plugins/lib/session-manager.ts` | 修改（requireSecurityAgent → requireAgent） | 步骤 12 |
+| `agents/searcher.md` | 新建 | 步骤 10 |
+| `agents/pentester.md` | 新建 | 步骤 10 |
+| `agents/coder.md` | 新建 | 步骤 10 |
+| `agents/adviser.md` | 新建 | 步骤 10 |
+| `agents/memorist.md` | 新建 | 步骤 10 |
+| `agents/installer.md` | 新建 | 步骤 10 |
+| `agents/binary-analysis.md` | 修改（frontmatter 加 task:allow） | 步骤 11 |
+| `agents/web-analysis.md` | 修改（frontmatter 加 task:allow） | 步骤 11 |
+| `agents/mobile-analysis.md` | 修改（frontmatter 加 task:allow） | 步骤 11 |
+| `agents/ai-security-analysis.md` | 修改（frontmatter 加 task:allow） | 步骤 11 |
+| `agents/crypto-analysis.md` | 修改（frontmatter 加 task:allow） | 步骤 11 |
+| `agents-rules/sub-agent-orchestration.md` | 修改（防递归约束 + 工种 Task 调用格式规范 + vector store / Graphiti 使用指引） | 步骤 13 |
+| `agents-rules/cross-agent-delegation.md` | 修改（委派策略加 vector store / Graphiti 使用说明） | 步骤 13 |
+| `test/embedding_client/` | 新建（单元测试） | 步骤 14 |
+| `test/vector_store/` | 新建（单元测试 + 集成测试） | 步骤 14 |
+| `test/graphiti_tool/` | 新建（单元测试） | 步骤 14 |
+| `test/sub_agent_manager/` | 新建（单元测试） | 步骤 14 |
 
 ### 编码规则
 
@@ -380,132 +465,134 @@
   - 触发条件正确检测
 - **依赖**: 无
 
-### 步骤 10. 更新 agents-rules + agent prompt
+### 步骤 10. 新建 6 个工种 agent .md 文件
 
-- **文件**: `agents-rules/sub-agent-orchestration.md`（修改）+ `agents-rules/cross-agent-delegation.md`（修改）+ 可能的 agent prompt 更新
-- **预估行数**: ~120 行修改
+- **文件**: `agents/searcher.md` + `agents/pentester.md` + `agents/coder.md` + `agents/adviser.md` + `agents/memorist.md` + `agents/installer.md`（新建）
+- **预估行数**: 每个文件 ~30-50 行（frontmatter + system prompt），合计 ~200 行
+- **改动内容**:
+  - 每个工种的 frontmatter：
+    ```yaml
+    ---
+    mode: subagent
+    hidden: true
+    buwai-extension-id: true
+    ---
+    ```
+  - **不加 `permission: { task: { "*": "allow" } }`** → 工种永远是叶子节点
+  - 每个工种的 system prompt 包含：
+    - 工种角色定义（职责、适用场景）
+    - vector store 使用规则（开始前查、完成后存）
+    - Graphiti 使用规则（记录事件、查历史）
+    - 子 agent 报告格式（`<result>` / `<discovered_surfaces>` / `<unsolved_challenges>`）
+    - **路径引用用 `$SHARED_DIR` 而非 `$AGENT_DIR`**（工种没有自己的 AGENT_DIR，getScriptDir 返回 undefined → $AGENT_DIR 不注入）
+  - 引用 `{{buwai-rule:execution-discipline}}` 等通用规则片段
+- **验证点**:
+  - 6 个文件语法正确（frontmatter 格式）
+  - 每个工种 mode=subagent + hidden=true
+  - 每个工种无 task:allow 权限
+  - `node --check` 不报错（如有 ts 引用）
+- **依赖**: 无
+
+### 步骤 11. 修改 5 个领域 agent 的 frontmatter
+
+- **文件**: `agents/binary-analysis.md` + `agents/web-analysis.md` + `agents/mobile-analysis.md` + `agents/ai-security-analysis.md` + `agents/crypto-analysis.md`（修改 frontmatter）
+- **预估行数**: 每个文件 +3 行，合计 ~15 行
+- **改动内容**:
+  - 每个 agent 的 frontmatter 加：
+    ```yaml
+    permission:
+      task:
+        "*": allow
+    ```
+  - 如果 frontmatter 已有 permission 字段，合并进去（不覆盖已有规则）
+  - security-analysis-evolve 和 security-coordinator **不改**（evolve 不做分析；coordinator 不进化）
+- **验证点**:
+  - 5 个文件的 frontmatter 格式正确
+  - `task: allow` 显式写出（不能用 `*: allow` 替代）
+  - 现有 frontmatter 字段不被破坏
+- **依赖**: 无
+
+### 步骤 12. 修改 Plugin — WORKER_AGENTS + requireAgent + getTaskDir 回溯
+
+- **文件**: `plugins/lib/constants.ts`（修改）+ `plugins/lib/session-manager.ts`（修改）+ `plugins/security-analysis.ts`（修改）
+- **预估行数**: constants.ts ~30 行新增 + session-manager.ts ~30 行修改 + security-analysis.ts ~40 行修改
 - **改动内容**:
 
-  **(A) 工种 Task prompt 模板更新**——所有工种加 vector store / Graphiti 使用指引：
+  **(A) constants.ts 新增 WORKER_AGENTS map**:
+  ```typescript
+  export const WORKER_AGENTS: Record<string, WorkerAgentConfig> = {
+    "searcher":   { compactionContext: "### searcher 状态\n- 已搜索的关键词\n- 已收集的信息摘要" },
+    "pentester":  { compactionContext: "### pentester 状态\n- 已执行的测试和结果\n- 已发现的漏洞" },
+    "coder":      { compactionContext: "### coder 状态\n- 已开发的代码和用途\n- 当前迭代状态" },
+    "adviser":    { compactionContext: "### adviser 状态\n- 已提供的建议\n- 当前分析的关键决策点" },
+    "memorist":   { compactionContext: "### memorist 状态\n- 已检索的知识来源\n- 已返回的关键结论" },
+    "installer":  { compactionContext: "### installer 状态\n- 已安装的工具\n- 已完成的配置变更" },
+  };
+  export function isWorkerAgent(agentName: string): boolean {
+    return agentName in WORKER_AGENTS;
+  }
+  ```
 
-  #### searcher（信息收集）
-  - **开始前**：查 vector store 获取已有发现（避免重复收集）
-    ```bash
-    $PYTHON_CMD $SHARED_DIR/scripts/vector_store.py search --query "[目标关键词]" --limit 5
-    ```
-  - **完成后**：把新发现存入 vector store（供后续子 agent 检索）
-    ```bash
-    $PYTHON_CMD $SHARED_DIR/scripts/vector_store.py store --text "[发现描述]" --type guide --metadata '{"source":"searcher","target":"[目标]"}'
-    ```
-  - **同时**：记录到 Graphiti（供时序查询）
-    ```bash
-    $PYTHON_CMD $OPENCODE_ROOT/tools/Graphiti/graphiti_tool.py add --name "[事件名]" --content "[详细内容]" --source searcher
-    ```
-  - **更新后的 Task prompt 模板**：
-    ```
-    "你是信息收集专家。收集目标 [目标描述] 的 [收集内容]。
-    开始前先查 vector store 获取已有发现：
-      $PYTHON_CMD $SHARED_DIR/scripts/vector_store.py search --query \"[相关关键词]\" --limit 5
-    完成后把新发现存入 vector store：
-      $PYTHON_CMD $SHARED_DIR/scripts/vector_store.py store --text \"[发现]\" --type guide
-    返回结构化摘要。"
-    ```
+  **(B) session-manager.ts 改造 requireSecurityAgent → requireAgent**:
+  - 新增 `requireAgent(hookName, sessionID)` 方法：同时匹配 `SECURITY_AGENTS` 和 `WORKER_AGENTS`
+  - 返回值增加 `agentType: "security" | "worker"` 字段
+  - `isSecurityAgent()` 逻辑不变（只匹配 SECURITY_AGENTS）
+  - 所有调用 `requireSecurityAgent` 的地方改为 `requireAgent`
 
-  #### pentester（渗透测试）
-  - **开始前**：查 vector store 获取 searcher 存的发现 + Graphiti 查历史
-    ```bash
-    $PYTHON_CMD $SHARED_DIR/scripts/vector_store.py search --query "[目标漏洞关键词]" --limit 5
-    $PYTHON_CMD $OPENCODE_ROOT/tools/Graphiti/graphiti_tool.py search-recent --query "[目标]" --hours 6
-    ```
-  - **完成后**：记录攻击结果到 Graphiti（供后续时序查询和关系分析）
-    ```bash
-    $PYTHON_CMD $OPENCODE_ROOT/tools/Graphiti/graphiti_tool.py add --name "[攻击事件]" --content "[攻击过程+结果]" --source pentester
-    ```
-  - **更新后的 Task prompt 模板**：
-    ```
-    "你是渗透测试专家。对目标 [目标] 执行 [测试类型]。
-    开始前查已有发现：
-      vector_store.py search --query \"[目标漏洞]\"
-      graphiti_tool.py search-recent --query \"[目标]\" --hours 6
-    完成后记录到 Graphiti：
-      graphiti_tool.py add --name \"[攻击事件]\" --content \"[结果]\" --source pentester
-    返回攻击结果 + 证据。"
-    ```
+  **(C) security-analysis.ts compacting 适配**:
+  - `requireAgent` 返回 worker 类型时，用 `WORKER_AGENTS[name].compactionContext`（不调 `getCompactionContext`）
 
-  #### coder（代码开发）
-  - **开始前**：查 vector store 获取已有发现和代码片段
-    ```bash
-    $PYTHON_CMD $SHARED_DIR/scripts/vector_store.py search --query "[漏洞/目标关键词]" --limit 5
+  **(D) getTaskDir 父链回溯**:
+  - `shell.env` 和 `compacting` 的 `getTaskDir(sessionID)` 返回 null 时，沿 `parentSessionID` 链回溯查父 session 的 taskDir
+  - 实现：
+    ```typescript
+    let taskDir = getTaskDir(sessionID);
+    if (!taskDir) {
+      let parent = session.parentSessionID;
+      while (parent && !taskDir) {
+        taskDir = getTaskDir(parent);
+        parent = ctx.sessionManager.get(parent)?.parentSessionID;
+      }
+    }
     ```
-  - **完成后**：把可用代码存入 vector store（供后续复用）
-    ```bash
-    $PYTHON_CMD $SHARED_DIR/scripts/vector_store.py store --text "[代码内容]" --type code --metadata '{"description":"[用途]","language":"python"}'
-    ```
-  - **更新后的 Task prompt 模板**：
-    ```
-    "你是代码开发专家。基于 [上下文] 编写 [脚本/payload]。
-    开始前查已有发现和代码：
-      vector_store.py search --query \"[关键词]\"
-    完成后把代码存入 vector store：
-      vector_store.py store --text \"[代码]\" --type code
-    返回完整可用代码 + 使用说明。"
-    ```
-
-  #### adviser（策略咨询）
-  - **开始前**：查 Graphiti 历史（之前是否遇到过类似障碍）+ vector store（相关方法论）
-    ```bash
-    $PYTHON_CMD $OPENCODE_ROOT/tools/Graphiti/graphiti_tool.py search --query "[障碍关键词]" --num-results 10
-    $PYTHON_CMD $SHARED_DIR/scripts/vector_store.py search --query "[障碍关键词]" --limit 5
-    ```
-  - **更新后的 Task prompt 模板**：
-    ```
-    "你是策略顾问。当前遇到 [障碍描述]。已有信息 [上下文]。
-    先查历史是否遇到过类似障碍：
-      graphiti_tool.py search --query \"[障碍关键词]\"
-      vector_store.py search --query \"[障碍关键词]\"
-    基于历史经验和当前信息，推荐解决方案和下一步。"
-    ```
-
-  #### memorist（记忆检索）
-  - **完全更新**：不再只读 markdown 知识库，改为三层检索
-    ```bash
-    # 1. vector store（碎片化即时记忆）
-    $PYTHON_CMD $SHARED_DIR/scripts/vector_store.py search --query "[主题]" --limit 10
-    # 2. Graphiti（时序事件 + 关系查询）
-    $PYTHON_CMD $OPENCODE_ROOT/tools/Graphiti/graphiti_tool.py search --query "[主题]" --num-results 10
-    $PYTHON_CMD $OPENCODE_ROOT/tools/Graphiti/graphiti_tool.py search-recent --query "[主题]" --hours 24
-    # 3. 知识库文件（结构化方法论，不变）
-    Read $AGENT_DIR/knowledge-base/[相关文件].md
-    ```
-  - **更新后的 Task prompt 模板**：
-    ```
-    "你是记忆检索专家。检索关于 [主题] 的历史信息。
-    依次查三层记忆：
-      1. vector_store.py search --query \"[主题]\"
-      2. graphiti_tool.py search --query \"[主题]\"
-      3. Read $AGENT_DIR/knowledge-base/[相关文件].md
-    返回相关方法和结论。"
-    ```
-
-  #### installer（环境维护）
-  - 不变（不涉及知识存储/检索）
-
-  **(B) cross-agent-delegation.md 更新**：
-  - 领域内委派策略增加："子 agent 完成后自动存入 vector store，后续子 agent 开始前自动查询"
-  - 典型例子更新：增加 vector store / Graphiti 的使用说明
-
-  **(C) 持久化子 agent 引用更新**：
-  - sub-agent-orchestration.md 的调度规则增加："优先复用已有持久化子 agent（通过 sub_agent_manager），不存在时新建"
 
 - **验证点**:
-  - 人工读一遍确认每个工种都有明确的 vector store / Graphiti bash 命令
-  - Task prompt 模板包含完整的"开始前查询 + 完成后存储"流程
-  - memorist 有三层检索（vector store + Graphiti + 知识库文件）
-  - 各 agent prompt 展开后行数可接受
-  - 无开发过程信息（"照抄 PentAGI"等字样）
-- **依赖**: 步骤 1-4
+  - 语法检查通过（`node --check`）
+  - `requireAgent` 对工种返回有效 session（agentType="worker"）
+  - `requireAgent` 对领域 agent 返回有效 session（agentType="security"）
+  - `requireAgent` 对 general/非 agent 返回 undefined
+  - compacting 对工种注入 WORKER_AGENTS 的 compactionContext
+  - shell.env 对工种注入环境变量（$AGENT_DIR 不注入，其余正常）
+  - 子 session 的 $TASK_DIR 通过父链回溯正确拿到
+- **依赖**: 步骤 10（工种 agent .md 文件存在，requireAgent 才能识别）、步骤 9（security-analysis.ts 在步骤 7-9 已被修改，步骤 12 在其基础上继续改）
 
-### 步骤 11. 新增单元测试 + 集成测试
+### 步骤 13. 更新 agents-rules（sub-agent-orchestration + cross-agent-delegation）
+
+- **文件**: `agents-rules/sub-agent-orchestration.md`（修改）+ `agents-rules/cross-agent-delegation.md`（修改）
+- **预估行数**: ~100 行修改
+- **改动内容**:
+
+  **(A) sub-agent-orchestration.md 更新**:
+  - 调度规则新增：
+    1. **Task 调用格式**：`Task(subagent_type: "<工种名>", description: "<工种-任务>", prompt: "<工种 prompt + 上下文>")`
+    2. **防递归约束**："工种 agent 不应再创建子 session——工种间协作由领域 agent 编排"
+    3. **持久化子 agent**：优先复用已有持久化子 agent（通过 sub_agent_manager），不存在时新建
+  - 每个工种加 vector store / Graphiti 使用指引（开始前查 + 完成后存）
+  - memorist 改为三层检索（vector store + Graphiti + 知识库文件）
+
+  **(B) cross-agent-delegation.md 更新**:
+  - 领域内委派的 Task 调用格式明确（`subagent_type: "<工种名>"`）
+  - 子 agent 完成后自动存入 vector store 的说明
+
+- **验证点**:
+  - 人工读一遍确认每个工种有明确的 vector store / Graphiti bash 命令
+  - Task 调用格式包含 subagent_type
+  - 防递归约束清晰
+  - memorist 有三层检索
+  - 无开发过程信息
+- **依赖**: 步骤 10（工种 agent 存在后，引用才有效）
+
+### 步骤 14. 新增单元测试 + 集成测试
 
 - **文件**: `test/embedding_client/` + `test/vector_store/` + `test/graphiti_tool/` + `test/sub_agent_manager/`（新建）
 - **预估行数**: 每个目录 ~50-80 行测试代码
@@ -518,7 +605,7 @@
   - 全部测试通过
   - `pytest test/embedding_client/ test/vector_store/ test/graphiti_tool/ test/sub_agent_manager/ -v` 无失败
   - 阶段 1 的 93 个测试回归通过
-- **依赖**: 步骤 1-4
+- **依赖**: 步骤 1-4、步骤 10-12
 
 ---
 
@@ -535,7 +622,12 @@
 | 4 | 持久化子 agent | `sub_agent_manager.py create` → `send` → `list` | session 复用，上下文保持 |
 | 5 | Adviser 触发 | 模拟连续失败 | 触发建议注入 |
 | 6 | 进程清理 | 启动 detach 进程 → 退出 opencode | 进程被自动 kill |
-| 7 | 单元测试 + 集成测试 | `pytest test/embedding_client/ test/vector_store/ test/graphiti_tool/ test/sub_agent_manager/ -v` | 全部通过 |
+| 7 | 工种 agent 可见 | `Task(subagent_type: "searcher")` 创建子 session | 成功创建 searcher 子 session |
+| 7a | 三层 Task 嵌套 | coordinator → binary-analysis → searcher | searcher 孙子 session 成功创建 |
+| 7b | 工种环境变量 | searcher 子 session 执行 `echo $TASK_DIR` | 返回父 session 的 taskDir 路径 |
+| 7c | 工种叶子限制 | searcher 子 session 尝试 `Task(...)` | task 工具不可见（被 deny） |
+| 7d | 领域 agent task:allow | binary-analysis 子 session 创建 searcher | 成功（不被注入 task:deny） |
+| 8 | 单元测试 + 集成测试 | `pytest test/embedding_client/ test/vector_store/ test/graphiti_tool/ test/sub_agent_manager/ -v` | 全部通过 |
 
 ### 4.2 回归验收
 
@@ -592,3 +684,17 @@ PentAGI 的 Adviser 每次工具调用都触发——成本太高。条件触发
 - SIGINT/SIGTERM → 异步 killAll + 6 秒超时
 - exit → 同步 SIGKILL 兜底
 - 与现有 timeline.ts 的 process.on("exit") 合并
+
+### 为什么工种是独立 agent 而非 prompt 模板
+
+每个工种有完全不同的能力边界：adviser 无工具（纯文本咨询）、pentester 有终端工具、searcher 用便宜模型。如果工种只是 prompt 模板（复用父 agent 配置），无法实现工具隔离和 model 优化。独立 agent .md 文件让每个工种有独立的 model、permission、system prompt。
+
+### 为什么用三层 Task 嵌套
+
+PentAGI 的工种可嵌套调用（pentester 调 coder），但 opencode 的子 session 默认被注入 `task: deny` 不能再创建子 session。给领域 agent 加 `permission: { task: { "*": "allow" } }` 后，领域 agent 作为子 session 不被注入 deny → 可以创建工种子 session → 三层架构（领域 agent → 工种）成立。工种不加 task:allow → 叶子节点 → 不能递归。
+
+代码验证：`deriveSubagentSessionPermission`（`subagent-permissions.ts:18`）用 `rule.permission === "task"` 精确匹配判断是否注入 deny。领域 agent 有此规则 → 不注入；工种无此规则 → 注入 deny。
+
+### 为什么不需要 coordinator 作为必须入口
+
+领域 agent 有 `task:allow` + `cross-agent-delegation` 规则注入，能直接互相委派（web-analysis → Task(binary-analysis)）。用户直接选最相关的领域 agent 开始，中途需要其他领域能力时直接委派。coordinator 可保留为可选入口（不确定时用），但不是必须的。
