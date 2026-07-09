@@ -1,0 +1,60 @@
+# toolcall_fixer.tmpl 分析
+
+## 1. 原文件名
+
+`toolcall_fixer.tmpl`
+
+注册名（PromptType）为 `toolcall_fixer`，定义于 `templates/templates.go:53`，源码注释为 `// corrects malformed security tool commands`。
+
+## 2. 类型与用途
+
+属于 **A 类 Agent System Prompt**（角色定义侧模板）。
+
+- 在 `templates.go:575-577` 被装配为 `ToolCallFixer` Agent 的 `System` 消息（`AgentPrompts.System`）。
+- 用途：定义"工具调用参数修复专家"的角色、操作准则与输出规范——要求模型对照 JSON Schema 做最小改动、保留原始意图，最终只输出一行合法且正确转义的 JSON。它**不承载任何失败现场数据**（函数名/原参数/schema/错误全部由配对的 human 模板注入），只提供稳定的角色与规则。
+- 运行选项为 `OptionsTypeSimpleJSON`（`handlers.go:978`），强制 LLM 以 JSON 模式输出纯文本，**不**进入工具调用循环；模型输出即"修复后的参数 JSON"，直接回灌重试（`handlers.go:991`）。
+
+## 3. 配对关系
+
+与 **`input_toolcall_fixer.tmpl`** 配对，二者共同构成 `ToolCallFixer` Agent 的一对 prompt（`templates.go:575-577`）：
+
+| 角色 | 模板 | PromptType | 注入位置 |
+| --- | --- | --- | --- |
+| System | `toolcall_fixer.tmpl`（本文件） | `toolcall_fixer` | `templates.go:576` |
+| Human | `input_toolcall_fixer.tmpl` | `input_toolcall_fixer` | `templates.go:577` |
+
+二者在 `fixToolCallArgs` 内先后渲染（本模板于 `handlers.go:973`，human 模板于 `handlers.go:963`），再由 `performSimpleChain` 组装成 system + human 两条消息送入模型（`performers.go:971-974`）。
+
+**分工特征**：本模板（system）零占位符、内容稳定；配对模板（human）承载全部 4 个易变上下文变量（函数名/原参数/schema/错误）。这种"稳定角色定义上 system、易变现场数据下 human"的拆分，使 system 侧适合 prompt 缓存，也使每次修复调用只需重渲染 human 侧。
+
+## 4. 调用时机
+
+触发链路：`performer.go` 的工具执行重试循环 → `fixToolCallArgs`（`handlers.go:936`）→ 渲染本模板（`handlers.go:973`）→ `performSimpleChain`（`handlers.go:980`）。
+
+**精确触发条件**：在 `execToolCall`（`performer.go:261`）的重试循环里，`executor.Execute(...)`（`performer.go:341`）**返回 error** 时，先取工具 schema（`performer.go:350`），再进入 `fixToolCallArgs` 修复参数（`performer.go:356`）。
+
+关键约束（源码验证，非症状推断；与配对文档结论一致）：
+
+- 触发条件是"工具执行返回 error"，**不限于** schema 不符——任何 handler 执行报错都会进入本流程。
+- **反直觉点**：纯粹的 JSON 语法错误（`json.Unmarshal` 失败）在 `executor.go` 被吞成 **`nil` error**，因此**不会**进入 fixer。本模板修复的是"能被解析、但在 schema/语义层面导致执行失败"的参数，而非"压根不是合法 JSON"的参数。
+- 修复后的 JSON 作为新 `funcArgs` 进入下一轮重试，循环上限 `maxRetriesToCallFunction`（`performer.go:334`），即最多进行有限次"修复 → 重试"。
+
+## 5. 工具列表
+
+**无工具**。本模板驱动的修复 Agent 是一个纯 JSON 文本生成器：
+
+- 经 `performSimpleChain` 执行（`handlers.go:980`），其内部 `CallEx(ctx, opt, chain, nil)` 第 4 参（工具列表）为 `nil`（`performers.go:981`），chain 仅含 system + human 两条文本（`performers.go:971-974`），无工具调用环节。
+- `OptionsTypeSimpleJSON` 走 `buildSimpleJSONOptions`（`config.go:847`），只产 LLM CallOption（model/temperature 等）并在兜底层追加 `llms.WithJSONMode()`（`config.go:862/867`），**不挂任何 function calling 工具集**。
+- 因此模型"输出"即"修复后的参数 JSON"本身，由 `handlers.go:991` 作为 `json.RawMessage` 直接返回，回灌到 `performer.go` 重试循环。
+
+这与它的定位一致——修复 Agent 只负责"改参数"，不应在修复过程中再触发工具副作用，否则会破坏执行的可追溯性。
+
+## 6. 非工具占位符
+
+**无占位符**。
+
+- 占位符注册表声明于 `templates.go:366`：`PromptTypeToolCallFixer: {}`，是**空 map**。
+- 渲染时对应传入 `map[string]any{}`（`handlers.go:973`），不注入任何运行时数据。
+- 模板正文内不含任何 `{{.Xxx}}` 引用，也无工具型占位符（如 `{{.Tools}}`/`{{.AvailableTools}}`）。
+
+> 说明：修复所需的全部上下文（`ToolCallName` / `ToolCallArgs` / `ToolCallSchema` / `ToolCallError`）均由配对的 `input_toolcall_fixer.tmpl` 承载（占位符注册见 `templates.go:367-372`，注入见 `handlers.go:963-968`）。本模板是 `ToolCallFixer` 这对 prompt 中"零数据、纯角色与规则"的一侧。

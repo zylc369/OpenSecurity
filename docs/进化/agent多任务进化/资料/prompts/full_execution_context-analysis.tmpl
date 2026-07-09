@@ -1,0 +1,63 @@
+# full_execution_context.tmpl 分析文档
+
+## 1. 原文件名
+
+`full_execution_context.tmpl`，源码注册名 `PromptTypeFullExecutionContext`（`templates.go:61`，字符串值 `"full_execution_context"`），数据库枚举同名（`database/models.go:378`）。
+
+## 2. 类型与用途
+
+**C 类工具辅助 Prompt——完整执行上下文摘要语料。**
+
+- 本模板**不直接驱动执行 agent**，也不是终端用户可见输出。它产出的结构化 XML 语料，是 `Summarizer`（链路摘要器）的输入。
+- 用途：把"全局任务 + 历史任务 + 已完成子任务 + 当前子任务 + 计划子任务"五种状态数据，序列化为一份结构化执行上下文，供后续 LLM 摘要压缩成自然语言段落。
+- 渲染产物在被消费前，**必须**先经过 `GetSummarizeResultHandler` 做一次 LLM 摘要（带 SHA256 内容缓存），因此它本质是"摘要器的喂料模板"，而非直接生效的指令。
+
+## 3. 配对关系
+
+**无配对**（指没有 PrimaryAgent/QuestionPrimaryAgent 那种"主/问"成对结构）。
+
+> 补充发现（供定夺）：占位符集合与 `PromptTypeShortExecutionContext`（`templates.go:401`）**完全相同**（同样五个字段）。两者形成机制上的对照：
+> - **Full 版（本模板）**：经 `Summarizer` LLM 摘要后产出自然语言，用于 PrimaryAgent 主链启动前的上下文初始化；
+> - **Short 版**：由 `getExecutionContextByTask`（`helpers.go:785`）渲染，**不经摘要**直接返回结构化原文，用于无子任务粒度时的轻量上下文获取。
+>
+> 若按"机制对"理解可视为配对；若按用户给定的"主/问配对"口径则为无配对。本结论遵循后者。
+
+## 4. 调用时机
+
+**由 `flowProvider.prepareExecutionContext`（`helpers.go:702`）渲染，随后立即触发 Summarizer 摘要。** 渲染发生在两个上游调用点：
+
+| 调用点 | 位置 | 触发场景 |
+|---|---|---|
+| `PrepareAgentChain` | `provider.go:601 / :622` | **主路径**。PrimaryAgent 主链启动前的准备阶段，为当前 `(taskID, subtaskID)` 生成执行上下文，并将摘要结果通过 `UpdateSubtaskContext`（`provider.go:628`）**持久化到 `subtasks.context` 字段做缓存**。 |
+| `getExecutionContext` 回退分支 | `assistant.go:405 / :411` | **回退路径**。当目标子任务 `Context` 为空（缓存缺失）时，取最近活跃子任务重新生成一次上下文。 |
+
+**摘要链路**（`handlers.go:870 GetSummarizeResultHandler`）：
+
+1. 以渲染原文的 SHA256 为 key 查 `summarizerCache`，命中即直返；
+2. 未命中则用 `PromptTypeSummarizer` 作为 system prompt，把本模板渲染产物作为 user message，经 `performSimpleChain` 调用一次 LLM（`OptionsTypeSimple`，消息链类型 `MsgchainTypeSummarizer`）；
+3. 超过 `2*msgSummarizerLimit` 的输入会做头尾截断（保留首尾各 `msgSummarizerLimit`，中间插 `{TRUNCATED}`）；
+4. 摘要结果 UTF-8 净化后写入缓存并返回。
+
+> 一句话：**子任务首次被 PrimaryAgent 接管、且无缓存上下文时，触发"渲染 → 摘要 → 落库"全流程**；之后命中缓存即跳过。
+
+## 5. 工具列表
+
+**无工具。** 本模板在 `server/models/prompts.go:41` 的"工具型 prompt"白名单中（该名单用于前端展示可挂工具的 prompt 类型），但其本身不注册任何工具——它只是 Summarizer 的纯文本输入语料，所有数据来自注入的占位符，输出由摘要 LLM 产生，不调用任何 function/tool。
+
+## 6. 非工具占位符
+
+注册顺序见 `templates.go:394-400`，五个占位符全部由 `prepareExecutionContext` 在 `helpers.go:738-744` 集中注入：
+
+| 占位符 | 数据来源 | 注入时机 | 用途 |
+|---|---|---|---|
+| `{{.Task}}` | `getTasksInfo(ctx, taskID).Task`（当前主任务实体） | `prepareExecutionContext` 渲染时 | 全局任务对象，模板内取 `{{.Task.Input}}` 作为 `<global_task>`，承载用户总体目标。 |
+| `{{.Tasks}}` | `getTasksInfo(...).Tasks`（同 flow 下的任务历史集合） | 同上 | 填充 `<previous_tasks>`，按 `{{range}}` 展开每条任务的 ID/Title/Input/Status/Result；为空时输出 `<status>none</status>` 兜底。 |
+| `{{.CompletedSubtasks}}` | `getSubtasksInfo(taskID, ...).Completed` | 同上 | 填充 `<completed_subtasks>`，按 `{{range}}` 展开已完成子任务的 ID/Title/Description/Status/Result；为空时输出"首个子任务"兜底文案。 |
+| `{{.Subtask}}` | `getSubtasksInfo(...).Subtask`（可为 `nil`） | 同上，**含 nil 回退**：`helpers.go:720-736` 当 Subtask 为空时，按 `subtaskID` 在 Planned+Completed 合集中定位，将其切为 Subtask，其前者归 Completed、后者归 Planned | 填充 `<current_subtask>` 的 ID/Title/Description；为 `nil` 时走 `{{else}}` 输出"无进行中子任务"兜底文案。 |
+| `{{.PlannedSubtasks}}` | `getSubtasksInfo(...).Planned` | 同上（nil 回退时会被重切，见上一行） | 填充 `<planned_subtasks>`，按 `{{range}}` 展开计划子任务的 ID/Title/Description；为空时输出"全部完成（当前子任务除外）"兜底文案，文案内还嵌套 `{{if .Subtask}}` 二次分支。 |
+
+**关键设计观察：**
+
+- 五个占位符构成"已完成 → 当前 → 计划"的时间轴切片，由 `subtaskID` 这一切分点决定归属；`Subtask` 缺失时的回退重切逻辑（`helpers.go:720-736`）保证即便上游未预设切分点，也能就地重建三段。
+- 模板对每个集合都有 `{{if}}/{{else}}` 空值兜底，确保任何状态下都能产出合法 XML，避免 Summarizer 拿到畸形输入。
+- `{{.Subtask}}` 同时驱动三处分支（current 段渲染、planned 兜底文案的二次嵌套），是整张模板的语义中枢。

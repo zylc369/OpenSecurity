@@ -1,0 +1,202 @@
+# reflector.tmpl 分析
+
+> 本文件为分析结论，不含模板原文。源码参照 PentAGI `backend/pkg/`。
+> 配对文档：`question_reflector-analysis.tmpl`（Reflector 的 Human 侧，互补参考）。
+
+## 1. 原文件名
+
+`reflector.tmpl`，对应枚举 `PromptTypeReflector = "reflector"`（`templates/templates.go:49`）。模板变量白名单声明在 `templates/templates.go:334-339`：`BarrierTools` / `CurrentTime` / `ExecutionContext` / `Request`，与模板内出现的 4 个 `{{.}}` 占位符一一对应。
+
+## 2. 类型与用途：工具调用格式纠正器
+
+**A 类 Agent System Prompt**，登记为 **Reflector agent** 的 `System` 角色 prompt（`templates/templates.go:567-570`）：
+
+```go
+Reflector: AgentPrompts{
+    System: getPrompt(PromptTypeReflector),        // 本文件
+    Human:  getPrompt(PromptTypeQuestionReflector), // question_reflector.tmpl
+},
+```
+
+### 2.1 核心定位
+
+Reflector 是 PentAGI 多 agent 编排体系中的一个**内部辅助 agent**，定位为"工具调用流程强制器"。它**不是**给终端用户用的，而是**当代码检测到某个子 agent 错误地以"纯文本（completion 模式）"而非"结构化工具调用"返回结果时**，由系统自动拉起的一个纠偏环节。其职责：
+
+1. 以**实际审查 agent 工作成果的用户的口吻**（"作为用户的代理"）生成一段 advice，而非以系统/机器口吻报错。
+2. 先**直接、简洁地回答** agent 在那段异常文本中提出的疑问（若有）。
+3. 再**把 agent 拉回正轨**：明确指出"系统只能处理格式正确的工具调用，非结构化响应会阻塞工作流"，并给出可执行的下一步——要么改成正确的工具调用格式，要么用 `done`/`ask` 这类终止工具显式收尾。
+
+### 2.2 它解决的痛点
+
+PentAGI 的多 agent 系统是**纯工具调用驱动**的：每一轮 agent 必须产出一个或多个 function call，流程才能往前走。但 LLM 偶尔会"忘了"用工具，直接吐一段自然语言（比如把结果写在正文里、或者反问用户问题）。这种空工具调用的返回会让 `performAgentChain` 的主循环卡死（没有 tool call 可执行）。Reflector 就是为这种情况兜底——不报错中断，而是**用一段拟人化的纠正提示回灌给原 agent，逼迫它在下一轮改用工具调用**。
+
+### 2.3 沟通风格约束（模板固化）
+
+模板把 Reflector 的输出风格写死成"繁忙用户在聊天界面里的快速消息"：
+
+- **无寒暄**：禁用任何 "Hi/Hello" 开头和 "Best regards/Thanks" 结尾。
+- **极简**：目标 500 字符以内，直接直奔主题，行动导向。
+- **用户口吻**：以发起任务的用户身份说话，保持自然语调但不啰嗦。
+
+这套约束是为了让回灌的 advice 对原 agent 而言像一条"来自用户的真实催促"，而非机械的系统报错。
+
+### 2.4 一个值得注意的注释偏差（查缺补漏）
+
+`templates/templates.go:49` 对 `PromptTypeReflector` 的行内注释是：
+
+```go
+PromptTypeReflector PromptType = "reflector" // analyzes outcomes and suggests improvements
+```
+
+该注释描述的是"分析结果并建议改进"，属于**泛化/历史性描述**，与当前 `reflector.tmpl` 的实际定位（**工具调用格式纠正器**）存在语义落差。实际的纠正对象不是"结果质量"而是"返回格式"，触发条件是空工具调用而非任务完成。阅读源码时应以模板正文与 `performReflector` 调用逻辑为准，不要被该注释误导为"结果评审 agent"。
+
+## 3. 配对关系：与 question_reflector.tmpl 构成 System + Human
+
+`reflector.tmpl` 与 `question_reflector.tmpl` 配对，构成 Reflector agent 的双角色 prompt（`templates/templates.go:567-570`）：
+
+| 角色 | 模板 | 类型 | context 键集合 | 数据子集 |
+|------|------|------|----------------|----------|
+| System | `reflector.tmpl`（本文件） | A 类 System | `BarrierTools` / `CurrentTime` / `ExecutionContext` / `Request` | `reflectorContext["system"]` |
+| Human | `question_reflector.tmpl` | B 类 Human | `Message` / `BarrierToolNames` | `reflectorContext["user"]` |
+
+### 3.1 两份 context 来自同一处构造
+
+两个模板的变量**不是分别注入，而是在 `performReflector` 内一次性构造好两套 context**（`performer.go:602-616`），再各自渲染：
+
+```go
+reflectorContext := map[string]map[string]any{
+    "user": {                              // → question_reflector.tmpl
+        "Message":          content,                       // 被纠正的 agent 原文
+        "BarrierToolNames": executor.GetBarrierToolNames(),// 工具名清单
+    },
+    "system": {                            // → reflector.tmpl（本文件）
+        "BarrierTools":     executor.GetBarrierTools(),    // 工具名+schema
+        "CurrentTime":      getCurrentTime(),              // 时间戳
+        "ExecutionContext": executionContext,               // flow/task/subtask 上下文
+    },
+}
+if humanMessage != "" {
+    reflectorContext["system"]["Request"] = humanMessage    // 原始用户任务（条件注入）
+}
+```
+
+随后在 `performer.go:639` / `:645` 同一处先后渲染 Human 与 System 两个模板，再一同送入 `performSimpleChain`（`performer.go:660-661`）。
+
+### 3.2 分工差异
+
+- **`reflector.tmpl`（System）**：设定 Reflector 的人设、沟通风格、"格式强制器"职责，并把**带 schema 的完整工具描述**交给它，使其能"对 JSON 格式方案提供最小化格式化示例、指出具体格式错误"。
+- **`question_reflector.tmpl`（Human）**：只承载"本次要被纠正的具体那条 agent 文本"以及"工具名清单"，作为单次纠正任务的输入载体，结构极简。
+
+二者形成"**完整描述 vs 名字清单**"、"**人设/职责 vs 单次任务素材**"的互补分工。
+
+## 4. 调用时机
+
+触发入口为 `flowProvider.performReflector`（`providers/performer.go:557`）。共有**三条**进入路径（其中第三条为优雅终止，配对文档未提及）：
+
+### 4.1 主路径——纯文本而非工具调用
+
+`performAgentChain` 主循环中，一轮 LLM 调用后若 `len(result.funcCalls) == 0`（即没有产生任何工具调用），且该 agent **不是** `OptionsTypeAssistant`（Assistant 类型走 `processAssistantResult`，纯文本是其合法返回，不进 reflector），则进入 `performReflector`（`performer.go:141-154`）。被纠正的 `content` 即该轮 agent 返回的纯文本。
+
+```go
+if len(result.funcCalls) == 0 {
+    if optAgentType == pconfig.OptionsTypeAssistant {
+        ... return fp.processAssistantResult(...)   // Assistant 豁免
+    }
+    // 构造带 reasoning 的 AI 消息，连同 chain 一并交给 reflector
+    result, err = fp.performReflector(ctx, optAgentType, chainID, taskID, subtaskID,
+        append(chain, reflectorMsg), executor,
+        fp.getLastHumanMessage(chain), result.content, executionContext, 1)
+}
+```
+
+### 4.2 次路径——工具调用重试耗尽
+
+`performCallerReflector`（`performer.go:718`）在工具调用多次重试仍失败时，把失败原因拼成一段 reflector content，再调用 `performReflector`（`performer.go:762-765`）。
+
+### 4.3 第三路径——临近迭代上限的优雅终止（查缺补漏）
+
+当 `iteration >= maxCallsLimit - maxAgentShutdownIterations`（`performer.go:115`），系统**主动构造**一个 `funcCalls` 为空、`content` 为"I can't continue this multi-turn chain because I'm too close to the AI agent iteration limit"的 `callResult`（`performer.go:122-127`）。它随后同样落入 `:141` 的 `len(result.funcCalls) == 0` 分支，从而**借用 Reflector 引导原 agent 用 `done`/`ask` 优雅收尾**，而非硬中断。日志会打 `max tool calls limit will be reached soon, invoking reflector for graceful termination`（`performer.go:119`）。
+
+> 这条路径在配对文档 `question_reflector-analysis.tmpl` 的调用时机小节中未列出，但它是真实存在的第三触发源，建议两份文档保持同步。
+
+### 4.4 进入后的流程
+
+`performReflector` 渲染 System + Human 模板 → `performSimpleChain`（**单轮、无工具执行器**，见 §5）生成 advice → 把 advice 作为 human 消息追加回原 chain（`performer.go:675`）→ `callWithRetries` 让**原 agent**（注意：用的是 `optOriginType` 而非 Reflector 类型，`performer.go:676`）带着纠正提示重跑一轮。
+
+### 4.5 防护与边界（验证自源码）
+
+- **递归上限**：`iteration > maxReflectorCallsPerChain`（常量 `= 3`，`performer.go:32`）直接报错返回（`performer.go:583-598`）。
+- **递归熔断**：若 reflector 给完 advice 后原 agent **仍**返回空工具调用，会**递归再调一次** `performReflector`（`iteration+1`，`performer.go:710-711`）；但 `performCallerReflector` 会先 `markReflectorRetry`（`performer.go:749`），此后再递归将被 `isReflectorRetry` 拦截并报 `reflector recursion detected`（`performer.go:705-708`，守卫定义见 `helpers.go:74-87`），防止无限递归。
+- **Assistant 豁免**：Assistant agent 的纯文本输出是合法结果，永不触发 reflector（`performer.go:142-144`）。
+
+## 5. 工具列表：无工具（BarrierTools 仅作文本注入）
+
+### 5.1 Reflector 本身不绑定任何工具
+
+Reflector 走的是 `performSimpleChain`（`performers.go:957`），其内部调用 `fp.CallEx(ctx, opt, chain, nil)`——**末位 tools executor 参数为 `nil`**（`performers.go:981`）。因此 Reflector 是纯文本进/纯文本出的单轮对话，**不持有任何可调用工具**。模板里 `{{range .BarrierTools}}` 列出的工具**不是 function calling 的工具定义**，而是注入到 prompt 文本里的一份参考清单。
+
+### 5.2 {{.BarrierTools}} 的真实身份
+
+`{{.BarrierTools}}`（`reflector.tmpl`）注入的是 `executor.GetBarrierTools()`（`performer.go:608`）的返回值——一个 `[]FunctionInfo{Name, Schema}` 切片（`tools/executor.go:389-403`），来自原 agent 的 executor（`ce.barriers` map）。模板用 `{{range}}` 把每个工具渲染成：
+
+```xml
+<tool>
+  <name>{{.Name}}</name>
+  <schema>{{.Schema}}</schema>
+</tool>
+```
+
+这些工具实际归**原 agent**所有（由原 agent 的 executor 提供），Reflector 只是口头上引用它们，用来在 advice 里点名引导——"你要么改用结构化工具调用，要么用 `done` / `ask` 结束流程"。
+
+### 5.3 屏障工具的具体内容
+
+被引用的屏障工具属于 `BarrierToolType`（`tools/registry.go:64, 97-98`）：
+
+| 工具名 | 常量 | 定义 | 含义 |
+|--------|------|------|------|
+| `done` | `FinalyToolName` | `tools/registry.go:12` | 标志当前 agent chain 完成，正常终止 |
+| `ask` | `AskUserToolName` | `tools/registry.go:13` | 向用户提问/请求输入，挂起 chain 等待 |
+
+二者即"**标志 agent chain 结束的终止工具**"。`done` 始终注册，`ask` 视 `cfg.Barrier` 配置条件注册（注册逻辑见 `tools/tools.go`，与配对文档 §5 一致）。
+
+### 5.4 与 question_reflector.tmpl 的 Barrier 占位符分工
+
+| 模板 | 占位符 | 数据 | 渲染形态 | 目的 |
+|------|--------|------|----------|------|
+| `reflector.tmpl`（System） | `{{.BarrierTools}}` | `[]FunctionInfo{Name,Schema}` | `<tool><name>+<schema>` | 让 Reflector 能给出**带格式的最小化示例**、指出具体格式错误 |
+| `question_reflector.tmpl`（Human） | `{{.BarrierToolNames}}` | `[]string` | `<tool>名字</tool>` | 仅提供**工具名清单**作轻量提示 |
+
+System 侧拿到的是"完整描述"（含 schema），因为纠正格式错误需要知道参数结构；Human 侧只拿到"名字"，因为单次任务输入无需重复 schema。
+
+## 6. 非工具占位符
+
+本模板允许的 4 个 context 键在 `templates/templates.go:334-339` 声明，全部在 `performReflector` 内构造 `reflectorContext["system"]` 时赋值（`performer.go:602-616`），并在 `fp.prompter.RenderTemplate(PromptTypeReflector, reflectorContext["system"])`（`performer.go:645`）处一次性注入。
+
+| 占位符 | 类型 | 数据源（注入信息） | 用途 | 注入时机 |
+|--------|------|-------------------|------|----------|
+| `{{.BarrierTools}}` | `[]FunctionInfo{Name,Schema}` | `executor.GetBarrierTools()`（`performer.go:608`） | 列出原 agent 可用的终止工具（done/ask）及其 JSON schema，供 Reflector 在 advice 中点名引导、提供格式示例 | `reflectorContext["system"]` 构造时（`:608`）→ 模板渲染时注入（`:645`） |
+| `{{.CurrentTime}}` | `string` | `getCurrentTime()`（`performer.go:609`），格式 `2006-01-02 15:04:05`（`helpers.go:929-931`） | 渲染进 `<current_time>` 段，供 Reflector 感知"现在"（与 ExecutionContext 配合理解当前进度） | 同上（`:609`） |
+| `{{.ExecutionContext}}` | `string` | `performReflector` 形参 `executionContext`（`performer.go:610`），上游来自 `performAgentChain` 的 `getExecutionContext` 产物 | 渲染进 `<execution_context>` 段；含当前 Flow/Task/SubTask 的 ID、状态、标题、描述。模板要求据此理解精确的当前目标、提取父子任务关系、识别当前操作分支的相关历史 | 同上（`:610`） |
+| `{{.Request}}` | `string` | `performReflector` 形参 `humanMessage`（`performer.go:614-616`），来自 `getLastHumanMessage(chain)`（`performer.go:773`）——倒序遍历 chain 取最后一条 human 消息文本 | 渲染进 `<original_assignment>` 段；承载**用户的原始任务分配**，使 Reflector 的引导与原始任务目标保持一致 | **条件注入**：仅当 `humanMessage != ""` 时写入（`:614`） |
+
+### 6.1 {{.Request}} 的双重条件性
+
+`{{.Request}}` 是唯一带"代码层 + 模板层"双重条件的占位符：
+
+- **代码层**：`performer.go:614-616` 仅当 `humanMessage != ""` 才往 `reflectorContext["system"]` 写入 `Request` 键。
+- **模板层**：`reflector.tmpl` 用 `{{if .Request}}...{{end}}` 包裹整段"当前任务评估"（模板第 81-89 行），键不存在时该段整段裁掉。
+
+两层共同保证：当 chain 中没有可追溯的原始人类消息时（例如某些纯内部触发的链路），既不会注入空值，也不会渲染出空的任务段。
+
+### 6.2 {{.Request}} 与 {{.ExecutionContext}} 的分工
+
+两者都关乎"任务上下文"，但粒度不同：
+
+- `{{.Request}}`：**用户原始的一句话任务分配**（最后一次 human 消息），是"用户想要什么"的高层目标。
+- `{{.ExecutionContext}}`：**系统结构化的执行状态快照**（Flow/Task/SubTask 的 ID、状态、标题、描述），是"当前进行到哪、子任务目标是什么"的细节。
+
+Reflector 据此双轨判断：原始目标（Request）+ 当前子任务目标（ExecutionContext），确保纠正引导既不偏离用户本意、又贴合当前执行进度。
+
+---
+
+**小结**：`reflector.tmpl` 是 Reflector 这一"工具调用格式纠正器"的 System 侧人设与职责模板。它本身**无任何工具**，仅通过 `{{.BarrierTools}}` 以文本形式引用原 agent 的终止工具（done/ask）及其 schema，配合 `{{.CurrentTime}}`/`{{.ExecutionContext}}`/`{{.Request}}` 三项运行时上下文，在子 agent 返回空工具调用（或重试耗尽、或临近迭代上限）时，以用户口吻生成简短纠正 advice 回灌原 agent，逼其改用结构化工具调用或显式收尾。与 `question_reflector.tmpl`（Human 侧）共享同一份 `reflectorContext` 的不同子集，构成 System + Human 配对。

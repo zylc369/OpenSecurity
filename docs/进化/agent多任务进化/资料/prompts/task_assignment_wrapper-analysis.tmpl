@@ -1,0 +1,64 @@
+# task_assignment_wrapper.tmpl 分析文档
+
+## 1. 原文件名
+
+- **磁盘文件名**：`task_assignment_wrapper.tmpl`
+- **PromptType 常量**：`PromptTypeTaskAssignmentWrapper`，字符串值为 `"task_assignment_wrapper"`（`database/models.go:384`、`templates/templates.go:67`）
+
+## 2. 类型与用途
+
+**C 类 — 工具辅助 Prompt**。
+
+该模板不直接驱动某个 agent，也不面向用户，而是扮演**任务分配合并器**：
+
+- planner（实为 adviser agent，以观测名 `"planner"` 调用）针对某个 specialist 任务产出执行计划后，本模板把**原始用户请求**与**执行计划**两段文本合并成一个带 `<task_assignment>` 结构标签的包装体。
+- 合并后的文本**替换**掉原本要喂给 specialist agent 的 user 模板（`userCoderTmpl` / `userInstallerTmpl` / `userPentesterTmpl`），作为该 specialist 的 human message 进入对话链。
+- 用途定位：让 specialist agent 拿到「目标 + 建议步骤」的组合输入，其中 hint 段强调"original_request 是首要目标、execution_plan 仅为指导、需根据实际情况调整"——即**计划服从目标**的优先级约定。
+
+数据结构上它属于 `ToolsPrompts`（`templates.go:478`）下的 `TaskAssignmentWrapper` 单一 `Prompt` 字段，不是 `AgentPrompts`（System/Human 配对结构）。
+
+## 3. 配对关系
+
+**无配对**。
+
+- 它是 `ToolsPrompts.TaskAssignmentWrapper`（`templates.go:490`），结构为单个 `Prompt`，没有对应的 System 侧或 Question 侧模板。
+- 与之相邻协作的是另一个独立的工具 Prompt `PromptTypeQuestionTaskPlanner`（用于向 planner 提问），但两者是先后调用关系，并非配对关系。
+
+## 4. 调用时机
+
+**触发条件**：仅当 `fp.planning == true`（流程开启了规划阶段）时进入。
+
+**调用链**（`providers/performers.go`）：
+
+1. specialist performer（Coder `:418` / Installer `:503` / Pentester `:656`）构造好原始 user 模板 `userXxxTmpl` 与 `question`。
+2. 进入 `performPlanner`（`performers.go:812`）：
+   - 先用 `PromptTypeQuestionTaskPlanner` 渲染提问（`AgentType` + `TaskQuestion`）；
+   - 通过 `executor.Execute(..., tools.AdviceToolName, "planner", ...)`（`:854`）调用 adviser 生成执行计划 `plan`；
+   - **planner 成功后**，调用本 wrapper 渲染（`:862`），产出 `taskAssignment`。
+3. 返回调用方后，用 `taskAssignment` **替换** `userXxxTmpl`（`:424` / `:662` 等），随后送入 `restoreChain` → `performAgentChain` 作为该 agent 的 human 消息。
+
+**降级路径**：若 `performPlanner` 返回 error，仅 `Warn` 日志（`:422` / `:660`），**不使用 wrapper 产物**，继续沿用原 `userXxxTmpl` 不带计划执行——即该模板的产出是"锦上添花"，失败不影响主流程。
+
+## 5. 工具列表
+
+**无工具**。
+
+该模板是纯文本渲染（`prompter.RenderTemplate`），不挂载任何 tool/function。其涉及的 adviser 调用发生在上游 `performPlanner` 内部，与本模板渲染本身无关。
+
+## 6. 非工具占位符
+
+声明的变量见 `templates/templates.go:439-442`，共两个，均在 `performPlanner` 内一次性注入（`performers.go:862-865`）：
+
+### `{{.OriginalRequest}}`
+
+- **用途**：承载该 specialist 的**原始用户请求 / 任务模板**，即包装前准备喂给 agent 的 user 侧内容。
+- **注入信息**：来自传入 `performPlanner` 的 `userTmpl` 形参（`performers.go:817`）。该形参由调用方以 `userCoderTmpl` / `userInstallerTmpl` / `userPentesterTmpl` 传入（`:419` / `:504` / `:657`），是各 agent 流程已构造好的初始用户模板。
+- **注入时机**：planner 成功生成 `plan` 之后、`RenderTemplate` 调用瞬间，与 `ExecutionPlan` 同时注入。
+
+### `{{.ExecutionPlan}}`
+
+- **用途**：承载 planner（adviser）针对该任务产出的**执行计划文本**，作为给 specialist 的建议步骤。
+- **注入信息**：来自 `performPlanner` 中 `executor.Execute(...)`（`:854`）的返回值 `plan`——即 adviser agent 对 `PromptTypeQuestionTaskPlanner` 提问的回答结果。
+- **注入时机**：与 `OriginalRequest` 同步注入，发生在 `performPlanner` 渲染本 wrapper 时（`:862`）。
+
+> 备注：测试 `TestTaskAssignmentWrapperPrompt`（`templates/templates_test.go:1017`）以 dummy 数据验证两占位符均被正确渲染，并校验结构标签 `task_assignment`/`original_request`/`execution_plan`/`hint` 存在。

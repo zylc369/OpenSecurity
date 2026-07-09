@@ -1,0 +1,44 @@
+# language_chooser.tmpl 分析
+
+## 1. 原文件名
+
+`language_chooser.tmpl`，注册的 PromptType 字符串为 `language_chooser`（`templates/templates.go:57`）。
+
+## 2. 类型与用途
+
+**C 类工具辅助 Prompt**，用于检测 AI 回复时应使用的自然语言。
+
+- 调用模式为 **单轮简单调用**：`prv.Call(ctx, pconfig.OptionsTypeSimple, languageTmpl)`（`providers/providers.go:424`），不进入多轮 ReAct 循环，不绑定 function-calling。
+- 输出是一个英文语言名单词（如 `English`、`Russian`、`Chinese`），经 `strings.TrimSpace` 清洗后作为下游参数。
+- 下游消费方：检测出的语言被作为 `Lang` 注入 `flow_descriptor`（`providers/providers.go:432`），用于本地化 flow 标题等展示文本。
+
+## 3. 配对关系
+
+**无配对**。
+
+该 prompt 是独立的工具型辅助 prompt，注册在 `ToolsPrompts.ChooseUserLanguage`（`templates/templates.go:590`）。与 `question_reflector`/`enricher` 这类"主 prompt + input 变体"成对结构不同，`language_chooser` 没有对应的 `input_language_chooser` 配对成员，语言检测逻辑无需用户二次输入。
+
+## 4. 调用时机
+
+存在**两个调用点**，均发生在 provider 初始化阶段（任务正式执行前）：
+
+| 调用点 | 所在函数 | 位置 | 触发场景与顺序 |
+|--------|----------|------|----------------|
+| ① | `NewFlowProvider` | `providers/providers.go:417` | **flow 启动时**。执行顺序：`image_chooser`(402–415) → **`language_chooser`(417–428)** → `flow_descriptor`(430+)。即紧随镜像选择之后、标题生成之前 |
+| ② | `NewAssistantProvider` | `providers/providers.go:563` | assistant 创建时。此路径镜像已由入参传入，`language_chooser` 是该流程的**首个** prompt 调用 |
+
+两处调用方式一致，均注入 `{"Input": input}`，以 `OptionsTypeSimple` 模式执行。
+
+## 5. 工具列表
+
+**无工具**。
+
+该 prompt 通过 `OptionsTypeSimple` 模式调用，不挂载任何 function/tool，模型仅做一次性语言判定并输出纯文本，不触发工具执行器（`FlowToolsExecutor`）。
+
+## 6. 非工具占位符
+
+模板仅含一个占位符 `{{.Input}}`，占位符白名单也仅声明此项（`templates/templates.go:413-415`）。
+
+- **用途**：承载用户原始输入文本，作为模型判定回复语言的唯一依据。
+- **注入信息**：即 `NewFlowProvider` / `NewAssistantProvider` 的 `input` 形参——用户提交的原始 prompt 文本（未经改写）。
+- **注入时机**：在 provider 初始化阶段由 `prompter.RenderTemplate` 渲染注入（`providers/providers.go:417-419` / `563-565`），早于任何任务执行或 agent 主流程，属于启动期的预处理步骤。

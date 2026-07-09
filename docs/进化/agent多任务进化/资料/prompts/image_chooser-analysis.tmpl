@@ -1,0 +1,77 @@
+# image_chooser.tmpl 分析文档
+
+> 本文档只记录分析结论，不复述模板原文。
+
+## 1. 原文件名
+
+`image_chooser.tmpl`（PentAGI 内置 prompt，对应 `templates.PromptTypeImageChooser`，PromptType 常量值 `"image_chooser"`，源码注释 *selects appropriate Docker containers*）。
+
+## 2. 类型与用途
+
+**C 类工具辅助 Prompt**（功能性模板，非 agent 角色 prompt）。
+
+- **用途**：在 flow 启动阶段，让 LLM 依据用户任务文本选定后续容器执行所用的 Docker 基础镜像。模型被约束为"仅输出小写镜像名"，是一个**单轮、纯文本、无副作用**的选择器。
+- **架构定位**：它不属于 agent 角色体系（不是 pentester/coder/searcher 之类），而是挂在 `ToolsPrompts.ChooseDockerImage` 字段（templates.go:589）上的流程编排用 prompt，用于在 agent 实际运行前完成一项环境预决策。
+- **与同类项的关系**：与 `language_chooser`、`flow_descriptor` 同属 NewFlowProvider 内的"flow 启动元信息预决策"组，三者结构同构（均为 OptionsTypeSimple + Call 的无工具单轮调用）。
+
+## 3. 配对关系
+
+**无配对**。
+
+- 它不是 agent 角色对（如 `pentester` ↔ `question_pentester`）的一部分，不存在对应的 question 变体。
+- 单次调用、单向产出（镜像名），无人类输入回路、无多轮交互形态。
+
+## 4. 调用时机
+
+**flow 启动时（早于任何 agent 任务执行）**。
+
+- **直接调用点**：`providers.go:402`，在 `providerController.NewFlowProvider` 内渲染模板并调用 `prv.Call(ctx, pconfig.OptionsTypeSimple, imageTmpl)`（providers.go:411）。
+- **上游调用方**：`controller/flow.go:191` 在 `NewFlowProvider` 内调用，位于 "prepare flow worker" span（flow.go:180）阶段，此时 flow 刚创建、executor 刚构建完成（flow.go:187），尚未进入任何子任务/agent 执行。
+- **调用档位**：`OptionsTypeSimple`（"simple"），即无工具的轻量文本生成档，区别于带工具的 agent 档（PrimaryAgent/Pentester 等）。
+- **返回值处理**：结果经 `strings.ToLower(strings.TrimSpace(image))` 清洗（providers.go:415），作为该 flow 后续容器执行的基础镜像。
+- **同批执行**：紧接着同函数内依次执行 language_chooser（providers.go:417）与 flow_descriptor（providers.go:430），三者都在 flow 初始化一次性完成，后续 agent 运行期间不再调用本模板。
+
+## 5. 工具列表
+
+**无工具**。
+
+- 证实依据：调用走 `prv.Call`（providers.go:411），该方法是"无工具"路径；带工具的是另一独立方法 `CallWithTools`，后者才通过 `llms.WithTools(tools)` 注入工具集（见 openai.go:163-176 的对照实现）。
+- `OptionsTypeSimple` 档位本身即"无工具的简单文本生成"，不绑定任何 FlowToolsExecutor 工具。
+- 因此本模板是**纯文本输入 → 纯文本输出（镜像名）**的功能性模板，不触发任何工具调用。
+
+## 6. 非工具占位符
+
+模板声明的渲染期占位符（templates.go:408-412）共三个，全部在 `NewFlowProvider` 渲染时（providers.go:402-406）一次性静态注入，无运行时动态/工具占位符。
+
+### {{.DefaultImage}} —— 通用兜底镜像
+
+| 维度 | 结论 |
+|---|---|
+| 注入值 | `pc.docker.GetDefaultImage()`（providers.go:403） |
+| 数据来源 | `dockerClient.defImage`（client.go:549-551）→ 初始化为 `strings.ToLower(cfg.DockerDefaultImage)`（client.go:116）；为空时回退常量 `defaultImage = "debian:latest"`（client.go:36、117-118） |
+| 用途 | 模板中作为"模棱两可/不确定"情况下的兜底镜像，供 LLM 在无法判断时直接采用 |
+| 注入时机 | flow 启动时一次性注入 |
+
+### {{.DefaultImageForPentest}} —— 渗透测试默认镜像
+
+| 维度 | 结论 |
+|---|---|
+| 注入值 | `pc.defaultDockerImageForPentest`（providers.go:404） |
+| 数据来源 | providerController 初始化时取自 `cfg.DockerDefaultImageForPentest`（providers.go:374） |
+| 用途 | 模板中作为"安全/渗透测试任务"的默认镜像，引导 LLM 在判定为渗透类任务时采用 |
+| 注入时机 | flow 启动时一次性注入 |
+
+### {{.Input}} —— 用户任务文本
+
+| 维度 | 结论 |
+|---|---|
+| 注入值 | `input`（providers.go:405），即 `NewFlowProvider` 的 `input` 形参 |
+| 数据来源 | `controller/flow.go:192` 传入的 `fwc.input`，即用户发起 flow 的原始任务请求文本 |
+| 用途 | 作为 `<input>` 块提供给 LLM，据此判断所需技术栈与是否属于渗透测试场景，从而选定镜像 |
+| 注入时机 | flow 启动时一次性注入 |
+
+---
+
+### 占位符注入小结
+
+三个占位符构成"两个系统默认值 + 一份用户输入"的最小决策上下文：LLM 读 `{{.Input}}` 判断任务性质，在 `{{.DefaultImageForPentest}}`（渗透类）、`{{.DefaultImage}}`（兜底）以及按技术栈推断的具体镜像之间做出单选，最终只回吐一个小写镜像名。

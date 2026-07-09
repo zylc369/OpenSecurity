@@ -1,0 +1,62 @@
+<task_report_context>
+  <instruction>为用户的任务生成一份全面的评估报告</instruction>
+
+  <user_task>
+    <input>{{.Task.Input}}</input>
+  </user_task>
+
+  {{if .Tasks}}
+  <previous_tasks>
+    {{range .Tasks}}
+    <task>
+      <id>{{.ID}}</id>
+      <input>{{.Input}}</input>
+      <status>{{.Status}}</status>
+      <result>{{.Result}}</result>
+    </task>
+    {{end}}
+  </previous_tasks>
+  {{end}}
+
+  {{if .CompletedSubtasks}}
+  <completed_subtasks>
+    {{range .CompletedSubtasks}}
+    <subtask>
+      <id>{{.ID}}</id>
+      <title>{{.Title}}</title>
+      <description>{{.Description}}</description>
+      <status>{{.Status}}</status>
+      <result>{{.Result}}</result>
+    </subtask>
+    {{end}}
+  </completed_subtasks>
+  {{end}}
+
+  {{if .PlannedSubtasks}}
+  <planned_subtasks>
+    {{range .PlannedSubtasks}}
+    <subtask>
+      <id>{{.ID}}</id>
+      <title>{{.Title}}</title>
+      <description>{{.Description}}</description>
+    </subtask>
+    {{end}}
+  </planned_subtasks>
+  {{else}}
+  <planned_subtasks status="empty">
+    <message>所有子任务已完成。请查看它们的状态和结果以准备你的报告。</message>
+  </planned_subtasks>
+  {{end}}
+
+  {{if .ExecutionState}}
+  <execution_state>
+  {{.ExecutionState}}
+  </execution_state>
+  {{end}}
+
+  {{if .ExecutionLogs}}
+  <execution_logs>
+  {{.ExecutionLogs}}
+  </execution_logs>
+  {{end}}
+</task_report_context>

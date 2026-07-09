@@ -1,0 +1,139 @@
+# searcher.tmpl 分析文档
+
+## 1. 原文件名
+
+`searcher.tmpl`，对应内部类型常量 `PromptTypeSearcher = "searcher"`（`backend/pkg/templates/templates.go:37`），注释标注为 *gathers intelligence from web sources*。
+
+- **PentAGI 源码路径**：`backend/pkg/templates/prompts/searcher.tmpl`（经 `//go:embed prompts/*.tmpl` 嵌入，`templates/templates.go:18`；`RenderTemplate` 按 `prompts/<type>.tmpl` 拼路径读取，`templates.go:650-651`）。
+- **注册处**：`templates/templates.go:204-216` 登记其合法占位符清单（共 11 项）。
+- **登记点**：`templates/templates.go:543-545` 挂在 `AgentsPrompts` 的 `Searcher: { System, Human }` 下，本模板为 `System` 侧。
+- **DB 镜像**：`database/models.go` 同名常量；`server/models/prompts.go:29` 把它与 `PromptTypeQuestionSearcher` 作为一组暴露给前端做自定义渲染。
+
+## 2. 类型与用途
+
+**A 类 Agent System Prompt**——精准信息检索专家（Searcher）Agent 的 system 侧消息模板。
+
+system 模板承载的是 agent 的**稳定身份信息**：角色定位（精英搜索情报 agent）、授权框架（已授权渗透测试）、双语言通道策略（任务执行日志走任务语言、技术通道走英语）、动作经济性原则（以 `search_answer` 起手、最多 3-5 次搜索动作、信息足够即停）、搜索优化策略与来源优先级（内部记忆 → 专用工具 → 通用引擎）、摘要感知协议（识别并禁止模仿历史摘要标记）、搜索工具部署矩阵、执行上下文用法、任务材料协议、操作协议、以及收尾交付规范（`search_result` 工具的 `result`/`message` 双字段语言约束）。
+
+这正是 A 类模板的意义——把"这个 agent 是谁、遵循什么检索纪律、能调哪些工具、如何组织答案存储"这类**跨调用稳定**的规范固化在 system 消息里，与承载单次查询内容/作用域的 human 模板（`question_searcher.tmpl`）分离。如此既避免单次检索上下文污染角色定义造成漂移，也使 system 消息可被任意调用方复用而不受其查询内容影响，同时缩小 prompt 注入面。
+
+## 3. 配对关系
+
+与 `question_searcher.tmpl`（`PromptTypeQuestionSearcher`）**严格成对**，在 `templates/templates.go:543-545` 的 `Searcher: AgentPrompts{}` 注册处一并登记：
+
+```
+Searcher: AgentPrompts{
+    System: getPrompt(PromptTypeSearcher),          // 本模板
+    Human:  getPrompt(PromptTypeQuestionSearcher),  // question_searcher.tmpl
+}
+```
+
+两者必须同时存在：system 侧定义身份、双语言通道协议、动作经济性、工具规范与收尾要求；human 侧承载每次检索的具体查询、作用域锚点（Task/Subtask）。分工互补——"怎么查、用什么工具、如何交付"留在 system 侧；"查什么、在哪查、搜几次"留给 human 侧。`server/models/prompts.go:29` 把两者作为一组暴露给前端做自定义渲染。
+
+> 本模板的占位符清单（11 项）显著多于配对的 human 模板（3 项 `Question`/`Task`/`Subtask`），正反映 A/B 分工：工具名、摘要标记、运行环境等"基础设施"信息全部沉淀在 system 侧。
+
+## 4. 调用时机
+
+调用链（自上而下，已逐段核验）：
+
+1. **任意持有 `search` 工具的 agent 决策委派**：调用方 agent 在各自 system prompt 中声明了 `SearchToolName`（工具名 `search`，`tools/registry.go:31`，类型 `AgentToolType` `registry.go:116`），在当前上下文不足以决策、需要外部信息或过往检索记忆时调用它。工具参数为 `tools.ComplexSearch`（`tools/args.go:108-111`），其 `Question` 字段强制英文、不翻译。
+2. **handler 派发**：`SearchToolName` 在七个 executor 中均绑定到 `cfg.Searcher`（`tools/tools.go:854` Assistant、`:1085` Primary、`:1157` Installer、`:1265` Coder、`:1390` Pentester、`:1660` Generator、`:1728` Refiner）。handler 分两型：
+   - 子任务级：`providers/handlers.go:688` `GetSubtaskSearcherHandler`（taskID、subtaskID 均可解析）；
+   - 任务级：`providers/handlers.go:780` `GetTaskSearcherHandler`（仅 taskID）。
+   外层执行器 `json.Unmarshal` 解析出 `tools.ComplexSearch`（`handlers.go:766/857`），转交内部 `searcherHandler`（`handlers.go:699/791`）。
+3. **上下文构造**：`handlers.go:700-718`（子任务型）/ `handlers.go:792-809`（任务型）构造 `searcherContext`，分为 `"user"` 与 `"system"` 两套字典。**本模板消费 `"system"` 这一套**（`handlers.go:706-718` / `handlers.go:797-809`），含全部 11 个占位符键。
+4. **渲染 system 模板**：`handlers.go:739` / `handlers.go:829` `RenderTemplate(PromptTypeSearcher, searcherContext["system"])` → 得到 `systemSearcherTmpl`（紧随 `handlers.go:734/824` 渲染 human 模板之后，两次渲染包在同一次 langfuse evaluator span 内做审计）。
+5. **执行**：`handlers.go:753` / `handlers.go:843` 调 `performSearcher(ctx, taskID, subtaskID, systemSearcherTmpl, userSearcherTmpl, search.Question)`（`performers.go:693`）。注意：`performSearcher` **无 `fp.planning` 计划增强分支**——system 文本原样进入消息链。
+6. **建链**：`performers.go:728-730` `restoreChain` 把 `systemSearcherTmpl` 作为 **system 消息**、`userSearcherTmpl` 作为 human 消息注入 searcher 消息链（`database.MsgchainTypeSearcher`），随后 `performers.go:735` `performAgentChain` 驱动 Searcher Agent 执行。
+
+一句话：**调用方 agent 调 `SearchToolName` → handlers.go 解析当前任务作用域 → 渲染本模板 → 作为 system 消息送给 Searcher Agent**。
+
+> 范围修正：调用方不限于 primary_agent。SearchToolName 在 Assistant / Primary / Installer / Coder / Pentester / Generator / Refiner 七个 executor 中均绑定到 searcher handler，任一在需要外部信息或记忆检索时都可委派。
+
+## 5. 工具列表
+
+本模板含 4 个工具名占位符 `{{.XxxToolName}}`，外加"搜索工具部署矩阵"中以**字面量**出现的 `memorist`/`google`/`duckduckgo`/`browser`/`tavily`/`perplexity`/`traversaal` 等工具名。实际可调工具由 Searcher executor 在 `tools/tools.go:1460` `GetSearcherExecutor` 通过 `SearcherExecutorConfig`（`performers.go:710-722`）注入，而非来自模板。下面逐个分析 4 个占位符工具。
+
+### `{{.SearchResultToolName}}` → `search_result`
+
+- **实际名称**：`search_result`（`tools/registry.go:32`）。
+- **代码位置**：工具定义 `registry.go:205-209`；类型 `StoreAgentResultToolType`（`registry.go:117`）；在 SearcherExecutor 注册于 `tools/tools.go:1480`（definition）、`:1484`（handler=`cfg.SearchResult`）、`:1488`（**barrier 屏障**——唯一屏障工具）。
+- **用途**：收尾交付工具。把综合搜索结果回送给调用方 agent。参数 `tools.SearchResult`（`tools/args.go:119-122`）：`result`（技术通道详述，强制英语）+ `message`（任务执行日志摘要，走任务语言）。模板在"搜索结果交付"章节（ tmpl 多处引用）强制规定两字段的语言通道归属。
+- **调用时机**：Searcher Agent **必须**以此工具交付最终结果。它是 barrier——一旦调用即终止本 searcher 的工具循环。handler `cfg.SearchResult`（`performers.go:714-720`）只把 args 反序列化进 `searchResult` 局部变量，返回固定串 `"search result successfully processed"`；真正的 `searchResult.Result` 随后被 `performers.go:741-748` 的 `putAgentLog` 写回日志，最终由 `performers.go:752` `return searchResult.Result` 回送给调用方。
+
+### `{{.SearchAnswerToolName}}` → `search_answer`
+
+- **实际名称**：`search_answer`（`tools/registry.go:37`）。
+- **代码位置**：工具定义 `registry.go:291-299`；类型 `SearchVectorDbToolType`（`registry.go:122`）；在 SearcherExecutor 条件注册于 `tools/tools.go:1608-1610`（仅当 `NewSearchTool(...).IsAvailable()`，handler=`search.Handle`）。
+- **用途**：检索**答案向量库**（长期记忆）的 1-5 条语义查询。参数 `tools.SearchAnswerAction`（`tools/args.go:185-189`）：`Questions[]`（强制英语、含上下文与意图）、`Type`（枚举 `guide`/`vulnerability`/`code`/`tool`/`other`，作硬过滤）、`Message`（任务语言日志）。
+- **调用时机**：模板把它定为 **priority 1**——"始终以 `search_answer` 开始，以检查既有知识"，是每次检索的**首选起手工具**，避免重复研究已有答案。
+
+### `{{.StoreAnswerToolName}}` → `store_answer`
+
+- **实际名称**：`store_answer`（`tools/registry.go:38`）。
+- **代码位置**：工具定义 `registry.go:300-305`；类型 `StoreVectorDbToolType`（`registry.go:123`）；在 SearcherExecutor 条件注册于 `tools/tools.go:1609-1611`（与 `search_answer` 共用同一 `search.Handle`）。
+- **用途**：把研究得到的答案写入答案向量库，供未来检索复用。参数 `tools.StoreAnswerAction`（`tools/args.go:191-196`）：`Answer`（markdown，强制英语）、`Question`（与答案共索引，强制英语）、`Type`、`Message`。模板要求存储前**匿名化敏感数据**（IP→`{ip}`、域名→`{domain}`、凭据→`{username}/{password}`、URL→`{url}`）。
+- **调用时机**：**仅当**发现记忆中尚未包含的有价值信息时才调用（模板"动作经济性"第 2 条：仅在发现记忆中尚未包含的有价值信息时，才使用 `store_answer`）。非必调，是知识沉淀的增量写入。
+
+### `{{.SummarizationToolName}}` → `execute_task_and_return_summary`（**幽灵占位符**）
+
+- **实际名称**：`execute_task_and_return_summary`（`backend/pkg/cast/chain_ast.go:18`，非 `tools` 包常量）。
+- **代码位置**：**未在 SearcherExecutor 注册**（`GetSearcherExecutor` 的 definitions/handlers 中无此项），searcher **无法也禁止调用**它。它由 `cfg.Summarizer`（`performers.go:721` = `GetSummarizeResultHandler`）在压缩历史时作为**系统标记**注入对话。
+- **用途**：仅供"摘要感知协议"**识别**历史摘要的两种形态之一——"工具调用摘要"形态（一条仅含对此工具名的调用的 AI 消息 + 紧随的 Tool 消息含摘要）。模板明确禁止 searcher 自行调用、禁止模仿其格式。
+- **调用时机**：**永不**由 searcher 调用。这是一个"指认敌我"式占位符——它的存在不是为了让 agent 用，而是为了让 agent 在历史里看到它时认出"这是被压缩过的旧上下文，不是我现在要执行的动作"。
+
+> 设计要点：4 个工具占位符分三层——`search_answer`（起手检索，priority 1）、`store_answer`（增量沉淀）、`search_result`（唯一 barrier 收尾）、`SummarizationToolName`（幽灵，仅供识别/禁止）。三者可调、一者禁调，覆盖了 searcher 的"查-存-交-识别历史"全生命周期。
+
+## 6. 非工具占位符
+
+`templates.go:204-216` 登记本模板允许的占位符共 11 项，除上节 4 个工具名外，其余 7 个为非工具占位符，全部由 `handlers.go:706-718`（子任务型）/ `handlers.go:797-809`（任务型）写入 system 侧字典，渲染时机在 `handlers.go:739` / `handlers.go:829`（收到 `ComplexSearch` 之后、调 `performSearcher` 之前的一次性实例化）。
+
+### `{{.SummarizedContentPrefix}}`
+
+- **用途**：标识历史摘要"带前缀形态"的字符串前缀。模板在"摘要感知协议 > identification"用它描述第二种摘要形态（一条 `Completion` 型 AI 消息，文本精确以此前缀开头），并在"prohibited_behavior"中禁止 searcher 在自己的消息里使用此前缀。
+- **注入信息**：`csum.SummarizedContentPrefix`（`backend/pkg/csum/chain_summary.go:48`）= `"**summarized content:**\n"`。注意 `handlers.go:711`（子任务）/ `handlers.go:802`（任务）用 `strings.ReplaceAll(..., "\n", "\\n")` 把真实换行**转义成字面 `\n`** 后注入，避免模板渲染时换行破坏 XML 标签结构。
+- **注入时机**：handler 内每次调用即时取常量并转义，渲染时填充。模板内**无条件输出**（无 `{{if}}` 守卫）。
+
+### `{{.ExecutionContext}}`
+
+- **用途**：当前执行上下文的结构化详情——Flow / Task / SubTask 的 ID、状态、标题、描述，操作范围与父任务关系，当前操作分支内的相关历史。模板在 `<execution_context>` 标签内展开，并在 `<execution_context_usage>` 引导 searcher 据此定制检索方法、锁定当前 SubTask 目标。
+- **注入信息**：来自 `fp.getExecutionContext(ctx, taskID, subtaskID)` 的返回。
+  - 子任务型：handler 初始化阶段 `handlers.go:694` 调用；
+  - 任务型：`handlers.go:786` 调用（`&taskID, nil`，无 subtaskID）。
+- **注入时机**：handler 初始化阶段预先取回，`handlers.go:712`（子任务）/ `handlers.go:803`（任务）写入 system context，渲染时填充。模板内**无条件输出**。
+
+### `{{.Cwd}}`
+
+- **用途**：容器内工作目录路径。模板在"任务材料"章节用它拼接 `{{.Cwd}}/uploads`（本流程交付文件）与 `{{.Cwd}}/resources`（参考材料）两个挂载点路径，告知 searcher 这些文件对容器内其他 agent 可用、必要时纳入检索策略。
+- **注入信息**：`docker.WorkFolderPathInContainer`（容器内路径常量，非宿主路径）。
+- **注入时机**：`handlers.go:713`（子任务）/ `handlers.go:804`（任务）写入，渲染时填充。注意该占位符**仅在 `{{if .UserFiles}}` 条件块内**出现（tmpl 行 137），故仅当有用户文件时才被渲染。
+
+### `{{.Lang}}`
+
+- **用途**：本次任务/会话的工作语言，决定"任务执行日志"通道（各工具 `message` 字段、收尾 `search_result.message`）的书写语言。模板在语言策略与搜索结果交付章节多次引用，反复强调 `result` 走英语、`message` 走 `{{.Lang}}` 的双通道约束。
+- **注入信息**：`fp.language`（flow provider 启动时确定的任务语言）。
+- **注入时机**：`handlers.go:714`（子任务）/ `handlers.go:805`（任务）写入，渲染时填充。模板内**无条件输出**（多处引用）。
+
+### `{{.CurrentTime}}`
+
+- **用途**：当前时间戳，注入 `<current_time>` 标签，为 searcher 提供时间锚点（用于判断信息时效性、构造带时间维度的查询）。
+- **注入信息**：`getCurrentTime()` 的返回（每次调用即时取值）。
+- **注入时机**：`handlers.go:715`（子任务）/ `handlers.go:806`（任务）写入，渲染时填充。模板内**无条件输出**。
+
+### `{{.ToolPlaceholder}}`
+
+- **用途**：模板末尾的"工具调用强制声明"，提醒 searcher 所有动作必须通过函数调用完成、纯文本响应不被接受。它不是具体工具，而是一条收尾的**行为约束复读**，与"摘要感知协议 > system_context"形成呼应。
+- **注入信息**：`ToolPlaceholder` 常量（`backend/pkg/providers/provider.go:32`）= `"Execute operations via function invocation - textual responses are not acceptable for task completion."`。
+- **注入时机**：`handlers.go:716`（子任务）/ `handlers.go:807`（任务）写入，渲染时填充。模板内位于**最末行**（tmpl 行 178），**无条件输出**，是整份 system prompt 的收束语。
+
+### `{{.UserFiles}}`
+
+- **用途**：本次流程用户上传文件的清单。模板用它渲染整个"任务材料"章节，让 searcher 在检索主题涉及这些文件（如文件名引用的工具/格式/技术）时将其纳入搜索策略。
+- **注入信息**：`fp.userFilesListing()` 的返回（用户文件目录列举）。
+- **注入时机**：`handlers.go:717`（子任务）/ `handlers.go:808`（任务）写入，渲染时填充。模板用 `{{if .UserFiles}}...{{end}}`（tmpl 行 131-144）整体守卫——为空时整段"任务材料"章节连同 `{{.Cwd}}`/`{{.UserFiles}}` 一起跳过，不输出空标签。
+
+> 设计要点：7 个非工具占位符分四类——摘要标记（`SummarizedContentPrefix`，带换行转义防 XML 破损）、运行环境（`ExecutionContext`/`Cwd`/`CurrentTime`，锚定时空与作用域）、语言与约束（`Lang`/`ToolPlaceholder`，双通道与函数调用纪律）、可缺省材料（`UserFiles`，带 `{{if}}` 守卫）。其中 `Cwd` 嵌套在 `UserFiles` 守卫内、`SummarizedContentPrefix` 做换行转义，是两处易被忽略但有意为之的实现细节。
+
+---
+
+> 查缺补漏：模板"搜索工具部署矩阵"以**字面量**列出 `memorist`/`google`/`duckduckgo`/`browser`/`tavily`/`perplexity`/`traversaal` 共 7 个工具名，但 SearcherExecutor 实际注册的网络检索工具还包括 `searxng`（`tools/tools.go:1577-1579`）和 `sploitus`（`:1589-1591`）。这二者在"语言策略"章节的引擎枚举里被提及，却**未进入部署矩阵**，存在文档与实际工具集不一致。建议矩阵补齐 `searxng`/`sploitus`，或改用占位符统一管理工具名以避免字面量与常量漂移。

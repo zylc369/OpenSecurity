@@ -1,0 +1,83 @@
+# task_reporter.tmpl 分析文档
+
+> 本文档只写分析结论，不含原模板内容。
+
+## 1. 原文件名
+
+`task_reporter.tmpl`，位于 `pkg/templates/prompts/`。
+注册类型 `PromptType = "task_reporter"`（`templates.go:48`）。
+
+## 2. 类型与用途
+
+**B 类 Agent Human Prompt**（`AgentPrompts.Human` 字段）：
+
+- 在 `templates.go:563-566` 的 `AgentPrompts` 映射里，Reporter 的 `Human` 字段绑定到 `getPrompt(PromptTypeTaskReporter)`，因此它是"Human 侧"模板，最终以 `ChatMessageTypeHuman` 进入消息链（`performers.go:36`）。
+- 本模板**不携带任何工具占位符**（无 `{{.ToolPlaceholder}}`），属"纯数据上下文"型 Human Prompt，区别于"含工具注入的 Human Prompt"。
+
+用途：把本次任务的执行结果上下文（原始任务、历史任务、已完成/未完成子任务、执行状态、执行日志）打包成结构化数据，作为 user 消息喂给 reporter agent，供其据此产出成败判定报告。
+
+## 3. 配对关系
+
+与 `reporter.tmpl`（`PromptTypeReporter`，system 侧）配对，组成 Reporter agent 的 `(System, Human)` 对：
+
+| 角色 | 模板 | PromptType | 上下文 |
+|------|------|-----------|--------|
+| System | `reporter.tmpl` | `PromptTypeReporter` | `reporterContext["system"]` |
+| **Human（本文件）** | `task_reporter.tmpl` | `PromptTypeTaskReporter` | `reporterContext["user"]` |
+
+二者在 `GetTaskResult`（`provider.go:551/583`）中分别渲染，拼成 `chain[System, Human]`（`performers.go:34-37`）后交给 reporter executor 执行。
+
+## 4. 调用时机
+
+**所有子任务执行完毕后由 Go 代码自动触发**，无需任何用户输入：
+
+- 触发点：`taskWorker.Run`（`controller/task.go:284`）主循环。
+- 触发条件：循环中 `PopSubtask` 返回 `nil`（执行队列为空，无待执行子任务，`task.go:295`），`break` 出循环后**立即**调用 `GetTaskResult`（`task.go:318`）。
+- 角色定位：渲染结果作为 reporter agent chain 的 `ChatMessageTypeHuman` 消息。
+- 兜底说明：触发点是"执行队列空"，并非严格等于"所有子任务 `status=Finished`"。此时仍可能存在 `status=Created` 的规划项未推进，故模板对 `{{.PlannedSubtasks}}` 为空与非空两种情况都做了处理（非空走列表、空走 else 兜底）。
+- 之后由 `performTaskResultReporter`（`performers.go:23`）执行 chain，收集 `ReportResult` 工具回调，写回任务结果与状态（`task.go:324-354`）。
+
+## 5. 工具列表
+
+**无工具。**
+
+本模板不含任何工具占位符（无 `{{.ToolPlaceholder}}`、无 `{{.ReportResultToolName}}`）。
+
+reporter agent 的唯一工具 `ReportResult` 在 **system 端** `reporter.tmpl` 通过 `{{.ToolPlaceholder}}` 注入（`provider.go:535`），与 Human 侧的本模板无关。因此 Human 侧只负责"喂数据"，不参与工具声明。
+
+## 6. 非工具占位符
+
+本模板的全部占位符均为非工具占位符，注册于 `templates.go:326-333`：
+
+```
+Task, Tasks, CompletedSubtasks, PlannedSubtasks, ExecutionLogs, ExecutionState
+```
+
+### 6.1 渐进填充机制（注入时机总览）
+
+注入不是一次完成，而是**三层渐进式填充**，受 `msgReporterSizeLimit = 100 KB`（`provider.go:39`）控制：
+
+| 层级 | 占位符 | 触发条件 | 渲染轮次 |
+|------|--------|---------|---------|
+| 基础层（必填） | `Task` / `Tasks` / `CompletedSubtasks` / `PlannedSubtasks` | 无条件 | 第 1 次渲染 |
+| 状态层（条件） | `ExecutionState` | 第 1 次渲染结果 `< 100 KB` | 第 2 次渲染 |
+| 日志层（条件） | `ExecutionLogs` | 第 2 次渲染结果仍 `< 100 KB` | 第 3 次渲染 |
+
+即：上下文越紧凑，注入越完整；上下文越膨胀，越优先保住基础信息、自动舍弃高耗量的状态/日志摘要（`provider.go:556-580`）。
+
+### 6.2 各占位符明细
+
+| 占位符 | 数据来源 | 注入信息 | 注入时机 |
+|--------|---------|---------|---------|
+| `{{.Task}}` | `tasksInfo.Task`：从同 flow 全部任务中抠出当前 `taskID` 对应的那条（`helpers.go:197-203`） | 当前任务对象；模板内只取 `{{.Task.Input}}`，即用户原始任务输入 | 基础层，必填 |
+| `{{.Tasks}}` | `tasksInfo.Tasks`：同 flow 的**其他**任务（已排除当前任务，`helpers.go:200`） | `previous_tasks`：每条含 `id / input / status / result` | 基础层，必填；模板内用 `{{if}}` 包裹，为空时整段省略 |
+| `{{.CompletedSubtasks}}` | `subtasksInfo.Completed`：`status = Finished` 或 `Failed` 的子任务（`helpers.go:234-235`） | `completed_subtasks`：每条含 `id / title / description / status / result` | 基础层，必填；`{{if}}` 包裹，为空时整段省略 |
+| `{{.PlannedSubtasks}}` | `subtasksInfo.Planned`：`status = Created` 的子任务（`helpers.go:232-233`） | `planned_subtasks`：每条含 `id / title / description` | 基础层，必填；**非空与空都处理**——为空时走 `else` 输出兜底提示（暗示全部完成） |
+| `{{.ExecutionState}}` | `executionState`：`getTaskPrimaryAgentChainSummary` 返回值，即 primary agent 链的浓缩摘要 | `execution_state`：主 agent 链的执行状态摘要 | 状态层，**仅当**第 1 次渲染结果 `< 100 KB` 时注入；否则留空（模板内 `{{if}}` 包裹，未注入则整段不出现） |
+| `{{.ExecutionLogs}}` | `msgLogsSummary`：`getTaskMsgLogsSummary` 返回值，即任务消息日志摘要 | `execution_logs`：执行过程中的消息日志摘要 | 日志层，**仅当**加入 `ExecutionState` 后仍 `< 100 KB` 时注入；否则留空（`{{if}}` 包裹） |
+
+### 6.3 注入边界小结
+
+- **恒定注入**：`Task / Tasks / CompletedSubtasks / PlannedSubtasks` —— 构成 reporter 判定的最小信息集，任何情况下都会出现。
+- **可能缺失**：`ExecutionState / ExecutionLogs` —— 受 100KB 上限约束，体积大时被自动裁剪。这是"保证基础信息优先于细节"的容量保护策略，不是 bug。
+- **空值语义不对称**：`PlannedSubtasks` 为空时模板会显式输出"所有子任务已完成"的兜底提示；而 `Tasks / CompletedSubtasks / ExecutionState / ExecutionLogs` 为空时只是静默省略对应整段。

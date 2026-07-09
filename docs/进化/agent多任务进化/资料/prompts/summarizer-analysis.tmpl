@@ -1,0 +1,368 @@
+# summarizer.tmpl 详细分析
+
+> 源码路径：`pentagi/backend/pkg/templates/prompts/summarizer.tmpl`
+> 模板变量定义：`templates/templates.go:373-378`（`PromptTypeSummarizer`）
+> 触发逻辑：`providers/handlers.go:870-934`（`GetSummarizeResultHandler`）
+> 防退化常量：`csum/chain_summary.go:48`（`SummarizedContentPrefix`）
+
+---
+
+## 元信息
+
+| 项目 | 值 |
+|------|-----|
+| **原文件名** | `summarizer.tmpl` |
+| **常量名** | `PromptTypeSummarizer` |
+| **所属分类** | A 类 · Agent System Prompt（摘要引擎） |
+| **结构体归属** | `AgentsPrompts.Summarizer`（仅 `System`，无 `Human`） |
+| **配对关系** | 无配对 |
+| **注册工具** | 无 |
+| **定义位置** | `templates/templates.go:55`（常量）、`templates.go:373-378`（占位符注册）、`templates.go:579-581`（结构体挂载） |
+| **触发源码** | `providers/handlers.go:895`（`GetSummarizeResultHandler` 内渲染） |
+| **上游调用** | `providers/performer.go:237`、`:827`（消息链压缩 `SummarizeChain`）；`providers/performers.go` 6 处（工具结果压缩） |
+| **结果缓存** | `providers/handlers.go:876-881`、`:928-930`（基于 sha256 的 `summarizerCache`） |
+
+---
+
+## 一、原文件名
+
+`summarizer.tmpl`
+
+对应模板类型常量：`templates.PromptTypeSummarizer = "summarizer"`（定义于 `templates/templates.go:55`，注释为 `// condenses long conversations and results`）。
+
+在 prompter 初始化时挂载到 `AgentsPrompts.Summarizer`（`templates.go:579-581`），结构如下：
+
+```go
+Summarizer: AgentPrompt{
+    System: getPrompt(PromptTypeSummarizer),
+},
+```
+
+注意类型是 **`AgentPrompt`（单数）**，只含 `System` 字段；而 reporter / refiner / enricher 等对话 agent 用的是 `AgentPrompts`（复数），含 `System` + `Human` 两个字段。这一类型差异是本模板"无配对、内容外置"特征的直接体现。
+
+---
+
+## 二、类型与用途
+
+**A 类 Agent System Prompt，但本质是系统内部的内容压缩工具，不是对话 agent。**
+
+### 2.1 核心定位
+
+本模板不服务于任何"与用户交互"或"执行任务"的 agent 角色，它的唯一职责是：**把过长的文本（消息链历史 / 工具调用结果）压缩成保留 100% 关键信息的简洁摘要**，供下游 agent 在有限的上下文窗口内继续工作。
+
+它是 PentAGI 上下文管理子系统的"压缩引擎"，对所有执行类 agent（primary_agent、pentester、coder、installer、searcher、memorist、adviser、enricher、reporter、reflector、assistant 等）透明服务——这些 agent 的 prompt 中都注入了 `{{.SummarizedContentPrefix}}`，用于识别"哪段历史已是压缩后的精华"。
+
+### 2.2 与对话 agent 的本质区别
+
+| 维度 | 对话 agent（如 pentester） | 本模板（summarizer） |
+|------|--------------------------|---------------------|
+| 触发方式 | 用户/上游 agent 显式调用 | 系统自动触发（链长/结果长） |
+| 输入载体 | 配对 Human 模板渲染 | **下一轮 user 消息**（无 Human 模板） |
+| 输出去向 | 进入对话流，可被用户观察 | 替换原消息链中的旧消息，对用户透明 |
+| 工具能力 | 注册 function calling 工具 | 无工具，纯文本输入输出 |
+| 结构体类型 | `AgentPrompts`（System+Human） | `AgentPrompt`（仅 System） |
+| 调用模式 | 多轮对话，可循环工具调用 | 单轮 LLM 调用（`OptionsTypeSimple`） |
+
+### 2.3 设计意图
+
+把"内容压缩"从业务 agent 中解耦出来——业务 agent 只管做事，上下文膨胀由本模板专职处理。这让所有 agent 共享同一套摘要质量标准（关键信息保留清单、XML 去标记规则、已摘要内容优先保留规则），而非每个 agent 各写一套。
+
+---
+
+## 三、配对关系
+
+**无配对。**
+
+- 结构体类型是 `AgentPrompt`（单数，仅 `System`），**不是** `AgentPrompts`（复数，System + Human）。全仓库 grep 确认不存在 `question_summarizer` 或 `summarizer_human` 模板。
+- 待压缩的内容**不通过模板占位符注入**，而是作为 LLM 调用的**下一轮 user 消息**传入（见 §4.3 的 `performSimpleChain` 调用）。模板正文末尾的"待摘要的内容将在下一条消息中提供"明确指示了这一机制。
+- 因此本模板与下游不存在"System+Human 配对"关系，也不存在"输出 → 下游占位符"的数据流向（与 `execution_logs.tmpl` 那种输出注入下游模板的模式不同）。它的输出直接替换消息链中的旧消息或作为工具压缩结果返回。
+
+---
+
+## 四、调用时机
+
+本模板有**两条独立的触发路径**，分别应对"对话历史过长"和"单次工具结果过长"两类上下文膨胀。
+
+### 4.1 触发场景总览
+
+| 触发场景 | 入口函数 | 模板渲染点 | 典型诱因 |
+|----------|---------|-----------|---------|
+| **消息链累计过长** | `summarizer.SummarizeChain`（`csum/chain_summary.go:107`） | `handlers.go:895`（经由 handler 闭包） | 多轮对话/多次工具调用后，链总字节超阈值 |
+| **单次工具结果过长** | 各 agent performer 内的工具执行器 | `handlers.go:895`（直接调用 handler） | 工具返回大体积文本（长日志、大文件、爬虫结果等） |
+
+两条路径最终都汇聚到 `GetSummarizeResultHandler` 返回的闭包（`handlers.go:870-934`），该闭包内统一渲染本模板。
+
+### 4.2 路径 1：消息链压缩（`SummarizeChain`）
+
+每轮 agent 执行结束后，`performer` 主循环检查是否需要压缩（`performer.go:235-257`）：
+
+```
+agent 执行一轮（含工具调用）
+  │
+  ▼
+if summarizer != nil
+  │
+  ▼
+summarizer.SummarizeChain(ctx, summarizerHandler, chain, tcIDTemplate)
+  │                                     ↑
+  │                                     └─ 即 GetSummarizeResultHandler 返回的闭包
+  ▼
+csum 内部：解析 chain 为 ChainAST → 分段 → 对每段调 handler 压缩
+  │
+  ▼
+handler 闭包内：渲染 summarizer.tmpl 作 system prompt → performSimpleChain
+  │
+  ▼
+返回新 chain（旧消息被摘要替换）
+```
+
+关键特征：
+- **错误吞咽**：`SummarizeChain` 出错时**不中断主流程**，仅记 warning 日志（`performer.go:238-252`，事件名 `chain summarization error swallowed`），返回原 chain 继续运行。这是有意的容错设计——摘要失败不能阻塞业务。
+- **链式分段**：`SummarizeChain` 不是整体压缩，而是按 `ChainAST` 的 section 结构分段处理（`chain_summary.go:107-231`），每段独立调 handler，并发执行（`wg` + goroutine，`:200`）。
+
+### 4.3 路径 2：工具结果压缩（直接调用 handler）
+
+`performers.go` 中 6 处给不同 agent 的 performer 注入同一个 handler：
+
+| 源码位置 | 服务对象 |
+|----------|---------|
+| `performers.go:410` | primary agent performer |
+| `performers.go:495` | pentester performer |
+| `performers.go:562` | coder performer |
+| `performers.go:648` | installer performer |
+| `performers.go:721` | searcher performer |
+| `performers.go:777` | memorist performer |
+
+注入形式统一为：
+
+```go
+Summarizer: fp.GetSummarizeResultHandler(taskID, subtaskID),
+```
+
+工具执行器在产出结果后，若判断结果过长，会调用这个 `Summarizer` handler 对结果做压缩，再把压缩后的文本作为工具返回值喂回 agent。这样大体积工具输出（如爬虫抓取的整页 HTML、长命令输出）不会一次性撑爆 agent 的上下文。
+
+### 4.4 单次渲染内部流程（`handlers.go:870-934`）
+
+无论来自哪条路径，handler 闭包的执行步骤完全一致：
+
+```
+GetSummarizeResultHandler(taskID, subtaskID) 返回的闭包 (ctx, result)
+  │
+  ├─ ① cacheKey := sha256(result)                  [handlers.go:876]
+  │     命中 summarizerCache → 直接返回缓存摘要（不调 LLM）[:878-881]
+  │
+  ├─ ② 构造 langfuse observation（agent 名 "chain summarizer"）[:884-893]
+  │
+  ├─ ③ RenderTemplate(PromptTypeSummarizer, {         [:895-900]
+  │       TaskID, SubtaskID, CurrentTime,
+  │       SummarizedContentPrefix  ← 注意 \n 转义
+  │   }) → systemSummarizerTmpl
+  │
+  ├─ ④ 超大输入截断保护                              [:906-912]
+  │     if len(result) > 2*msgSummarizerLimit (64KB):
+  │       result = result[:32KB] + "\n\n{TRUNCATED}...\n\n" + result[len-32KB:]
+  │
+  ├─ ⑤ performSimpleChain(ctx, taskID, subtaskID,    [:916]
+  │       OptionsTypeSimple,
+  │       MsgchainTypeSummarizer,
+  │       systemSummarizerTmpl,  ← system 消息
+  │       result)                ← user 消息（待压缩内容）
+  │
+  ├─ ⑥ SanitizeUTF8(summary)                        [:921]
+  │
+  └─ ⑦ 写回 summarizerCache                          [:928-930]
+```
+
+关键设计点：
+- **`result` 是 user 消息**：`performSimpleChain` 的最后两个参数分别是 system prompt（本模板渲染结果）和 user 消息（待压缩文本）。这印证了 §三 "内容在下一轮消息中提供"的机制。
+- **64KB 截断保护**：`msgSummarizerLimit = 32 * 1024`（`provider.go:40`），`2*` 即 64KB。超长输入会保留头尾各 32KB、中间插入 `{TRUNCATED}` 标记。这是防止 summarizer 自身上下文溢出的硬保护。
+- **sha256 缓存**：相同输入直接返回缓存摘要，避免对相同工具结果重复压缩（典型场景：同一消息链被多个 agent 读取）。
+
+---
+
+## 五、工具列表
+
+**本模板不注册、不绑定任何工具。**
+
+- 调用时传入 `pconfig.OptionsTypeSimple`（`handlers.go:914`），`GetOptionsForType(OptionsTypeSimple)` 返回的是裸 LLM 调用选项（model / temperature 等），**不含 function calling 工具集**。
+- 模板内容中不含任何 `{{.XxxToolName}}` 占位符。
+- 它是一个**纯文本压缩器**：输入一段文本，输出一段更短的文本，单轮 LLM 调用即结束，无工具循环、无多轮对话。
+
+这与它的定位一致——summarizer 是被动的内容处理工具，不应具备"主动调用外部能力"的权限（否则压缩过程中可能触发副作用，破坏上下文可追溯性）。
+
+---
+
+## 六、非工具占位符详解
+
+本模板注册了 4 个非工具占位符（`templates/templates.go:373-378`）：
+
+```go
+PromptTypeSummarizer: {
+    "TaskID",
+    "SubtaskID",
+    "CurrentTime",
+    "SummarizedContentPrefix",
+},
+```
+
+注册表与模板正文引用的 4 个 `{{.Xxx}}` 完全一致，无多余、无遗漏。注入点唯一：`handlers.go:895-900`。
+
+### 6.1 占位符清单
+
+| 占位符 | Go 类型 | 注入值来源 | 用途 |
+|--------|---------|-----------|------|
+| `{{.TaskID}}` | `*int64` | `GetSummarizeResultHandler` 的 `taskID` 形参 | 渲染 `<current_task id="..."/>`，标识摘要任务归属 |
+| `{{.SubtaskID}}` | `*int64` | `GetSummarizeResultHandler` 的 `subtaskID` 形参 | 渲染 `<current_subtask id="..."/>`，标识子任务归属（可能为 nil） |
+| `{{.CurrentTime}}` | `string` | `getCurrentTime()`（`helpers.go:929`） | 渲染 `<current_time>`，提供时序感知 |
+| `{{.SummarizedContentPrefix}}` | `string` | `csum.SummarizedContentPrefix`（`chain_summary.go:48`） | **防退化机制核心**（见 §6.3） |
+
+### 6.2 `TaskID` / `SubtaskID` / `CurrentTime` 详解
+
+三者均为环境上下文信息，注入模板的"执行环境"段（条件渲染）：
+
+- **`{{.TaskID}}` / `{{.SubtaskID}}`**：模板用 `{{if .TaskID}}...{{end}}` 条件渲染。来自 `GetSummarizeResultHandler(taskID, subtaskID *int64)` 的形参，调用方在 `performers.go` 各处以 `fp.GetSummarizeResultHandler(taskID, subtaskID)` 形式传入当前 task / subtask。作用是让 summarizer 在生成摘要时知晓"这是哪个任务的上下文"，便于在多任务并发场景下保持摘要的任务边界感。注意类型是 `*int64`（指针），工具结果压缩路径下 `subtaskID` 可能为 nil（此时 `<current_subtask>` 段不渲染）。
+- **`{{.CurrentTime}}`**：来自 `getCurrentTime()`（`providers/helpers.go:929-931`），格式固定为 `YYYY-MM-DD HH:MM:SS`（Go 时间格式化参考串 `"2006-01-02 15:04:05"`）。模板渲染瞬间实时取值，注入 `<current_time>` 段。对摘要任务的实际作用较弱（摘要关注内容精度而非时序），此处注入更多是 PentAGI 全模板的统一惯例。
+
+### 6.3 `SummarizedContentPrefix` —— 多轮压缩防退化机制（核心）
+
+这是本模板最关键、也是最容易误读的占位符。它不是一个简单的字符串替换，而是 PentAGI 整套"多轮压缩信息保真"机制的对外宣告入口。
+
+#### 6.3.1 值的定义
+
+```go
+// csum/chain_summary.go:48
+SummarizedContentPrefix = "**summarized content:**\n"
+```
+
+注意末尾是真实的换行符 `\n`（不是字面反斜杠 n）。
+
+#### 6.3.2 注入时的转义处理
+
+注入模板时做了一次转义（`handlers.go:899`）：
+
+```go
+"SummarizedContentPrefix": strings.ReplaceAll(csum.SummarizedContentPrefix, "\n", "\\n"),
+```
+
+即把真实的 `\n` 替换成字面的 `\n` 两字符序列。原因是：Go `text/template` 渲染时，若直接把含真实换行的字符串插入 prompt 文本，换行会展开成多行；而本模板在 §"处理已摘要内容" 段是用 `{{.SummarizedContentPrefix}}` 作为**内联标记**引用的（`当遇到标记为 {{.SummarizedContentPrefix}} 或类似前缀的内容时`），需要它作为一个**可识别的字符串字面量**呈现给 LLM 阅读，而非展开成多行。转义后渲染结果在 prompt 中显示为 `**summarized content:**\n`，LLM 据此识别"哪段内容已是摘要"。
+
+> 这一同款转义（`strings.ReplaceAll(..., "\n", "\\n")`）在仓库内出现 **15 处**（所有 agent prompt 的注入点 + handler），说明 `SummarizedContentPrefix` 是**全 agent 共享**的常量，每个 agent 都需要知道这个前缀长什么样。
+
+#### 6.3.3 前缀的三重作用（写入 / 识别 / 防重复压缩）
+
+`SummarizedContentPrefix` 在 `csum` 包内同时承担三个角色，构成闭环：
+
+**① 写入标记 —— 摘要生成时打上前缀**
+
+`SummarizeChain` 生成摘要后，新 AI 消息的内容不是裸摘要文本，而是 `SummarizedContentPrefix + summaryText`（`chain_summary.go:218`、`:318`、`:442`、`:570` 四处写入点）：
+
+```go
+// chain_summary.go:218（Completion 类型分支）
+summaryPair = cast.NewBodyPairFromCompletion(SummarizedContentPrefix + summaryText)
+```
+
+这意味着：**每一段被压缩过的内容，都会在开头带上 `**summarized content:**` 这个可见水印**。
+
+**② 识别标记 —— 下一轮压缩时识别"已摘要内容"**
+
+`containsSummarizedContent` 函数（`chain_summary.go:460-492`）通过 `strings.HasPrefix(textContent.Text, SummarizedContentPrefix)` 判断一条 AI 消息是否"已是摘要"（`:484`）：
+
+```go
+if strings.HasPrefix(textContent.Text, SummarizedContentPrefix) {
+    return true
+}
+```
+
+返回 `true` 的 body pair 在 AST 中被视为 `Summarization` 类型（已摘要），与 `RequestResponse`（正常问答）、`Completion`（普通补全）区分对待。
+
+**③ 防重复压缩 —— 单 section 已是摘要则跳过**
+
+`summarizeQAPairs` 在决定要压缩哪些 section 时，对"仅含一个已摘要 body pair 的 section"直接跳过（`chain_summary.go:522-528`）：
+
+```go
+case 1:
+    firstSectionBody := sectionsToSummarize[0].Body
+    if len(firstSectionBody) == 1 && containsSummarizedContent(firstSectionBody[0]) {
+        return nil  // ← 已是摘要，不再二次压缩
+    }
+```
+
+这避免了"对摘要再摘要"——摘要已经是信息浓缩的产物，再压缩只会进一步丢失细节。
+
+#### 6.3.4 防退化闭环（多轮压缩如何保真）
+
+把以上三步串起来，就是 PentAGI 在长时间运行（如持续数十轮的渗透测试）中防止上下文持续退化的核心机制：
+
+```
+第 1 轮：原始对话累计过长
+   │
+   ▼ SummarizeChain 压缩
+   │
+第 2 轮：旧消息被替换为 "**summarized content:**\n<摘要>"  ← 写入标记
+   │      新消息照常追加
+   │
+   ▼ 再次 SummarizeChain
+   │
+第 3 轮：containsSummarizedContent 识别出带前缀的旧消息  ← 识别标记
+   │      → 视为 Summarization 类型
+   │      → 若该 section 仅含此摘要，跳过重复压缩  ← 防重复压缩
+   │      新消息照常被压缩
+   │
+   ▼ ... 无限循环
+```
+
+关键在于：**每一轮压缩只作用于"尚未被压缩过的内容"**，已摘要内容凭借前缀获得"豁免"。这样即使对话持续数百轮，最早被压缩的那段摘要文本始终保持第 1 轮压缩时的精度，不会随轮次增加被反复稀释。
+
+#### 6.3.5 本模板在闭环中的角色
+
+本模板（summarizer.tmpl）的 §"处理已摘要内容" 段（原文第 28-33 行）是对上述机制的**对 LLM 的指令层宣告**：
+
+> 当遇到标记为 `{{.SummarizedContentPrefix}}` 的内容时：
+> - 此内容代表已经提炼过的关键信息
+> - 你必须优先保留此已摘要内容中的所有要点
+> - 与新信息整合，且不得丢失任何已摘要内容的细节
+
+这段指令是闭环不可或缺的一环——代码层的"前缀识别 + 跳过重复压缩"只解决了**不再二次压缩**的问题，但当下一次压缩**必须**包含已摘要内容（例如整段链都需要再压一轮）时，代码无法强制 LLM 保真，只能靠 prompt 指令要求 LLM "优先保留已摘要内容的所有要点"。代码层（结构识别）+ 指令层（生成约束）双重保险，才构成完整的防退化机制。
+
+#### 6.3.6 同款前缀逻辑也散布在所有执行 agent
+
+值得注意的是：`{{.SummarizedContentPrefix}}` 不只出现在 summarizer 模板中。grep 显示所有对话类 agent（primary_agent、pentester、coder、installer、searcher、memorist、adviser、enricher、reporter、reflector、assistant、generator、refiner）的 prompt 都注入了它，且各自都有一段"识别带前缀的 AI 消息 = 已摘要内容，NEVER 自己使用此前缀"的指令（如 `primary_agent.tmpl:165-178`、`coder.tmpl:164-177`）。
+
+这是防退化机制的**第三个层面**——防止执行 agent 在自己的输出中误用前缀（否则会被误判为"已摘要内容"而跳过下游压缩）。summarizer 是唯一被允许产出带前缀消息的角色，其他 agent 一律禁止。这一"前缀生产垄断"是整个识别体系可信的前提。
+
+---
+
+## 七、关键设计点
+
+### 7.1 三层防退化体系
+
+如 §6.3 所述，`SummarizedContentPrefix` 实际承载了三层防护：
+
+| 层次 | 机制 | 实现位置 |
+|------|------|---------|
+| **代码层·结构识别** | HasPrefix 判断 → 区分 Summarization / Completion 类型 | `chain_summary.go:484` |
+| **代码层·跳过重复** | 单 section 已是摘要则 return nil | `chain_summary.go:522-528` |
+| **指令层·生成约束** | 本模板要求"优先保留已摘要内容细节" | `summarizer.tmpl` §"处理已摘要内容" |
+| **指令层·前缀垄断** | 所有执行 agent 禁止使用此前缀 | 各 agent 模板的注入段 |
+
+四层中任何一层缺失都会导致退化：代码层缺失则重复压缩丢信息；本模板的指令层缺失则 LLM 压缩时不优先保护旧摘要；前缀垄断缺失则执行 agent 误产前缀污染识别体系。
+
+### 7.2 双路径统一入口
+
+消息链压缩（`SummarizeChain`）和工具结果压缩（直接 handler 调用）两条路径最终都汇聚到 `GetSummarizeResultHandler` 闭包，共用同一套渲染逻辑、缓存、截断保护。这一设计保证了无论上下文膨胀来自"历史累计"还是"单次工具爆发"，压缩质量标准一致。
+
+### 7.3 错误吞咽的容错哲学
+
+`SummarizeChain` 失败时不中断主流程（`performer.go:238-252`），仅记 warning。这是有意的——摘要失败不能阻塞业务 agent，宁可带着稍长的上下文继续工作，也比卡死整个 flow 强。但代价是：若 summarizer 模板本身有 bug 导致持续失败，上下文会无限增长直到 LLM 上限。需要靠 langfuse 监控 `chain summarization error swallowed` 事件来发现此类隐患。
+
+### 7.4 sha256 缓存的语义前提
+
+`summarizerCache` 以 result 的 sha256 为 key（`handlers.go:876`）。这一缓存正确的语义前提是：**相同输入必然期望相同摘要输出**。由于 summarizer 的 system prompt（本模板）在单次 flow 生命周期内是确定的（TaskID/SubtaskID/CurrentTime 中只有 CurrentTime 会变，但 CurrentTime 不影响"如何摘要"只影响时序标记），缓存命中率高。但若调整本模板内容（如改指令），旧缓存不会自动失效——缓存键不含模板版本。改造时需注意清空缓存或纳入模板版本。
+
+### 7.5 64KB 截断的信息丢失风险
+
+`handlers.go:906-912` 的截断逻辑在 result > 64KB 时只保留头尾各 32KB，中间用 `{TRUNCATED}` 替代。这对结构均匀的文本（如对话日志）损失可控，但对**信息集中在中间段**的输入（如 JSON 文档的核心字段在中间）可能丢失关键内容。源码注释 `// TODO: here need to summarize result by chunks in iterations`（`:905`）表明作者已意识到此问题，预期未来改成迭代分块摘要，但当前实现仍是硬截断。
+
+### 7.6 `AgentPrompt` vs `AgentPrompts` 的类型暗示
+
+本模板挂载在 `AgentPrompt`（单数，仅 System）而非 `AgentPrompts`（复数，System + Human），这是 PentAGI 模板系统中**"无配对"的强类型信号**。改造时若误把 Summarizer 改成 `AgentPrompts` 并挂载 Human 模板，会与"内容在下一轮 user 消息中提供"的运行时机制冲突——system prompt 之外的消息由 `performSimpleChain` 的 `result` 参数提供，而非来自配对 Human 模板渲染。类型选择与运行时机制是对齐的，不能单方面改动。

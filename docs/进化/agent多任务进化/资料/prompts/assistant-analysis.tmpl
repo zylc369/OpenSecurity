@@ -1,0 +1,152 @@
+# assistant.tmpl 分析文档
+
+> 本文档是对 PentAGI `prompts/assistant.tmpl` 的源码级分析，结论全部来自 Go 源码追踪，不复述模板原文。
+> 源码基准：`pentagi/backend/pkg/`。
+
+---
+
+## 1. 原文件名
+
+`assistant.tmpl`（嵌入路径 `prompts/assistant.tmpl`，经 `templates/templates.go:18` 的 `//go:embed prompts/*.tmpl` 编译进二进制）。
+
+对应 `PromptType` 常量 `PromptTypeAssistant = "assistant"`（`templates/templates.go:30`）。文件名去掉 `.tmpl` 后缀即作为 `PromptType`，由 `GetDefaultPrompts`（`templates.go:498`）和 `defaultPrompter.GetTemplate`（`templates.go:649`）按此规则定位。
+
+---
+
+## 2. 类型与用途
+
+**A 类——Agent System Prompt（交互式助手）。**
+
+- 角色定位：系统中**唯一**面向终端用户的 chat agent。它直接用自然文本回答用户，同时可通过工具调用驱动底层自动化。
+- 不走 flow/subtask 执行链。它的消息链类型是 `database.MsgchainTypeAssistant`（`providers/assistant.go:120`），与 flow 模式下 specialist agent 使用的 `MsgchainTypePrimaryAgent` 完全独立。
+- 输出契约：最终回复必须是纯文本（completion），不得伪装成工具调用。这是它与其他 specialist agent 的本质区别。
+
+---
+
+## 3. 配对关系
+
+**无配对 Human 模板。** 没有任何 `question_assistant.tmpl`。
+
+证据：`AgentsPrompts` 结构体（`templates/templates.go:460`）中 `Assistant` 字段类型是 `AgentPrompt`（仅含 `System`，`templates.go:451`），而非 `AgentPrompts`（含 `System`+`Human`，`templates.go:455`）。所有 flow 内 specialist（Pentester/Coder/...）都是 `AgentPrompts`，唯独 `PrimaryAgent`、`Assistant`、`Summarizer` 是 `AgentPrompt`。
+
+用户原文如何进入对话：`assistantProvider.updateAssistantChain`（`providers/assistant.go:279`）把用户输入字符串直接作为 `ChatMessageTypeHuman` 消息追加进链（`assistant.go:290` 和 `ast.AppendHumanMessage(humanPrompt)` at `assistant.go:302`）。**不做任何模板渲染。**
+
+---
+
+## 4. 调用时机
+
+**触发条件：用户在非 flow 模式下直接发消息。** 入口与流程如下：
+
+### 入口函数链
+
+| 步骤 | 函数 | 文件:行号 | 作用 |
+|---|---|---|---|
+| 创建 | `NewAssistantWorker` | `controller/assistant.go:95` | 首次创建 assistant，调用 `PrepareAgentChain` 渲染 system prompt 并建空链 |
+| 准备 | `assistantProvider.PrepareAgentChain` | `providers/assistant.go:103` | 调 `getAssistantSystemPrompt`（`assistant.go:311`）渲染模板，`restoreChain` 建空链 |
+| 投递 | `assistantWorker.PutInput` → channel | `controller/assistant.go`（worker 接口） | 用户消息进入 `aw.input` channel |
+| 执行 | `assistantWorker.worker` → `perform` | `controller/assistant.go:433` | 消费 channel，串行处理每条输入 |
+| 入链 | `PutInputToAgentChain` | `providers/assistant.go:242` | 把用户原文作为 human 消息追加（`updateAssistantChain`） |
+| 推理 | `PerformAgentChain` | `providers/assistant.go:132` | 注册全部工具（`GetAssistantExecutor`），执行 LLM 推理循环 |
+
+### 关键区分
+
+- **非 flow 模式**：assistant 不依赖 task/subtask。它的 `PrepareAgentChain` 签名是 `(ctx) (int64, error)`（`assistant.go:39`），**不带 taskID/subtaskID**；而 flow 内 specialist 的签名是 `(ctx, taskID, subtaskID)`（`providers/provider.go:99`）。
+- **用户原文 = human 消息**：`perform` 内 `aw.ap.PutInputToAgentChain(ctx, input)`（`controller/assistant.go:467`）的 `input` 即用户在 UI 输入的原文，无中间加工。
+
+---
+
+## 5. 工具列表
+
+### 工具注册总览
+
+全部在 `tools/tools.go:780` 的 `GetAssistantExecutor` 中注册。assistant 注册工具的策略是**全量注册**（按可用性与模式筛选），覆盖四大类：
+
+1. **直接执行型**（始终注册）：`terminal`、`file`、`browser`（browser 需 `IsAvailable`）
+2. **委派型**（`UseAgents=true` 时注册）：`search`、`pentester`、`coder`、`maintenance`、`memorist`、`advice`
+3. **直接执行型-检索**（`UseAgents=false` 时注册）：`search_in_memory`、`search_guide`、`search_answer`、`search_code` + 各搜索引擎
+4. **Flow 管理型**（`flowWorker != nil` 时注册）：`get_flow_status`（始终）、`stop_flow`/`submit_flow_input`/`patch_flow_subtasks`/`wait_flow_completion`（条件）
+5. **系统标记**（非真实工具）：`execute_task_and_return_summary`——由系统在历史摘要时注入，assistant 禁止自行调用。
+
+### 工具明细表
+
+| 模板占位符 | 工具实际名称（registry 常量值） | 常量定义 | 注册位置 | 类型 | 用途 |
+|---|---|---|---|---|---|
+| `{{.TerminalToolName}}` | `terminal` | `registry.go:45` | `tools.go:819` | 直接执行 | Docker 容器内执行 shell 命令 |
+| `{{.FileToolName}}` | `file` | `registry.go:46` | `tools.go:819` | 直接执行 | 容器内读写文件 |
+| `{{.BrowserToolName}}` | `browser` | `registry.go:23` | `tools.go:836` | 直接执行（条件） | 抓取指定 URL 网页内容 |
+| `{{.SearchToolName}}` | `search` | `registry.go:31` | `tools.go:847` | 委派（UseAgents） | 委派 searcher agent 做复杂检索 |
+| `{{.PentesterToolName}}` | `pentester` | `registry.go:18` | `tools.go:846` | 委派（UseAgents） | 委派 pentester agent 执行渗透 |
+| `{{.CoderToolName}}` | `coder` | `registry.go:16` | `tools.go:843` | 委派（UseAgents） | 委派 coder agent 写代码/载荷 |
+| `{{.MaintenanceToolName}}` | `maintenance` | `registry.go:14` | `tools.go:844` | 委派（UseAgents） | 委派 installer agent 装环境/工具 |
+| `{{.MemoristToolName}}` | `memorist` | `registry.go:21` | `tools.go:845` | 委派（UseAgents） | 委派 memorist agent 检索记忆 |
+| `{{.AdviceToolName}}` | `advice` | `registry.go:20` | `tools.go:842` | 委派（UseAgents） | 向导师请求战略建议 |
+| `{{.SearchInMemoryToolName}}` | `search_in_memory` | `registry.go:34` | `tools.go:862` | 直接执行（非 Agents） | 向量库语义检索（只读） |
+| `{{.SearchGuideToolName}}` | `search_guide` | `registry.go:35` | `tools.go:877` | 直接执行（非 Agents） | 向量库检索指南 |
+| `{{.SearchAnswerToolName}}` | `search_answer` | `registry.go:37` | `tools.go:892` | 直接执行（非 Agents） | 向量库检索答案 |
+| `{{.SearchCodeToolName}}` | `search_code` | `registry.go:39` | `tools.go:907` | 直接执行（非 Agents） | 向量库检索代码样本 |
+| `{{.GoogleToolName}}` | `google` | `registry.go:24` | `tools.go:917` | 直接执行（非 Agents） | Google 搜索 |
+| `{{.DuckDuckGoToolName}}` | `duckduckgo` | `registry.go:25` | `tools.go:927` | 直接执行（非 Agents） | DuckDuckGo 搜索 |
+| `{{.TavilyToolName}}` | `tavily` | `registry.go:26` | `tools.go:938` | 直接执行（非 Agents） | Tavily 搜索 |
+| `{{.TraversaalToolName}}` | `traversaal` | `registry.go:27` | `tools.go:948` | 直接执行（非 Agents） | Traversaal 搜索 |
+| `{{.PerplexityToolName}}` | `perplexity` | `registry.go:28` | `tools.go:959` | 直接执行（非 Agents） | Perplexity 搜索 |
+| `{{.GetFlowStatusToolName}}` | `get_flow_status` | `registry.go:47` | `tools.go:986` | Flow 管理（始终） | 查询并行 flow 的状态/任务/子任务 |
+| `{{.StopFlowToolName}}` | `stop_flow` | `registry.go:48` | `tools.go:991` | Flow 管理（条件） | 取消当前运行的任务 |
+| `{{.SubmitFlowInputToolName}}` | `submit_flow_input` | `registry.go:49` | `tools.go:997` | Flow 管理（条件） | 向 flow 投递文本/创建任务 |
+| `{{.PatchFlowSubtasksToolName}}` | `patch_flow_subtasks` | `registry.go:50` | `tools.go:1003` | Flow 管理（条件） | 重写任务的计划子任务列表 |
+| `{{.WaitFlowCompletionToolName}}` | `wait_flow_completion` | `registry.go:51` | `tools.go:1009` | Flow 管理（条件） | 阻塞等待当前任务结束 |
+| `{{.SummarizationToolName}}` | `execute_task_and_return_summary` | `cast/chain_ast.go:18` | **不注册** | 系统标记 | 历史摘要的系统占位符，禁止 agent 自行调用 |
+
+### 工具函数定义
+
+每个工具的 `FunctionDefinition`（含 JSON-schema 参数描述）集中在 `registry.go:166-432` 的 `registryDefinitions` map。例：`terminal` 在 `registry.go:167`，`get_flow_status` 在 `registry.go:387`。
+
+### 两种模式（UseAgents）的差异
+
+`UseAgents` 是 assistant 的核心模式开关，由 DB 字段 `assistants.use_agents` 决定（`providers/assistant.go:307` 的 `getAssistantUseAgents` 读 DB）：
+
+- **`UseAgents=true`（委派模式）**：assistant 不直接碰搜索引擎/向量库，而是通过 6 个委派工具把工作交给 specialist agent。模板中"团队协作与委派"章节、专家清单仅在此模式下渲染。
+- **`UseAgents=false`（直接模式）**：assistant 自己直接调向量库（4 个只读检索）和搜索引擎（最多 7 个），没有中间 agent 层。
+
+两套互斥：`tools.go:840` 的 `if cfg.UseAgents {...} else {...}`。
+
+### Flow 管理工具的启用条件
+
+`get_flow_status` 无条件注册（`tools.go:985-987`，即使无 flowWorker 也能查询，只是会返回空状态）。其余 4 个工具各自依赖 `FlowManagerHandlers` 中对应回调非 nil（`tools.go:989-1011`）。回调由 `buildFlowManagerHandlers`（`assistant.go:424`）构造——当 `ap.flowWorker == nil` 时返回零值结构体，4 个工具全部不注册；对应模板变量 `FlowManagerEnabled = ap.flowWorker != nil`（`assistant.go:358`）。
+
+---
+
+## 6. 非工具占位符
+
+所有占位符在 `providers/assistant.go:330` 的 `getAssistantSystemPrompt` 中一次性注入。下表逐个说明。
+
+| 占位符 | 注入值 | 注入代码 | 来源/含义 |
+|---|---|---|---|
+| `{{.Lang}}` | 用户任务语言（如 `中文`、`English`） | `assistant.go:356` | `ap.fp.Language()`，由 `language_chooser` 在 flow 初始化时判定并入库 |
+| `{{.UseAgents}}` | `bool` | `assistant.go:351` | `getAssistantUseAgents`（`assistant.go:307`）读 DB `assistants.use_agents`。控制模板分支与工具注册模式 |
+| `{{.DockerImage}}` | 容器镜像名（如 `mxrch/pentest-image`） | `assistant.go:352` | `ap.fp.Image()`，flow 创建时由 `image_chooser` 选定 |
+| `{{.Cwd}}` | `/work` | `assistant.go:353` | `docker.WorkFolderPathInContainer`（`docker/client.go:31`）。容器内工作目录，所有工具操作的基准路径 |
+| `{{.ContainerPorts}}` | OOB 攻击端口描述（多行文本） | `assistant.go:354` | `getContainerPortsDescription`（`helpers.go:863`）。区分 host/bridge 网络模式，列出强制可用端口、外部 IP、反向连接用法 |
+| `{{.ExecutionContext}}` | flow 子任务上下文（Markdown） | `assistant.go:355` | `getAssistantExecutionContext`（`assistant.go:374`）。遍历 flow 子任务，取最后一个非 `created` 子任务的 `Context`；为空则用 `prepareExecutionContext` 实时生成。让 assistant 感知并行自动化的进展 |
+| `{{.CurrentTime}}` | `2006-01-02 15:04:05` 格式时间 | `assistant.go:357` | `getCurrentTime()`（`helpers.go:929`）= `time.Now()` |
+| `{{.FlowManagerEnabled}}` | `bool` | `assistant.go:358` | `ap.flowWorker != nil`。控制"自动化流程管理"整章节是否渲染，以及 4 个 flow 管理工具是否注册 |
+| `{{.SummarizationToolName}}` | `execute_task_and_return_summary` | `assistant.go:349` | `cast.SummarizationToolName`（`cast/chain_ast.go:18`）。**非真实工具**——是系统注入历史摘要时用的工具调用名标记，prompt 据此识别并禁止 agent 模仿 |
+| `{{.SummarizedContentPrefix}}` | `**summarized content:**\n`（注入时 `\n` 被转义为字面 `\\n`） | `assistant.go:350` | `csum.SummarizedContentPrefix`（`csum/chain_summary.go:48`）。已摘要的 completion 消息以此前缀开头，agent 据此识别历史摘要 |
+| `{{.UserFiles}}` | 用户文件列表（XML） | `assistant.go:364` | `userFilesListing`（`provider.go:232`）→ `flowfiles.FileListingForPrompt`。列出 `uploads/` 与 `resources/` 目录文件。无文件时返回空串，模板的 `{{if .UserFiles}}` 分支整段不渲染 |
+
+### 渲染时机
+
+`getAssistantSystemPrompt` 在**两个时机**被调用（`assistant.go:311`）：
+1. `PrepareAgentChain`（`assistant.go:113`）——首次建链。
+2. `updateAssistantChain`（`assistant.go:282`，由 `PutInputToAgentChain` 触发）——**每次用户发消息都重新渲染 system prompt**。
+
+这意味着 `CurrentTime`、`ExecutionContext`、`ContainerPorts`、`UserFiles` 等动态内容每轮都刷新，保持与最新运行态一致。
+
+---
+
+## 补充观察（查缺补漏）
+
+分析过程中发现一处模板与代码的轻微不一致，供参考：
+
+- `assistant.tmpl:165` 文字提及 "以及配置后的 Searxng/Sploitus"，且 `GetAssistantExecutor` 在 `UseAgents=false` 时确实会按 `IsAvailable` 注册 `searxng`（`tools.go:970`）和 `sploitus`（`tools.go:980`）工具。
+- 但 `PromptVariables[PromptTypeAssistant]`（`templates/templates.go:91-126`）**未声明** `SearxngToolName` 与 `SploitusToolName` 变量，`getAssistantSystemPrompt` 也**未注入**这两个值。
+- 当前模板用的是纯文本字面量 "Searxng/Sploitus"（非 `{{.}}` 占位符），所以渲染不会报错；但如果将来想让这两个工具名跟随配置动态化，需要同步补齐 `PromptVariables` 与注入代码。这是 assistant 与其他 agent（如 generator/refiner 等 PromptVariables 中也未列出这两个）共性的遗漏。

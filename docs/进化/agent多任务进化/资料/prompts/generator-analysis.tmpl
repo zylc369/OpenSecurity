@@ -1,0 +1,71 @@
+# generator.tmpl 分析文档
+
+## 1. 原文件名
+
+`generator.tmpl`，嵌入路径 `prompts/generator.tmpl`，通过 `//go:embed prompts/*.tmpl` 打包（templates/templates.go:18-19）。对应的 PromptType 常量为 `PromptTypeGenerator = "generator"`（templates/templates.go:43）。
+
+## 2. 类型与用途
+
+属于 **A 类 Agent System Prompt**（System 角色消息），角色为**子任务生成器**。
+
+- 结构归属：`AgentsPrompts.Generator.System`（templates/templates.go:555-558，469），`AgentPrompts` 类型，含 System + Human 双消息槽。
+- 消息链类型：`database.MsgchainTypeGenerator`（performers.go:102）。
+- 选项类型：`pconfig.OptionsTypeGenerator`（performers.go:101）。
+- 职责：将用户原始请求拆解为有序、不重叠的子任务列表，供后续 primary agent 逐个执行。是任务生命周期的第一个 agent，产出物为计划本身，不直接执行渗透/编码动作。
+
+## 3. 配对关系
+
+与 **`subtasks_generator.tmpl`**（`PromptTypeSubtasksGenerator`）配对，构成 Generator agent 的 System + Human 双消息：
+
+- 本模板 = System 消息（agent 人格、规则、工具说明），templates.go:556。
+- `subtasks_generator.tmpl` = Human 消息（注入 Task/Tasks/Subtasks 等运行时上下文），templates.go:557。
+
+两模板在 `flowProvider.GenerateSubtasks` 中分别渲染后拼入同一条消息链（provider.go:365 渲染 Human，provider.go:383 渲染 System），再传入 `performSubtasksGenerator`（provider.go:388）。
+
+## 4. 调用时机
+
+**任务启动时由 Go 代码自动触发，早于任何子任务执行。** 完整调用链：
+
+1. `controller/task.go:94` — 任务 worker 创建阶段调用 `stc.GenerateSubtasks(ctx)`，此时任务刚入库、尚无子任务。
+2. `controller/subtasks.go:70-71` — `subtaskController.GenerateSubtasks` 转调 `Provider.GenerateSubtasks`。
+3. `provider.go:318` — `flowProvider.GenerateSubtasks` 组装 system/human 上下文 map，渲染两模板。
+4. `provider.go:388` — 调用 `performSubtasksGenerator`。
+5. `performers.go:94-173` — 构建 executor、创建 msg chain、执行 `performAgentChain`，LLM 产出子任务列表。
+6. 返回的 `[]SubtaskInfo` 由 controller 逐条写入数据库（subtasks.go:81-91）。
+
+触发点位于 `runTask`（task.go:94）中，紧跟在用户输入入库之后、子任务派发之前，是 task 级别的单次调用。后续每个子任务执行后由 `Refiner`（refiner.tmpl）做增量优化，而非再次调用 generator。
+
+## 5. 工具列表
+
+工具注册在 `GetGeneratorExecutor`（tools/tools.go:1617-1683）。以下为模板中通过 `{{.XxxToolName}}` 引用的工具：
+
+| 占位符 | 实际工具名 | 代码位置 | 用途 | 调用时机 |
+|---|---|---|---|---|
+| `{{.SubtaskListToolName}}` | `subtask_list` | 常量 tools/registry.go:43；定义 registry.go:185-189；注册 tools.go:1654,1661 | 提交最终子任务列表（`SubtaskList` 结构，args.go:42-45）。**Barrier 工具**（tools.go:1665），调用即终止生成器消息链。 | 生成器完成分析后**必须**调用，是唯一收尾出口 |
+| `{{.SearchToolName}}` | `search` | 常量 registry.go:31；定义 registry.go:197-204；注册 tools.go:1653,1660 | 委派给 searcher 专家做定向互联网研究（`ComplexSearch`，args.go:108-111） | 规划阶段需补充技术情报、评估方案时，由 `cfg.Searcher` handler 驱动子 agent |
+| `{{.TerminalToolName}}` | `terminal` | 常量 registry.go:45；定义 registry.go:167-174；注册 tools.go:1655,1662 | Docker 容器内执行阻塞式 shell 命令（`TerminalAction`，args.go:93-99） | 需检查运行环境/镜像能力时调用，handler 为 `term.Handle` |
+| `{{.FileToolName}}` | `file` | 常量 registry.go:46；定义 registry.go:175-179；注册 tools.go:1656,1663 | 读写容器内文件（`FileAction`，args.go:16-21），与 terminal 共用同一 handler `term.Handle` | 需读取已挂载文件、检查内容时 |
+| `{{.BrowserToolName}}` | `browser` | 常量 registry.go:23；定义 registry.go:210-214；**条件注册** tools.go:1677-1679（仅 `browser.IsAvailable()` 为真） | 浏览器抓取网页内容（`Browser`，args.go:31-35） | 仅当 scraper 服务可用时才进入工具集，非保证可用 |
+
+**注：模板引用但执行器未注册的工具**
+
+- `{{.SummarizationToolName}}` → 值为 `cast.SummarizationToolName = "execute_task_and_return_summary"`（cast/chain_ast.go:18）。`GetGeneratorExecutor` 的 definitions 列表中**不含**此工具，`GeneratorExecutorConfig` 也无 Summarizer 字段（tools.go:284-289）。模板中它仅出现在"摘要感知协议"，作用是让 agent **识别**已被系统摘要的历史内容并**禁止自行调用**。实际的链级摘要由 `fp.summarizer` 在 `performAgentChain`（performers.go:155）外部执行，agent 无权触发。
+
+> **Handler 来源**（performers.go:110-133）：memorist 来自 `GetMemoristHandler`，searcher 来自 `GetTaskSearcherHandler`，subtask_list 为内联闭包将 JSON 反序列化为 `tools.SubtaskList`。
+
+## 6. 非工具占位符
+
+以下占位符在 `flowProvider.GenerateSubtasks` 的 `generatorContext["system"]`（provider.go:336-352）中赋值，模板渲染时注入。声明清单见 `PromptVariables[PromptTypeGenerator]`（templates.go:271-286）。
+
+| 占位符 | 注入值（来源） | 用途 | 注入时机 |
+|---|---|---|---|
+| `{{.SummarizedContentPrefix}}` | `csum.SummarizedContentPrefix`（csum/chain_summary.go:48 = `"**summarized content:**\n"`），渲染前经 `\n`→`\\n` 转义（provider.go:343） | 摘要内容前缀标识。模板要求 agent 识别以此前缀开头的消息为系统摘要历史，禁止模仿其格式或自己使用该前缀 | 渲染 generator system 模板时（provider.go:383） |
+| `{{.DockerImage}}` | `fp.image`（provider.go:344） | 告知 agent 子任务将运行的 Docker 镜像名，影响方案可行性判断 | 同上 |
+| `{{.Cwd}}` | `docker.WorkFolderPathInContainer`（docker/client.go:31 = `"/work"`，provider.go:345） | 容器内工作目录，用于文件材料路径拼接（`{{.Cwd}}/uploads`、`{{.Cwd}}/resources`） | 同上 |
+| `{{.Lang}}` | `fp.language`（provider.go:346） | 任务语言，全局决定日志/计划条目（子任务 title/description、message）的书写语言，技术通道字段仍强制英语 | 同上 |
+| `{{.CurrentTime}}` | `getCurrentTime()`（provider.go:347） | 当前时间戳，提供时间感知上下文 | 同上 |
+| `{{.N}}` | `TasksNumberLimit = 15`（provider.go:34,348） | 子任务数量硬上限，约束拆解粒度 | 同上 |
+| `{{.ToolPlaceholder}}` | `ToolPlaceholder` 常量（provider.go:32 = `"Execute operations via function invocation - textual responses are not acceptable for task completion."`） | 强制 agent 通过结构化工具调用而非纯文本输出完成任务，渲染到模板末尾 | 同上 |
+| `{{.UserFiles}}` | `fp.userFilesListing()`（provider.go:350，调用 flowfiles.FileListingForPrompt 生成 uploads/ + resources/ 的 XML 清单） | 用户上传文件与参考材料的只读清单；模板中用 `{{if .UserFiles}}` 条件块包裹，无文件时整段（含"任务材料"章节）不渲染 | 同上，仅当 flow 目录下存在文件时非空 |
+
+> **Human 模板侧占位符**（不在本模板，仅说明配对）：`{{.Task}}`、`{{.Tasks}}`、`{{.Subtasks}}` 由 `generatorContext["user"]`（provider.go:331-335）注入，提供当前任务、历史任务、已有子任务作为上下文。

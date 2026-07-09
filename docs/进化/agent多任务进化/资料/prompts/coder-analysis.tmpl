@@ -1,0 +1,132 @@
+# coder.tmpl 分析文档
+
+## 1. 原文件名
+
+`coder.tmpl`，源码注册名 `PromptTypeCoder`（`templates/templates.go:33`，字符串值 `"coder"`，注释 "develops exploits and custom security tools"），数据库枚举同名（`database/models.go:350`、`graph/model/models_gen.go:967`）。
+
+## 2. 类型与用途
+
+**A 类执行 Agent System Prompt——开发员子 agent 的角色与运行约束。**
+
+- 与 `primary_agent` / `pentester` / `installer` / `searcher` / `memorist` / `adviser` 同属"执行型 agent"层，是 `code_result`（StoreAgentResult）收尾型 agent。
+- 用途：当主链路需要"写代码"（漏洞利用、载荷、攻击工具、辅助脚本）时被上层委派，在专属 Docker 容器内独立完成"查询记忆 → 检索资料 → 编码 → 运行验证 → 复用入库 → 收尾报告"全流程，最终通过 `code_result` 工具把英文技术报告回交调用方。
+- 设计特征（与同层 agent 共有的能力 + 本 agent 独有的强化）：
+  - **双通道语言策略**：`message` 字段走任务语言（`{{.Lang}}`），所有技术载荷（`question` / 查询 / 源码 / 运行时命令 / `code_result.result`）走英语。
+  - **专属代码向量库切片**：挂载 `search_code` / `store_code`（条件可用）。执行 agent 层按"资产类型"分库——coder 用 `code`、installer/pentester 用 `guide`（`tools.go:1195-1198` / `:1428-1431`）、searcher 用 `answer`（`tools.go:1608-1611`），coder 是 `code` 切片的唯一持有者。
+  - **可选 Graphiti 时序图谱**：受 `{{.GraphitiEnabled}}` 控制整段协议渲染，启用后多出 4 类检索模式（recent_context / successful_tools / episode_context / diverse_results）。
+  - **受摘要感知协议约束**：识别 `{{.SummarizationToolName}}` 与 `{{.SummarizedContentPrefix}}` 两种历史摘要形态，禁止自身复现。
+  - **受高级导师（Mentor）监督**：通过 `{{.AdviceToolName}}` 主动咨询，被动接收 `<mentor_analysis>` 增强响应。
+
+## 3. 配对关系
+
+**与 `question_coder.tmpl`（`PromptTypeQuestionCoder`，注册于 `templates/templates.go:178`）构成标准 System+User 配对**，装配见 `templates.go:535-538`：
+
+```go
+Coder: AgentPrompts{
+    System: getPrompt(PromptTypeCoder),        // 本模板
+    Human:  getPrompt(PromptTypeQuestionCoder),// question_coder.tmpl
+},
+```
+
+- 配对模板极简（7 行），仅承载单一占位符 `{{.Question}}`（来自 `CoderAction.Question`，`tools/args.go:224`），把上层委派描述原样塞进 `<user_question>` 标签。
+- 本模板负责全部"角色 / 协议 / 工具描述 / 环境约束"，配对模板只负责"这次具体要做什么"，分工干净。
+
+## 4. 调用时机
+
+**调用链路：上层 agent → `coder` 工具 → `GetCoderHandler` → `performCoder`。**
+
+### 4.1 入口暴露
+
+`{{.CoderToolName}}`（值 `"coder"`，`tools/registry.go:16`）作为委派工具暴露给上层 agent。注册到三处上层 executor：
+
+| 上层 | 注册位置 | 条件 |
+|---|---|---|
+| `primary_agent` | `tools/tools.go:1072`、`handlers[CoderToolName] = cfg.Coder`（`:1081`） | 始终启用 |
+| `pentester` | `tools/tools.go:1377`、`:1387` | 始终启用 |
+| `assistant` | `tools/tools.go:843`、`:850` | 仅 `cfg.UseAgents=true` |
+
+工具定义见 `registry.go:352-356`，参数结构 `CoderAction{Question, Message}`（`args.go:223`）。
+
+### 4.2 Handler 入口
+
+`providers/handlers.go:251 GetCoderHandler` 返回包装函数（`:332`），其内层闭包 `coderHandler`（`:262`）：
+
+1. 构造 `coderContext`（`:263`），分 `user` / `system` 两路；
+2. **system 路占位符在 `handlers.go:267-289` 集中注入**（详见第 6 节）；
+3. 渲染 user 模板（`PromptTypeQuestionCoder`，`:305`）；
+4. 渲染 system 模板（`PromptTypeCoder`，即本模板，`:310`）；
+5. 调用 `fp.performCoder(ctx, taskID, subtaskID, systemCoderTmpl, userCoderTmpl, action.Question)`（`:324`）。
+
+### 4.3 执行器装配
+
+`providers/performers.go:364 performCoder`：
+
+1. **取四个委派 handler**（`performers.go:375-393`）：Adviser、Installer（即 `MaintenanceToolName` 的实际后端）、Memorist、Searcher；
+2. **构造 `CoderExecutorConfig`**（`:396-411`），关键字段：
+   - `CodeResult`：**内联闭包**（`:403-409`），反序列化 `CodeResult` 后即返回，**配合 barrier 机制用于收尾退出**；
+   - `Summarizer`：取自 `GetSummarizeResultHandler`；
+3. `fp.executor.GetCoderExecutor(cfg)`（`:412`）拿到带完整工具集的 executor（工具集见第 5 节）；
+4. 可选 `performPlanner` 注入计划（`:417-426`），失败仅警告不中断；
+5. `restoreChain`（`:428`）+ `performAgentChain`（`:435`）真正驱动 LLM 多轮调用。
+
+### 4.4 收尾
+
+子 agent 在链中调用 `code_result`（barrier 工具，`tools.go:1269-1271` 注册为 barrier）→ 触发第 4.3 步的内联闭包 → `performAgentChain` 主循环退出 → `performCoder` 把 `codeResult.Result`（英语技术报告）返回给上层调用方（`:452`），并经 `putAgentLog` 写一条 agent 间日志（`:440-450`）。
+
+> 一句话：**任意上层 agent 调 `coder` 工具 → 渲染 system+user 模板 → 在专用容器内跑链直到子 agent 调 `code_result` 收尾 → 英文报告回交上层**。
+
+## 5. 工具列表
+
+固定工具集（7 个，注册于 `tools/tools.go:1251-1259`）+ 条件工具（3 类，分别注册于 `:1284` / `:1302` / `:1315`）+ 1 个伪工具名（仅出现在 prompt 文案）。
+
+### 5.1 固定工具集
+
+| 占位符 | 工具实际名称 | 工具类型 | 代码位置 | 用途 | 调用时机 |
+|---|---|---|---|---|---|
+| `{{.CodeResultToolName}}` | `code_result` | `StoreAgentResultToolType` | 常量 `registry.go:17`；定义 `registry.go:357-361`；参数 `CodeResult`（`args.go:228`）；handler 在 `performers.go:403-409` 内联注入（`tools.go:1261`） | 收尾：把英文代码开发报告 + 任务语言摘要回交上层 | 任务完成或主动放弃时；**barrier 工具**（`tools.go:1269-1271`），调用即终止本子 agent 主循环 |
+| `{{.AdviceToolName}}` | `advice` | `AgentToolType` | 常量 `registry.go:20`；定义 `registry.go:372-376`；参数 `AskAdvice`（`args.go:101`）；handler `cfg.Adviser`（`tools.go:1262`）← `GetAskAdviceHandler`（`performers.go:375`） | 委派给 Adviser 子 agent，向上层 Mentor 提问（含可选 `code` / `output` 片段） | 遇到架构 / 算法 / 设计模式难题，或需导师纠偏时 |
+| `{{.MaintenanceToolName}}` | `maintenance` | `AgentToolType` | 常量 `registry.go:14`；定义 `registry.go:342-346`；参数 `MaintenanceAction`（`args.go:213`）；handler `cfg.Installer`（`tools.go:1263`）← `GetInstallerHandler`（`performers.go:380`） | 委派给 Installer 子 agent，在容器内装依赖、配工具链 | 需要安装编译器、第三方库或准备运行环境时 |
+| `{{.MemoristToolName}}` | `memorist` | `AgentToolType` | 常量 `registry.go:21`；定义 `registry.go:332-336`；参数 `MemoristAction`（`args.go:153`）；handler `cfg.Memorist`（`tools.go:1264`）← `GetMemoristHandler`（`performers.go:385`） | 委派给 Memorist 子 agent，从历史任务库检索过往代码方案 | 需要找"我们以前是否解决过类似问题"时 |
+| `{{.SearchToolName}}` | `search` | `AgentToolType` | 常量 `registry.go:31`；定义 `registry.go:197-204`；参数 `ComplexSearch`（`args.go:108`）；handler `cfg.Searcher`（`tools.go:1265`）← `GetSubtaskSearcherHandler`（`performers.go:390`） | 委派给 Searcher 子 agent，调外部搜索引擎 + 长期记忆做复杂检索 | 需要库文档、API 规范、公开 exploit 参考时 |
+| `{{.TerminalToolName}}` | `terminal` | `EnvironmentToolType` | 常量 `registry.go:45`；定义 `registry.go:167-174`；参数 `TerminalAction`（`args.go:93`）；handler `term.Handle`（`tools.go:1266`） | 在专属 Docker 容器内执行 shell 命令（支持 detach / timeout） | 编译、运行、调试、安装本地包、查看进程等所有命令行操作 |
+| `{{.FileToolName}}` | `file` | `EnvironmentToolType` | 常量 `registry.go:46`；定义 `registry.go:175-179`；参数 `FileAction`（`args.go:16`）；handler `term.Handle`（`tools.go:1267`，与 terminal 共享同一后端） | 容器内读写文件 | 保存源码、读取参考文件、修改配置 |
+
+### 5.2 条件工具集
+
+| 占位符 | 工具实际名称 | 工具类型 | 代码位置 | 启用条件 | 用途 / 调用时机 |
+|---|---|---|---|---|---|
+| `{{.SearchCodeToolName}}` | `search_code` | `SearchVectorDbToolType` | 常量 `registry.go:39`；定义 `registry.go:306-314`；参数 `SearchCodeAction`（`args.go:198`）；handler `code.Handle`（`tools.go:1305`） | `code.IsAvailable()`（`tools.go:1302`，即 CodeTool 构造成功，依赖 embedder / 向量库就绪） | **代码向量库检索**。编写新代码前查询"团队是否已写过类似实现"；1-5 条英语语义查询，按编程语言过滤 |
+| `{{.StoreCodeToolName}}` | `store_code` | `StoreVectorDbToolType` | 常量 `registry.go:40`；定义 `registry.go:315-320`；参数 `StoreCodeAction`（`args.go:204`）；handler `code.Handle`（`tools.go:1306`） | 同上 | **代码向量库写入**。仅当产出"记忆中尚不存在"的有价值代码时调用；强制匿名化（IP / 域名 / 凭据 / API key 替换为占位符） |
+| `{{.GraphitiSearchToolName}}` | `graphiti_search` | `SearchVectorDbToolType` | 常量 `registry.go:41`；定义 `registry.go:321-331`；参数 `GraphitiSearchAction`（`args.go:132`）；handler `graphitiSearch.Handle`（`tools.go:1317`） | `graphitiSearch.IsAvailable()`（`tools.go:1315`，即 `fp.graphitiClient != nil && IsEnabled`） | **时序知识图谱查询**。写 exploit 前查"是否有类似修改"、写脚本前查"是否有先前实现"、报错时查"同类问题如何解决" |
+
+> 备注：`browser` 工具（`registry.go:23`，`SearchNetworkToolType`）在 `tools.go:1284-1287` 也会被条件注册到 coder executor，但本模板文案**未引用** `{{.BrowserToolName}}`，因此 coder 是否"知道"自己有浏览器取决于 LLM 对工具 schema 的感知，而非 prompt 文本引导。
+
+### 5.3 伪工具名（仅出现在 prompt 文案，不可调用）
+
+| 占位符 | 字面值 | 代码位置 | 性质 |
+|---|---|---|---|
+| `{{.SummarizationToolName}}` | `execute_task_and_return_summary` | `cast/chain_ast.go:18` | **不是注册工具**，是 chainAST 摘要系统使用的占位名。摘要历史时，系统会用这个名字伪装一次"工具调用"以保留结构。本模板文案引用它的目的是让 coder **识别历史摘要中的该标记**，并明令"禁止自行调用、禁止用纯文本模仿其格式"（详见模板"摘要感知协议"段）。 |
+
+## 6. 非工具占位符
+
+注册顺序见 `templates/templates.go:155-176`，全部由 `GetCoderHandler` 在 `handlers.go:267-289` 集中注入。
+
+| 占位符 | 数据来源 | 注入代码位置 | 注入信息 | 用途 |
+|---|---|---|---|---|
+| `{{.GraphitiEnabled}}` | `fp.graphitiClient != nil && fp.graphitiClient.IsEnabled()` | `handlers.go:271` | bool | **整张模板的条件总开关**。控制 Graphiti 段（`<graphiti_search_protocol>` 全块约 70 行）、language_policy 中 Graphiti 引用、memory_protocol 顶部 graphiti_search 提示、ContainerConstraints 之外的多处 `{{if .GraphitiEnabled}}` 分支是否渲染。false 时所有 Graphiti 相关内容消失，工具也会从 executor 中摘除 |
+| `{{.SummarizedContentPrefix}}` | `csum.SummarizedContentPrefix`（原始值 `"**summarized content:**\n"`，`csum/chain_summary.go:48`） | `handlers.go:280`（注入前 `strings.ReplaceAll(..., "\n", "\\n")` 转义） | 转义后的前缀字符串 | 摘要感知协议的识别标记：模板指示 coder 把以此前缀开头的 AI Completion 视为历史摘要，禁止自身复现该前缀 |
+| `{{.DockerImage}}` | `fp.image` | `handlers.go:281` | 容器镜像名（如 `kalilinux/kali-rolling`） | 告知 coder 当前运行时的镜像基底，影响其选择安装命令的发行版语法（apt / apk / yum） |
+| `{{.Cwd}}` | `docker.WorkFolderPathInContainer` | `handlers.go:282` | 容器内工作目录绝对路径 | 作为所有文件操作的基准路径；prompt 在"任务材料"段用它拼接 `{{.Cwd}}/uploads` 和 `{{.Cwd}}/resources` 只读目录、`{{.Cwd}}/` 可写目录 |
+| `{{.ContainerPorts}}` | `fp.getContainerPortsDescription()`（`helpers.go:863-927`） | `handlers.go:283` | 多行 markdown 文本：按 host / bridge 网络模式分别列出强制端口映射、OOB 攻击回调用法、外部 IP（或自动发现提示） | 指导 coder 在写 reverse shell / DNS exfiltration / SSRF 验证等载荷时**只能使用已分配端口**，避免载荷因端口未转发而失败 |
+| `{{.ExecutionContext}}` | `executionContext` ← `fp.getExecutionContext(ctx, taskID, subtaskID)`（`helpers.go:764`） | `handlers.go:284` | 渲染自 `PromptTypeShortExecutionContext` 的结构化 XML，优先级 subtaskID → taskID → flow；包含当前 Flow/Task/SubTask 的 ID/状态/标题/描述、已完成与计划中的兄弟子任务 | 让 coder 知道"本次委派发生在哪条任务支线上、上下游做过什么、还计划做什么"，从而避免重复劳动、对齐当前 subtask 目标 |
+| `{{.Lang}}` | `fp.language` | `handlers.go:285` | 任务工作语言代码（如 `zh` / `en`） | **双通道语言策略的锚点**：所有 `message` 日志条目按此语言书写，所有技术通道字段仍保持英语。同时被"完成要求"段二次引用以强调收尾 message 的语言 |
+| `{{.CurrentTime}}` | `getCurrentTime()`（`helpers.go:929-931`） | `handlers.go:286` | 格式化时间字符串（`2006-01-02 15:04:05`） | 注入执行时间戳，供 coder 判断 Graphiti 的 `recency_window`（6h / 24h / 7d）等时间敏感决策参考 |
+| `{{.ToolPlaceholder}}` | 常量 `ToolPlaceholder`（`providers/provider.go:32`，值 `"Execute operations via function invocation - textual responses are not acceptable for task completion."`） | `handlers.go:287` | 固定约束文案 | 追加在 system prompt 最末尾的通用硬性约束，强制 LLM 走结构化工具调用而非纯文本模拟；与其他所有 agent 共用同一常量 |
+| `{{.UserFiles}}` | `fp.userFilesListing()`（`provider.go:232-237`） | `handlers.go:288` | uploads/ 与 resources/ 目录的 XML 文件清单（只读）；无任何文件时返回空字符串 | 模板用 `{{if .UserFiles}}` 包住整段"任务材料"协议：**无附件则整段不渲染**；有附件时告知 coder 这批文件在容器内的只读路径，以及"修改后的副本要写回 `{{.Cwd}}/`"的规则 |
+
+**关键设计观察：**
+
+- **两套独立的知识后端并存**：`search_code` / `store_code` 是代码专用向量库（"可复用代码资产"），`graphiti_search` 是时序知识图谱（"我们实际写过什么的情景记忆"）。prompt 在 `<integration_with_memory_protocol>` 段明确分工，要求 coder 同时查两者，体现"资产库 + 经历库"的双层记忆设计。
+- **`{{.GraphitiEnabled}}` 是唯一的整段开关**：其他占位符都是"填空"，唯独它控制约 70 行协议文本的生灭，使同一份模板同时服务于"启用 / 未启用 Graphiti"两种部署形态，避免维护两份模板。
+- **`{{.ToolPlaceholder}}` 与 `{{.SummarizationToolName}}` 构成防伪造双重锁**：前者从正面要求"必须用结构化工具调用"，后者从反面列出"历史摘要的两种形态（伪工具调用 + 前缀 Completion）"并禁止复现，二者协同防止 LLM 用纯文本"假装"执行过工具。
+- **`{{.Cwd}}` 的高复用度**：单一份额占位符同时驱动运行环境段、任务材料段（uploads / resources / 可写目录）共三处文案，是连接"运行时事实"与"prompt 指令"的核心纽带。

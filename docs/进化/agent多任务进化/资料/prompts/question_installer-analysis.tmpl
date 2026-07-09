@@ -1,0 +1,121 @@
+# question_installer.tmpl 分析文档
+
+> 本文档为分析结论，不含模板原文。代码引用以 `pentagi/backend/pkg/` 为根的相对路径 + 行号。
+
+## 1. 原文件名
+
+`question_installer.tmpl`
+
+在 PentAGI 中对应的 PromptType 枚举为 `PromptTypeQuestionInstaller`，值为字符串 `"question_installer"`，注释标注为 "human input requesting system installation"。
+
+- 枚举定义：`templates/templates.go:36`
+- GraphQL/数据模型镜像：`graph/model/models_gen.go:970`、`database/models.go:353`
+
+## 2. 类型与用途
+
+**B 类 —— Agent Human Prompt（子代理的用户侧/人类侧提示）。**
+
+它不直接面对终端用户，而是子代理（installer 安装维护专家）被唤醒时，作为该子代理对话链的**首条 user 消息**注入。其职责不是定义能力（那是 system prompt 的活），而是**把调用方委托的具体任务投递给 installer 子代理**，并附上一句框定其工作重心的指令。
+
+- 注册位置（作为 `Human` 字段）：`templates/templates.go:541`
+- 服务端可编辑的子代理提示清单将其与 installer 并列：`server/models/prompts.go:28`
+
+## 3. 配对关系
+
+与 **`installer.tmpl`** 严格配对，构成 installer 子代理的完整提示对：
+
+| 角色 | 模板 | PromptType | 职责 |
+|------|------|-----------|------|
+| System | `installer.tmpl` | `PromptTypeInstaller` | 定义 installer 的身份、授权框架、语言双通道策略、工具使用规范、收尾要求等"恒定能力" |
+| Human | `question_installer.tmpl` | `PromptTypeQuestionInstaller` | 承载本次具体委托任务，是"变化的输入" |
+
+配对装配点：`templates/templates.go:539-542`
+
+```go
+Installer: AgentPrompts{
+    System: getPrompt(PromptTypeInstaller),
+    Human:  getPrompt(PromptTypeQuestionInstaller),
+},
+```
+
+两者在运行时由 `GetInstallerHandler` 同时渲染：system 渲染自 `installerContext["system"]`（含全部工具名/执行上下文），human 渲染自 `installerContext["user"]`（仅含 `Question`）——见 `providers/handlers.go:402-410`。这种"system 装能力 + human 装任务"的拆分，使得同一份能力定义可复用于任意委托任务。
+
+## 4. 调用时机
+
+当**任一具备 `maintenance` 工具的代理**调用该工具时触发。完整调用链（已逐环验证）：
+
+1. **工具注册**：`maintenance` 工具名映射到 installer handler —— `handlers[MaintenanceToolName] = cfg.Installer`（`tools/tools.go:851`）；工具名为常量 `"maintenance"`（`tools/registry.go:14`）。
+2. **工具 schema**：参数为 `MaintenanceAction{Question, Message}`（`tools/args.go:213-216`），`question` 为必填的"技术通道载荷"。
+3. **调用方触发**：调用方在自身对话中发出 `maintenance` 工具调用，`question` 字段即委托描述。
+4. **handler 分发**：`GetInstallerHandler` 返回的闭包反序列化参数为 `MaintenanceAction`（`providers/handlers.go:433-434`），进入 `installerHandler`。
+5. **模板渲染**：取 `action.Question` 构建 user context（`providers/handlers.go:364-366`），渲染本模板为 user 消息（`:402`），同时渲染 `installer.tmpl` 为 system 消息（`:407`）。
+6. **进入子代理链**：`performInstaller` 把 system/user 两段模板交给 `restoreChain` 作为对话链起点（`providers/performers.go:513-514`），由 `performAgentChain` 驱动 installer 子代理执行。
+
+> **修正与补充（精确化）**：任务描述中称"primary_agent 调 MaintenanceToolName"。经核实，`maintenance` 工具不仅注册给 primary_agent，**pentester 与 coder 同样持有该工具并可委托 installer**（参见 `templates/prompts/pentester.tmpl:252`、`coder.tmpl:222` 的 `<tool_name>` 声明，以及 `adviser.tmpl:15-20` 的委派矩阵）。因此更准确的表述是：**primary_agent 是主要调用方，但 pentester/coder 在需要环境搭建/依赖安装时也会触发本模板渲染**。三者共用同一套 installer handler 与同一对本模板。
+
+## 5. 工具列表
+
+**无。**
+
+本模板不含任何工具占位符。占位符白名单仅声明 `Question` 一项（`templates/templates.go:201-203`）：
+
+```go
+PromptTypeQuestionInstaller: {
+    "Question",
+},
+```
+
+工具能力分两层注入，**均不在本模板内**：
+
+- **占位符层（声明工具名）**：全部由配对的 `installer.tmpl`（system 侧）承担，通过其占位符（`MaintenanceResultToolName`、`TerminalToolName`、`FileToolName`、`SearchToolName`、`AdviceToolName`、`MemoristToolName` 等）把工具名写进 system prompt 文本。
+- **执行器层（绑定真实 handler）**：实际可调工具在 `GetInstallerExecutor`（`tools/tools.go:1102-1196`）内装配。其中 `InstallerExecutorConfig`（`tools/tools.go:243-251`）只暴露可注入的同伴 handler —— Adviser、Memorist、Searcher、MaintenanceResult、Summarizer；而 **Terminal/File 工具不作为可注入字段**，而是在执行器构建时由 `NewTerminalTool` 本地实例化，并将 `TerminalToolName` 与 `FileToolName` 一并绑定到同一个 `term.Handle`（`tools/tools.go:1124、1158-1159`）。此外按可用性条件追加 Browser、StoreGuide、SearchGuide 等工具。
+
+这与"职责拆分"设计一致：**system 负责能力清单（稳定身份），human 只负责把任务说清楚（易变输入）**，不在 user 侧重复声明工具，避免与 system 侧产生冲突或冗余，也缩小 prompt 注入面。
+
+## 6. 非工具占位符：`{{.Question}}`
+
+这是本模板**唯一的**占位符，也是最简单的 human 模板之一（全文仅 7 行，对比 `question_searcher` 还需 `Task`/`Subtask`）。
+
+### 用途
+
+承载**调用方委托给 installer 子代理的具体任务描述**——即"这次要让安装维护专家干什么"。它是 installer 子代理收到的、唯一随每次调用而变化的语义输入，决定本轮子代理的工作目标与边界。
+
+### 注入信息
+
+来源为 `MaintenanceAction.Question`（即 `maintenance` 工具调用参数中的 `question` 字段）。按 schema 契约，该字段被定义为**技术通道载荷**：
+
+> "Technical-channel payload — task description for the DevOps team member to maintain the local environment and tools inside the docker container. Always written in English; never translated."
+
+即按 PentAGI 的语言双通道策略，**委托 `question` 一律使用英语**（即便整个任务的展示语言是中文）——因为它是代理间技术链路的内容，需保证可被向量存储/搜索等英文索引通道正确处理。模板外层的中文指令框定的是 installer 的工作取向，而 `{{.Question}}` 本身是英文技术任务描述。
+
+数据注入点：`providers/handlers.go:365`（`"Question": action.Question`）→ 渲染于 `:402`。
+
+### 注入时机
+
+在 `installerHandler` 内、**子代理对话链启动之前**注入：
+
+- 时机：调用方发出 `maintenance` 工具调用 → handler 反序列化得到 `action.Question` → 构造 `installerContext["user"]` → `RenderTemplate(PromptTypeQuestionInstaller, ...)` 渲染为 `userInstallerTmpl`。
+- 随后 `userInstallerTmpl` 作为**首条 user 消息**与 `systemInstallerTmpl`（system 消息）一并交给 `performInstaller` → `restoreChain` → `performAgentChain`，开启 installer 子代理的独立对话链。
+- 可选增强：若启用 planning，`userInstallerTmpl` 会在进入链前被 planner 进一步加工（追加计划），见 `providers/performers.go:502-511`——即本模板渲染结果在 planning 模式下并非最终 user 消息的全部，而是计划生成的基础输入。
+
+---
+
+### 附：调用链速查
+
+```
+调用方(primary_agent/pentester/coder)
+   │  调用 maintenance 工具, args.question = 委托描述(英语)
+   ▼
+tools.go:851  MaintenanceToolName → cfg.Installer (GetInstallerHandler)
+   ▼
+handlers.go:429  反序列化 → MaintenanceAction
+   ▼
+handlers.go:362  installerHandler
+   ├─ handlers.go:365  user ctx = { Question: action.Question }
+   ├─ handlers.go:402  渲染 question_installer.tmpl → user 消息  ← 本模板
+   └─ handlers.go:407  渲染 installer.tmpl           → system 消息
+   ▼
+performers.go:455  performInstaller(system, user, question)
+   ├─ (可选) performers.go:503  performPlanner 加工 user 模板
+   └─ performers.go:513  restoreChain → performAgentChain  开启 installer 子代理链
+```

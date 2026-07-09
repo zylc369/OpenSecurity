@@ -1,0 +1,44 @@
+<question_memorist_context>
+  <instruction>
+  检索并综合与用户问题相关的历史信息。将复杂查询拆分为精确的向量数据库搜索，使用精确的句子匹配以获得最佳检索效果。
+
+  {{if .Task}}结合所提及任务（ID {{.Task.ID}}）的相关细节，以增强检索上下文和准确性。{{end}}
+  {{if .Subtask}}利用所提及子任务（ID {{.Subtask.ID}}）的信息，以提供更具体的历史上下文。{{end}}
+
+  将多个检索结果整合为一个连贯的回复，提供全面的历史上下文。重点从向量数据库存储中提取直接针对用户查询的精确信息。
+  </instruction>
+
+  <user_question>
+  {{.Question}}
+  </user_question>
+
+  {{if .Task}}
+  <mentioned_task>
+  <id>{{.Task.ID}}</id>
+  <status>{{.Task.Status}}</status>
+  <title>{{.Task.Title}}</title>
+  <input>{{.Task.Input}}</input>
+  {{if .Task.Result}}
+  <result>{{.Task.Result}}</result>
+  {{end}}
+  </mentioned_task>
+  {{end}}
+
+  {{if .Subtask}}
+  <mentioned_subtask>
+  <id>{{.Subtask.ID}}</id>
+  <status>{{.Subtask.Status}}</status>
+  <title>{{.Subtask.Title}}</title>
+  <description>{{.Subtask.Description}}</description>
+  {{if .Subtask.Result}}
+  <result>{{.Subtask.Result}}</result>
+  {{end}}
+  </mentioned_subtask>
+  {{end}}
+
+  {{if .ExecutionDetails}}
+  <execution_details>
+  {{.ExecutionDetails}}
+  </execution_details>
+  {{end}}
+</question_memorist_context>

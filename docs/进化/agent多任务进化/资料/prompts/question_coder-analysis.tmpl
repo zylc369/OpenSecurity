@@ -1,0 +1,61 @@
+# question_coder.tmpl 分析文档
+
+## 1. 原文件名
+
+`question_coder.tmpl`，对应内部类型常量 `PromptTypeQuestionCoder`（`backend/pkg/templates/templates.go:34`），值为字符串 `"question_coder"`，注释标注为 "human input requesting code development"。
+
+## 2. 类型与用途
+
+**B 类 Agent Human Prompt**——Coder（开发者）Agent 的 human 侧消息模板。
+
+与 system 侧的 `coder.tmpl`（系统提示，定义角色、能力、工具用法、输出规范）分工互补：system 模板解决"这个 agent 是谁、能用什么、怎么干活"，本 human 模板解决"这次具体要干什么"。它承载的是**单次编码任务的实例化输入**，而非 agent 的稳定身份设定。
+
+这正是 B 类模板的意义——Human 消息必须是"易变的具体任务"，不能混进 System 消息里造成角色漂移或 prompt 注入面扩大。
+
+## 3. 配对关系
+
+与 `coder.tmpl`（`PromptTypeCoder`）**严格成对**，在 `templates.go:535-538` 的 `Coder: AgentPrompts{}` 注册处一并登记：
+
+```
+Coder: AgentPrompts{
+    System: getPrompt(PromptTypeCoder),          // coder.tmpl
+    Human:  getPrompt(PromptTypeQuestionCoder),  // 本模板
+}
+```
+
+两者必须同时存在：缺少 system 侧则 agent 丢失身份与工具规范；缺少 human 侧则每次任务无入口。`server/models/prompts.go:27` 把两者作为一组暴露给前端做自定义渲染。
+
+## 4. 调用时机
+
+调用链（自上而下，已逐段核验）：
+
+1. **primary_agent 决策**：主代理在规划中调用 `CoderToolName` 工具，工具参数为 `tools.CoderAction`（`tools/args.go:223-224`），其 `Question` 字段是主代理生成、要求用英文书写的编码任务描述。
+2. **handler 派发**：`providers/handlers.go:251` `GetCoderHandler` 返回的执行器在 `handlers.go:332-348` 被调用，`json.Unmarshal` 解析出 `action.Question`（`handlers.go:336-337`）。
+3. **上下文构造**：`handlers.go:263-266` 构造 `coderContext["user"] = {"Question": action.Question}`，user 侧字典**只有这一个键**——这是整个 prompt 体系里最精简的 user context。
+4. **渲染 human 模板**：`handlers.go:305` `RenderTemplate(PromptTypeQuestionCoder, coderContext["user"])` → 得到 `userCoderTmpl`。紧接着 `handlers.go:310` 渲染 system 模板得到 `systemCoderTmpl`。
+5. **执行**：`handlers.go:324` 调 `performCoder(ctx, taskID, subtaskID, systemCoderTmpl, userCoderTmpl, action.Question)`。
+6. **建链**：`performers.go:428-430` `restoreChain` 把 `systemCoderTmpl` 作为 system 消息、`userCoderTmpl` 作为 **human 消息**注入消息链，随后 `performAgentChain` 驱动 Coder Agent 执行。
+
+> 副路径（planning 开启时）：`performers.go:417-426`，`userCoderTmpl` 会先经 `performPlanner` 增强出计划再作为 human 消息发出。即 human 消息内容可能被 planner 改写，但本模板仍是其渲染起点。
+
+一句话：**primary_agent 调 `CoderToolName` → handlers.go 渲染本模板 → 作为 human 消息送给 Coder Agent**。
+
+## 5. 工具列表
+
+**本模板不声明任何工具，也不含任何工具名占位符。**
+
+这是有意为之的分工：工具名占位符全部声明在配对的 system 模板 `coder.tmpl` 中（见 `templates.go:166-177` 的 `PromptTypeCoder` 允许占位符清单），实际可调工具则由 Coder executor 在 `performers.go:396-411` 通过 `tools.CoderExecutorConfig` 注入：Adviser、Installer、Memorist、Searcher、CodeResult、Summarizer。
+
+工具规范属于"稳定身份信息"，应留在 system 侧；本模板只承载易变的任务内容，因此**零工具声明**。
+
+## 6. 非工具占位符
+
+`templates.go:178-180` 登记本模板允许的占位符清单**只有一项**：`"Question"`。
+
+### `{{.Question}}`
+
+- **用途**：承载本次编码任务的具体描述——主代理向 Coder Agent 派发的"开发需求说明书"。它告诉 coder 本次要写什么代码、目标是什么、（不明显时）如何实现。
+- **注入信息**：来自 `tools.CoderAction.Question`（`tools/args.go:224`）。其 jsonschema 描述约定：这是"task description for the developer team member to write code, with detailed explanation of the goal and how to achieve it when not obvious. Always written in English; never translated." 即由主代理生成、**强制英文、不翻译**的技术通道载荷。模板在 XML 结构 `<question_coder_context>` > `<user_question>` 内引用它，并配一条固定 `<instruction>`（"为用户问题生成详尽且详细的代码…"）作为行为指令。
+- **注入时机**：在 `GetCoderHandler` 内、收到 `CoderAction` 之后、调用 `performCoder` 之前，由 `handlers.go:265` 写入 user context、`handlers.go:305` 渲染时填充，对应本次工具调用的一次性实例化，非启动期注入。
+
+> 本模板是整套 prompt 体系里**结构最简的 human 模板**（7 行、单一占位符、纯任务文本包裹）。这种极简是有意设计：任务内容由调用方（primary_agent）负责构造完整，模板只负责用稳定的 XML 语义结构把它包好送进 agent，不引入任何额外噪音。

@@ -1,0 +1,41 @@
+<task_context>
+  <instruction>
+  你的目标是生成优化的子任务，这些子任务将完成下方 <user_task><input> 字段中提供的主要用户请求。
+  
+  <user_task><input> 包含用户请求的主要目标——这是你必须实现的最终目标。
+  你创建的所有子任务必须被设计为协同工作，以完成这个确切的用户请求。
+  将你的子任务聚焦于解决用户在 <user_task><input> 中所要求的内容，而非无关的活动。
+  </instruction>
+
+  <user_task>
+    <input>{{.Task.Input}}</input>
+  </user_task>
+
+  {{if .Tasks}}
+  <previous_tasks>
+    {{range .Tasks}}
+    <task>
+      <id>{{.ID}}</id>
+      <input>{{.Input}}</input>
+      <status>{{.Status}}</status>
+      <result>{{.Result}}</result>
+    </task>
+    {{end}}
+  </previous_tasks>
+  {{end}}
+
+  {{if .Subtasks}}
+  <previous_subtasks>
+    {{range .Subtasks}}
+    <subtask>
+      <task_id>{{.TaskID}}</task_id>
+      <id>{{.ID}}</id>
+      <title>{{.Title}}</title>
+      <description>{{.Description}}</description>
+      <status>{{.Status}}</status>
+      <result>{{.Result}}</result>
+    </subtask>
+    {{end}}
+  </previous_subtasks>
+  {{end}}
+</task_context>

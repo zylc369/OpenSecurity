@@ -1,0 +1,415 @@
+# adviser.tmpl 详细分析文档
+
+> 源码路径：`pentagi/backend/pkg/templates/prompts/adviser.tmpl`
+> 模板变量定义：`templates/templates.go:245`（`PromptTypeAdviser`）
+> 触发逻辑：`providers/handlers.go:73`（`GetAskAdviceHandler`）→ `providers/performers.go:957`（`performSimpleChain`）
+> 特殊调用路径：`performers.go:812`（`performPlanner`）、`performers.go:874`（`performMentor`）
+
+---
+
+## §1 基本信息
+
+| 项 | 值 |
+|----|----|
+| **原文件名** | `adviser.tmpl` |
+| **行数** | 315 行 |
+| **模板类型** | Go `text/template`（`.tmpl`） |
+| **PromptType 常量** | `PromptTypeAdviser = "adviser"`（`templates/templates.go:41`） |
+| **分类** | A 类 — Agent System Prompt（对话型 agent 的 system 消息） |
+| **所属结构体字段** | `AgentsPrompts.Adviser`（`templates/templates.go` 中的 `AgentPrompts` 类型） |
+| **配对 Human 模板** | `question_adviser.tmpl`（27 行） |
+| **工具集** | **无** — adviser 经 `performSimpleChain` 执行，是纯推理链，不注册任何工具 |
+
+---
+
+## §2 类型与用途：技术方案优化专家
+
+`adviser.tmpl` 定义的是 **技术方案优化专家（Technical Solution Optimization Expert / Adviser）**，是 PentAGI 多 agent 编排体系中的**咨询型 agent**。它的角色是分析其他 agent 遇到的挑战，提供战略指导和最优方案推荐，但不直接执行操作。
+
+### 2.1 核心定位
+
+adviser 的角色宣言（模板第 3 行）：
+
+> 你是一名专业的技术顾问(adviser)，在代理遇到挑战时提供战略指导以最大化效率。你的角色是咨询式的——分析情况并推荐最优方案，附带清晰的推理依据。
+
+关键词是**咨询式（consultative）**：adviser 不发号施令，它分析 → 推理 → 建议，并附上理由。模板第 164-178 行的 `<tone_guidelines>` 固化了这一定位，用正反例约束语调：
+
+- **反面**："立即停止并编写报告"（命令式）
+- **正面**："建议停止主动测试 - 侦察目标已凭当前发现达成"（咨询式 + 推理依据）
+
+### 2.2 零工具的纯推理架构
+
+adviser 与 PentAGI 中几乎所有其他 agent 的根本区别：**adviser 没有任何工具**。
+
+它的执行入口是 `performSimpleChain`（`handlers.go:219`），该方法（`performers.go:957-1047`）只发送 system + human 两条消息，等待 LLM 返回纯文本响应——**没有 executor、没有工具注册、没有 function calling**。
+
+因此，模板中出现的 11 个 `{{.XxxToolName}}` 占位符（见 §5）**都不是 adviser 自己的工具**，而是 adviser 在建议中**引用**的工具名——告诉调用方 agent "你应该去调用 `pentester` / `coder` / `done` ……"。
+
+### 2.3 三种运行模式
+
+adviser 是 PentAGI 中唯一身兼三职的 agent（模板第 135-162 行 `<adviser_contexts>`）：
+
+| 模式 | 触发方式 | Human 模板 | 输出形态 |
+|------|---------|-----------|---------|
+| **模式 1：直接技术咨询** | agent 主动调用 `advice` 工具 | `question_adviser.tmpl` | 技术分析 + 优先级建议 |
+| **模式 2：任务规划（规划模式）** | 系统在专家 agent 执行前自动触发 | `question_task_planner.tmpl` → 嵌入 `question_adviser.tmpl` | 3-7 步执行清单 |
+| **模式 3：执行监控（导师模式）** | 系统检测到执行异常模式时自动触发 | `question_execution_monitor.tmpl` → 嵌入 `question_adviser.tmpl` | 进展评估 + 方向修正 |
+
+模式 2 和 3 的问题模板（`question_task_planner.tmpl` / `question_execution_monitor.tmpl`）渲染后**作为字符串**注入 `ask.Question`，再经 `question_adviser.tmpl` 的 `{{.Question}}` 包装——这是嵌套式 prompt 构造（详见 §4.2）。
+
+---
+
+## §3 配对关系：与 question_adviser.tmpl 配对
+
+adviser 是标准的 **System + Human 配对**模式。
+
+### 3.1 两个模板的分工
+
+| 模板 | 角色 | 消息 role | 内容 |
+|------|------|-----------|------|
+| `adviser.tmpl`（本文档） | System Prompt | `system` | 定义角色、三模式、代理能力表、沟通风格、知识发现协议 |
+| `question_adviser.tmpl`（27 行） | Human Prompt | `human` | 包装发起方 + 增强数据 + 用户问题 + 可选代码/输出 |
+
+它们作为两条独立消息发给 LLM：
+
+```json
+{
+  "messages": [
+    { "role": "system", "content": "<adviser.tmpl 渲染结果>" },
+    { "role": "user",   "content": "<question_adviser.tmpl 渲染结果>" }
+  ]
+}
+```
+
+### 3.2 question_adviser.tmpl 的结构
+
+```xml
+<question_adviser_context>
+  <instruction>Generate comprehensive advice ...</instruction>
+  <initiator_agent>{{.InitiatorAgent}}</initiator_agent>
+  {{if .Enriches}}<enrichment_data>{{.Enriches}}</enrichment_data>{{end}}
+  <user_question>{{.Question}}</user_question>
+  {{if .Code}}<code_snippet>{{.Code}}</code_snippet>{{end}}
+  {{if .Output}}<command_output>{{.Output}}</command_output>{{end}}
+</question_adviser_context>
+```
+
+它的变量集（`templates.go:264-270`，`PromptTypeQuestionAdviser`）有 5 个：`InitiatorAgent`、`Question`、`Code`、`Output`、`Enriches`。
+
+`adviser.tmpl` 第 113-133 行的 `<input_templates>` 段落描述了三种输入数据结构，分别对应三种模式：
+- **提问模板**：`<question_adviser_context>` 的字段
+- **规划模板**：`<task_assignment>` 含 `<original_request>` 和 `<execution_plan>`
+- **监控模板**：`<my_current_assignment>`、`<my_role_and_capabilities>`、`<recent_conversation_history>`、`<all_tool_calls_i_executed>`、`<my_most_recent_action>`
+
+> **注意**：规划模板和监控模板的 XML 标签名出现在 `question_task_planner.tmpl` / `question_execution_monitor.tmpl` 的渲染结果里（作为 `{{.Question}}` 的内容），而非 `adviser.tmpl` 自身——`adviser.tmpl` 只是对这些即将到来的结构做了预告说明。
+
+### 3.3 变量传递链
+
+```
+调用方发起 advice 请求
+  ↓ 参数为 tools.AskAdvice{Question, Code, Output}
+GetAskAdviceHandler（handlers.go:227）
+  ↓ json.Unmarshal(args, &ask)
+  ├─ ① enricherHandler(ctx, ask)
+  │     ↓ ask.Question / ask.Code / ask.Output → enricher 处理
+  │     ↓ 返回 enriches（补充上下文文本）
+  └─ ② adviserHandler(ctx, ask, enriches)
+        ↓ 渲染 question_adviser.tmpl（user 模板）
+        │     {{.InitiatorAgent}} ← tools.GetAgentContext(ctx).CurrentAgentType
+        │     {{.Question}}       ← ask.Question
+        │     {{.Code}}           ← ask.Code
+        │     {{.Output}}         ← ask.Output
+        │     {{.Enriches}}       ← enriches
+        ↓ 渲染 adviser.tmpl（system 模板，17 个变量）
+        ↓ performSimpleChain（system + human → AI 纯文本响应）
+        ↓ 返回 advice 文本
+```
+
+---
+
+## §4 调用时机
+
+adviser 有**三条调用路径**，全部最终经过 `GetAskAdviceHandler` → 渲染 `adviser.tmpl`（system）+ `question_adviser.tmpl`（human）→ `performSimpleChain`。区别在于**谁触发**和**问题内容来源**。
+
+### 4.1 路径一：直接技术咨询（agent 主动调用）
+
+这是最直接的路径。任何注册了 `advice` 工具的 agent 在遇到困难时主动调用。
+
+**注册了 `advice` 工具的 agent**（来自 `tools.go` 各 `GetXxxExecutor`）：
+
+| Agent | 注册位置 | 发起方取值（`initiator_agent`） |
+|-------|---------|------|
+| 主代理（Primary Agent） | `tools.go:1071` | `primary_agent` |
+| 渗透测试员（Pentester） | `tools.go:1376` | `pentester` |
+| 开发员（Coder） | `tools.go:1253` | `coder` |
+| 安装员（Installer） | `tools.go:1147` | `installer` |
+| 助手（Assistant） | `tools.go:842`（仅 `UseAgents=true`） | `assistant` |
+
+搜索员（Searcher）和记忆员（Memorist）**没有** advice 工具。
+
+**调用链**：
+
+```
+agent 的 LLM 决策 → 调用 advice 工具（参数 tools.AskAdvice）
+  → GetAskAdviceHandler（handlers.go:227）
+       ├─ enricherHandler（handlers.go:237）— enricher 先跑一轮信息收集
+       └─ adviserHandler（handlers.go:242）— adviser 基于 enriches + 问题给建议
+  → 返回 advice 文本给调用方 agent
+```
+
+`initiator_agent` 字段在 `handlers.go:151-154` 通过 `tools.GetAgentContext(ctx)` 获取当前 agent 类型，注入 `question_adviser.tmpl` 的 `{{.InitiatorAgent}}`，让 adviser 知道是谁在提问、该建议哪个完成工具。
+
+### 4.2 路径二：任务规划（performPlanner，系统自动触发）
+
+当 `fp.planning == true`（配置开关），专家 agent（pentester / coder / installer）的 performer 在启动 agent 主链**之前**，会先调用 adviser 生成执行计划。
+
+**触发点**（`performers.go`）：
+- `performCoder`：`performers.go:417-426`
+- `performInstaller`：`performers.go:502-511`
+- `performPentester`：`performers.go:655-664`
+
+三处模式一致：
+```go
+if fp.planning {
+    userTmplWithPlan, err := fp.performPlanner(
+        ctx, taskID, subtaskID, optAgentType, executor, userTmpl, question,
+    )
+    // 用带计划的 userTmpl 替换原始 userTmpl
+}
+```
+
+**performPlanner 内部**（`performers.go:812-871`）：
+
+```
+① 渲染 question_task_planner.tmpl（变量 AgentType + TaskQuestion）→ 得到 planQuestion 字符串
+② 构造 AskAdvice{Question: planQuestion}，JSON 序列化
+③ executor.Execute(ctx, 0, toolCallID, tools.AdviceToolName, "planner", "", askAdviceJSON)
+     ↓ 走 GetAskAdviceHandler 的完整链（enricher + adviser）
+     ↓ adviser.tmpl 作为 system prompt 渲染
+     ↓ question_adviser.tmpl 作为 human prompt 渲染（{{.Question}} = planQuestion）
+     ↓ 返回 plan 文本
+④ 渲染 task_assignment_wrapper.tmpl（变量 OriginalRequest + ExecutionPlan）
+     ↓ OriginalRequest = 原始 userTmpl
+     ↓ ExecutionPlan = plan 文本
+     ↓ 得到包装后的 taskAssignment
+⑤ 返回 taskAssignment 作为新的 userTmpl
+```
+
+> **嵌套 prompt 构造**：规划模式中，`question_task_planner.tmpl` 的渲染结果不是直接发给 LLM，而是作为 `ask.Question` 喂给 `question_adviser.tmpl` 的 `{{.Question}}`。所以 adviser 收到的 human 消息结构是：`<question_adviser_context>` → `<user_question>` → **（question_task_planner.tmpl 的完整渲染输出）**。
+
+生成的计划再经 `task_assignment_wrapper.tmpl`（15 行）包装，把原任务请求和执行计划组装成 `<task_assignment>` 结构，作为专家 agent 主链的 human 消息。这一步对专家 agent 透明——专家 agent 只看到一条带执行计划的 user 消息。
+
+> **失败容错**：若 `performPlanner` 失败（`performers.go:422`、`507`、`661`），只记一条 Warn 日志，继续用原始 `userTmpl` 执行——规划不是硬依赖。
+
+### 4.3 路径三：执行监控（performMentor，系统自动触发）
+
+在 agent 主链执行工具调用时，系统通过 `executionMonitor`（`helpers.go:142-175`）检测异常执行模式，达到阈值后自动调用 adviser 评估进展。
+
+**触发条件**（`performer.go:366`）：
+
+```go
+if monitor.shouldInvokeMentor(toolCall) && executor.IsFunctionExists(tools.AdviceToolName) {
+    mentorResponse, err := fp.performMentor(...)
+}
+```
+
+`shouldInvokeMentor`（`helpers.go:153-168`）的两个触发条件（满足任一即触发）：
+
+| 条件 | 含义 |
+|------|------|
+| `sameToolCount >= sameThreshold` | 连续重复调用同一工具达到阈值次 |
+| `totalCallCount >= totalThreshold` | 自上次 mentor 调用以来，累计工具调用达到阈值次 |
+
+> 阈值由 `executionMonitor` 构建器设置（`helpers.go` 中 `executionMonitorBuilder`），是配置层面的参数。每次 mentor 调用后 `monitor.reset()`（`helpers.go:171-175`）重置计数。
+
+**performMentor 内部**（`performers.go:874-955`）：
+
+```
+① 从 chain 提取近期消息（getRecentMessages）
+② 从 chain 提取所有已执行工具调用（extractToolCallsFromChain）
+③ 获取子任务描述（fp.db.GetSubtask）
+④ 从 chain 提取 agent 原始 prompt（extractAgentPromptFromChain）
+⑤ 渲染 question_execution_monitor.tmpl（7 个变量）→ 得到 question 字符串
+⑥ 构造 AskAdvice{Question: question}，JSON 序列化
+⑦ executor.Execute(ctx, 0, toolCallID, tools.AdviceToolName, "mentor", "", askAdviceJSON)
+     ↓ 走 GetAskAdviceHandler 的完整链（enricher + adviser）
+     ↓ 返回 mentorResponse 文本
+⑧ formatEnhancedToolResponse(response, mentorResponse)
+     ↓ 把 mentor 评估追加到工具调用结果后面
+     ↓ agent 在下一轮看到增强后的工具结果
+```
+
+> **同样是嵌套构造**：`question_execution_monitor.tmpl` 的渲染结果作为 `ask.Question` 喂给 `question_adviser.tmpl`。
+
+### 4.4 三条路径总览
+
+| 路径 | 触发方 | Human 模板 | 输出消费方 | obs 名称 |
+|------|--------|-----------|-----------|---------|
+| 直接咨询 | agent 自主调用 `advice` | `question_adviser.tmpl` | 调用方 agent | 工具名 `advice` |
+| 规划 | 系统（`performPlanner`，agent 执行前） | `question_task_planner.tmpl` → `question_adviser.tmpl` | 经 `task_assignment_wrapper.tmpl` 包装后作为 agent 的 user 消息 | `"planner"` |
+| 监控 | 系统（`performMentor`，工具重复/过多时） | `question_execution_monitor.tmpl` → `question_adviser.tmpl` | 经 `formatEnhancedToolResponse` 追加到工具结果 | `"mentor"` |
+
+三条路径的共同点：**`adviser.tmpl` 始终是 system prompt，`question_adviser.tmpl` 始终是 human prompt 的外层包装**。差异仅在于 `{{.Question}}` 的内容来源。
+
+### 4.5 消息链示意（直接咨询模式）
+
+```
+messages[0]: { role: "system", content: adviser.tmpl 渲染结果 }
+messages[1]: { role: "human",  content: question_adviser.tmpl 渲染结果 }
+       ↓
+performSimpleChain 调用 LLM（无工具，单轮）
+       ↓
+messages[2]: { role: "assistant", content: advice 文本 }
+       ↑ 纯文本响应，不调用任何工具
+```
+
+adviser 链是**单轮**的（`performSimpleChain` 不做 function calling 迭代），响应直接返回。这与 enricher（多轮、有工具、有 barrier）形成对比。
+
+---
+
+## §5 工具列表
+
+### 5.1 关键认知：adviser 自身零工具
+
+adviser 经 `performSimpleChain`（`handlers.go:219`）执行，该方法**不注册任何工具**。模板中的 11 个 `{{.XxxToolName}}` 占位符全部是**引用性工具名**——它们出现在"代理能力与完成函数"表（模板第 9-47 行）和建议示例中，供 adviser 在建议文本里**指名道姓**地推荐调用方 agent 该用什么工具。
+
+这与 enricher / pentester 等 agent 的工具占位符性质不同：那些 agent 的占位符对应**自己注册并使用**的工具；adviser 的占位符对应**别人注册并使用**的工具。
+
+### 5.2 占位符清单
+
+以下 11 个占位符均声明在 `PromptTypeAdviser`（`templates.go:248-258`），值注入在 `handlers.go:167-177`。
+
+#### 完成工具（barrier / result 类）— adviser 据此建议"何时终止"
+
+| 占位符 | 实际名称 | 常量定义 | 参数结构 | 用途 | adviser 建议时机 |
+|--------|---------|---------|---------|------|----------------|
+| `{{.FinalyToolName}}` | `done` | `registry.go:12` | `args.go:87` `Done{Success, Result, Message}` | primary_agent 的完成工具（barrier） | 模板第 27 行：建议 primary_agent "调用 `done` 以完成此子任务" |
+| `{{.HackResultToolName}}` | `hack_result` | `registry.go:19` | `args.go:238` `HackResult{Result, Message}` | pentester 的完成工具（barrier） | 模板第 25 行：建议 pentester "调用 `hack_result` 并附带当前发现" |
+| `{{.CodeResultToolName}}` | `code_result` | `registry.go:17` | `args.go:228` `CodeResult{Result, Message}` | coder 的完成工具（barrier） | 模板第 26 行：建议 coder "调用 `code_result` 并附带已开发的方案" |
+| `{{.MaintenanceResultToolName}}` | `maintenance_result` | `registry.go:15` | `args.go:218` `MaintenanceResult{Result, Message}` | installer 的完成工具（barrier） | 模板第 18 行表格中列出，用于建议 installer 终止 |
+| `{{.SearchResultToolName}}` | `search_result` | `registry.go:32` | `args.go:119` `SearchResult{Result, Message}` | searcher 的完成工具（barrier） | 模板第 19 行表格中列出，用于建议 searcher 终止 |
+
+#### 委派工具（agent 类）— adviser 据此建议"委派给谁"
+
+| 占位符 | 实际名称 | 常量定义 | 参数结构 | 用途 | adviser 建议时机 |
+|--------|---------|---------|---------|------|----------------|
+| `{{.PentesterToolName}}` | `pentester` | `registry.go:18` | `args.go:233` `PentesterAction{Question, Message}` | 委派渗透测试任务 | 模板第 15 行表格 + 第 29-33 行的委派建议示例 |
+| `{{.CoderToolName}}` | `coder` | `registry.go:16` | `args.go:223` `CoderAction{Question, Message}` | 委派代码开发任务 | 模板第 16、30 行：pentester 在漏洞利用代码上遇到困难 → 委派给 coder |
+| `{{.MaintenanceToolName}}` | `maintenance` | `registry.go:14` | `args.go:213` `MaintenanceAction{Question, Message}` | 委派环境维护/安装任务 | 模板第 17、31 行：coder 需要环境配置 → 委派给 maintenance |
+| `{{.SearchToolName}}` | `search` | `registry.go:31` | `args.go:108` `ComplexSearch{Question, Message}` | 委派信息检索任务 | 模板第 18、32 行：任何代理需要研究 → 委派给 search |
+| `{{.MemoristToolName}}` | `memorist` | `registry.go:21` | `args.go:153` `MemoristAction{Question, TaskID, SubtaskID, Message}` | 委派记忆检索任务 | 模板第 19、33 行：任何代理需要记忆操作 → 委派给 memorist |
+| `{{.AdviceToolName}}` | `advice` | `registry.go:20` | `args.go:101` `AskAdvice{Question, Code, Output, Message}` | 请求顾问建议（本文档定义的 agent 入口） | 模板第 15-20 行表格中各 agent 均列出可委派给 advice；第 141 行说明直接咨询模式的触发 |
+
+### 5.3 代理能力表的作用
+
+模板第 13-20 行的表格将上述 11 个工具名按"谁的完成工具"和"谁能委派给谁"组织起来。这张表是 adviser 的**决策参考矩阵**：
+
+- **行**：6 种 agent 类型（primary / pentester / coder / installer / searcher / assistant）
+- **完成工具列**：该 agent 用哪个工具终止自己的执行
+- **可委派给列**：该 agent 能调用哪些下级 agent
+
+adviser 收到 `<initiator_agent>` 后，查表确定该 agent 的完成工具名和可用委派工具名，在建议中精确引用（"建议调用 `hack_result`……" 而非笼统的"提交结果"）。
+
+### 5.4 为什么 adviser 自己没有工具
+
+adviser 的定位是**纯顾问**——分析、推理、建议。如果 adviser 自己能执行工具（如 terminal / file / search），它就变成了执行者而非顾问，职责边界模糊。PentAGI 的设计是：
+- 要补充上下文 → 先走 enricher（adviser 的影子前置，有工具）
+- 要执行操作 → 委派给对应专家 agent（pentester / coder / installer）
+- adviser 只负责**告诉别人该做什么**，不亲自下场
+
+---
+
+## §6 非工具占位符
+
+`PromptTypeAdviser` 声明 17 个变量（`templates.go:245-263`），其中 11 个是引用性工具名（见 §5），其余 **6 个是非工具占位符**。
+
+### 6.1 占位符清单
+
+| 占位符 | 类型 | 来源（`handlers.go:164-182`） | 用途 |
+|--------|------|-------------------------------|------|
+| `{{.ExecutionContext}}` | 字符串 | `fp.getExecutionContext(ctx, taskID, subtaskID)` | 当前 Flow/Task/SubTask 详情 |
+| `{{.CurrentTime}}` | 字符串 | `getCurrentTime()` | 当前时间戳 |
+| `{{.DockerImage}}` | 字符串 | `fp.image` | Docker 容器镜像名 |
+| `{{.Cwd}}` | 字符串 | `docker.WorkFolderPathInContainer` | 容器内工作目录路径 |
+| `{{.ContainerPorts}}` | 字符串 | `fp.getContainerPortsDescription()` | 容器带外(OOB)端口描述 |
+| `{{.UserFiles}}` | 字符串 | `fp.userFilesListing()` | 用户附加文件列表 |
+
+> **与 enricher / pentester 等 agent 的差异**：adviser 的非工具占位符中**没有** `{{.Lang}}`（语言）、`{{.ToolPlaceholder}}`（工具使用提示）、`{{.SummarizationToolName}}`（摘要标记）、`{{.SummarizedContentPrefix}}`（摘要前缀）、`{{.GraphitiEnabled}}`（知识图谱开关）。原因是 adviser 没有工具（不需要 `ToolPlaceholder`）、不做摘要（不需要摘要协议变量）、不直接检索知识图谱（不需要 Graphiti 开关）。语言变量缺失则因为 adviser 响应始终是英语技术通道——它不直接面向任务协调团队。
+
+### 6.2 重点占位符详解
+
+#### `{{.ExecutionContext}}` — 执行上下文
+
+由 `fp.getExecutionContext(ctx, taskID, subtaskID)`（`handlers.go:79`）生成，渲染到模板第 269-271 行的 `<execution_context>` 段。模板第 262-267 行指导 adviser 如何使用它：
+- 提取 Flow、Task、SubTask 的详情（ID、状态、标题、描述）
+- 确定操作范围和父任务关系
+- 识别当前操作分支内的相关历史
+- 针对当前子任务目标量身定制建议
+
+这是 adviser 理解"我在帮谁、帮什么子任务"的核心信息源。
+
+#### `{{.DockerImage}}` + `{{.Cwd}}` + `{{.ContainerPorts}}` — 运行环境三件套
+
+渲染到模板第 57-73 行的 `<container_environment>` 段：
+
+- **`{{.DockerImage}}`**：当前 Docker 容器使用的镜像名，adviser 据此判断可用工具集（如 pentest 镜像含 msfconsole）
+- **`{{.Cwd}}`**：容器内工作目录路径（`docker.WorkFolderPathInContainer`，通常为 `/work`），用于在建议中引用文件路径；模板第 279 行还用于定位 `{{.Cwd}}/uploads` 和 `{{.Cwd}}/resources`
+- **`{{.ContainerPorts}}`**：容器绑定的带外(OOB)端口描述，adviser 据此建议基于回调的攻击（反向 shell、DNS 数据外泄等），模板第 64-72 行强调"代理必须仅使用已分配的端口"
+
+#### `{{.CurrentTime}}` — 当前时间戳
+
+渲染到模板第 258-260 行的 `<current_time>` 段。用于让 adviser 知道当前时刻，在时间敏感的建议中（如"距任务开始已多久""端口监听已运行多长时间"）提供参考。
+
+#### `{{.UserFiles}}` — 任务材料段开关
+
+模板第 272-285 行：整个 `## 任务材料` 段包裹在 `{{if .UserFiles}}...{{end}}` 中。仅当有用户附加文件时才渲染，告知 adviser 可在 `{{.Cwd}}/uploads`（交付文件）和 `{{.Cwd}}/resources`（参考资料）下找到任务材料，且这些目录为只读。
+
+---
+
+## §7 关键设计要点
+
+### 7.1 adviser 的"三体"架构
+
+adviser 是 PentAGI 中唯一同时服务三种场景的 agent，但**共用同一个 system prompt**（`adviser.tmpl`）。三种模式的区分靠：
+1. **Human prompt 内容不同**（直接问题 vs 规划问题 vs 监控问题）
+2. **system prompt 的预告**：模板第 135-162 行和第 113-133 行预先告知 adviser 它会收到三种不同结构的输入，让它能自适应
+
+这是一种**经济型设计**——一个 agent prompt 覆盖三种用途，而非维护三个独立 agent。
+
+### 7.2 enricher 前置的透明性
+
+无论哪条调用路径，adviser handler 内部都**先跑 enricher**（`handlers.go:237`）。这意味着：
+- 直接咨询时：enricher 先收集补充上下文 → adviser 基于完整信息回答
+- 规划模式时：enricher 先收集 → adviser 基于完整信息规划
+- 监控模式时：enricher 先收集 → adviser 基于完整信息评估
+
+调用方完全不知道 enricher 的存在。对调用方而言，advice 工具就是"输入问题、输出建议"的黑盒。
+
+### 7.3 三种模式的输出消费方式差异
+
+| 模式 | 输出处理 | 消费方式 |
+|------|---------|---------|
+| 直接咨询 | 原样返回给调用方 agent | agent 自行解读 |
+| 规划 | 经 `task_assignment_wrapper.tmpl` 包装 | 替换 agent 的 user 消息（作为执行指引） |
+| 监控 | 经 `formatEnhancedToolResponse` 拼接 | 追加到工具结果后面（agent 下一轮看到） |
+
+规划模式的输出对专家 agent 透明（agent 以为这是原始任务描述）；监控模式的输出对专家 agent 半透明（agent 看到的是"工具结果 + 导师评语"的混合体）。
+
+### 7.4 后端终端执行机制的详尽指导
+
+模板第 75-111 行的 `<terminal_execution_model>` 是 adviser 特有的长篇指导，详述了：
+- Docker exec 的隔离模型（每条命令独立会话、无状态共享）
+- detach 模式的两种行为（后台运行 vs 阻塞等待）
+- MSF（Metasploit）的 6 种常见错误（交互挂起、缺少退出、孤儿进程等）及正确模式
+- RPC 守护进程工作流和诊断命令
+
+这些内容存在的原因：adviser 的建议经常涉及 terminal 命令（尤其在监控模式下分析 agent 的工具调用历史时）。adviser 需要能识别 agent 犯的 MSF 错误并在建议中纠正。
+
+### 7.5 知识发现协议
+
+模板第 180-211 行的 `<research_recommendation>` 定义了 adviser 何时建议开展互联网研究：
+- 代理缺乏领域知识却硬上
+- 代理在重复造已有的成熟方法
+- 任务有充分公开记录的解决方案
+
+同时设定了**平衡原则**：现有方案能节省大量时间时建议研究；定制开发更直接时劝阻过度搜索。这与 adviser 作为"效率优化"角色的定位一致。

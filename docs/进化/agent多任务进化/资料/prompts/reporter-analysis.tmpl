@@ -1,0 +1,115 @@
+# reporter.tmpl 分析文档
+
+## 1. 原文件名
+
+- 嵌入路径：`prompts/reporter.tmpl`（由 `templates.go:18` 的 `//go:embed prompts/*.tmpl` 打包进二进制）
+- PromptType 常量：`PromptTypeReporter = "reporter"`（`templates/templates.go:47`）
+- 加载逻辑：`GetDefaultPrompts` 遍历 `prompts/` 目录，剥去 `.tmpl` 后缀得到 `"reporter"`，映射到 `PromptTypeReporter`（`templates.go:504-513`）
+
+## 2. 类型与用途
+
+- **A 类 Agent System Prompt**（AgentPrompts.System），见 `templates.go:563-566` 的 `Reporter: AgentPrompts{System: ..., Human: ...}` 结构。
+- 角色：**任务收尾评估器 / 报告生成器**。它不执行任何技术动作，只消费本次任务中早期产生的技术通道材料（专家 result 载荷、终端输出、搜索摘录、代码摘录、存储的知识），对照原始用户需求做独立判断，产出任务执行日志的收尾条目。
+- 与执行类 agent 的本质差异：唯一输出通道是 `report_result` 工具调用，不挂载 terminal/file/browser/search 等任何环境或检索工具（见第 5 节）。
+
+## 3. 配对关系
+
+与 `task_reporter.tmpl`（`PromptTypeTaskReporter`）配对，共同构成 Reporter agent 的 System + Human 双消息：
+
+| 角色 | 文件 | PromptType | 变量集 |
+|------|------|-----------|--------|
+| System | `reporter.tmpl` | `PromptTypeReporter` | `templates.go:316-325` |
+| Human | `task_reporter.tmpl` | `PromptTypeTaskReporter` | `templates.go:326-333` |
+
+二者在 `performTaskResultReporter` 中被组装成消息链（`performers.go:34-37`）：
+
+```
+[System: reporter.tmpl 渲染结果] + [Human: task_reporter.tmpl 渲染结果]
+```
+
+分工：`reporter.tmpl` 注入角色定义、评估方法论、语言策略、工具规则；`task_reporter.tmpl` 注入本次任务的具体数据（Task / Tasks / CompletedSubtasks / PlannedSubtasks / ExecutionState / ExecutionLogs）。
+
+## 4. 调用时机
+
+**所有子任务执行完毕后，由 Go 代码自动触发**，agent 自身无法主动调用。完整链路：
+
+1. `controller/task.go:318` — 子任务队列消费循环中，`st == nil`（队列为空 = 任务完成，`task.go:295-296`）跳出循环后，调用 `Provider.GetTaskResult(ctx, taskID)`。
+2. `provider.go:508` `GetTaskResult` — Reporter 的编排入口：
+   - 渐进式渲染 Human 模板（`task_reporter.tmpl`）：先填基础字段，若未达 `msgReporterSizeLimit`（100KB，`provider.go:39`）则依次追加 `ExecutionState`（primary agent 链摘要，`provider.go:563`）、`ExecutionLogs`（msg 日志摘要，`provider.go:575`）。
+   - 渲染 System 模板（`reporter.tmpl`）：`provider.go:583`。
+3. `provider.go:588` `performTaskResultReporter(ctx, &taskID, nil, systemReporterTmpl, reporterTmpl, tasksInfo.Task.Input)` — 真正发起 Reporter agent 链。
+4. `performers.go:23-92` 实现：构建只含 `report_result` 一个工具的 executor（`performers.go:51` `GetReporterExecutor`），走 `performAgentChain`，通过 `ReportResult` 回调（`performers.go:43-49`）捕获 `TaskResult`。
+
+特性：Reporter **每次新建消息链**（不走 `restoreChain`，无历史复用），是一次性收尾 agent。返回的 `TaskResult.Success` 直接决定任务最终状态（`task.go:325-329`：true → `Finished`，false → `Failed`）。
+
+## 5. 工具列表
+
+`reporter.tmpl` 中出现的 `{{.XxxToolName}}` 占位符共 2 个，但**只有 1 个是 reporter 可调用的真实工具**。区分如下：
+
+### 5.1 `{{.ReportResultToolName}}` — 唯一可调用工具
+
+| 项 | 内容 |
+|----|------|
+| 占位符变量 | `ReportResultToolName` |
+| 实际工具名 | `"report_result"`（`tools/registry.go:42`） |
+| 工具定义位置 | `tools/registry.go:180-184`，描述："Send the report result to the user with execution status and description" |
+| 参数 Schema | `tools/args.go:77-81` 的 `TaskResult` 结构：`success`(bool)、`result`(string，详细评估)、`message`(string，简明回顾) |
+| 工具类型 | `StoreAgentResultToolType`（`registry.go:127`） |
+| 是否 Barrier | **是**（`tools.go:1926` `barriers: map[string]struct{}{ReportResultToolName: {}}`）——调用后 agent 链立即终止 |
+| Handler 注册 | `GetReporterExecutor`（`tools.go:1909-1928`）将 `cfg.ReportResult` 绑定到该工具名 |
+| Handler 实现 | `performers.go:43-49` 的闭包：`json.Unmarshal(args, &taskResult)` 后返回 `"report result successfully processed"` |
+| 用途 | 提交 reporter 对整体任务的独立评估结论（成功/失败 + 详细报告 + 摘要），是 reporter 的唯一输出通道 |
+| 调用时机 | reporter 完成评估后**必须**调用一次；调用即标志 agent 链结束，捕获的 `TaskResult` 上抛给 controller 决定任务终态 |
+
+### 5.2 `{{.SummarizationToolName}}` — 历史标记名，**不可调用**
+
+| 项 | 内容 |
+|----|------|
+| 占位符变量 | `SummarizationToolName` |
+| 实际值 | `"execute_task_and_return_summary"`（`cast/chain_ast.go:18`，来自 `cast.SummarizationToolName`） |
+| 是否在 reporter executor 中注册 | **否**。`GetReporterExecutor`（`tools.go:1909-1928`）只注册 `ReportResultToolName`，reporter 无法调用此工具 |
+| 出现位置 | reporter.tmpl 的「摘要感知协议」段（识别段、禁止行为段） |
+| 用途 | 纯**只读标识**——告诉 reporter："你会在对话历史里看到对 `execute_task_and_return_summary` 的调用，那是系统生成的历史摘要标记，不是你要模仿或重复调用的工具" |
+| 调用时机 | 永远不会被 reporter 调用。该名称由 summarizer 子系统（`csum` 包）在压缩历史时生成（如 `csum/chain_summary.go:218` 等），reporter 仅消费其产物 |
+
+## 6. 非工具占位符
+
+`PromptVariables[PromptTypeReporter]`（`templates.go:316-325`）声明的非工具占位符共 6 个，全部在 `GetTaskResult`（`provider.go:521-537`）渲染 System 模板时注入：
+
+### 6.1 `{{.SummarizedContentPrefix}}`
+
+- **实际值**：`"**summarized content:**\n"`（`csum/chain_summary.go:48`，`SummarizedContentPrefix`）
+- **注入形态**：注入前做 `\n` → `\\n` 转义（`provider.go:531` `strings.ReplaceAll(..., "\n", "\\n")`），避免模板换行污染
+- **用途**：配合「摘要感知协议」，告诉 reporter 历史中「以这个前缀开头的 AI 消息」是摘要条目，需当作历史上下文解读而非模仿
+- **注入时机**：`GetTaskResult` 渲染 System 模板时（`provider.go:583`），值在 flow 全生命周期不变
+
+### 6.2 `{{.Cwd}}`
+
+- **实际值**：`docker.WorkFolderPathInContainer`（容器内工作目录，`/work`）（`provider.go:532`）
+- **用途**：在「任务材料」段指出 uploads/resources 在容器内的挂载根路径，供 reporter 评估涉及文件的子任务时定位材料
+- **注入时机**：`GetTaskResult` 渲染时；值由 docker 包常量决定，全局固定
+
+### 6.3 `{{.Lang}}`
+
+- **实际值**：`fp.language`（`provider.go:533`）
+- **用途**：任务执行日志（engagement-log）语言。reporter 的 `result`/`message` 必须用此语言撰写；同时明确「技术通道英文、日志通道 `Lang`」的双语策略
+- **注入时机**：`GetTaskResult` 渲染时；该语言在 flow 启动时由 `language_chooser` agent 一次性确定，整个任务期间固定不变
+
+### 6.4 `{{.N}}`
+
+- **实际值**：`4000`（`provider.go:534`，硬编码）
+- **用途**：最终报告（`result` + `message` 合计）的最大字符数上限，在 prompt 中多处作为硬约束出现
+- **注入时机**：`GetTaskResult` 渲染时
+
+### 6.5 `{{.ToolPlaceholder}}`
+
+- **实际值**：`providers.ToolPlaceholder` 常量（`provider.go:32`）= `"Execute operations via function invocation - textual responses are not acceptable for task completion."`
+- **用途**：prompt 末尾的强制工具调用提醒，约束 reporter 必须用 `report_result` 结构化调用交付结论，禁止纯文本模拟
+- **注入时机**：`GetTaskResult` 渲染时；该常量被所有 agent prompt 共用
+
+### 6.6 `{{.UserFiles}}`
+
+- **实际值**：`fp.userFilesListing()`（`provider.go:536`）的返回值——flow 的 `uploads/` 和 `resources/` 目录下文件的紧凑 XML 清单（由 `flowfiles.FileListingForPrompt` 生成，`provider.go:232-237`）
+- **用途**：让 reporter 在评估「涉及特定文件的子任务」时，能核对相应工作是否处理了这些材料
+- **注入时机**：`GetTaskResult` 渲染时
+- **边界行为**：若无文件，返回空字符串。reporter.tmpl 中以 `{{if .UserFiles}}...{{end}}`（reporter.tmpl:113-126）包裹整个「任务材料」段——空值时该段连同标题整体不渲染，`{{.UserFiles}}` 本身也在块内不会被输出

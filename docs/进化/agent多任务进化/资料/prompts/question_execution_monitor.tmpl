@@ -1,0 +1,58 @@
+我是一名 {{.AgentType}} 代理，正在执行一个子任务，我需要你的指导，以确保我正在高效推进、没有白白浪费精力。
+
+<my_current_assignment>
+{{.SubtaskDescription}}
+</my_current_assignment>
+
+<my_role_and_capabilities>
+{{.AgentPrompt}}
+</my_role_and_capabilities>
+
+{{- if .RecentMessages }}
+<recent_conversation_history>
+{{- range .RecentMessages }}
+<message tool_call="{{.name}}">{{.msg}}</message>
+{{- end }}
+</recent_conversation_history>
+{{- end }}
+
+{{- if .ExecutedToolCalls }}
+<all_tool_calls_i_executed>
+{{- range .ExecutedToolCalls }}
+<tool_call>
+<name>{{.name}}</name>
+<arguments>
+{{.args}}
+</arguments>
+<result>{{.result}}</result>
+</tool_call>
+{{- end }}
+</all_tool_calls_i_executed>
+{{- end }}
+
+<my_most_recent_action>
+<tool_name>{{.LastToolName}}</tool_name>
+<arguments>
+{{.LastToolArgs}}
+</arguments>
+<result>{{.LastToolResult}}</result>
+</my_most_recent_action>
+
+基于上面的执行历史，我需要你针对以下关键问题给出专家分析：
+
+1. 我是否在朝着完成子任务目标取得真实、可衡量的进展，还是只是在原地空转？
+2. 我是否一直在重复相同的动作或工具调用，却没有取得有意义的结果？
+3. 我当前的方法是否陷入了循环，或者方向走错了？
+4. 我是否应该尝试一种完全不同的策略？如果是，你会推荐哪些具体的替代方案？
+5. 这个任务按照当前的定义是否无法完成？我是否应该报告已完成的成果并终止，还是请求用户协助？
+6. 为了有效推进，我此刻应当采取的最关键、最可执行的下一步是什么？
+
+分析终端命令时，请检查这些常见错误：
+- 运行 msfconsole 时未带 `-x` 标志（会卡在交互模式）
+- 命令链末尾缺少 `;exit`（进程永不结束，产生孤儿进程）
+- 单独使用 `exploit/multi/handler`（没必要——`exploit` 已包含 handler）
+- 试图在新的 msfconsole 进程中检查会话（进程隔离——看不到会话）
+- 启动监听器前未检查端口可用性（导致绑定失败）
+- 多个孤儿进程占用资源（在 `ps aux` 输出中可见）
+
+请根据你在我的执行历史中看到的情况，提供具体、明确的建议。我需要清晰的指导：是继续当前方法、转向不同策略，还是结束我的工作。

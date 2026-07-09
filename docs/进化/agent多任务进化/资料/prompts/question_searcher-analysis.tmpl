@@ -1,0 +1,87 @@
+# question_searcher.tmpl 分析文档
+
+## 1. 原文件名
+
+`question_searcher.tmpl`，对应内部类型常量 `PromptTypeQuestionSearcher = "question_searcher"`（`backend/pkg/templates/templates.go:38`），注释标注为 *human input requesting information search*。
+
+- **PentAGI 源码路径**：`backend/pkg/templates/prompts/question_searcher.tmpl`
+- **注册处**：`templates/templates.go:217-221` 登记其合法占位符清单。
+- **登记点**：`templates/templates.go:543-546` 挂在 `AgentsPrompts` 的 `Searcher: { System, Human }` 下。
+- **DB 镜像**：`database/models.go:355` 同名常量；`server/models/prompts.go:29` 把它与 `PromptTypeSearcher` 作为一组暴露给前端做自定义渲染。
+
+## 2. 类型与用途
+
+**B 类 Agent Human Prompt**——精准信息检索专家（Searcher）Agent 的 human 侧消息模板。
+
+与 system 侧的 `searcher.tmpl`（系统提示，定义检索 agent 身份、授权框架、双语言通道策略、动作经济性原则、搜索优化策略、运行环境、可用工具规范与收尾要求）分工互补：system 模板解决"这个 agent 是谁、遵循什么检索纪律、能调哪些工具、如何组织答案存储"，本 human 模板解决"这次具体研究什么问题、检索范围限定在哪条任务/子任务上、最多花几次搜索动作"。
+
+这正是 B 类模板的意义——Human 消息承载的是**单次检索任务的具体查询 + 作用域 + 搜索预算**，而非 agent 的稳定身份。把易变的查询输入、当前任务锚点和搜索效率约束与稳定的角色/工具规范分离，避免单次检索上下文污染 system 消息造成角色漂移，同时缩小 prompt 注入面。
+
+## 3. 配对关系
+
+与 `searcher.tmpl`（`PromptTypeSearcher`）**严格成对**，在 `templates.go:543-546` 的 `Searcher: AgentPrompts{}` 注册处一并登记：
+
+```
+Searcher: AgentPrompts{
+    System: getPrompt(PromptTypeSearcher),          // searcher.tmpl
+    Human:  getPrompt(PromptTypeQuestionSearcher),  // 本模板
+}
+```
+
+两者必须同时存在：缺少 system 侧则 agent 丢失身份、双语言通道协议、动作经济性与工具规范；缺少 human 侧则每次检索无查询入口、无作用域锚点、无搜索预算约束。`server/models/prompts.go:29` 把两者作为一组暴露给前端做自定义渲染。
+
+> 与 memorist 的 `question_memorist.tmpl` 相比，本模板 user 侧 context 键数较少——仅 `Question`、`Task`、`Subtask` 三项，没有 `ExecutionDetails`。原因是 searcher 的检索作用域是"当前执行上下文"（handler 入参带入），不像 memorist 那样需要在同一次调用里解析"用户是否显式指定了其它任务/子任务"的复杂决策轨迹。
+
+## 4. 调用时机
+
+调用链（自上而下，已逐段核验）：
+
+1. **任意 agent 决策委派**：调用方 agent 在各自 system prompt 中声明了 `SearchToolName`（工具名 `search`，`tools/registry.go:31`），需要外部/记忆信息时调用它。工具参数为 `tools.ComplexSearch`（`tools/args.go:108`），其 `Question` 字段（`args.go:109`）的 jsonschema 描述约定为 *Technical-channel payload — research question for the researcher specialist with full context, target content type, and required structure. Always written in English; never translated.* 即**强制英文、不翻译**的研究问题载荷，需含完整上下文、目标内容类型与所需结构。
+2. **handler 派发**：SearchToolName 在七个 executor 中均绑定到 `cfg.Searcher`（`tools/tools.go:854` Assistant、`:1085` Primary、`:1157` Installer、`:1265` Coder、`:1390` Pentester、`:1660` Generator、`:1728` Refiner），故任一持有该工具的 agent 调用 `search` 都路由到 searcher handler。handler 分两型：
+   - 子任务级：`providers/handlers.go:688` `GetSubtaskSearcherHandler`（taskID、subtaskID 均可解析，检索可锚定到具体子任务）；
+   - 任务级：`providers/handlers.go:780` `GetTaskSearcherHandler`（仅 taskID，无子任务作用域）。
+   外层执行器 `json.Unmarshal` 解析出 `tools.ComplexSearch`（`handlers.go:766/857`），转交内部 `searcherHandler`（`handlers.go:699/791`）。
+3. **上下文构造**：`handlers.go:700-718`（子任务型）/ `handlers.go:792-809`（任务型）构造 `searcherContext`，分为 `"user"` 与 `"system"` 两套字典。本模板用 `"user"` 这一套（`handlers.go:701-705` / `handlers.go:793-796`），含 `Question`/`Task`/`Subtask` 三键。
+4. **渲染 human 模板**：`handlers.go:734` / `handlers.go:824` `RenderTemplate(PromptTypeQuestionSearcher, searcherContext["user"])` → 得到 `userSearcherTmpl`。紧接着 `handlers.go:739` / `handlers.go:829` 渲染 system 模板得到 `systemSearcherTmpl`。两次渲染包在同一次 langfuse evaluator span 内，用于审计渲染质量。
+5. **执行**：`handlers.go:753` / `handlers.go:843` 调 `performSearcher(ctx, taskID, subtaskID, systemSearcherTmpl, userSearcherTmpl, search.Question)`（`performers.go:693`）。注意：与 pentester 不同，`performSearcher` **无 `fp.planning` 计划增强分支**——human 文本原样进入消息链，不做任务拆解重写。
+6. **建链**：`performers.go:728-730` `restoreChain` 把 `systemSearcherTmpl` 作为 system 消息、`userSearcherTmpl` 作为 **human 消息**注入 searcher 消息链（`database.MsgchainTypeSearcher`），随后 `performers.go:735` `performAgentChain` 驱动 Searcher Agent 执行。
+
+一句话：**调用方 agent 调 `SearchToolName` → handlers.go 解析当前任务作用域 → 渲染本模板 → 作为 human 消息送给 Searcher Agent**。
+
+> 范围修正：调用方不限于 primary_agent。SearchToolName 在 Assistant / Primary / Installer / Coder / Pentester / Generator / Refiner 七个 executor 中均绑定到 searcher handler，任何一个在当前上下文不足以决策、需要外部信息或过往检索记忆时都可委派给 searcher。primary_agent 只是其中之一。
+
+## 5. 工具列表
+
+**本模板不声明任何工具，也不含任何工具名占位符。**
+
+这是有意为之的分工：工具规范全部声明在配对的 system 模板 `searcher.tmpl` 中（`SearchResultToolName` / `SearchAnswerToolName` / `StoreAnswerToolName` / `SummarizationToolName` 等），实际可调工具则由 Searcher executor 在 `tools/tools.go:1460` `GetSearcherExecutor` 通过 `SearcherExecutorConfig` 注入（外部搜索引擎、浏览器、答案向量存储的检索/存储、向 memorist 委派、收尾工具等）。
+
+工具规范属于"稳定身份信息"，留在 system 侧；本模板只承载易变的查询内容、作用域与搜索预算，因此**零工具声明**。这也使本模板可被任意调用方复用而不受其工具集影响。
+
+## 6. 非工具占位符
+
+`templates.go:217-221` 登记本模板允许的占位符清单共三项：`Question`、`Task`、`Subtask`。全部由 `handlers.go:701-705`（子任务型）/ `handlers.go:793-796`（任务型）写入 user 侧字典，渲染时机在 `handlers.go:734` / `handlers.go:824`（收到 `ComplexSearch` 之后、调 `performSearcher` 之前的一次性实例化）。
+
+### `{{.Question}}`
+
+- **用途**：承载本次检索的**研究问题**——调用方 agent 向 Searcher Agent 派发的"检索说明书"。模板在 `<question_searcher_context>` > `<user_question>` 内引用，是整段检索的语义核心，决定 searcher 要研究什么、找什么类型的内容。
+- **注入信息**：来自 `tools.ComplexSearch.Question`（`tools/args.go:109`）。其 jsonschema 描述约定为 *Technical-channel payload — research question for the researcher specialist with full context, target content type, and required structure. Always written in English; never translated.* 即由调用方 agent 生成、**强制英文、不翻译**，需含完整上下文、目标内容类型与所需结构的技术通道载荷。
+- **注入时机**：`handlers.go:702`（子任务型）/ `handlers.go:794`（任务型）从 `search.Question` 取值写入 user context，`handlers.go:734` / `handlers.go:824` 渲染时填充。模板内**无条件输出**（无 `{{if}}` 守卫），因为它是必填字段。
+
+### `{{.Task}}`
+
+- **用途**：把**当前执行上下文所属的任务**的结构化详情注入模板，供 searcher 用作检索查询优化的锚点。模板在 `<current_task>` 标签内展开其 `ID`/`Status`/`Title`，并在 `<instruction>` 内配一条引导语："使用任务上下文（ID xxx）来优化你的搜索查询并聚焦相关信息"，让 searcher 据此把检索范围收窄到该任务的语境。
+- **注入信息**：来自 `*database.Task` 指针。
+  - 子任务型：`handlers.go:689` 调 `getTaskAndSubtask(ctx, taskID, subtaskID)`，当 `taskID != nil` 时 `handlers.go:55-61` 调 `fp.db.GetTask` 取回当前任务记录。
+  - 任务型：`handlers.go:781` 直接 `fp.db.GetTask(ctx, taskID)` 取回。
+  
+  注意：这里注入的是**当前任务**（handler 入参 `taskID` 所指），而非用户在工具调用里显式指定的其它任务——Searcher 的工具参数 `ComplexSearch` 只有 `Question`，不含 `TaskID`。这与 memorist 的 `Task`（用户可显式指定任意任务）语义不同。
+- **注入时机**：handler 初始化阶段决定，`handlers.go:703`（子任务型）/ `handlers.go:795`（任务型）写入 user context，`handlers.go:734` / `handlers.go:824` 渲染时条件填充。当 `taskID` 为 nil（如 assistant 在无具体任务上下文中调用）时 `Task` 为 nil，模板内 `{{if .Task}}` 块整体跳过。
+
+### `{{.Subtask}}`
+
+- **用途**：把**当前执行上下文所属的子任务**的结构化详情注入模板，提供比 Task 更细粒度的检索锚点。模板在 `<current_subtask>` 标签内展开其 `ID`/`Status`/`Title`，并配一条引导语："结合子任务详情（ID xxx）进一步细化你的搜索范围"，用于把检索锁定到某个子任务分支。
+- **注入信息**：来自 `*database.Subtask` 指针。仅子任务型 handler（`handlers.go:688`）经 `getTaskAndSubtask` 在 `subtaskID != nil` 时（`handlers.go:62-68`）调 `fp.db.GetSubtask` 取回当前子任务记录。任务型 handler（`handlers.go:780`）**从不注入 Subtask**，其 user context 字典里没有 `"Subtask"` 键。同样地，这是**当前子任务**而非用户显式指定的其它子任务。
+- **注入时机**：子任务型 handler 初始化阶段决定，`handlers.go:704` 写入 user context，`handlers.go:734` 渲染时条件填充。当 `subtaskID` 为 nil 时 `Subtask` 为 nil，模板内 `{{if .Subtask}}` 块走 `{{else}}` 分支——输出回退引导语"使用所有子任务搜索相关信息"，使搜索作用域说明始终存在，而非出现空标签。这是本模板一个值得注意的设计：**作用域守卫带 `{{else}}` 回退**，保证子任务作用域指令在缺省时仍有明确语义，维持 XML 结构干净。
+
+> 设计要点：三个占位符中 `Question` 是检索语义（必填、无条件输出），`Task`/`Subtask` 是检索作用域锚点（来自当前执行上下文、可缺省）。三者共同解决 searcher 检索的"查什么、在哪查"问题，而"怎么查、用什么工具"全部留给 system 侧 `searcher.tmpl`。模板用 `{{if}}` 条件块保证 Task/Subtask 缺省时不输出空标签，并用 `{{else}}` 为 Subtask 缺省提供回退策略，是 B 类 human 模板里"作用域软约束"的典型实现。

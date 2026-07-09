@@ -1,0 +1,127 @@
+# primary_agent.tmpl 分析文档
+
+## 1. 原文件名
+
+`primary_agent.tmpl`，源码注册名 `PromptTypePrimaryAgent`（`templates/templates.go:29`，字符串值 `"primary_agent"`，注释 "orchestrates subtask execution using AI agents"）。
+
+## 2. 类型与用途
+
+**A 类 Agent System Prompt——子任务编排器（团队编排管理器），是整条 agent 链的顶层驱动者。**
+
+- 在 `AgentsPrompts` 结构中类型为 `AgentPrompt`（**仅 System，无 Human**，`templates/templates.go:461`），装配见 `templates.go:525-527`。这一点是它与所有"执行型子 agent"（Pentester / Coder / Installer / Searcher / Memorist / Adviser，均为 `AgentPrompts` 即 System+Human）的根本区别。
+- 用途：当一个 Flow 的某条 Task 被分解为若干 SubTask 后，**每个 SubTask 执行时都由本模板渲染出的 system prompt 驱动一个独立 LLM 链**。它不亲自执行命令、不亲自写代码，而是作为"首要任务编排者"，把子任务目标拆解为可管理的工作单元，委派给 6 位专家（searcher / pentester / developer / adviser / memorist / installer），管理整体工作流，最终通过 `done` 工具收尾交付子任务结果。
+- 设计特征：
+  - **纯委派、无直接环境访问**：注册的工具集里**没有** `terminal` / `file` / `browser`（见第 5 节），一切"动手"操作都必须通过委派工具转交专家。这与 coder / pentester / installer 等子 agent（自带 terminal/file）形成鲜明对照。
+  - **双通道语言策略**：`message` 日志字段走任务语言（`{{.Lang}}`），所有委派 `question` 及导师技术摘录走英语。
+  - **受摘要感知协议约束**：识别 `{{.SummarizationToolName}}` 与 `{{.SummarizedContentPrefix}}` 两种历史摘要形态，禁止自身复现。
+  - **受高级导师（Mentor）监督**：通过 `{{.AdviceToolName}}` 主动咨询，被动接收 `<mentor_analysis>` 增强响应。
+  - **可选客户交互**：受 `{{.AskUserEnabled}}` 控制整段"客户交互协议"是否渲染，启用后多出 `{{.AskUserToolName}}` 工具。
+
+## 3. 配对关系
+
+**无配对——不存在 `question_primary_agent.tmpl`。**
+
+这是本模板最特殊的一点。证据链：
+
+1. **结构层面**：`AgentsPrompts.PrimaryAgent` 的类型是 `AgentPrompt`（`templates.go:461`，只有 `System Prompt` 一个字段），而 Pentester / Coder / Installer / Searcher / Memorist / Adviser 的类型是 `AgentPrompts`（`templates.go:463-468`，含 `System` + `Human` 两个字段）。`AgentPrompt` 结构体本身就**不含 Human 字段**（`templates.go:451-453`）。
+2. **PromptType 常量表**：`templates.go:28-68` 中有 `PromptTypeQuestionPentester` / `PromptTypeQuestionCoder` / ... / `PromptTypeQuestionAdviser`，但**没有** `PromptTypeQuestionPrimaryAgent`。
+3. **运行时注入**：子任务描述不是来自配对模板，而是**直接取数据库字段**注入。`PrepareAgentChain` 调用 `restoreChain(ctx, &taskID, &subtaskID, optAgentType, msgChainType, systemAgentTmpl, subtask.Description)`（`providers/provider.go:662-664`），其中 `subtask.Description` 作为 `humanPrompt` 参数。`restoreChain` 内部把它包成一条 `ChatMessageTypeHuman` 消息追加到链尾（`providers/helpers.go:509-511` fallback 路径 / `:546` AppendHumanMessage 路径）。
+4. **执行上下文也注入 system prompt**：完整的 Task/SubTask 树（Flow、当前 Task、当前 SubTask、已完成兄弟、计划中兄弟）通过 `{{.ExecutionContext}}` 占位符**注入到 system prompt 内部**（`provider.go:649`），而非作为独立 human 消息。这进一步说明本模板是"自包含"的——角色、协议、本次任务上下文全部塞进一条 system 消息。
+
+> 一句话：**其他 agent 是"system 模板 + human 配对模板"双文件结构；primary_agent 是"system 模板内嵌执行上下文 + 数据库子任务描述当 human"的单模板结构**。子任务描述即"客户当前的子任务"，模板末尾那句"你正在处理客户当前的子任务，该任务将在下一条消息中送达"正是指这条 human 消息。
+
+## 4. 调用时机
+
+**调用链路：Flow 执行控制器 → `PrepareAgentChain`（渲染 + 建链）→ `PerformAgentChain`（驱动 LLM 多轮）。每个子任务执行一次。**
+
+两个方法都暴露在 `FlowProvider` 接口上（`providers/provider.go:99-100`），由子任务调度器逐个 SubTask 调用。
+
+### 4.1 PrepareAgentChain（建链，`provider.go:601-671`）
+
+1. 取 SubTask（`:616`），调 `prepareExecutionContext`（`:622`，见 4.3）生成执行上下文并写回 `subtask.Context`（`:628`）；
+2. **本模板占位符在此集中注入**（`:637-656`），渲染出 `systemAgentTmpl`；
+3. `restoreChain(...)`（`:662`）尝试复用 DB 中同 Flow/Task/Type 的历史链（`MsgchainTypePrimaryAgent`），无则 fallback 为 `[system, human]` 两条消息；
+4. 返回 `msgChainID`。
+
+- `optAgentType = pconfig.OptionsTypePrimaryAgent`（`:605`）
+- `msgChainType = database.MsgchainTypePrimaryAgent`（`:606`）
+
+### 4.2 PerformAgentChain（执行，`provider.go:673-889`）
+
+1. 从 DB 取回 msgChain 并反序列化（`:689-699`）；
+2. **取 7 个委派 handler**（`:701-735`）：Adviser、Coder、Installer、Memorist、Pentester、Searcher（通过 `Get*Handler` 系列）；
+3. **构造 `PrimaryExecutorConfig`**（`:761-871`），关键字段：
+   - `Barrier`：**内联闭包**（`:770-869`），处理两个 barrier 工具：
+     - `done`（FinalyToolName）：反序列化 `Done`，写回 `subtask.Result`（`:810`），发一条 `MsglogTypeReport`（`:824`），据 `done.Success` 设 `PerformResultDone/Error`；
+     - `ask`（AskUserToolName）：设 `PerformResultWaiting`，结束当前链，等待用户输入；
+   - 其余 6 个 handler 指向第 2 步取到的子 agent handler；
+4. `fp.executor.GetPrimaryExecutor(cfg)`（`:873`）拿到带完整工具集的 executor（工具集见第 5 节）；
+5. `performAgentChain`（`:879`）真正驱动 LLM 多轮，直到子 agent 调 barrier 工具（`done`/`ask`）退出；
+6. 返回 `PerformResult`（Done / Waiting / Error）。
+
+### 4.3 prepareExecutionContext（执行上下文来源，`helpers.go:702-762`）
+
+- 取 tasksInfo + subtasksInfo（`:714-736`），定位当前 SubTask 在兄弟序列中的位置（已完成在前、计划中在后）；
+- 渲染 **`PromptTypeFullExecutionContext`**（完整版，`helpers.go:738`，区别于子 agent 用的 `PromptTypeShortExecutionContext`）；
+- 过一遍 `summarizeHandler`（`:749-750`）压缩超长内容；
+- 结果即 `{{.ExecutionContext}}` 的注入值。
+
+### 4.4 用户续接（ask 之后）
+
+当 barrier 闭包命中 `ask`，返回 `PerformResultWaiting`。用户回答后，调度器调 `PutInputToAgentChain`（`provider.go:891-907`），内部用 `updateMsgChainResult` 把回答塞回 `ask` 工具的 Tool 响应位（`:904`），再重新进入 `PerformAgentChain` 续跑。
+
+> 一句话：**每个 SubTask 触发一次 Prepare→Perform 循环；primary_agent 在链里纯靠委派工具调度专家，直到调 `done`（收尾）或 `ask`（挂起等用户）退出**。
+
+## 5. 工具列表
+
+固定工具集（7 个，注册于 `tools/tools.go:1069-1077`）+ 条件工具（1 个，`:1093-1097`）+ 1 个伪工具名（仅出现在 prompt 文案）。
+
+### 5.1 固定工具集
+
+| 占位符 | 工具实际名称 | 工具类型 | 代码位置 | 用途 | 调用时机 |
+|---|---|---|---|---|---|
+| `{{.FinalyToolName}}` | `done` | `BarrierToolType` | 常量 `registry.go:12`；定义 `registry.go:382-386`；参数 `Done{Success, Result, Message}`（`args.go:87`）；handler 在 `provider.go:770-869` 内联注入（`tools.go:1079`） | **收尾**：把子任务结果（含 success 标志、完整 `result`、简明 `message`）写回系统，结束本子任务链 | 子任务完成（success=true）或主动放弃（success=false）时；**barrier 工具**（`tools.go:1087-1089`），调用即终止主循环 |
+| `{{.AdviceToolName}}` | `advice` | `AgentToolType` | 常量 `registry.go:20`；定义 `registry.go:372-376`；参数 `AskAdvice{Question, Code, Output, Message}`（`args.go:101`）；handler `cfg.Adviser`（`tools.go:1080`）← `GetAskAdviceHandler`（`provider.go:701`） | 委派给 Adviser 子 agent，向高级导师提问（含可选 `code`/`output` 技术片段） | 遇到战略 / 架构难题、方法选择困境，或需导师纠偏时 |
+| `{{.CoderToolName}}` | `coder` | `AgentToolType` | 常量 `registry.go:16`；定义 `registry.go:352-356`；参数 `CoderAction{Question, Message}`（`args.go:223`）；handler `cfg.Coder`（`tools.go:1081`）← `GetCoderHandler`（`provider.go:707`） | 委派给 Coder 子 agent，编写 exploit / 载荷 / 辅助脚本 | 需要"写代码"时 |
+| `{{.MaintenanceToolName}}` | `maintenance` | `AgentToolType` | 常量 `registry.go:14`；定义 `registry.go:342-346`；参数 `MaintenanceAction{Question, Message}`（`args.go:213`）；handler `cfg.Installer`（`tools.go:1082`）← `GetInstallerHandler`（`provider.go:713`） | 委派给 Installer 子 agent，在容器内装依赖、配工具链、准备环境 | 需要环境配置 / 工具安装时 |
+| `{{.MemoristToolName}}` | `memorist` | `AgentToolType` | 常量 `registry.go:21`；定义 `registry.go:332-336`；参数 `MemoristAction{Question, TaskID?, SubtaskID?, Message}`（`args.go:153`）；handler `cfg.Memorist`（`tools.go:1083`）← `GetMemoristHandler`（`provider.go:719`） | 委派给 Memorist 子 agent，从历史任务向量库检索过往方案 | 当前上下文不足、需要"以前是否解决过类似问题"时 |
+| `{{.PentesterToolName}}` | `pentester` | `AgentToolType` | 常量 `registry.go:18`；定义 `registry.go:362-366`；参数 `PentesterAction{Question, Message}`（`args.go:233`）；handler `cfg.Pentester`（`tools.go:1084`）← `GetPentesterHandler`（`provider.go:725`） | 委派给 Pentester 子 agent，执行安全测试 / 漏洞利用 / 侦察攻击 | 需要实际"动手打"目标时 |
+| `{{.SearchToolName}}` | `search` | `AgentToolType` | 常量 `registry.go:31`；定义 `registry.go:197-204`；参数 `ComplexSearch{Question, Message}`（`args.go:108`）；handler `cfg.Searcher`（`tools.go:1085`）← `GetSubtaskSearcherHandler`（`provider.go:731`） | 委派给 Searcher 子 agent，调外部搜索引擎 + 长期记忆做复杂检索 | 需要情报收集 / 技术调研 / 公开资料时 |
+
+### 5.2 条件工具集
+
+| 占位符 | 工具实际名称 | 工具类型 | 代码位置 | 启用条件 | 用途 / 调用时机 |
+|---|---|---|---|---|---|
+| `{{.AskUserToolName}}` | `ask` | `BarrierToolType` | 常量 `registry.go:13`；定义 `registry.go:377-381`；参数 `AskUser{Message}`（`args.go:83`）；handler `cfg.Barrier`（`tools.go:1095`，复用 done 的 barrier 闭包） | `fte.cfg.AskUser == true`（`tools.go:1093`） | **向客户提问**。当关键信息缺失且无法通过其他专家获取时调用；**barrier 工具**（`tools.go:1096`），调用即挂起链、返回 `PerformResultWaiting`，等用户经 `PutInputToAgentChain` 续接 |
+
+### 5.3 伪工具名（仅出现在 prompt 文案，不可调用）
+
+| 占位符 | 字面值 | 代码位置 | 性质 |
+|---|---|---|---|
+| `{{.SummarizationToolName}}` | `execute_task_and_return_summary` | `cast/chain_ast.go:18` | **不是注册工具**（不在 `GetPrimaryExecutor` 的 definitions 里），是 chainAST 摘要系统使用的占位名。摘要历史时系统会用这个名字伪装一次"工具调用"以保留结构。本模板文案引用它的目的是让编排器**识别历史摘要中的该标记**，并明令"禁止自行调用、禁止用纯文本模仿其格式"（见模板"摘要感知协议"段）。 |
+
+> **工具集设计要点**：primary_agent 的 7 个固定工具**全部是委派型**（6 个 `AgentToolType` + 1 个 `done` 收尾），没有任何 `EnvironmentToolType`（terminal/file）或 `SearchNetworkToolType`（google/browser）工具。它是纯粹的"调度中枢"——所有动手能力都外包给专家，自己只做"拆解 → 委派 → 整合 → 收尾"。这与模板"团队编排管理器"的定位、以及"仅在当前子任务范围内工作""不要尝试执行待办列表中规划好的子任务"的边界约束完全一致。
+
+## 6. 非工具占位符
+
+注册顺序见 `templates/templates.go:71-90`，**全部由 `PrepareAgentChain` 在 `provider.go:637-656` 集中注入**（注意：注入点不在 `handlers.go`，因为 primary_agent 是顶层链驱动者，不被其他 agent 通过工具调用，没有 handler 层）。
+
+| 占位符 | 数据来源 | 注入代码位置 | 注入信息 | 用途 |
+|---|---|---|---|---|
+| `{{.AskUserEnabled}}` | `fp.askUser` | `provider.go:648` | bool | **"客户交互协议"整段的条件开关**。true 时渲染整段 `<customer_communication>` 协议（约 11 行）并在语言策略中追加"客户提问"措辞；同时控制 `ask` 工具是否注册到 executor（`tools.go:1093`）。false 时整段消失、工具不可用。这是本模板除 `{{if .UserFiles}}` 外唯一的整段条件分支 |
+| `{{.SummarizedContentPrefix}}` | `csum.SummarizedContentPrefix`（原始值 `"**summarized content:**\n"`，`csum/chain_summary.go:48`） | `provider.go:646`（注入前 `strings.ReplaceAll(..., "\n", "\\n")` 转义） | 转义后的前缀字符串 | 摘要感知协议的识别标记：模板指示编排器把以此前缀开头的 AI Completion 视为历史摘要，禁止自身复现该前缀 |
+| `{{.ExecutionContext}}` | `executionContext` ← `fp.prepareExecutionContext(ctx, taskID, subtaskID)`（`helpers.go:702`） | `provider.go:649` | 渲染自 **`PromptTypeFullExecutionContext`**（完整版，`helpers.go:738`）再经 `summarizeHandler` 压缩的结构化 XML；含当前 Flow/Task/SubTask 的 ID/状态/标题/描述、已完成与计划中的兄弟子任务 | **本模板的核心上下文注入**。让编排器知道"本次委派发生在哪条任务支线上、上下游做过什么、还计划做什么"，从而对齐当前 SubTask 目标、避免重复劳动。这是 primary_agent 无需配对 human 模板的关键——任务上下文已内嵌进 system prompt |
+| `{{.Cwd}}` | `docker.WorkFolderPathInContainer`（值 `"/work"`，`docker/client.go:31`） | `provider.go:650` | 容器内工作目录绝对路径 | 模板用 `{{if .UserFiles}}` 包住的"任务材料"段用它拼接 `{{.Cwd}}/uploads`（只读投递文件）和 `{{.Cwd}}/resources`（只读参考材料）、`{{.Cwd}}/`（可写输出目录）。注意：编排器自身**没有 terminal/file 工具**，这些路径主要供它**在委派 question 中转告专家**使用 |
+| `{{.Lang}}` | `fp.language` | `provider.go:651` | 任务工作语言代码（如 `zh` / `en`） | **双通道语言策略的锚点**：所有 `message` 日志条目按此语言书写，所有委派 `question` 及导师技术摘录保持英语。模板在"语言策略""完成要求"两段多次引用以反复强调收尾 message/result 的语言归属 |
+| `{{.DockerImage}}` | `fp.image` | `provider.go:652` | 容器镜像名（如 `kalilinux/kali-rolling`） | 告知编排器所有工作在哪个镜像基底上执行（模板"执行管理"段："所有工作都在使用 `{{.DockerImage}}` 镜像的 Docker 容器内执行"）。编排器借此判断专家执行的发行版环境，间接影响其委派描述中对安装语法的提示 |
+| `{{.CurrentTime}}` | `getCurrentTime()`（`helpers.go`） | `provider.go:653` | 格式化时间字符串 | 注入执行时间戳，供编排器判断时间敏感决策、与执行上下文中的子任务状态时间对齐 |
+| `{{.ToolPlaceholder}}` | 常量 `ToolPlaceholder`（`providers/provider.go:32`，值 `"Execute operations via function invocation - textual responses are not acceptable for task completion."`） | `provider.go:654` | 固定约束文案 | 追加在 system prompt **最末尾**的通用硬性约束，强制 LLM 走结构化工具调用而非纯文本模拟；与所有其他 agent 共用同一常量 |
+| `{{.UserFiles}}` | `fp.userFilesListing()`（`provider.go:232-237`，调 `flowfiles.FileListingForPrompt`） | `provider.go:655` | uploads/ 与 resources/ 目录的 XML 文件清单（只读）；无任何文件时返回空字符串 | 模板用 `{{if .UserFiles}}` 包住整段"任务材料"协议：**无附件则整段不渲染**；有附件时告知编排器这批文件在容器内的只读路径与访问规则，要求它在委派专家时传递完整绝对路径 |
+
+**关键设计观察：**
+
+- **无配对模板的代价由 ExecutionContext 承担**：其他子 agent 的"本次具体任务"由配对 human 模板（承载 `{{.Question}}`）注入；primary_agent 没有配对模板，于是把**完整任务树**（FullExecutionContext）塞进 system prompt 的 `{{.ExecutionContext}}`，再由 `restoreChain` 把 `subtask.Description` 作为一条 human 消息追加。两套机制叠加，确保编排器既看到全局（任务树），又聚焦当前（子任务描述）。
+- **占位符注入点在 provider.go 而非 handlers.go**：所有子 agent 的占位符注入都在 `handlers.go` 的 `Get*Handler` 里（因为它们被上层 agent 通过工具调用触发）；primary_agent 是**链的顶层驱动者**，没有上层 handler，故注入逻辑直接落在 `PrepareAgentChain`（`provider.go:637-656`）。这是"谁调用谁注入"原则的体现。
+- **`{{.AskUserEnabled}}` 是唯一的协议级开关**：其他占位符都是"填空"，唯独它控制整段"客户交互协议"的生灭 + `ask` 工具的注册，使同一份模板同时服务于"允许 / 禁止客户交互"两种部署形态。
+- **纯委派工具集 = 编排器定位的自证**：7 个固定工具里 0 个环境工具、0 个网络工具，全部是"把活派给别人"或"收尾退出"。工具集本身就是"团队编排管理器"这一角色的硬编码实现——它不能动手，只能调度。这与模板文案"仅当某位专家明显更适合该任务时才委派""专注于产出能让后续子任务成功的结果"形成闭环约束。
+- **`{{.ToolPlaceholder}}` 与 `{{.SummarizationToolName}}` 构成防伪造双重锁**：前者从正面要求"必须用结构化工具调用"，后者从反面列出"历史摘要的两种形态（伪工具调用 + 前缀 Completion）"并禁止复现，二者协同防止 LLM 用纯文本"假装"执行过工具。

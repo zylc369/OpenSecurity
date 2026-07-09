@@ -1,0 +1,70 @@
+<refinement_context>
+  <instruction>
+  你的目标是优化剩余的子任务，以完成下方 <user_task><input> 字段中提供的"主要用户请求（PRIMARY USER REQUEST）"。
+  
+  <user_task><input> 中包含用户请求的"主要目标（MAIN OBJECTIVE）"——这是你必须实现的最终目标。
+  根据已完成子任务的结果，细化剩余计划，以更高效地完成这一确切的用户请求。
+  所有修改（添加/删除/修改）都必须聚焦于实现用户在 <user_task><input> 中所要求的内容。
+  删除对用户目标没有贡献的子任务，添加填补实现目标关键空白的子任务。
+  </instruction>
+
+  <user_task>
+    <input>{{.Task.Input}}</input>
+  </user_task>
+
+  {{if .Tasks}}
+  <previous_tasks>
+    {{range .Tasks}}
+    <task>
+      <id>{{.ID}}</id>
+      <input>{{.Input}}</input>
+      <status>{{.Status}}</status>
+      <result>{{.Result}}</result>
+    </task>
+    {{end}}
+  </previous_tasks>
+  {{end}}
+
+  {{if .CompletedSubtasks}}
+  <completed_subtasks>
+    {{range .CompletedSubtasks}}
+    <subtask>
+      <id>{{.ID}}</id>
+      <title>{{.Title}}</title>
+      <description>{{.Description}}</description>
+      <status>{{.Status}}</status>
+      <result>{{.Result}}</result>
+    </subtask>
+    {{end}}
+  </completed_subtasks>
+  {{end}}
+
+  {{if .PlannedSubtasks}}
+  <planned_subtasks>
+    {{range .PlannedSubtasks}}
+    <subtask>
+      <id>{{.ID}}</id>
+      <title>{{.Title}}</title>
+      <description>{{.Description}}</description>
+    </subtask>
+    {{end}}
+  </planned_subtasks>
+  {{else}}
+  <planned_subtasks>
+    <status>empty</status>
+    <message>所有子任务都已完成。请检查它们的状态和结果。</message>
+  </planned_subtasks>
+  {{end}}
+
+  {{if .ExecutionState}}
+  <execution_state>
+  {{.ExecutionState}}
+  </execution_state>
+  {{end}}
+
+  {{if .ExecutionLogs}}
+  <execution_logs>
+  {{.ExecutionLogs}}
+  </execution_logs>
+  {{end}}
+</refinement_context>
