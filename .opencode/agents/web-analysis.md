@@ -3,6 +3,8 @@ description: Web 安全分析 — 输入 URL 或源码目录和分析需求，�
 mode: all
 buwai-extension-id: web-analysis
 permission:
+  task:
+    "*": allow
   external_directory:
     ~/bw-security-analysis/**: allow
     ~/Downloads/**: allow

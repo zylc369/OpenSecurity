@@ -3,6 +3,8 @@ description: 二进制逆向分析 — 输入目标文件和分析需求，自�
 mode: all
 buwai-extension-id: binary-analysis
 permission:
+  task:
+    "*": allow
   external_directory:
     ~/bw-security-analysis/**: allow
     ~/Downloads/**: allow

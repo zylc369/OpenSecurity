@@ -3,6 +3,8 @@ description: 移动应用逆向分析 — 输入 APK/IPA 和分析需求，自�
 mode: all
 buwai-extension-id: mobile-analysis
 permission:
+  task:
+    "*": allow
   external_directory:
     ~/bw-security-analysis/**: allow
     ~/Downloads/**: allow

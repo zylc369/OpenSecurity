@@ -3,6 +3,8 @@ description: AI 安全分析 — 输入 LLM 应用 URL/源码/模型名称，自
 mode: all
 buwai-extension-id: ai-security-analysis
 permission:
+  task:
+    "*": allow
   external_directory:
     ~/bw-security-analysis/**: allow
     ~/Downloads/**: allow

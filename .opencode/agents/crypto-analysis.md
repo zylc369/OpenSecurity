@@ -3,6 +3,8 @@ description: 密码学分析 — 输入密码学题目（脚本/参数/密文）
 mode: all
 buwai-extension-id: crypto-analysis
 permission:
+  task:
+    "*": allow
   external_directory:
     ~/bw-security-analysis/**: allow
     ~/Downloads/**: allow

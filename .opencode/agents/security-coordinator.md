@@ -3,6 +3,8 @@ description: 安全分析任务编排 — 自动分析复合安全任务，分�
 mode: primary
 buwai-extension-id: security-coordinator
 permission:
+  task:
+    "*": allow
   external_directory:
     ~/bw-security-analysis/**: allow
     ~/Downloads/**: allow
