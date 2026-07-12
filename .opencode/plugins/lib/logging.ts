@@ -53,9 +53,9 @@ function writeLog(logFile: string, msg: string): void {
  * 调 getTaskDirRaw（纯函数，不回调 debugLog），彻底消除循环依赖。
  *
  * 注意：getTaskDirRaw 返回的 error 在此处故意忽略——debugLog 是日志路由层，
- * 只关心 path 用于决定写入位置。error 的诊断由业务层 getTaskDir（task-session.ts）负责记录。
+ * 只关心 path 用于决定写入位置。error 的诊断由业务层 getTaskDir 负责记录。
  */
-export function debugLog(msg: string, sessionID?: string): void {
+export function debugLog(msg: string, sessionID?: string | null): void {
   if (sessionID) {
     const result = getTaskDirRaw(sessionID);
     if (result.path) {

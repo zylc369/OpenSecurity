@@ -1,6 +1,7 @@
-import { writeFileSync, existsSync } from "fs";
+import { writeFileSync, readFileSync, statSync, existsSync, openSync, closeSync } from "fs";
 import { join, dirname, delimiter } from "path";
 import { tmpdir } from "os";
+import * as yaml from "js-yaml";
 import type { Plugin } from "@opencode-ai/plugin";
 import type { Event } from "@opencode-ai/sdk";
 import {
@@ -19,6 +20,9 @@ import {
   AGENT_SECURITY_ANALYSIS_EVOLVE,
   AGENT_SECURITY_COORDINATOR,
   SECURITY_AGENTS,
+  AGENTS_WITH_DELEGATION_RULES,
+  AGENT_SEARCHER,
+  AGENT_MEMORIST,
   AGENT_SCRIPT_DIRS,
   SHARED_DIR,
   AGENTS_DIR,
@@ -26,9 +30,9 @@ import {
 import { ctx } from "./lib/context";
 import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
-import { readJsonSafe, getTaskDir, removeTaskSession, createTaskDir } from "./lib/task-session";
+import { readJsonSafe, removeTaskSession } from "./lib/task-session";
 import { getPythonCmd, getCondaCmd, getCondaInstallHint } from "./lib/venv";
-import { hasBuwaiExtensionId, loadSnippet } from "./lib/snippet";
+import { hasBuwaiExtensionId, loadSnippet, resolveDynamicRuleSnippetName as resolveDynamicByAgentSnippetName } from "./lib/snippet";
 import { maybeResumeAnalysis } from "./lib/persistence";
 import { recordTimeline, flushTimeline } from "./lib/timeline";
 import { runProcess } from "./lib/spawn";
@@ -63,19 +67,6 @@ function getScriptDir(
   agentName: string | undefined,
 ): string | undefined {
   return AGENT_SCRIPT_DIRS[agentName || ""] || undefined;
-}
-
-function getCompactionReminder(agentName: string): string {
-  // agent prompt 在系统提示（不随压缩丢失），环境信息由 system.transform 强制注入（justCompacted 机制）。
-  // 已知 agent 时无需恢复指令；仅在 agent 身份未知时（如插件重启后 session 恢复丢失 agentName）提示确认。
-  if (!agentName) {
-    return `## 压缩恢复指令（压缩时必须保留）
-
-上下文刚被压缩。继续分析前必须：
-1. 请告知当前使用的是哪个 Agent（如 ${AGENT_BINARY_ANALYSIS}、${AGENT_MOBILE_ANALYSIS}、${AGENT_WEB_ANALYSIS}）
-2. 根据 Agent 名读取 ${AGENTS_DIR}/<agent-name>.md`;
-  }
-  return "";
 }
 
 function getCompactionContext(agentName: string): string {
@@ -138,8 +129,9 @@ function getCompactionContext(agentName: string): string {
 async function buildEnvSection(
   agentName: string | undefined,
   envInfo: EnvData["data"],
-  sessionID?: string,
+  session: SessionData,
 ): Promise<string> {
+  const sessionID = session.sessionID;
   try {
     const scriptsDir = getScriptDir(agentName);
 
@@ -148,10 +140,22 @@ async function buildEnvSection(
     envSection += `- 项目的OpenCode配置根目录 ($OPENCODE_ROOT)路径，即项目的\`.opencode\`路径，它里面包含项目的所有Agents、Plugins、知识库、工具、脚本: ${OPENCODE_ROOT}\n`;
 
     if (scriptsDir) {
-      envSection += `- Agent 目录 ($AGENT_DIR)路径，它是当前Agent所在目录，里面有专用于当前Agent的知识、工具和脚本: ${scriptsDir}\n`;
+      envSection += `- Agent 目录($AGENT_DIR)路径，它是当前Agent所在目录，里面有专用于当前Agent的知识、工具和脚本: ${scriptsDir}\n`;
     }
 
-    envSection += `- 共享目录 ($SHARED_DIR)路径，它里面有共享的通用的知识、工具和脚本: ${SHARED_DIR}\n`;
+    const taskDir = session.getTaskDir();
+    if (taskDir) {
+      envSection += `- 当前会话的任务目录($TASK_DIR)路径，当前会话的所有中间输出文件在此目录下: ${taskDir}`;
+    } else {
+      debugLog(`全局环境和目录位置信息 - 任务目录不存在`, sessionID);
+    }
+
+    const rootTaskDir = session.getTaskDir();
+    if (!session.isRootAgent && rootTaskDir) {
+      envSection += `- 根会话的任务目录($ROOT_TASK_DIR)路径: ${rootTaskDir}`;
+    }
+
+    envSection += `- 共享目录($SHARED_DIR)路径，它里面有共享的通用的知识、工具和脚本: ${SHARED_DIR}\n`;
     const idaPro = envInfo?.ida_pro;
     if (idaPro?.available && idaPro.idat_path) {
       envSection += `- IDA Pro: ${idaPro.path}\n`;
@@ -255,47 +259,19 @@ async function abortSession(sessionID: string, reason: string): Promise<void> {
 // 工具开始执行时间戳（tool.execute.before → tool.execute.after 配对计算耗时）
 const toolStartTimes = new Map<string, number>();
 
-// 确保任务目录存在（根 session 首次消息时调用）。
-// 调 createTaskDir（TS 直接创建目录+映射，不 spawn Python 脚本）。
-// 幂等：同一 sessionID 重复调用返回已有目录（createTaskDir 内部保证）。
-async function ensureTaskDir(
-  sessionID: string,
-): Promise<EnvironmentCheckResult> {
-  try {
-    const taskDir = createTaskDir(sessionID);
-    debugLog(`ensureTaskDir: 任务目录已就绪 sessionID=${sessionID} taskDir=${taskDir}`, sessionID);
-    return { ready: true, message: "" };
-  } catch (e) {
-    const msg = (e as Error)?.message ?? String(e);
-    debugLog(`ensureTaskDir: 创建失败 sessionID=${sessionID} error=${msg}`, sessionID);
-    return { ready: false, message: `[任务目录创建失败] ${msg}` };
-  }
-}
-
 // 统一环境检测入口（chat.message 调用此函数）
-// 检测顺序：PythonCmd 可用性 → 任务目录初始化（仅根 session）→ 环境检测（全量+预装）
+// 检测顺序：PythonCmd 可用性 → 环境检测（全量+预装）
 async function checkEnvironment(agent: string, sessionID: string): Promise<EnvironmentCheckResult> {
+  // 确保 .ai_env 存在（首次启动时 Plugin 自动创建，避免 detect_env 报错）
+  const aiEnvPath = join(OPENCODE_ROOT, ".ai_env");
+  if (!existsSync(aiEnvPath)) {
+    debugLog(`checkEnvironment: .ai_env 不存在，自动创建 sessionID=${sessionID}`, sessionID);
+    closeSync(openSync(aiEnvPath, 'w')); 
+  }
+
   const pythonCmd = getPythonCmd();
   if (!pythonCmd) {
     return { ready: false, message: getCondaInstallHint() };
-  }
-
-  // 任务目录初始化（仅根 session；子 session 共用父 TASK_DIR，由 Coordinator 文字传递）
-  const session = ctx.sessionManager.get(sessionID);
-  const isRootSession = !session?.parentSessionID;
-  if (isRootSession) {
-    const existingTaskDir = getTaskDir(sessionID);
-    if (!existingTaskDir) {
-      debugLog(`checkEnvironment: 根 session 首次消息，初始化任务目录 sessionID=${sessionID}`, sessionID);
-      const taskResult = await ensureTaskDir(sessionID);
-      if (!taskResult.ready) {
-        return taskResult;
-      }
-    } else {
-      debugLog(`checkEnvironment: 任务目录已存在 sessionID=${sessionID} taskDir=${existingTaskDir}`, sessionID);
-    }
-  } else {
-    debugLog(`checkEnvironment: 子 session，跳过任务目录初始化 sessionID=${sessionID} parentSessionID=${session?.parentSessionID}`, sessionID);
   }
 
   return await runDetectEnv(agent, pythonCmd, sessionID);
@@ -320,6 +296,154 @@ async function reportErrorAndAbort(
     await client.session.abort({ path: { id: sessionID } });
   } catch (e) {
     debugLog(`reportErrorAndAbort: abort 失败 sessionID=${sessionID} err=${(e as Error)?.message}`, sessionID);
+  }
+}
+
+/**
+ * 构造"可委派 agent 清单"段——所有 AGENTS_WITH_DELEGATION_RULES 成员都看得到。
+ *
+ * 从每个成员 agent .md 的 frontmatter description 字段自动收集，
+ * 避免维护两套描述。当前 agent 自己也会列出（让 LLM 知道自己是谁）。
+ */
+function buildDelegationBlock(currentAgent: string, sessionID: string): string | null {
+  const lines: string[] = [
+    "",
+    "## 可委派的 Agent",
+    "",
+    "遇到不属于你专长领域的子问题，用 **Task 工具**（`subagent_type` 参数）委派给对应专家 agent。把必要的上下文传给子 agent，不要只说\"帮我查一下\"。",
+    "",
+    "| subagent_type | 擅长 |",
+    "|---------------|------|",
+  ];
+
+  let agentCount = 0;
+
+  for (const agentName of AGENTS_WITH_DELEGATION_RULES) {
+    if (agentName === currentAgent) {
+      continue;
+    }
+    const desc = readAgentDescription(agentName, sessionID);
+    if (desc) {
+      lines.push(`| \`${agentName}\` | ${desc} |`);
+      agentCount++;
+    } else {
+      debugLog(`buildDelegationBlock: ${agentName} description 读取失败，跳过`, sessionID);
+    }
+  }
+
+  if (agentCount <= 0) {
+    debugLog("没有可以委派的子agents", sessionID);
+    return null;
+  }
+
+  lines.push("");
+  lines.push("**委派规则**：把已发现的全部相关信息传给子 agent（文件路径、URL、参数、目标），要求返回**具体的可操作结果**（flag / payload / 报告路径），不是\"建议\"。拿到返回结果后**整合进你的分析继续**，不要停下来等用户。");
+
+  return lines.join("\n");
+}
+
+/**
+ * 从 agent .md 的 frontmatter 读 description 字段。
+ * 使用 js-yaml 解析，支持完整 YAML 语法（多行/引号/嵌套）。
+ * 带 mtime 缓存——文件未修改时返回缓存值。
+ * 失败返回 null。
+ */
+const descCache = new Map<string, { desc: string | null; mtime: number }>();
+
+function readAgentDescription(agentName: string, sessionID: string): string | null {
+  const agentFile = join(AGENTS_DIR, `${agentName}.md`);
+  try {
+    const stat = statSync(agentFile);
+    const cached = descCache.get(agentName);
+    if (cached && cached.mtime === stat.mtimeMs) return cached.desc;
+
+    const content = readFileSync(agentFile, "utf-8");
+    const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
+    let desc: string | null = null;
+    if (match) {
+      try {
+        const fm = yaml.load(match[1]) as Record<string, any> | null;
+        if (fm?.description && typeof fm.description === "string") {
+          desc = fm.description.trim();
+        }
+      } catch {
+        // YAML 解析失败，desc 保持 null
+      }
+    }
+    descCache.set(agentName, { desc, mtime: stat.mtimeMs });
+    return desc;
+  } catch (e) {
+    debugLog(`readAgentDescription: 读取 ${agentName} 失败: ${(e as Error)?.message}`, sessionID);
+    return null;
+  }
+}
+
+function resolveDynamicSnippetName(session: SessionData, name: string): string | null {
+  const sessionID = session.sessionID;
+
+  debugLog(`Expanded snippet: 开始解析动态片段名`, sessionID)
+
+  // 找到首个安全Agent
+  const firstSecurityAgentSessionData =
+    ctx.sessionManager.resolveFirstSecurityAgentSessionData(session.parentSessionID);
+  const agentName = firstSecurityAgentSessionData?.agentName;
+
+  let snippetName: string | null = null;
+  if (name.startsWith("dynamic-by-agent_")) {
+    snippetName = resolveDynamicByAgentSnippetName(agentName, name);
+  } else {
+    debugLog(`Expanded snippet: 不支持的动态片段, name=${name}`, sessionID);
+  }
+
+  debugLog(
+    `Expanded snippet dynamic-by-agent: securityAgentName=${agentName}, snippetName=${snippetName}`, 
+    sessionID
+  );
+  return snippetName;
+}
+
+function expandedSnippet(session: SessionData, output: {system: string[];}): void {
+  const sessionID = session.sessionID;
+  const agentName = session.agentName;
+  debugLog(`system.transform: 开始占位符展开 sessionID=${sessionID} agent=${agentName}`, sessionID);
+  const agentFile = join(AGENTS_DIR, `${agentName}.md`);
+
+  if (!hasBuwaiExtensionId(agentFile)) {
+    debugLog(`[ERROR] system.transform: ${agentFile} 不包含 buwai-extension-id，跳过占位符展开`, sessionID);
+    return;
+  }
+
+  debugLog(
+    `system.transform: 检测到 buwai-extension-id in ${agentFile}, performing snippet expansion`,
+    sessionID,
+  );
+
+  // {{buwai-rule:片段名}} — 统一占位符展开
+  const regex = /\{\{buwai-rule:([a-zA-Z0-9_-]+)\}\}/g;
+  for (let i = 0; i < output.system.length; i++) {
+    if (!output.system[i].includes("{{buwai-rule:")) continue;
+    output.system[i] = output.system[i].replace(regex, (_, name: string) => {
+      let realName: string | null | undefined = name
+      let snippet: string | null = null;
+      if (name.startsWith("dynamic-")) {
+        realName = resolveDynamicSnippetName(session, name);
+      }
+
+      if (!realName) {
+        debugLog(`Snippet name not found: name=${name},realName=${realName}`, sessionID);
+        return _;
+      }
+      
+      // 静态片段：从 agents-rules/<name>.md 加载
+      snippet = loadSnippet(realName);
+
+      if (snippet === null || snippet === undefined) {
+        debugLog(`Snippet not found: ${realName}`, sessionID);
+        return _;
+      }
+      debugLog(`Expanded snippet: ${realName} (${snippet.length} chars)`, sessionID);
+      return snippet;
+    });
   }
 }
 
@@ -380,7 +504,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         // 判断是否为 resume prompt 回声（synthetic message）。
         // maybeResumeAnalysis 发 prompt 后同步设 resumeMarker；resume prompt 触发 chat.message 时它还非空。
         // 用它区分：synthetic 回声不刷新 lastUserMessageAt（否则 max_duration 超时检查形同虚设）。
-        const existing = ctx.sessionManager.get(sessionID);
+        // 为了补偿opencode重启后会话数据丢失的问题。
+        const existingResult = await ctx.sessionManager.create(sessionID);
+        const existing = existingResult.data;
         const isResumeEcho = !!existing?.resumeMarker;
 
         sessionData = await ctx.sessionManager.upsert(sessionID, agent, isResumeEcho);
@@ -395,17 +521,17 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
 
         debugLog(`chat.message: sessionID=${sessionID} agent=${agent}${isResumeEcho ? " [resume-echo]" : ""}`, sessionID);
 
-      // 环境检测：不 ready → 存错误信息到 sessionData + 终止（不 throw，不调 session.prompt）
-      const envCheck = await checkEnvironment(agent, sessionID);
-      if (!envCheck.ready) {
-        debugLog(`chat.message: 环境检测未通过 agent=${agent}，输出错误并终止`, sessionID);
-        await reportErrorAndAbort(ctx.client, sessionID, sessionData, envCheck.message);
-        return;
-      }
-      sessionData.activelyTerminated = false;
-      sessionData.pendingErrorMessage = null;
-      // 用户新消息 = 新一轮对话，上一轮植入的 resumeMarker 不再相关，清空避免误判
-      sessionData.resumeMarker = null;
+        // 环境检测：不 ready → 存错误信息到 sessionData + 终止（不 throw，不调 session.prompt）
+        const envCheck = await checkEnvironment(agent, sessionID);
+        if (!envCheck.ready) {
+          debugLog(`chat.message: 环境检测未通过 agent=${agent}，输出错误并终止`, sessionID);
+          await reportErrorAndAbort(ctx.client, sessionID, sessionData, envCheck.message);
+          return;
+        }
+        sessionData.activelyTerminated = false;
+        sessionData.pendingErrorMessage = null;
+        // 用户新消息 = 新一轮对话，上一轮植入的 resumeMarker 不再相关，清空避免误判
+        sessionData.resumeMarker = null;
       } catch (e) {
         // 兜底：chat.message 里的任何意外异常都不能 throw（会变 defect → 用户空白）
         const msg = (e as Error)?.message ?? String(e);
@@ -436,31 +562,15 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           sid,
         );
         const compactionCtx = getCompactionContext(agentName);
-        const compactionReminder = getCompactionReminder(agentName);
         output.context.push(compactionCtx);
-        if (compactionReminder) {
-          output.context.push(compactionReminder);
-        }
 
         debugLog(`=== compacting 注入内容开始 ===`, sid);
         debugLog(`sid:${sid}\n`, sid);
         debugLog(`agent:${agentName}\n`, sid);
         debugLog(`compactionCtx:\n${compactionCtx}\n`, sid);
-        debugLog(`compactionReminder:\n${compactionReminder}`, sid);
         debugLog(`=== compacting 注入内容结束 ===`, sid);
 
         if (sid) {
-          const taskDir = getTaskDir(sid);
-          if (taskDir) {
-            debugLog(`compacting: TASK_DIR recovered=${taskDir}`, sid);
-            output.context.push(`## TASK_DIR（不可省略 — 压缩后必须保留）
-  当前会话的任务目录: ${taskDir}
-  所有中间输出文件在此目录下。后续分析必须使用此路径作为 $TASK_DIR。
-  如果用户明确要求使用新的任务目录，重新执行"任务目录约定"中的创建命令即可切换。`);
-          } else {
-            debugLog(`compacting: TASK_DIR not found for sessionID=${sid}`, sid);
-          }
-
           // 分析持续性恢复：压缩后如果分析尚未完成，AI 应继续自主分析
           if (SECURITY_AGENTS.includes(session.agentName) && session.agentName !== AGENT_SECURITY_ANALYSIS_EVOLVE) {
             output.context.push(`## 分析持续性（压缩后必须遵守）
@@ -480,125 +590,82 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       try {
         const sessionID = input.sessionID;
 
-        // ── 通用层：所有会话（含靶子 build、explore 等非安全 agent）──
-        // 临时文件放置规则 + 本机白名单目录绝对路径（与 global.ts 白名单基准同源）
-        // 放在 requireSecurityAgent 之前：通用信息所有会话都该知道；专属层只给 SECURITY_AGENTS
+        if (!sessionID) {
+          debugLog(`system.transform: 会话ID不存在`, sessionID);
+          return;
+        }
+
+        // ── 通用层：所有会话 ──
         output.system.push(
           `\n## 临时文件放置\n` +
           `如需写临时文件，写到 ${join(tmpdir(), "opencode")}/ 下。\n` +
           `> 该目录权限已放行，不会触发权限申请。`,
         );
 
-        const session = ctx.sessionManager.requireSecurityAgent(
-          "system.transform",
-          sessionID,
-        );
+        // ── 获取 session（先试 SECURITY_AGENTS，再试 searcher/memorist subagent）──
+        const session = ctx.sessionManager.requireRegisteredAgent("system.transform", sessionID);
         if (!session) {
-          debugLog(
-            `[WARN] system.transform: 跳过 — 非 Security Agent, sessionID=${sessionID}`,
-            sessionID,
-          );
+          debugLog(`[WARN] system.transform: 跳过 — 非注册 agent, sessionID=${sessionID}`, sessionID);
           return;
         }
 
+        const isRootAgent = session.isRootAgent;
+
         const agentName = session.agentName;
 
-        // 占位符展开（每次 LLM 调用都执行）
-        debugLog(
-          `system.transform: 开始占位符展开 sessionID=${sessionID} agent=${agentName}`,
-          sessionID,
-        );
-        const agentFile = join(AGENTS_DIR, `${agentName}.md`);
-        if (hasBuwaiExtensionId(agentFile)) {
-          debugLog(
-            `system.transform: 检测到 buwai-extension-id in ${agentFile}, performing snippet expansion`,
-            sessionID,
-          );
+        // ── 占位符展开（所有识别的 agent 都执行）──
+        expandedSnippet(session, output);
 
-          // 匹配 {{buwai-rule:片段名}} — 片段名仅允许字母数字连字符下划线
-          const regex = /\{\{buwai-rule:([a-zA-Z0-9_-]+)\}\}/g;
-          for (let i = 0; i < output.system.length; i++) {
-            // 快速跳过不含占位符的字符串，避免无谓的正则匹配
-            if (!output.system[i].includes("{{buwai-rule:")) continue;
-            output.system[i] = output.system[i].replace(regex, (_, name) => {
-              const snippet = loadSnippet(name);
-              if (snippet === null) {
-                debugLog(`Snippet not found: ${name}`, sessionID);
-                return _; // 保留原始占位符文本，不删除
-              }
-              debugLog(
-                `Expanded snippet: ${name} (${snippet.length} chars)`,
-                sessionID,
-              );
-              return snippet;
-            });
+        if (isRootAgent) {
+          debugLog(`system.transform: 根Agent agent=${agentName}`, sessionID);
+          const switchedFrom = session.agentSwitchedFrom;
+          if (switchedFrom) {
+            output.system.unshift(`## Agent切换\n**注意，发生Agent切换：**Agent 已从 ${switchedFrom} 切换到 ${agentName}。请立即按照 ${agentName} 的规则工作，丢弃前一个 Agent 的角色设定。`);
+            session.agentSwitchedFrom = null;
+          } else {
+            output.system.unshift(`当前 Agent: ${agentName}`);
           }
-        } else {
-          debugLog(
-            `[ERROR] system.transform: ${agentFile} 不包含 buwai-extension-id，跳过占位符展开`,
-            sessionID,
-          );
         }
 
-        // 每次都注入 Plugin 完整性检查 + Agent 身份
-        // 放在 output.system 最前面，确保 LLM 优先看到
-        // 如果 Plugin 未加载，这段不会出现，agent 应立即停止并告知用户
-        debugLog(
-          `system.transform: 注入 Plugin 完整性检查和 Agent 身份 sessionID=${sessionID} agent=${agentName}`,
-          sessionID,
-        );
-        const switchedFrom = session.agentSwitchedFrom;
-        const systemPromptPart1 = "[系统完整性] Plugin 已加载。";
-        const systemPromptPart2 = "如果你看不到这段标记，说明 Plugin 未加载，当前会话缺少关键功能（环境信息、工具配置、占位符展开）。请立即告知用户并停止分析。";
-        if (switchedFrom) {
-          output.system.unshift(
-            `${systemPromptPart1}⚠️ Agent 已从 ${switchedFrom} 切换到 ${agentName}。请立即按照 ${agentName} 的规则工作，丢弃前一个 Agent 的角色设定。${systemPromptPart2}`,
-          );
-          session.agentSwitchedFrom = null;
-        } else {
-          output.system.unshift(
-            `${systemPromptPart1}当前 Agent: ${agentName}。${systemPromptPart2}`,
-          );
-        }
-
-        // 环境信息注入频率：
-        // 前 3 次都注入（新会话 step=1 时标题生成请求先触发 #1，主聊天 #2，首次工具调用 #3，
-        //   都需要拿到环境信息才能正确解析 $SHARED_DIR 等变量）
-        // 之后每 X 次注入一次（节省 token）
+        // ── buildEnvSection（所有识别的 agent 都执行）──
         session.systemTransformCount++;
         const shouldInject =
           session.systemTransformCount <= 3 ||
           session.systemTransformCount % ENV_INJECTION_FREQUENCY === 0 ||
           session.justCompacted;
-        // const shouldInject = true; // 目前调试阶段每次都注入，确认稳定后改回按频率注入
 
         if (!shouldInject) {
-          debugLog(
-            `[INFO] system.transform: #${session.systemTransformCount} 跳过环境信息注入 sessionID=${sessionID} agent=${agentName}`,
-            sessionID,
-          );
+          debugLog(`[INFO] system.transform: #${session.systemTransformCount} 跳过环境信息注入 agent=${agentName}`, sessionID);
           return;
         }
 
         const envData = readJsonSafe<EnvData>(ENV_CACHE_FILE, sessionID);
         const envInfo = envData?.data;
 
-        const envSection = await buildEnvSection(agentName, envInfo, sessionID);
+        const envSection = await buildEnvSection(agentName, envInfo, session);
         output.system.push(envSection);
-        // 注入成功后清理压缩标识（异常时不清理，下次 system.transform 重试注入——比 finally 清理更安全）
+
+        // 注入"可委派 agent 清单"——只对 AGENTS_WITH_DELEGATION_RULES 成员生效
+        // 让调用方知道有哪些 agent 可以委派（含 searcher/memorist + 其他领域 agent）
+        if (AGENTS_WITH_DELEGATION_RULES.includes(agentName)) {
+          const delegationBlock = buildDelegationBlock(agentName, sessionID);
+          if (delegationBlock) {
+            output.system.push(delegationBlock);
+            debugLog(`[INFO] system.transform: 注入委派清单 agent=${agentName} length=${delegationBlock.length}`, sessionID);
+          }
+        }
+
+        // 清理压缩标识
         if (session.justCompacted) {
           session.justCompacted = false;
-          debugLog(`[INFO] system.transform: 压缩后强制注入完成，清理 justCompacted sessionID=${sessionID}`, sessionID);
+          debugLog(`[INFO] system.transform: 清理 justCompacted sessionID=${sessionID}`, sessionID);
         }
         debugLog(
           `[INFO] system.transform: #${session.systemTransformCount} 注入环境信息 sessionID=${sessionID}, agent=${agentName}, length=${envSection.length}, envSection=\n${envSection}`,
-          sessionID,
+          sessionID
         );
       } catch (e) {
-        debugLog(
-          `[ERROR] system.transform: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`,
-          input.sessionID,
-        );
+        debugLog(`[ERROR] system.transform: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`, input.sessionID);
       }
     },
 
@@ -651,7 +718,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         }
 
         // TASK_DIR（从 task session mapping 读取，可能为空）
-        const taskDir = getTaskDir(sessionID);
+        const taskDir = session.getTaskDir();
         if (taskDir) {
           output.env.TASK_DIR = taskDir;
         }

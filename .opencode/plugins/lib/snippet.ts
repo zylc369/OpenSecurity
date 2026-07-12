@@ -1,5 +1,6 @@
 import { join } from "path";
 import { statSync, readFileSync } from "fs";
+import * as yaml from "js-yaml";
 import { AGENTS_RULES_DIR } from "./constants";
 import { debugLog } from "./logging";
 
@@ -15,16 +16,16 @@ interface FrontmatterCacheEntry {
 }
 const frontmatterCache = new Map<string, FrontmatterCacheEntry>();
 
-// 解析 YAML frontmatter（仅扁平 key-value，不处理嵌套结构）
-function parseFrontmatter(content: string): Record<string, string> {
+// 解析 YAML frontmatter（使用 js-yaml，支持多行/引号/嵌套等完整 YAML 语法）
+function parseFrontmatter(content: string): Record<string, any> {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
   if (!match) return {};
-  const result: Record<string, string> = {};
-  for (const line of match[1].split(/\r?\n/)) {
-    const kv = line.match(/^([a-zA-Z0-9_-]+):\s*(.*)$/);
-    if (kv) result[kv[1]] = kv[2].trim();
+  try {
+    const parsed = yaml.load(match[1]);
+    return (parsed && typeof parsed === "object") ? (parsed as Record<string, any>) : {};
+  } catch {
+    return {};
   }
-  return result;
 }
 
 // 检查 agent .md 是否声明了 buwai-extension-id（有此字段才做占位符展开）
@@ -57,4 +58,31 @@ export function loadSnippet(name: string): string | null {
     debugLog(`Snippet not found: ${filePath}`);
     return null;
   }
+}
+
+/**
+ * 加载动态片段。
+ */
+export function resolveDynamicRuleSnippetName(
+  securityAgentName: string | null | undefined, dynamicTag: string): string | null {
+  if (!securityAgentName) {
+    return null;
+  }
+
+  const index = dynamicTag.indexOf("_");
+  if (index < 0) {
+    debugLog(`解析动态规则片段: 没有片段名: ${dynamicTag}`)
+    return null;
+  }
+
+  if (dynamicTag.length === 1) {
+    debugLog(`解析动态规则片段: 片段名不合法: ${dynamicTag}`)
+    return null;
+  }
+
+  const snippetNamePrefix = dynamicTag.substring(index + 1);
+  debugLog(`解析动态规则片段: 片段名前缀: ${snippetNamePrefix}`)
+  const snippetName = `dynamic-by-agent-${snippetNamePrefix}-${securityAgentName}`
+  debugLog(`解析动态规则片段: 片段名: ${snippetName}`)
+  return snippetName;
 }

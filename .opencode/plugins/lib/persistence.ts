@@ -8,7 +8,6 @@ import {
 } from "./constants";
 import { ctx } from "./context";
 import { debugLog } from "./logging";
-import { getTaskDir } from "./task-session";
 
 // ─── 完成标记（动态生成 + 精确匹配）──────────────────────────────
 //
@@ -180,7 +179,7 @@ export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
       return;
     }
 
-    const taskDir = getTaskDir(sessionID);
+    const taskDir = session.getTaskDir();
     if (!taskDir) {
       debugLog(`session.idle: 跳过恢复 — 无 taskDir（非正式分析任务）, sessionID=${sessionID}`, sessionID);
       return;

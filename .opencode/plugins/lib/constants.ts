@@ -15,7 +15,7 @@ function findOpenCodeRoot(startDir: string): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return dirname(startDir); // fallback
+  return dirname(startDir); // 回退
 }
 
 export const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
@@ -41,6 +41,12 @@ export const AGENT_CRYPTO_ANALYSIS = "crypto-analysis";
 export const AGENT_SECURITY_ANALYSIS_EVOLVE = "security-analysis-evolve";
 export const AGENT_SECURITY_COORDINATOR = "security-coordinator";
 
+// 通过 PentAGI searcher/memorist 进化新增的子 agent（2026-07-09）。
+// 以原始字符串形式保留，因为它们不属于历史的 SECURITY_AGENTS 列表
+// （后者用于控制环境信息注入 + 会话生命周期钩子）。
+export const AGENT_SEARCHER = "searcher";
+export const AGENT_MEMORIST = "memorist";
+
 export const SECURITY_AGENTS = [
   AGENT_BINARY_ANALYSIS,
   AGENT_MOBILE_ANALYSIS,
@@ -49,6 +55,25 @@ export const SECURITY_AGENTS = [
   AGENT_CRYPTO_ANALYSIS,
   AGENT_SECURITY_ANALYSIS_EVOLVE,
   AGENT_SECURITY_COORDINATOR,
+];
+
+// 不可委派agents
+export const NON_DELEGATABLE_SECURITY_AGENTS = [AGENT_SECURITY_COORDINATOR, AGENT_SECURITY_ANALYSIS_EVOLVE]
+
+export const BASIC_GENERAL_AGENTS = [AGENT_SEARCHER, AGENT_MEMORIST]
+
+// 所有参与跨 agent 委派的 agent。插件会向每个成员的系统提示词中注入
+// 一个"可委派 Agent"区块（从每个 agent 的 .md frontmatter description 中收集）。
+//
+// 组成：5 个领域分析 agent + searcher + memorist。
+// 设计上排除：
+//   - security-analysis-evolve（开发工具，不是分析 agent）
+//   - security-coordinator（保留以向后兼容，但不在此列表中）
+// 这并非 SECURITY_AGENTS 的超集——两个列表在 5 个领域 agent 上有重叠，
+// 但各自都包含对方没有的成员。
+export const AGENTS_WITH_DELEGATION_RULES = [
+  ...BASIC_GENERAL_AGENTS,
+  ...SECURITY_AGENTS.filter(agent => !NON_DELEGATABLE_SECURITY_AGENTS.includes(agent))
 ];
 
 export const AGENT_SCRIPT_DIRS: Record<string, string> = {};

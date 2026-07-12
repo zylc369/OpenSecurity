@@ -2,7 +2,7 @@ import { join, dirname } from "path";
 import { mkdirSync, writeFileSync } from "fs";
 import { LOGS_DIR, MAX_TIMELINE_BUFFER } from "./constants";
 import { debugLog } from "./logging";
-import { getTaskDir } from "./task-session";
+import { ctx } from "./context";
 
 export type TimelineEventType =
   | "tool.before"
@@ -45,7 +45,7 @@ export function flushTimeline(sessionID: string): void {
   const buffer = timelineBuffers.get(sessionID);
   if (!buffer || buffer.length === 0) return;
 
-  const taskDir = getTaskDir(sessionID);
+  const taskDir = ctx.sessionManager.getTaskDir(sessionID);
   const logFile = taskDir
     ? join(taskDir, "logs", "timeline.log")
     : join(LOGS_DIR, `timeline-${sessionID}.log`);

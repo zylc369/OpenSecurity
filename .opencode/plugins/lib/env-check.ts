@@ -9,10 +9,10 @@
 import { join } from "path";
 import type { ProcessResult } from "./spawn";
 import { SHARED_DIR, AGENT_SECURITY_COORDINATOR, OPENCODE_ROOT } from "./constants";
-import { getTaskDir } from "./task-session";
 import { getCondaCmd } from "./venv";
 import { runProcess } from "./spawn";
 import { debugLog } from "./logging";
+import { ctx } from "./context";
 
 export type EnvironmentCheckResult = {
   ready: boolean;
@@ -29,7 +29,7 @@ export type EnvironmentCheckResult = {
  */
 export function buildDetectEnvArgs(
   agent: string,
-  taskDir: string | null,
+  taskDir: string | null | undefined,
 ): string[] {
   const checkAgent = agent === AGENT_SECURITY_COORDINATOR ? "all" : agent;
   const args = ["--check-preinstall", checkAgent];
@@ -100,7 +100,7 @@ export async function runDetectEnv(
   sessionID: string,
 ): Promise<EnvironmentCheckResult> {
   const detectEnv = join(SHARED_DIR, "scripts", "detect_env.py");
-  const taskDir = getTaskDir(sessionID);
+  const taskDir = ctx.sessionManager.getTaskDir(sessionID);
   const args = [detectEnv, ...buildDetectEnvArgs(agent, taskDir)];
   const condaCmd = getCondaCmd();
   const childEnv: Record<string, string> = { OPENCODE_ROOT };

@@ -1,0 +1,14 @@
+[project]
+name = "opensec-memory-mcp"
+version = "0.1.0"
+description = "Vector store MCP server for OpenSecurity searcher/memorist agents"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0",
+    "sentence-transformers>=2.7",
+    "sqlite-vec>=0.1",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

@@ -1,15 +1,27 @@
+import { join } from "path";
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { SECURITY_AGENTS } from "./constants";
+import { SECURITY_AGENTS, BASIC_GENERAL_AGENTS } from "./constants";
 import { debugLog } from "./logging";
+import { createTaskDir } from "./task-session";
 import { Result } from "./result";
+
+function localIsSecurityAgent(agentName: string): boolean {
+  return SECURITY_AGENTS.includes(agentName);
+}
 
 export class SessionData {
   /** session 创建时间戳（毫秒）。调试参考，不用于业务逻辑 */
   readonly createdAt: number;
   /** 当前 agent 名（如 "binary-analysis"）。由 chat.message 更新。保证非空——createFromAPI 在缺失时抛异常 */
   agentName: string;
-  /** 父 session ID。如果是编排 agent 创建的子 session 则有值。当前未使用，预留 */
+  readonly sessionID: string; // 当前 session ID（唯一标识符）
+  /** 根 session ID（沿 parentID 链追溯到的顶层 session）。task_dir 共用根 session 的 */
+  readonly rootSessionID: string;
+  readonly isRootAgent: boolean;
+  /** 直接父 session ID。子 session（编排 agent 创建）时有值，用于判定子 session 分支 */
   readonly parentSessionID?: string;
+  rootTaskDir: string | null | undefined; // 根 session 的 task_dir（绝对路径），由 createFromAPI 创建时获取。可能为 null（映射文件不存在或读取失败）
+  private taskDir?: string | null = null; // 任务目录（绝对路径），由 createFromAPI 创建时获取。可能为 null（映射文件不存在或读取失败）
   /** system.transform hook 触发次数。用于控制环境信息注入频率（前 3 次必注入，之后按频率注入） */
   systemTransformCount = 0;
   /** 压缩标识。compacting hook 置 true，system.transform 检测到后强制注入环境信息并清 false。
@@ -37,15 +49,27 @@ export class SessionData {
   /** 冷却中 pending 的 setTimeout handle。新 resume 前或用户手动发消息时清除。 */
   pendingResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(agentName: string, parentSessionID?: string) {
+  constructor(agentName: string, sessionID: string, rootSessionID: string, parentSessionID?: string) {
     this.createdAt = Date.now();
     this.lastUserMessageAt = this.createdAt;
     this.agentName = agentName;
+    this.sessionID = sessionID;
+    this.rootSessionID = rootSessionID;
     this.parentSessionID = parentSessionID;
+
+    this.isRootAgent = !parentSessionID;
   }
 
   isSecurityAgent(): boolean {
-    return SECURITY_AGENTS.includes(this.agentName);
+    return localIsSecurityAgent(this.agentName);
+  }
+
+  isBasicGeneralAgent(): boolean {
+    return BASIC_GENERAL_AGENTS.includes(this.agentName);
+  }
+
+  isRegisteredAgent(): boolean {
+    return this.isSecurityAgent() || this.isBasicGeneralAgent()
   }
 
   /** 当前未使用，预留给编排 agent 子任务方案 */
@@ -63,6 +87,14 @@ export class SessionData {
       return true;
     }
     return false;
+  }
+
+  setTaskDir(taskDir: string | null | undefined): void {
+    this.taskDir = taskDir;
+  }
+
+  getTaskDir(): string | null | undefined {
+    return this.taskDir;
   }
 }
 
@@ -107,8 +139,24 @@ export class SessionDataManager {
   }
 
   /** 只返回 Security Agent 的 session。只查不创建。 */
+  requireRegisteredAgent(
+    hookName: string,
+    sessionID?: string,
+  ): SessionData | undefined {
+    return this.requireAgent(hookName, (session) => {return session.isRegisteredAgent()}, sessionID)
+  }
+
+  /** 只返回 Security Agent 的 session。只查不创建。 */
   requireSecurityAgent(
     hookName: string,
+    sessionID?: string,
+  ): SessionData | undefined {
+    return this.requireAgent(hookName, (session) => {return session.isSecurityAgent()}, sessionID)
+  }
+
+  private requireAgent(
+    hookName: string,
+    matchFunc: (session: SessionData) => boolean,
     sessionID?: string,
   ): SessionData | undefined {
     if (!sessionID) {
@@ -120,7 +168,7 @@ export class SessionDataManager {
       debugLog(`[${hookName}] 跳过 — session 未创建（等待 chat.message）, sessionID=${sessionID}`);
       return undefined;
     }
-    if (!session.isSecurityAgent()) {
+    if (!matchFunc(session)) {
       debugLog(
         `[${hookName}] 跳过 — 非 Security Agent agent=${session.agentName} sessionID=${sessionID}`,
         sessionID,
@@ -130,9 +178,64 @@ export class SessionDataManager {
     return session;
   }
 
+  /**
+   * 递归向上找父链中第一个 SECURITY_AGENTS 成员的 agentName。
+   * 用于 searcher/memorist 推断它服务于哪个领域，从而加载对应的 domain-sources-<root>.md 片段。
+   *
+   * 返回值：
+   *   - 找到 → agentName（如 "binary-analysis"）
+   *   - 走到根未命中 → null（system.transform 兜底加载 domain-sources-general.md）
+   *
+   * 限制：依赖 sessions map 中父 session 已被 session.created hook 创建。
+   * 如果父 session 没创建（极少见，例如 plugin 重启时序问题），返回 null 兜底。
+   */
+  resolveFirstSecurityAgentSessionData(sessionID: string | null | undefined): SessionData | null {
+    let currentSid: string | null | undefined = sessionID;
+    const visitedSids = new Set<string>();
+    let depth = 0;
+    while (true) {
+      if (!currentSid) {
+        debugLog(`[depth=${depth}] resolveRootSecurityAgent: 会话ID为空，终止`, sessionID);
+        return null;
+      }
+
+      if (visitedSids.has(currentSid)) {
+        debugLog(`[depth=${depth}] resolveRootSecurityAgent: 检测到循环 sessionID=${currentSid}，终止`, sessionID);
+        return null;
+      }
+      visitedSids.add(currentSid);
+      const session = this.sessions.get(currentSid);
+      if (!session) {
+        debugLog(
+          `[depth=${depth}] resolveRootSecurityAgent: session 不在 map（parent 未创建？）current=${currentSid}`,
+          sessionID,
+        );
+        return null;
+      }
+      if (SECURITY_AGENTS.includes(session.agentName)) {
+        debugLog(
+          `[depth=${depth}] resolveRootSecurityAgent: 命中首个Agent：${session.agentName} 将要返回`,
+          sessionID,
+        );
+        return session;
+      }
+      currentSid = session.parentSessionID;
+
+      depth++;
+    }
+  }
+
   /** 同步获取（不触发创建）。 */
   get(sessionID: string): SessionData | undefined {
     return this.sessions.get(sessionID);
+  }
+
+  getTaskDir(sessionID: string): string | null | undefined {
+    const session = this.sessions.get(sessionID);
+    if (!session) {
+      return null;
+    }
+    return session.getTaskDir();
   }
 
   /** 删除（session.deleted 时调用）。同时清理 pending Map。 */
@@ -174,13 +277,53 @@ export class SessionDataManager {
     if (!agentName) {
       throw new Error(`SessionDataManager: API 未返回 agent 字段 sessionID=${sessionID}`);
     }
+    let rootSessionID: string | undefined = undefined;
+    let parentSession: SessionData | undefined = undefined;
     const parentSessionID = (sessionInfo as { parentID?: string })?.parentID;
-    const session = new SessionData(agentName, parentSessionID);
+        if (parentSessionID) {
+      // 子 session（非根 session）需要沿用根 session 的 task_dir。先创建父 session 再获取 rootSessionID。
+      const parentSessionResult = await this.create(parentSessionID);
+      parentSession = parentSessionResult.data;
+      if (!parentSession) {
+        throw new Error(`SessionDataManager: 父 session 创建失败 sessionID=${sessionID} parentID=${parentSessionID} error=${parentSessionResult.errorMessage}`);
+      }
+      rootSessionID = parentSession.rootSessionID;
+    } else {
+      rootSessionID = sessionID;
+    }
+    const session = new SessionData(agentName, sessionID, rootSessionID, parentSessionID);
     this.sessions.set(sessionID, session);
     debugLog(
       `SessionDataManager: 创建 sessionID=${sessionID} agent=${agentName} parentID=${parentSessionID || "无"}`,
       sessionID,
     );
+    
+        // 创建 task_dir 映射文件（幂等，已存在则返回已有）
+    const taskDir = this.getOrCreateTaskDir(sessionID, agentName, parentSession);
+    session.setTaskDir(taskDir);
+    if (!parentSessionID) {
+      session.rootTaskDir = taskDir; // 根 session 任务目录
+    } else {
+      session.rootTaskDir = parentSession?.rootTaskDir;
+    }
     return session;
+  }
+
+    private getOrCreateTaskDir(sessionID: string, agentName: string, parentSession: SessionData | undefined): string | null | undefined {
+    const isCurrentPrimaryAgent = !parentSession?.sessionID;
+    let baseDir = parentSession?.rootTaskDir;
+
+    if (isCurrentPrimaryAgent) {
+      if (!localIsSecurityAgent(agentName)) {
+        debugLog(`getOrCreateTaskDir: 根 session 且非 Security Agent，不创建 task_dir sessionID=${sessionID} agent=${agentName}`, sessionID);
+        return null;
+      }
+    } else {
+      if (baseDir) {
+        baseDir = join(baseDir, "subtasks");
+      }
+    }
+    
+    return createTaskDir(sessionID, agentName, baseDir);
   }
 }
