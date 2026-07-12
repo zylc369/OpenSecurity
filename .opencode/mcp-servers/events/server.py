@@ -1,8 +1,7 @@
-"""Graphiti 时序知识图谱 MCP 服务器（桩实现）。
+"""事件库 MCP 服务器（桩实现）。
 
-这是 Phase 1 的桩实现。全部 7 个搜索方法都返回空结果，并附带一条说明，
-指出 Graphiti 尚未接通。Phase 2 将用真实的 graphiti-core SDK 调用
-（对接 Neo4j 后端）替换这些函数体。
+存储过往 LLM 响应和工具执行记录的事件库。全部 7 个搜索方法返回空结果（stub）。
+二期替换为真实后端（Graphiti/Neo4j）。
 
 方法签名对齐 PentAGI graphiti_search.go:18-24（共 7 个方法），
 参数形态对齐 github.com/vxcontrol/graphiti-go-client@v0.9.0/types.go。
@@ -13,9 +12,9 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-STUB_NOTE = "Graphiti backend not implemented yet - returning empty results. See Phase 2 plan."
+STUB_NOTE = "Events backend not implemented yet - returning empty results. See Phase 2 plan."
 
-mcp = FastMCP("graphiti")
+mcp = FastMCP("events")
 
 
 def _empty_result(extra: dict[str, Any] | None = None) -> str:

@@ -1,12 +1,10 @@
 [project]
-name = "opensec-memory-mcp"
+name = "opensec-events-mcp"
 version = "0.1.0"
-description = "Vector store MCP server for OpenSecurity searcher/memorist agents"
+description = "Graphiti temporal knowledge graph MCP server (STUB - Phase 2 will implement)"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.0",
-    "sentence-transformers>=2.7",
-    "sqlite-vec>=0.1",
 ]
 
 [build-system]

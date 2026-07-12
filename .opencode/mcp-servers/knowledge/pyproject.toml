@@ -1,10 +1,12 @@
 [project]
-name = "opensec-graphiti-mcp"
+name = "opensec-knowledge-mcp"
 version = "0.1.0"
-description = "Graphiti temporal knowledge graph MCP server (STUB - Phase 2 will implement)"
+description = "Vector store MCP server for OpenSecurity searcher/memorist agents"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.0",
+    "sentence-transformers>=2.7",
+    "sqlite-vec>=0.1",
 ]
 
 [build-system]

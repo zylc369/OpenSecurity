@@ -1,4 +1,4 @@
-"""基于 SQLite + sqlite-vec 的向量存储（memory MCP server 后端）。
+"""基于 SQLite + sqlite-vec 的向量存储（knowledge MCP server 后端）。
 
 双表设计：
   - answers（普通 SQLite 表）：id, question, answer, type, doc_type, created_at

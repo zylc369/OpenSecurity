@@ -1,4 +1,4 @@
-"""OpenSecurity searcher/memorist agent 的记忆 MCP server。
+"""OpenSecurity searcher/memorist agent 的知识库 MCP server。
 
 提供三个工具：
   - search_answer：从答案知识库（doc_type=answer）检索 —— searcher 用
@@ -20,18 +20,18 @@ sys.path.insert(0, str(Path(__file__).parent))
 from db import MemoryDB, DEFAULT_TOP_K  # noqa: E402
 
 DATA_DIR = Path.home() / "bw-security-analysis"
-DB_PATH = DATA_DIR / "memory.db"
+DB_PATH = DATA_DIR / "knowledge.db"
 MODEL_NAME = "BAAI/bge-m3"
 
 VALID_TYPES = ("guide", "vulnerability", "code", "tool", "other")
 
 # 模型与数据库在启动时加载一次，后续工具调用复用它们。
-print(f"[memory-mcp] loading embedder {MODEL_NAME}...", file=sys.stderr)
+print(f"[knowledge-mcp] loading embedder {MODEL_NAME}...", file=sys.stderr)
 _embedder = SentenceTransformer(MODEL_NAME)
 _db = MemoryDB(DB_PATH, _embedder)
-print(f"[memory-mcp] ready, db={DB_PATH}", file=sys.stderr)
+print(f"[knowledge-mcp] ready, db={DB_PATH}", file=sys.stderr)
 
-mcp = FastMCP("memory")
+mcp = FastMCP("knowledge")
 
 
 @mcp.tool(
@@ -114,7 +114,7 @@ def search_in_memory(
     description=(
         "Persist a new (question, answer) pair to the vector store for future "
         "retrieval. ONLY call when you discovered information not already in "
-        "memory. Indexes the question for semantic retrieval."
+        "the knowledge base. Indexes the question for semantic retrieval."
     ),
 )
 def store_answer(
