@@ -1,4 +1,4 @@
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
@@ -15,7 +15,7 @@ let cachedCondaCmd: string | null = null;
 // 验证 Python 可用性（执行 print('OK') 检查）
 function verifyPython(pathOrCmd: string): boolean {
   try {
-    const output = execSync(`"${pathOrCmd}" -c "print('OK')"`, {
+    const output = execFileSync(pathOrCmd, ["-c", "print('OK')"], {
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 5000,
       encoding: "utf-8",
@@ -42,7 +42,7 @@ function findVenvPython(): string | null {
 // 验证 conda 命令可用（执行 --version 检查）
 function verifyConda(cmd: string): boolean {
   try {
-    execSync(`"${cmd}" --version`, {
+    execFileSync(cmd, ["--version"], {
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 5000,
       encoding: "utf-8",
@@ -121,7 +121,7 @@ function ensureCondaEnvPython(): string | null {
   // 3. 创建 conda env（python=3.13）
   debugLog(`${methodName}: creating conda env with ${conda}`);
   try {
-    execSync(`"${conda}" create -p "${VENV_DIR}" python=3.13 -y`, {
+    execFileSync(conda, ["create", "-p", VENV_DIR, "python=3.13", "-y"], {
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 300000, // 5 分钟
       encoding: "utf-8",

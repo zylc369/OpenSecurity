@@ -35,7 +35,6 @@ import { getPythonCmd, getCondaCmd, getCondaInstallHint } from "./lib/venv";
 import { hasBuwaiExtensionId, loadSnippet, resolveDynamicRuleSnippetName as resolveDynamicByAgentSnippetName } from "./lib/snippet";
 import { maybeResumeAnalysis } from "./lib/persistence";
 import { recordTimeline, flushTimeline } from "./lib/timeline";
-import { runProcess } from "./lib/spawn";
 import { runDetectEnv, type EnvironmentCheckResult } from "./lib/env-check";
 import { McpManager } from "./lib/mcp-manager";
 
