@@ -37,6 +37,7 @@ import { maybeResumeAnalysis } from "./lib/persistence";
 import { recordTimeline, flushTimeline } from "./lib/timeline";
 import { runProcess } from "./lib/spawn";
 import { runDetectEnv, type EnvironmentCheckResult } from "./lib/env-check";
+import { McpManager } from "./lib/mcp-manager";
 
 interface EnvData {
   data?: {
@@ -481,6 +482,10 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   } catch (e) {
     debugLog(`  心跳文件写入失败: ${e}`);
   }
+
+  // ── 动态注册 MCP server（跨平台，不写死路径）──
+  const mcpManager = new McpManager(client);
+  await mcpManager.registerAll();
 
   return {
     tool: {},

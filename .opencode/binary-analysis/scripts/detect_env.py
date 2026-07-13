@@ -154,6 +154,16 @@ def _load_ai_env() -> None:
         _warn("读取 .ai_env 失败（环境变量未加载，IDA_PRO_HOME 等配置不生效）", exc=e)
 
 PYTHON_PACKAGES: list[Dependency] = [
+    # 通用
+    Dependency(name="mcp", kind="python", pip_name="angr", preinstall=True,
+               agents=["all"],
+               description="MCP依赖"),
+    Dependency(name="sentence_transformers", kind="python", pip_name="angr", preinstall=True,
+               agents=["all"],
+               description=""),
+    Dependency(name="sqlite_vec", kind="python", pip_name="angr", preinstall=True,
+               agents=["all"],
+               description=""),
     # binary-analysis 逆向分析包
     Dependency(name="angr", kind="python", pip_name="angr", preinstall=True,
                agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
