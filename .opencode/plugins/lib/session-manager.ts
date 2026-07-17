@@ -1,5 +1,5 @@
 import { join } from "path";
-import type { OpencodeClient } from "@opencode-ai/sdk";
+import type { OpencodeClient, Part, UserMessage } from "@opencode-ai/sdk";
 import { SECURITY_AGENTS, BASIC_GENERAL_AGENTS } from "./constants";
 import { debugLog } from "./logging";
 import { createTaskDir } from "./task-session";
@@ -33,7 +33,7 @@ export class SessionData {
   /** agent 切换标记。upsert 检测到 agentName 变化时置为旧 agent 名，system.transform 读取后清空 */
   agentSwitchedFrom: string | null = null;
   /** 主动终止标记。chat.message 里预装检查不通过 → 主动 abort 时置 true，event hook 恢复逻辑据此跳过 maybeResumeAnalysis */
-  activelyTerminated: boolean | null = null;
+  activelyTerminated: boolean = false;
   /** 待输出的错误信息。chat.message 主动终止时保存，session.idle 时取出并通过 session.prompt 输出给用户 */
   pendingErrorMessage: string | null = null;
   pendingErrorCallbackMessage: boolean = false;
@@ -41,6 +41,7 @@ export class SessionData {
    *  chat.message 时清成 null（用户新消息 = 新一轮，旧 marker 不再相关）。
    *  完成检测用它精确匹配 lastText，强制 LLM 原样复制本次植入的具体值，
    *  避免它通过模仿格式（如 `>>>COMPLETE-xxxx<<<`）绕过完成检测。 */
+  resumePrompt: string | null = null;
   resumeMarker: string | null = null;
   /** 自动恢复次数（内存，不持久化）。重启 opencode 后归零。
    *  防止分析完成后无限循环恢复。达到 MAX_RESUMES 后不再 resume。 */
@@ -50,7 +51,12 @@ export class SessionData {
   /** 冷却中 pending 的 setTimeout handle。新 resume 前或用户手动发消息时清除。 */
   pendingResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(agentName: string, sessionID: string, rootSessionID: string, parentSessionID?: string) {
+  constructor(
+    agentName: string,
+    sessionID: string,
+    rootSessionID: string,
+    parentSessionID?: string,
+  ) {
     this.createdAt = Date.now();
     this.lastUserMessageAt = this.createdAt;
     this.agentName = agentName;
@@ -70,7 +76,7 @@ export class SessionData {
   }
 
   isRegisteredAgent(): boolean {
-    return this.isSecurityAgent() || this.isBasicGeneralAgent()
+    return this.isSecurityAgent() || this.isBasicGeneralAgent();
   }
 
   /** 当前未使用，预留给编排 agent 子任务方案 */
@@ -88,6 +94,27 @@ export class SessionData {
       return true;
     }
     return false;
+  }
+
+  /**
+   * 判断 chat.message hook 收到的消息是否为 sendResume 发出的恢复提示词回声。
+   *
+   * 判定逻辑（双重条件，缺一不可）：
+   * 1. resumeMarker !== null — 我们正处于 resume 等待期（sendResume 设了 marker，idle 检测到完成标记后清空）
+   * 2. output.parts 中存在 text part 的文本与 resumePrompt 完全相等
+   *    — opencode 源码确认 text part 从 promptAsync 到 chat.message 全程不被加工（resolvePart 仅 spread + 加 messageID/sessionID）
+   *
+   * 回声与真实用户消息的处理差异（见 upsert）：
+   * - 回声：不刷新 lastUserMessageAt（否则超时检测形同虚设）、不清 resumeMarker（否则 idle 检测不到完成标记 → 死循环）
+   * - 真实消息：刷新 lastUserMessageAt、清 resumeMarker（用户介入，恢复流程终止）
+   */
+  isResumeEcho(output: { message: UserMessage; parts: Part[] }): boolean {
+    return (
+      this.resumeMarker !== null &&
+      output.parts.some(
+        (p) => p.type === "text" && (p as { text?: string }).text === this.resumePrompt,
+      )
+    );
   }
 
   setTaskDir(taskDir: string | null | undefined): void {
@@ -117,7 +144,10 @@ export class SessionDataManager {
       const session = await this.createInternal(sessionID);
       return Result.ok(session);
     } catch (e) {
-      debugLog(`SessionDataManager.create 失败 sessionID=${sessionID} error=${e}`, sessionID);
+      debugLog(
+        `SessionDataManager.create 失败 sessionID=${sessionID} error=${e}`,
+        sessionID,
+      );
       return Result.fail<SessionData>(String(e));
     }
   }
@@ -125,17 +155,52 @@ export class SessionDataManager {
   /**
    * 更新 session 数据（agentName + lastUserMessageAt）。
    * 仅供 chat.message 调用。session 不存在时先创建（插件重启兜底），创建失败抛异常（中断 prompt，用户看到 toast）。
-   * isSynthetic: resume prompt 回声（由 chat.message 根据 resumeMarker 判断），为 true 时不刷新 lastUserMessageAt。
+   * 内部通过 isResumeEcho(output) 判断是否为 resume 回声：回声不刷新 lastUserMessageAt 也不清 resumeMarker。
    */
-  async upsert(sessionID: string, agentName: string, isSynthetic?: boolean): Promise<SessionData> {
+  async upsert(
+    sessionID: string,
+    agentName: string,
+    output: { message: UserMessage; parts: Part[] },
+  ): Promise<SessionData> {
     const session = await this.createInternal(sessionID); // 已存在则返回，不存在则创建（失败抛异常）
-    if (!isSynthetic) {
+    // 执行到这里的情况下，重置这个标识
+    session.activelyTerminated = false;
+    const isResumeEcho = session.isResumeEcho(output);
+    if (isResumeEcho) {
+      // 不能清理 resumeMarker ，因为此处清理掉在 idle 判断resumeMarker的时候会认为"未检测到完成标记"
+      // 就可能再次发送恢复提示词造成死循环！
+
+      debugLog(
+        `chat.message: 这是恢复提示词 sessionID=${sessionID}, prompt=${session.resumePrompt}`,
+        sessionID,
+      );
+    } else {
+      // 用户手动发送的消息
+
       session.lastUserMessageAt = Date.now();
+
+      // 用户手动发送的消息 = 新一轮对话，上一轮植入的 resumeMarker 不再相关，清空避免误判
+      session.resumeMarker = null;
+
+      debugLog(
+        `chat.message: 用户手动发送的消息 sessionID=${sessionID}`,
+        sessionID,
+      );
     }
     if (session.agentName !== agentName) {
       session.agentSwitchedFrom = session.agentName;
       session.agentName = agentName;
     }
+
+    // 不管是用户发送的消息还是回复消息，直接调用一次定时器清理
+    const cleared = session.clearPendingResume();
+    if (cleared) {
+      debugLog(
+        `chat.message: 取消 pending 冷却恢复 sessionID=${sessionID}`,
+        sessionID,
+      );
+    }
+
     return session;
   }
 
@@ -144,7 +209,13 @@ export class SessionDataManager {
     hookName: string,
     sessionID?: string,
   ): SessionData | undefined {
-    return this.requireAgent(hookName, (session) => {return session.isRegisteredAgent()}, sessionID)
+    return this.requireAgent(
+      hookName,
+      (session) => {
+        return session.isRegisteredAgent();
+      },
+      sessionID,
+    );
   }
 
   /** 只返回 Security Agent 的 session。只查不创建。 */
@@ -152,7 +223,13 @@ export class SessionDataManager {
     hookName: string,
     sessionID?: string,
   ): SessionData | undefined {
-    return this.requireAgent(hookName, (session) => {return session.isSecurityAgent()}, sessionID)
+    return this.requireAgent(
+      hookName,
+      (session) => {
+        return session.isSecurityAgent();
+      },
+      sessionID,
+    );
   }
 
   private requireAgent(
@@ -166,7 +243,9 @@ export class SessionDataManager {
     }
     const session = this.get(sessionID);
     if (!session) {
-      debugLog(`[${hookName}] 跳过 — session 未创建（等待 chat.message）, sessionID=${sessionID}`);
+      debugLog(
+        `[${hookName}] 跳过 — session 未创建（等待 chat.message）, sessionID=${sessionID}`,
+      );
       return undefined;
     }
     if (!matchFunc(session)) {
@@ -190,18 +269,26 @@ export class SessionDataManager {
    * 限制：依赖 sessions map 中父 session 已被 session.created hook 创建。
    * 如果父 session 没创建（极少见，例如 plugin 重启时序问题），返回 null 兜底。
    */
-  resolveFirstSecurityAgentSessionData(sessionID: string | null | undefined): SessionData | null {
+  resolveFirstSecurityAgentSessionData(
+    sessionID: string | null | undefined,
+  ): SessionData | null {
     let currentSid: string | null | undefined = sessionID;
     const visitedSids = new Set<string>();
     let depth = 0;
     while (true) {
       if (!currentSid) {
-        debugLog(`[depth=${depth}] resolveRootSecurityAgent: 会话ID为空，终止`, sessionID);
+        debugLog(
+          `[depth=${depth}] resolveRootSecurityAgent: 会话ID为空，终止`,
+          sessionID,
+        );
         return null;
       }
 
       if (visitedSids.has(currentSid)) {
-        debugLog(`[depth=${depth}] resolveRootSecurityAgent: 检测到循环 sessionID=${currentSid}，终止`, sessionID);
+        debugLog(
+          `[depth=${depth}] resolveRootSecurityAgent: 检测到循环 sessionID=${currentSid}，终止`,
+          sessionID,
+        );
         return null;
       }
       visitedSids.add(currentSid);
@@ -265,42 +352,59 @@ export class SessionDataManager {
   /** 私有：从 API 创建 SessionData。唯一的 new SessionData() 调用点。失败抛异常。 */
   private async createFromAPI(sessionID: string): Promise<SessionData> {
     if (!this.client) {
-      throw new Error(`SessionDataManager: client 未初始化，无法创建 sessionID=${sessionID}`);
+      throw new Error(
+        `SessionDataManager: client 未初始化，无法创建 sessionID=${sessionID}`,
+      );
     }
     const response = await this.client.session.get({
       path: { id: sessionID },
     });
     if (response.error || !response.data) {
-      throw new Error(`SessionDataManager: API 错误 sessionID=${sessionID} error=${JSON.stringify(response.error)}`);
+      throw new Error(
+        `SessionDataManager: API 错误 sessionID=${sessionID} error=${JSON.stringify(response.error)}`,
+      );
     }
     const sessionInfo = response.data;
     const agentName = (sessionInfo as { agent?: string })?.agent;
     if (!agentName) {
-      throw new Error(`SessionDataManager: API 未返回 agent 字段 sessionID=${sessionID}`);
+      throw new Error(
+        `SessionDataManager: API 未返回 agent 字段 sessionID=${sessionID}`,
+      );
     }
     let rootSessionID: string | undefined = undefined;
     let parentSession: SessionData | undefined = undefined;
     const parentSessionID = (sessionInfo as { parentID?: string })?.parentID;
-        if (parentSessionID) {
+    if (parentSessionID) {
       // 子 session（非根 session）需要沿用根 session 的 task_dir。先创建父 session 再获取 rootSessionID。
       const parentSessionResult = await this.create(parentSessionID);
       parentSession = parentSessionResult.data;
       if (!parentSession) {
-        throw new Error(`SessionDataManager: 父 session 创建失败 sessionID=${sessionID} parentID=${parentSessionID} error=${parentSessionResult.errorMessage}`);
+        throw new Error(
+          `SessionDataManager: 父 session 创建失败 sessionID=${sessionID} parentID=${parentSessionID} error=${parentSessionResult.errorMessage}`,
+        );
       }
       rootSessionID = parentSession.rootSessionID;
     } else {
       rootSessionID = sessionID;
     }
-    const session = new SessionData(agentName, sessionID, rootSessionID, parentSessionID);
+    const session = new SessionData(
+      agentName,
+      sessionID,
+      rootSessionID,
+      parentSessionID,
+    );
     this.sessions.set(sessionID, session);
     debugLog(
       `SessionDataManager: 创建 sessionID=${sessionID} agent=${agentName} parentID=${parentSessionID || "无"}`,
       sessionID,
     );
-    
-        // 创建 task_dir 映射文件（幂等，已存在则返回已有）
-    const taskDir = this.getOrCreateTaskDir(sessionID, agentName, parentSession);
+
+    // 创建 task_dir 映射文件（幂等，已存在则返回已有）
+    const taskDir = this.getOrCreateTaskDir(
+      sessionID,
+      agentName,
+      parentSession,
+    );
     session.setTaskDir(taskDir);
     if (!parentSessionID) {
       session.rootTaskDir = taskDir; // 根 session 任务目录
@@ -310,13 +414,20 @@ export class SessionDataManager {
     return session;
   }
 
-    private getOrCreateTaskDir(sessionID: string, agentName: string, parentSession: SessionData | undefined): string | null | undefined {
+  private getOrCreateTaskDir(
+    sessionID: string,
+    agentName: string,
+    parentSession: SessionData | undefined,
+  ): string | null | undefined {
     const isCurrentPrimaryAgent = !parentSession?.sessionID;
     let baseDir = parentSession?.rootTaskDir;
 
     if (isCurrentPrimaryAgent) {
       if (!localIsSecurityAgent(agentName)) {
-        debugLog(`getOrCreateTaskDir: 根 session 且非 Security Agent，不创建 task_dir sessionID=${sessionID} agent=${agentName}`, sessionID);
+        debugLog(
+          `getOrCreateTaskDir: 根 session 且非 Security Agent，不创建 task_dir sessionID=${sessionID} agent=${agentName}`,
+          sessionID,
+        );
         return null;
       }
     } else {
@@ -324,7 +435,7 @@ export class SessionDataManager {
         baseDir = join(baseDir, "subtasks");
       }
     }
-    
+
     return createTaskDir(sessionID, agentName, baseDir);
   }
 }

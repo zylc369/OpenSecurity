@@ -1,4 +1,11 @@
-import { writeFileSync, readFileSync, statSync, existsSync, openSync, closeSync } from "fs";
+import {
+  writeFileSync,
+  readFileSync,
+  statSync,
+  existsSync,
+  openSync,
+  closeSync,
+} from "fs";
 import { join, dirname, delimiter } from "path";
 import { tmpdir } from "os";
 import * as yaml from "js-yaml";
@@ -32,7 +39,11 @@ import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
 import { readJsonSafe, removeTaskSession } from "./lib/task-session";
 import { getPythonCmd, getCondaCmd, getCondaInstallHint } from "./lib/venv";
-import { hasBuwaiExtensionId, loadSnippet, resolveDynamicRuleSnippetName as resolveDynamicByAgentSnippetName } from "./lib/snippet";
+import {
+  hasBuwaiExtensionId,
+  loadSnippet,
+  resolveDynamicRuleSnippetName as resolveDynamicByAgentSnippetName,
+} from "./lib/snippet";
 import { maybeResumeAnalysis } from "./lib/persistence";
 import { recordTimeline, flushTimeline } from "./lib/timeline";
 import { runDetectEnv, type EnvironmentCheckResult } from "./lib/env-check";
@@ -53,19 +64,20 @@ interface EnvData {
       path: string | null;
       idat_path?: string | null;
     };
-    tools?: Record<string, {
-      available: boolean;
-      version: string | null;
-      description?: string;
-      resolved_path?: string | null;
-    }>;
+    tools?: Record<
+      string,
+      {
+        available: boolean;
+        version: string | null;
+        description?: string;
+        resolved_path?: string | null;
+      }
+    >;
   };
 }
 
 // 根据 agent 名获取脚本目录；不在映射表中时返回 undefined
-function getScriptDir(
-  agentName: string | undefined,
-): string | undefined {
+function getScriptDir(agentName: string | undefined): string | undefined {
   return AGENT_SCRIPT_DIRS[agentName || ""] || undefined;
 }
 
@@ -252,7 +264,10 @@ async function abortSession(sessionID: string, reason: string): Promise<void> {
     await ctx.client.session.abort({ path: { id: sessionID } });
     debugLog(`abortSession: 已终止 sessionID=${sessionID}`, sessionID);
   } catch (e) {
-    debugLog(`abortSession: abort 失败 sessionID=${sessionID} error=${e}`, sessionID);
+    debugLog(
+      `abortSession: abort 失败 sessionID=${sessionID} error=${e}`,
+      sessionID,
+    );
   }
 }
 
@@ -261,12 +276,18 @@ const toolStartTimes = new Map<string, number>();
 
 // 统一环境检测入口（chat.message 调用此函数）
 // 检测顺序：PythonCmd 可用性 → 环境检测（全量+预装）
-async function checkEnvironment(agent: string, sessionID: string): Promise<EnvironmentCheckResult> {
+async function checkEnvironment(
+  agent: string,
+  sessionID: string,
+): Promise<EnvironmentCheckResult> {
   // 确保 .ai_env 存在（首次启动时 Plugin 自动创建，避免 detect_env 报错）
   const aiEnvPath = join(OPENCODE_ROOT, ".ai_env");
   if (!existsSync(aiEnvPath)) {
-    debugLog(`checkEnvironment: .ai_env 不存在，自动创建 sessionID=${sessionID}`, sessionID);
-    closeSync(openSync(aiEnvPath, 'w')); 
+    debugLog(
+      `checkEnvironment: .ai_env 不存在，自动创建 sessionID=${sessionID}`,
+      sessionID,
+    );
+    closeSync(openSync(aiEnvPath, "w"));
   }
 
   const pythonCmd = getPythonCmd();
@@ -288,14 +309,23 @@ async function reportErrorAndAbort(
   if (sessionData) {
     sessionData.activelyTerminated = true;
     sessionData.pendingErrorMessage = message;
-    debugLog(`reportErrorAndAbort: sessionData 更新错误信息 sessionID=${sessionID} message=${message}`, sessionID);
+    debugLog(
+      `reportErrorAndAbort: sessionData 更新错误信息 sessionID=${sessionID} message=${message}`,
+      sessionID,
+    );
   } else {
-    debugLog(`reportErrorAndAbort: sessionData 未提供，无法保存错误信息 sessionID=${sessionID} message=${message}`, sessionID);
+    debugLog(
+      `reportErrorAndAbort: sessionData 未提供，无法保存错误信息 sessionID=${sessionID} message=${message}`,
+      sessionID,
+    );
   }
   try {
     await client.session.abort({ path: { id: sessionID } });
   } catch (e) {
-    debugLog(`reportErrorAndAbort: abort 失败 sessionID=${sessionID} err=${(e as Error)?.message}`, sessionID);
+    debugLog(
+      `reportErrorAndAbort: abort 失败 sessionID=${sessionID} err=${(e as Error)?.message}`,
+      sessionID,
+    );
   }
 }
 
@@ -305,12 +335,15 @@ async function reportErrorAndAbort(
  * 从每个成员 agent .md 的 frontmatter description 字段自动收集，
  * 避免维护两套描述。当前 agent 自己也会列出（让 LLM 知道自己是谁）。
  */
-function buildDelegationBlock(currentAgent: string, sessionID: string): string | null {
+function buildDelegationBlock(
+  currentAgent: string,
+  sessionID: string,
+): string | null {
   const lines: string[] = [
     "",
     "## 可委派的 Agent",
     "",
-    "遇到不属于你专长领域的子问题，用 **Task 工具**（`subagent_type` 参数）委派给对应专家 agent。把必要的上下文传给子 agent，不要只说\"帮我查一下\"。",
+    '遇到不属于你专长领域的子问题，用 **Task 工具**（`subagent_type` 参数）委派给对应专家 agent。把必要的上下文传给子 agent，不要只说"帮我查一下"。',
     "",
     "| subagent_type | 擅长 |",
     "|---------------|------|",
@@ -327,7 +360,10 @@ function buildDelegationBlock(currentAgent: string, sessionID: string): string |
       lines.push(`| \`${agentName}\` | ${desc} |`);
       agentCount++;
     } else {
-      debugLog(`buildDelegationBlock: ${agentName} description 读取失败，跳过`, sessionID);
+      debugLog(
+        `buildDelegationBlock: ${agentName} description 读取失败，跳过`,
+        sessionID,
+      );
     }
   }
 
@@ -337,7 +373,9 @@ function buildDelegationBlock(currentAgent: string, sessionID: string): string |
   }
 
   lines.push("");
-  lines.push("**委派规则**：把已发现的全部相关信息传给子 agent（文件路径、URL、参数、目标），要求返回**具体的可操作结果**（flag / payload / 报告路径），不是\"建议\"。拿到返回结果后**整合进你的分析继续**，不要停下来等用户。");
+  lines.push(
+    '**委派规则**：把已发现的全部相关信息传给子 agent（文件路径、URL、参数、目标），要求返回**具体的可操作结果**（flag / payload / 报告路径），不是"建议"。拿到返回结果后**整合进你的分析继续**，不要停下来等用户。',
+  );
 
   return lines.join("\n");
 }
@@ -350,7 +388,10 @@ function buildDelegationBlock(currentAgent: string, sessionID: string): string |
  */
 const descCache = new Map<string, { desc: string | null; mtime: number }>();
 
-function readAgentDescription(agentName: string, sessionID: string): string | null {
+function readAgentDescription(
+  agentName: string,
+  sessionID: string,
+): string | null {
   const agentFile = join(AGENTS_DIR, `${agentName}.md`);
   try {
     const stat = statSync(agentFile);
@@ -373,19 +414,27 @@ function readAgentDescription(agentName: string, sessionID: string): string | nu
     descCache.set(agentName, { desc, mtime: stat.mtimeMs });
     return desc;
   } catch (e) {
-    debugLog(`readAgentDescription: 读取 ${agentName} 失败: ${(e as Error)?.message}`, sessionID);
+    debugLog(
+      `readAgentDescription: 读取 ${agentName} 失败: ${(e as Error)?.message}`,
+      sessionID,
+    );
     return null;
   }
 }
 
-function resolveDynamicSnippetName(session: SessionData, name: string): string | null {
+function resolveDynamicSnippetName(
+  session: SessionData,
+  name: string,
+): string | null {
   const sessionID = session.sessionID;
 
-  debugLog(`Expanded snippet: 开始解析动态片段名`, sessionID)
+  debugLog(`Expanded snippet: 开始解析动态片段名`, sessionID);
 
   // 找到首个安全Agent
   const firstSecurityAgentSessionData =
-    ctx.sessionManager.resolveFirstSecurityAgentSessionData(session.parentSessionID);
+    ctx.sessionManager.resolveFirstSecurityAgentSessionData(
+      session.parentSessionID,
+    );
   const agentName = firstSecurityAgentSessionData?.agentName;
 
   let snippetName: string | null = null;
@@ -396,20 +445,29 @@ function resolveDynamicSnippetName(session: SessionData, name: string): string |
   }
 
   debugLog(
-    `Expanded snippet dynamic-by-agent: securityAgentName=${agentName}, snippetName=${snippetName}`, 
-    sessionID
+    `Expanded snippet dynamic-by-agent: securityAgentName=${agentName}, snippetName=${snippetName}`,
+    sessionID,
   );
   return snippetName;
 }
 
-function expandedSnippet(session: SessionData, output: {system: string[];}): void {
+function expandedSnippet(
+  session: SessionData,
+  output: { system: string[] },
+): void {
   const sessionID = session.sessionID;
   const agentName = session.agentName;
-  debugLog(`system.transform: 开始占位符展开 sessionID=${sessionID} agent=${agentName}`, sessionID);
+  debugLog(
+    `system.transform: 开始占位符展开 sessionID=${sessionID} agent=${agentName}`,
+    sessionID,
+  );
   const agentFile = join(AGENTS_DIR, `${agentName}.md`);
 
   if (!hasBuwaiExtensionId(agentFile)) {
-    debugLog(`[ERROR] system.transform: ${agentFile} 不包含 buwai-extension-id，跳过占位符展开`, sessionID);
+    debugLog(
+      `[ERROR] system.transform: ${agentFile} 不包含 buwai-extension-id，跳过占位符展开`,
+      sessionID,
+    );
     return;
   }
 
@@ -423,17 +481,20 @@ function expandedSnippet(session: SessionData, output: {system: string[];}): voi
   for (let i = 0; i < output.system.length; i++) {
     if (!output.system[i].includes("{{buwai-rule:")) continue;
     output.system[i] = output.system[i].replace(regex, (_, name: string) => {
-      let realName: string | null | undefined = name
+      let realName: string | null | undefined = name;
       let snippet: string | null = null;
       if (name.startsWith("dynamic-")) {
         realName = resolveDynamicSnippetName(session, name);
       }
 
       if (!realName) {
-        debugLog(`Snippet name not found: name=${name},realName=${realName}`, sessionID);
+        debugLog(
+          `Snippet name not found: name=${name},realName=${realName}`,
+          sessionID,
+        );
         return _;
       }
-      
+
       // 静态片段：从 agents-rules/<name>.md 加载
       snippet = loadSnippet(realName);
 
@@ -441,7 +502,10 @@ function expandedSnippet(session: SessionData, output: {system: string[];}): voi
         debugLog(`Snippet not found: ${realName}`, sessionID);
         return _;
       }
-      debugLog(`Expanded snippet: ${realName} (${snippet.length} chars)`, sessionID);
+      debugLog(
+        `Expanded snippet: ${realName} (${snippet.length} chars)`,
+        sessionID,
+      );
       return snippet;
     });
   }
@@ -456,8 +520,8 @@ function expandedSnippet(session: SessionData, output: {system: string[];}): voi
  * opencode 退出时通过 SIGTERM 关闭 daemon。
  */
 let writerDaemon: import("child_process").ChildProcess | null = null;
-let daemonReady = false;          // daemon 是否已输出 READY
-let pendingEvents: string[] = [];  // daemon 未就绪时暂存的事件（上限 50）
+let daemonReady = false; // daemon 是否已输出 READY
+let pendingEvents: string[] = []; // daemon 未就绪时暂存的事件（上限 50）
 let exitHandlerRegistered = false;
 
 function ensureWriterDaemon(): void {
@@ -471,7 +535,12 @@ function ensureWriterDaemon(): void {
     return;
   }
 
-  const script = join(OPENCODE_ROOT, "mcp-servers", "events", "write_event_daemon.py");
+  const script = join(
+    OPENCODE_ROOT,
+    "mcp-servers",
+    "events",
+    "write_event_daemon.py",
+  );
   if (!existsSync(script)) {
     debugLog(`ensureWriterDaemon: daemon 脚本不存在 ${script}`);
     return;
@@ -482,7 +551,7 @@ function ensureWriterDaemon(): void {
   try {
     const { spawn } = require("child_process");
     writerDaemon = spawn(python, [script], {
-      stdio: ["pipe", "pipe", "pipe"],  // stdin/stdout/stderr 全 pipe
+      stdio: ["pipe", "pipe", "pipe"], // stdin/stdout/stderr 全 pipe
       env: { ...process.env },
     });
 
@@ -492,10 +561,14 @@ function ensureWriterDaemon(): void {
         const line = data.toString().trim();
         if (line === "READY" && !daemonReady) {
           daemonReady = true;
-          debugLog(`ensureWriterDaemon: daemon READY，flush ${pendingEvents.length} 个暂存事件`);
+          debugLog(
+            `ensureWriterDaemon: daemon READY，flush ${pendingEvents.length} 个暂存事件`,
+          );
           // flush 暂存事件
           for (const evt of pendingEvents) {
-            try { writerDaemon?.stdin?.write(evt); } catch {}
+            try {
+              writerDaemon?.stdin?.write(evt);
+            } catch {}
           }
           pendingEvents = [];
         }
@@ -519,9 +592,13 @@ function ensureWriterDaemon(): void {
     });
 
     writerDaemon.on("exit", (code: number | null, signal: string | null) => {
-      debugLog(`ensureWriterDaemon: daemon exited code=${code} signal=${signal}`);
+      debugLog(
+        `ensureWriterDaemon: daemon exited code=${code} signal=${signal}`,
+      );
       if (code !== 0) {
-        debugLog(`ensureWriterDaemon: daemon 异常退出，${pendingEvents.length} 个暂存事件丢失`);
+        debugLog(
+          `ensureWriterDaemon: daemon 异常退出，${pendingEvents.length} 个暂存事件丢失`,
+        );
         pendingEvents = [];
       }
       writerDaemon = null;
@@ -538,7 +615,9 @@ function ensureWriterDaemon(): void {
       exitHandlerRegistered = true;
     }
 
-    debugLog(`ensureWriterDaemon: daemon 已启动 pid=${writerDaemon.pid}，等待 READY...`);
+    debugLog(
+      `ensureWriterDaemon: daemon 已启动 pid=${writerDaemon.pid}，等待 READY...`,
+    );
   } catch (e) {
     debugLog(`ensureWriterDaemon: spawn 失败: ${(e as Error)?.message}`);
     writerDaemon = null;
@@ -551,16 +630,22 @@ function ensureWriterDaemon(): void {
  * daemon 未就绪时暂存（上限 50），就绪后自动 flush。
  * 失败只记日志，不影响 agent 运行。
  */
-function fireAndForgetEvent(name: string, body: string, source: string, groupId: string): void {
+function fireAndForgetEvent(
+  name: string,
+  body: string,
+  source: string,
+  groupId: string,
+): void {
   ensureWriterDaemon();
 
-  const event = JSON.stringify({
-    name,
-    body,
-    source,
-    group_id: groupId,
-    timestamp: Date.now(),
-  }) + "\n";
+  const event =
+    JSON.stringify({
+      name,
+      body,
+      source,
+      group_id: groupId,
+      timestamp: Date.now(),
+    }) + "\n";
 
   if (!writerDaemon || !writerDaemon.stdin || writerDaemon.stdin.destroyed) {
     debugLog(`fireAndForgetEvent: daemon 不可用，跳过 name=${name}`);
@@ -575,7 +660,9 @@ function fireAndForgetEvent(name: string, body: string, source: string, groupId:
         debugLog(`fireAndForgetEvent: stdin 背压，事件可能延迟 name=${name}`);
       }
     } catch (e) {
-      debugLog(`fireAndForgetEvent: stdin 写入失败 name=${name} err=${(e as Error)?.message}`);
+      debugLog(
+        `fireAndForgetEvent: stdin 写入失败 name=${name} err=${(e as Error)?.message}`,
+      );
     }
   } else {
     // daemon 未就绪 → 暂存（上限 50，超出丢弃最早的）
@@ -606,7 +693,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   debugLog(`  directory param: ${directory}`);
   debugLog(`  env_cache exists: ${existsSync(ENV_CACHE_FILE)}`);
   debugLog(`  ctx.client: ${!!ctx.client}`);
-  debugLog(`  PYTHON_CMD: ${getPythonCmd() ?? "未初始化（等待首次 chat.message 触发）"}`);
+  debugLog(
+    `  PYTHON_CMD: ${getPythonCmd() ?? "未初始化（等待首次 chat.message 触发）"}`,
+  );
 
   // 写心跳文件，供 agent 检测 Plugin 是否正常加载
   const heartbeatFile = join(DATA_DIR, ".plugin-heartbeat");
@@ -637,7 +726,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     // 注意：chat.message 是唯一能直接从 input.agent 获取 agent 名的 hook
     //       system.transform / tool.execute.before 的 input 无 agent
     //       但 SessionDataManager.requireSecurityAgent 可通过 session.get API 间接获取
-    "chat.message": async (input) => {
+    "chat.message": async (input, output) => {
       const { sessionID, agent } = input;
       let sessionData: SessionData | null = null;
       try {
@@ -655,41 +744,52 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         const existingResult = await ctx.sessionManager.create(sessionID);
         if (existingResult.data?.pendingErrorCallbackMessage) {
           existingResult.data.pendingErrorCallbackMessage = false;
-          debugLog(`chat.message: 错误信息回调，不继续执行 sessionID=${sessionID}`, sessionID);
+          debugLog(
+            `chat.message: 错误信息回调，不继续执行 sessionID=${sessionID}`,
+            sessionID,
+          );
           return;
         }
-        const existing = existingResult.data;
-        const isResumeEcho = !!existing?.resumeMarker;
 
-        sessionData = await ctx.sessionManager.upsert(sessionID, agent, isResumeEcho);
+        sessionData = await ctx.sessionManager.upsert(sessionID, agent, output);
 
-        // 真实用户消息 = 取消 pending 的冷却 resume（用户手动介入，自动恢复不应插队）
-        if (!isResumeEcho) {
-          const cleared = sessionData.clearPendingResume();
-          if (cleared) {
-            debugLog(`chat.message: 取消 pending 冷却恢复 sessionID=${sessionID}`, sessionID);
-          }
-        }
+        // 发送了消息，清理发送恢复消息的定时器
 
-        debugLog(`chat.message: sessionID=${sessionID} agent=${agent}${isResumeEcho ? " [resume-echo]" : ""}`, sessionID);
+        debugLog(
+          `chat.message: sessionID=${sessionID} agent=${agent}`,
+          sessionID,
+        );
 
         // 环境检测：不 ready → 存错误信息到 sessionData + 终止（不 throw，不调 session.prompt）
         const envCheck = await checkEnvironment(agent, sessionID);
         if (!envCheck.ready) {
-          debugLog(`chat.message: 环境检测未通过 agent=${agent}，输出错误并终止`, sessionID);
-          await reportErrorAndAbort(ctx.client, sessionID, sessionData, envCheck.message);
+          debugLog(
+            `chat.message: 环境检测未通过 agent=${agent}，输出错误并终止`,
+            sessionID,
+          );
+          await reportErrorAndAbort(
+            ctx.client,
+            sessionID,
+            sessionData,
+            envCheck.message,
+          );
           return;
         }
-        sessionData.activelyTerminated = false;
         sessionData.pendingErrorMessage = null;
-        // 用户新消息 = 新一轮对话，上一轮植入的 resumeMarker 不再相关，清空避免误判
-        sessionData.resumeMarker = null;
       } catch (e) {
         // 兜底：chat.message 里的任何意外异常都不能 throw（会变 defect → 用户空白）
         const msg = (e as Error)?.message ?? String(e);
-        debugLog(`chat.message: 意外异常 sessionID=${sessionID} err=${msg}`, sessionID);
+        debugLog(
+          `chat.message: 意外异常 sessionID=${sessionID} err=${msg}`,
+          sessionID,
+        );
         try {
-          await reportErrorAndAbort(ctx.client, sessionID, sessionData, `[chat.message 异常] ${msg}`);
+          await reportErrorAndAbort(
+            ctx.client,
+            sessionID,
+            sessionData,
+            `[chat.message 异常] ${msg}`,
+          );
         } catch {
           // reportErrorAndAbort 本身也失败了，只能靠日志
         }
@@ -701,9 +801,15 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     "experimental.session.compacting": async (input, output) => {
       try {
         const sid = input.sessionID;
-        const session = ctx.sessionManager.requireSecurityAgent("compacting", sid);
+        const session = ctx.sessionManager.requireSecurityAgent(
+          "compacting",
+          sid,
+        );
         if (!session) {
-          debugLog(`compacting: 跳过 — 非 Security Agent, sessionID=${sid}`, sid);
+          debugLog(
+            `compacting: 跳过 — 非 Security Agent, sessionID=${sid}`,
+            sid,
+          );
           return;
         }
         const agentName = session.agentName;
@@ -724,13 +830,19 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
 
         if (sid) {
           // 分析持续性恢复：压缩后如果分析尚未完成，AI 应继续自主分析
-          if (SECURITY_AGENTS.includes(session.agentName) && session.agentName !== AGENT_SECURITY_ANALYSIS_EVOLVE) {
+          if (
+            SECURITY_AGENTS.includes(session.agentName) &&
+            session.agentName !== AGENT_SECURITY_ANALYSIS_EVOLVE
+          ) {
             output.context.push(`## 分析持续性（压缩后必须遵守）
   这是安全分析会话，分析可能尚未完成。压缩后请继续执行未完成的分析步骤，不要输出状态报告后停下来等待用户。如果分析已完成，直接输出最终结论即可。`);
           }
         }
       } catch (e) {
-        debugLog(`compacting: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`, input.sessionID);
+        debugLog(
+          `compacting: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`,
+          input.sessionID,
+        );
       }
     },
 
@@ -750,14 +862,20 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         // ── 通用层：所有会话 ──
         output.system.push(
           `\n## 临时文件放置\n` +
-          `如需写临时文件，写到 ${join(tmpdir(), "opencode")}/ 下。\n` +
-          `> 该目录权限已放行，不会触发权限申请。`,
+            `如需写临时文件，写到 ${join(tmpdir(), "opencode")}/ 下。\n` +
+            `> 该目录权限已放行，不会触发权限申请。`,
         );
 
         // ── 获取 session（先试 SECURITY_AGENTS，再试 searcher/memorist subagent）──
-        const session = ctx.sessionManager.requireRegisteredAgent("system.transform", sessionID);
+        const session = ctx.sessionManager.requireRegisteredAgent(
+          "system.transform",
+          sessionID,
+        );
         if (!session) {
-          debugLog(`[WARN] system.transform: 跳过 — 非注册 agent, sessionID=${sessionID}`, sessionID);
+          debugLog(
+            `[WARN] system.transform: 跳过 — 非注册 agent, sessionID=${sessionID}`,
+            sessionID,
+          );
           return;
         }
 
@@ -772,7 +890,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           debugLog(`system.transform: 根Agent agent=${agentName}`, sessionID);
           const switchedFrom = session.agentSwitchedFrom;
           if (switchedFrom) {
-            output.system.unshift(`## Agent切换\n**注意，发生Agent切换：**Agent 已从 ${switchedFrom} 切换到 ${agentName}。请立即按照 ${agentName} 的规则工作，丢弃前一个 Agent 的角色设定。`);
+            output.system.unshift(
+              `## Agent切换\n**注意，发生Agent切换：**Agent 已从 ${switchedFrom} 切换到 ${agentName}。请立即按照 ${agentName} 的规则工作，丢弃前一个 Agent 的角色设定。`,
+            );
             session.agentSwitchedFrom = null;
           } else {
             output.system.unshift(`当前 Agent: ${agentName}`);
@@ -787,7 +907,10 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           session.justCompacted;
 
         if (!shouldInject) {
-          debugLog(`[INFO] system.transform: #${session.systemTransformCount} 跳过环境信息注入 agent=${agentName}`, sessionID);
+          debugLog(
+            `[INFO] system.transform: #${session.systemTransformCount} 跳过环境信息注入 agent=${agentName}`,
+            sessionID,
+          );
           return;
         }
 
@@ -803,21 +926,30 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           const delegationBlock = buildDelegationBlock(agentName, sessionID);
           if (delegationBlock) {
             output.system.push(delegationBlock);
-            debugLog(`[INFO] system.transform: 注入委派清单 agent=${agentName} length=${delegationBlock.length}`, sessionID);
+            debugLog(
+              `[INFO] system.transform: 注入委派清单 agent=${agentName} length=${delegationBlock.length}`,
+              sessionID,
+            );
           }
         }
 
         // 清理压缩标识
         if (session.justCompacted) {
           session.justCompacted = false;
-          debugLog(`[INFO] system.transform: 清理 justCompacted sessionID=${sessionID}`, sessionID);
+          debugLog(
+            `[INFO] system.transform: 清理 justCompacted sessionID=${sessionID}`,
+            sessionID,
+          );
         }
         debugLog(
           `[INFO] system.transform: #${session.systemTransformCount} 注入环境信息 sessionID=${sessionID}, agent=${agentName}, length=${envSection.length}, envSection=\n${envSection}`,
-          sessionID
+          sessionID,
         );
       } catch (e) {
-        debugLog(`[ERROR] system.transform: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`, input.sessionID);
+        debugLog(
+          `[ERROR] system.transform: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`,
+          input.sessionID,
+        );
       }
     },
 
@@ -829,13 +961,25 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         const sessionID = input.sessionID;
         if (!sessionID) {
           debugLog(`shell.env: 致命错误 — 无 sessionID, cwd=${input.cwd}`);
-          await abortSession("", `shell.env 触发但无 sessionID (cwd=${input.cwd})，session 初始化异常`);
+          await abortSession(
+            "",
+            `shell.env 触发但无 sessionID (cwd=${input.cwd})，session 初始化异常`,
+          );
           return;
         }
-        debugLog(`shell.env: 触发 sessionID=${sessionID} cwd=${input.cwd} callID=${input.callID ?? "无"}`, sessionID);
-        const session = ctx.sessionManager.requireSecurityAgent("shell.env", sessionID);
+        debugLog(
+          `shell.env: 触发 sessionID=${sessionID} cwd=${input.cwd} callID=${input.callID ?? "无"}`,
+          sessionID,
+        );
+        const session = ctx.sessionManager.requireSecurityAgent(
+          "shell.env",
+          sessionID,
+        );
         if (!session) {
-          debugLog(`shell.env: 跳过 — 非 Security Agent sessionID=${sessionID}`, sessionID);
+          debugLog(
+            `shell.env: 跳过 — 非 Security Agent sessionID=${sessionID}`,
+            sessionID,
+          );
           return;
         }
 
@@ -852,7 +996,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           const venvBin = dirname(pythonCmd);
           // filter(Boolean) 过滤空值，避免末尾分隔符(空 PATH 条目会被解释为当前目录，有 PATH injection 风险)
           // delimiter 跨平台: POSIX=':' Windows=';'（与 constants.ts 的 Windows 支持一致）
-          output.env.PATH = [venvBin, process.env.PATH].filter(Boolean).join(delimiter);
+          output.env.PATH = [venvBin, process.env.PATH]
+            .filter(Boolean)
+            .join(delimiter);
         }
         // CONDA_CMD（惰性缓存，getPythonCmd 已触发 ensureCondaEnvPython 设置缓存；
         // 用于 detect_env.py 生成准确的 conda 安装提示）
@@ -897,7 +1043,10 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           sessionID,
         );
       } catch (e) {
-        debugLog(`shell.env: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`, input.sessionID);
+        debugLog(
+          `shell.env: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`,
+          input.sessionID,
+        );
       }
     },
 
@@ -911,10 +1060,16 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           sid,
         );
         if (!session) {
-          debugLog(`tool.execute.before: 跳过 — 非 Security Agent, sessionID=${sid}`, sid);
+          debugLog(
+            `tool.execute.before: 跳过 — 非 Security Agent, sessionID=${sid}`,
+            sid,
+          );
           return;
         }
-        debugLog(`tool.execute.before: tool=${input.tool} sessionID=${sid}`, sid);
+        debugLog(
+          `tool.execute.before: tool=${input.tool} sessionID=${sid}`,
+          sid,
+        );
 
         // 时间线记录：工具开始执行（记录注入前的原始命令）
         const originalCmd = output.args?.command;
@@ -930,7 +1085,10 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         // 记录开始时间用于计算耗时
         toolStartTimes.set(input.callID, Date.now());
       } catch (e) {
-        debugLog(`tool.execute.before: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`, input.sessionID);
+        debugLog(
+          `tool.execute.before: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`,
+          input.sessionID,
+        );
       }
     },
 
@@ -944,7 +1102,10 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           sid,
         );
         if (!session) {
-          debugLog(`tool.execute.after: 跳过 — 非 Security Agent, sessionID=${sid}`, sid);
+          debugLog(
+            `tool.execute.after: 跳过 — 非 Security Agent, sessionID=${sid}`,
+            sid,
+          );
           return;
         }
 
@@ -965,12 +1126,20 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         if (toolName !== "task") {
           const agentName = session.agentName;
           const body = `Tool: ${toolName}\nArguments: ${JSON.stringify(input.args).slice(0, 2000)}\nInvoked by: ${agentName} Agent\nStatus: success\nResult: ${(output.output || "").slice(0, 2000)}\nContext: Session ${sid}`;
-          fireAndForgetEvent(`${toolName} execution`, body, `${agentName} tool execution`, sid);
+          fireAndForgetEvent(
+            `${toolName} execution`,
+            body,
+            `${agentName} tool execution`,
+            sid,
+          );
         }
 
         debugLog(`tool.execute.after: tool=${toolName}`, sid);
       } catch (e) {
-        debugLog(`tool.execute.after: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`, input.sessionID);
+        debugLog(
+          `tool.execute.after: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`,
+          input.sessionID,
+        );
       }
     },
 
@@ -987,9 +1156,16 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         if (!text.trim()) return;
 
         const body = `Agent: ${agentName}\nResponse: ${text.slice(0, 4000)}\nContext: Session ${sid}`;
-        fireAndForgetEvent(`${agentName} agent response`, body, `${agentName} response`, sid);
+        fireAndForgetEvent(
+          `${agentName} agent response`,
+          body,
+          `${agentName} response`,
+          sid,
+        );
       } catch (e) {
-        debugLog(`text.complete: 写入事件库失败 sessionID=${input.sessionID} err=${(e as Error)?.message}`);
+        debugLog(
+          `text.complete: 写入事件库失败 sessionID=${input.sessionID} err=${(e as Error)?.message}`,
+        );
       }
     },
 
@@ -1013,7 +1189,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
               );
             }
           } else {
-            debugLog(`event: session.created 无 sessionID，无法创建 SessionData`);
+            debugLog(
+              `event: session.created 无 sessionID，无法创建 SessionData`,
+            );
           }
         }
 
@@ -1044,22 +1222,34 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
 
           // ─── 分析持续性恢复 ────────────────────────────────────
           const session = ctx.sessionManager.get(sessionID);
-          if (session?.activelyTerminated || session?.activelyTerminated === null) {
-            debugLog(`session.idle: 主动终止（预装检查），跳过恢复，activelyTerminated=${session?.activelyTerminated}`, sessionID);
+          if (session?.activelyTerminated) {
+            debugLog(
+              `session.idle: 主动终止（预装检查），跳过恢复，activelyTerminated=${session?.activelyTerminated}`,
+              sessionID,
+            );
             // 如果有待输出的错误信息，在 session 空闲时通过 session.prompt 输出（从 chat.message 内部调会死锁）
             session.activelyTerminated = false;
             if (session?.pendingErrorMessage) {
               const errMsg = session.pendingErrorMessage;
               session.pendingErrorMessage = null;
               try {
-                debugLog(`session.idle: 输出待处理的错误信息：${errMsg}`, sessionID);
-                session.pendingErrorCallbackMessage = true
+                debugLog(
+                  `session.idle: 输出待处理的错误信息：${errMsg}`,
+                  sessionID,
+                );
+                session.pendingErrorCallbackMessage = true;
                 await ctx.client.session.prompt({
                   path: { id: sessionID },
-                  body: { parts: [{ type: "text", text: errMsg }], noReply: true },
+                  body: {
+                    parts: [{ type: "text", text: errMsg }],
+                    noReply: true,
+                  },
                 });
               } catch (e) {
-                debugLog(`session.idle: 输出错误信息失败: ${(e as Error)?.message}`, sessionID);
+                debugLog(
+                  `session.idle: 输出错误信息失败: ${(e as Error)?.message || e}`,
+                  sessionID,
+                );
               }
             }
           } else {
@@ -1070,7 +1260,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         // session 状态变化和错误（非 idle）
         if (
           sessionID &&
-          SECURITY_AGENTS.includes(ctx.sessionManager.get(sessionID)?.agentName || "")
+          SECURITY_AGENTS.includes(
+            ctx.sessionManager.get(sessionID)?.agentName || "",
+          )
         ) {
           if (event.type === "session.status") {
             recordTimeline(sessionID, {
@@ -1100,7 +1292,10 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           }
         }
       } catch (e) {
-        debugLog(`event: 意外异常 event=${JSON.stringify(input.event)} err=${(e as Error)?.message}`, input.event.properties?.info?.id);
+        debugLog(
+          `event: 意外异常 event=${JSON.stringify(input.event)} err=${(e as Error)?.message}`,
+          input.event.properties?.info?.id,
+        );
       }
     },
   };
