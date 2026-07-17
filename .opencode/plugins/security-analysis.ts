@@ -447,6 +447,146 @@ function expandedSnippet(session: SessionData, output: {system: string[];}): voi
   }
 }
 
+/**
+ * 常驻事件写入 daemon 管理。
+ *
+ * daemon 是一个长驻 Python 进程（write_event_daemon.py），通过 stdin 管道接收事件。
+ * 首次调用 fireAndForgetEvent 时懒启动，后续复用。
+ * daemon 初始化完成后输出 "READY" 到 stdout，plugin 收到后才开始写事件。
+ * opencode 退出时通过 SIGTERM 关闭 daemon。
+ */
+let writerDaemon: import("child_process").ChildProcess | null = null;
+let daemonReady = false;          // daemon 是否已输出 READY
+let pendingEvents: string[] = [];  // daemon 未就绪时暂存的事件（上限 50）
+let exitHandlerRegistered = false;
+
+function ensureWriterDaemon(): void {
+  if (writerDaemon && !writerDaemon.killed) {
+    return;
+  }
+
+  const python = getPythonCmd();
+  if (!python) {
+    debugLog(`ensureWriterDaemon: Python 未就绪`);
+    return;
+  }
+
+  const script = join(OPENCODE_ROOT, "mcp-servers", "events", "write_event_daemon.py");
+  if (!existsSync(script)) {
+    debugLog(`ensureWriterDaemon: daemon 脚本不存在 ${script}`);
+    return;
+  }
+
+  daemonReady = false;
+
+  try {
+    const { spawn } = require("child_process");
+    writerDaemon = spawn(python, [script], {
+      stdio: ["pipe", "pipe", "pipe"],  // stdin/stdout/stderr 全 pipe
+      env: { ...process.env },
+    });
+
+    // daemon stdout → 等 READY 信号
+    if (writerDaemon.stdout) {
+      writerDaemon.stdout.on("data", (data: Buffer) => {
+        const line = data.toString().trim();
+        if (line === "READY" && !daemonReady) {
+          daemonReady = true;
+          debugLog(`ensureWriterDaemon: daemon READY，flush ${pendingEvents.length} 个暂存事件`);
+          // flush 暂存事件
+          for (const evt of pendingEvents) {
+            try { writerDaemon?.stdin?.write(evt); } catch {}
+          }
+          pendingEvents = [];
+        }
+      });
+    }
+
+    // daemon stderr → debugLog（实时管道，排查用）
+    if (writerDaemon.stderr) {
+      writerDaemon.stderr.on("data", (data: Buffer) => {
+        const lines = data.toString().trim().split("\n");
+        for (const line of lines) {
+          if (line.trim()) debugLog(`writer-daemon: ${line.trim()}`);
+        }
+      });
+    }
+
+    writerDaemon.on("error", (e: Error) => {
+      debugLog(`ensureWriterDaemon: daemon error: ${e.message}`);
+      writerDaemon = null;
+      daemonReady = false;
+    });
+
+    writerDaemon.on("exit", (code: number | null, signal: string | null) => {
+      debugLog(`ensureWriterDaemon: daemon exited code=${code} signal=${signal}`);
+      if (code !== 0) {
+        debugLog(`ensureWriterDaemon: daemon 异常退出，${pendingEvents.length} 个暂存事件丢失`);
+        pendingEvents = [];
+      }
+      writerDaemon = null;
+      daemonReady = false;
+    });
+
+    // opencode 退出时关闭 daemon（只注册一次）
+    if (!exitHandlerRegistered) {
+      process.on("exit", () => {
+        if (writerDaemon && !writerDaemon.killed) {
+          writerDaemon.kill("SIGTERM");
+        }
+      });
+      exitHandlerRegistered = true;
+    }
+
+    debugLog(`ensureWriterDaemon: daemon 已启动 pid=${writerDaemon.pid}，等待 READY...`);
+  } catch (e) {
+    debugLog(`ensureWriterDaemon: spawn 失败: ${(e as Error)?.message}`);
+    writerDaemon = null;
+  }
+}
+
+/**
+ * 异步写入事件到 Graphiti 事件库（fire-and-forget，不阻塞主流程）。
+ * 通过 daemon stdin 管道写入 line-delimited JSON（含 timestamp 保证时序）。
+ * daemon 未就绪时暂存（上限 50），就绪后自动 flush。
+ * 失败只记日志，不影响 agent 运行。
+ */
+function fireAndForgetEvent(name: string, body: string, source: string, groupId: string): void {
+  ensureWriterDaemon();
+
+  const event = JSON.stringify({
+    name,
+    body,
+    source,
+    group_id: groupId,
+    timestamp: Date.now(),
+  }) + "\n";
+
+  if (!writerDaemon || !writerDaemon.stdin || writerDaemon.stdin.destroyed) {
+    debugLog(`fireAndForgetEvent: daemon 不可用，跳过 name=${name}`);
+    return;
+  }
+
+  if (daemonReady) {
+    // daemon 已就绪 → 直接写
+    try {
+      const canWrite = writerDaemon.stdin.write(event);
+      if (!canWrite) {
+        debugLog(`fireAndForgetEvent: stdin 背压，事件可能延迟 name=${name}`);
+      }
+    } catch (e) {
+      debugLog(`fireAndForgetEvent: stdin 写入失败 name=${name} err=${(e as Error)?.message}`);
+    }
+  } else {
+    // daemon 未就绪 → 暂存（上限 50，超出丢弃最早的）
+    if (pendingEvents.length >= 50) {
+      pendingEvents.shift();
+      debugLog(`fireAndForgetEvent: 暂存队列已满（50），丢弃最早事件`);
+    }
+    pendingEvents.push(event);
+  }
+}
+
 export const SecurityAnalysisPlugin: Plugin = async (input) => {
   const { client, directory } = input;
 
@@ -483,8 +623,11 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   }
 
   // ── 动态注册 MCP server（跨平台，不写死路径）──
+  // fire-and-forget：不 await，避免阻塞插件加载（knowledge server 加载 BGE-M3 需 ~16s）
   const mcpManager = new McpManager(client);
-  await mcpManager.registerAll();
+  mcpManager.registerAll().catch((e) => {
+    debugLog(`[McpManager] registerAll 失败: ${e?.message ?? e}`);
+  });
 
   return {
     tool: {},
@@ -510,6 +653,11 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         // 用它区分：synthetic 回声不刷新 lastUserMessageAt（否则 max_duration 超时检查形同虚设）。
         // 为了补偿opencode重启后会话数据丢失的问题。
         const existingResult = await ctx.sessionManager.create(sessionID);
+        if (existingResult.data?.pendingErrorCallbackMessage) {
+          existingResult.data.pendingErrorCallbackMessage = false;
+          debugLog(`chat.message: 错误信息回调，不继续执行 sessionID=${sessionID}`, sessionID);
+          return;
+        }
         const existing = existingResult.data;
         const isResumeEcho = !!existing?.resumeMarker;
 
@@ -787,7 +935,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     },
 
     // 工具执行后触发（fire-and-forget）
-    // 职责：记录工具执行结果，供 evolve agent 事后验证
+    // 职责：记录工具执行结果 + 写入事件库
     "tool.execute.after": async (input, output) => {
       try {
         const sid = input.sessionID;
@@ -812,9 +960,36 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           duration: startTime ? Date.now() - startTime : undefined,
         });
 
+        // 写入事件库（对齐 PentAGI performer.go:198 storeToolExecutionToGraphiti）
+        // 排除 Task 工具（对齐 PentAGI 排除 AgentToolType）
+        if (toolName !== "task") {
+          const agentName = session.agentName;
+          const body = `Tool: ${toolName}\nArguments: ${JSON.stringify(input.args).slice(0, 2000)}\nInvoked by: ${agentName} Agent\nStatus: success\nResult: ${(output.output || "").slice(0, 2000)}\nContext: Session ${sid}`;
+          fireAndForgetEvent(`${toolName} execution`, body, `${agentName} tool execution`, sid);
+        }
+
         debugLog(`tool.execute.after: tool=${toolName}`, sid);
       } catch (e) {
         debugLog(`tool.execute.after: 意外异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`, input.sessionID);
+      }
+    },
+
+    // LLM 响应完成时触发（fire-and-forget）
+    // 职责：写入事件库（对齐 PentAGI performer.go:170 storeAgentResponseToGraphiti）
+    "experimental.text.complete": async (input, output) => {
+      try {
+        const sid = input.sessionID;
+        const session = ctx.sessionManager.get(sid);
+        if (!session) return;
+
+        const agentName = session.agentName;
+        const text = output.text || "";
+        if (!text.trim()) return;
+
+        const body = `Agent: ${agentName}\nResponse: ${text.slice(0, 4000)}\nContext: Session ${sid}`;
+        fireAndForgetEvent(`${agentName} agent response`, body, `${agentName} response`, sid);
+      } catch (e) {
+        debugLog(`text.complete: 写入事件库失败 sessionID=${input.sessionID} err=${(e as Error)?.message}`);
       }
     },
 
@@ -878,6 +1053,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
               session.pendingErrorMessage = null;
               try {
                 debugLog(`session.idle: 输出待处理的错误信息：${errMsg}`, sessionID);
+                session.pendingErrorCallbackMessage = true
                 await ctx.client.session.prompt({
                   path: { id: sessionID },
                   body: { parts: [{ type: "text", text: errMsg }], noReply: true },

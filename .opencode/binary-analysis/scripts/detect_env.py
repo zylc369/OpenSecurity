@@ -1,17 +1,20 @@
 """summary: 跨平台环境自动检测脚本
 
 description:
-  检测逆向分析所需的工具链和依赖包，输出 JSON 格式结果。
+  检测安全分析所需的工具链和依赖包。
   支持 Windows/Linux/macOS。
   Python 包安装在 Plugin 管理的虚拟环境（~/bw-security-analysis/.venv）中。
   C/C++ 编译器缺失时通知用户。
-  --check-preinstall 模式不自动装包、不读缓存（实时检测），Plugin chat.message 用此模式。
-  默认模式读 24h 缓存；--force 强制重新检测。
   必需依赖缺失时返回 success: false，Plugin 终止并提示用户安装。
 
+  两个子命令：
+    install                安装全部依赖（install.sh 调用）
+    check-preinstall <agent>  按 agent 检测依赖（plugin 每条消息调用，fail-fast）
+
 usage:
-  $PYTHON_CMD detect_env.py [--output PATH] [--force] [--check-preinstall AGENT]
-  AGENT=all 时检测所有依赖（Coordinator 用）
+  $PYTHON_CMD detect_env.py install
+  $PYTHON_CMD detect_env.py check-preinstall <agent> [--output PATH]
+  agent=all 时检测所有依赖（Coordinator 用）
 
 level: intermediate
 
@@ -34,7 +37,6 @@ from typing import Literal
 
 CACHE_DIR = os.path.expanduser("~/bw-security-analysis")
 CACHE_FILE = os.path.join(CACHE_DIR, "env_cache.json")
-CACHE_TTL = 86400
 
 
 @dataclass
@@ -61,6 +63,10 @@ class Dependency:
     version_cmd: list[str] = field(default_factory=list)
     env_var: str = ""                      # 路径来源(空=靠 PATH which; IDA=IDA_PRO_HOME)
     executable: str = ""                   # env_var 模式下拼接的可执行名(如 idat); 空=靠 PATH which
+    # --- 跨平台 ---
+    platforms: list[str] = field(default_factory=list)            # 空=全平台; ["darwin"]=仅 macOS
+    platform_install_hint: dict[str, str] = field(default_factory=dict)
+    # 按 OS 的安装描述。有当前 OS → 用它; 无 → 降级到 install_hint
 
 
 def _get_opencode_root() -> str:
@@ -80,7 +86,7 @@ AI_ENV_FILE = os.path.join(_get_opencode_root(), ".ai_env")
 def _warn(msg, exc=None, detail=None):
     """统一的 stderr 诊断日志。
     所有失败/异常诊断走此函数，确保：格式一致 + 不污染 stdout 的 JSON 输出
-    （--check-preinstall 模式 Plugin 用 JSON.parse(stdout)，诊断信息必须走 stderr）。
+    （check-preinstall 子命令 Plugin 用 JSON.parse(stdout)，诊断信息必须走 stderr）。
     msg: 操作描述；exc: 异常对象（附带类型名）；detail: 附加信息（如子进程 stderr 片段）。"""
     parts = [f"[!] {msg}"]
     if exc is not None:
@@ -92,7 +98,7 @@ def _warn(msg, exc=None, detail=None):
 
 def _log(msg):
     """正常进度日志，打到 stderr。
-    stdout 独占给 JSON 输出（默认模式末尾 print(output_json)、--check-preinstall 的 print(json.dumps)），
+    stdout 独占给 JSON 输出（check-preinstall 子命令的 print(json.dumps)），
     供 Plugin JSON.parse(stdout)。所有 [*]/[+]/[!] 进度必须走 _log 或 _warn，不能直接 print 到 stdout。"""
     print(msg, file=sys.stderr)
 
@@ -154,21 +160,25 @@ def _load_ai_env() -> None:
         _warn("读取 .ai_env 失败（环境变量未加载，IDA_PRO_HOME 等配置不生效）", exc=e)
 
 PYTHON_PACKAGES: list[Dependency] = [
-    # 通用
-    Dependency(name="mcp", kind="python", pip_name="angr", preinstall=True,
+    # MCP 基础依赖（knowledge + events MCP server 共用）
+    Dependency(name="mcp", kind="python", pip_name="mcp", preinstall=True,
                agents=["all"],
-               description="MCP依赖"),
-    Dependency(name="sentence_transformers", kind="python", pip_name="angr", preinstall=True,
+               description="MCP 协议库，knowledge/events MCP server 依赖"),
+    Dependency(name="sentence_transformers", kind="python", pip_name="sentence-transformers", preinstall=True,
                agents=["all"],
-               description=""),
-    Dependency(name="sqlite_vec", kind="python", pip_name="angr", preinstall=True,
+               description="嵌入模型库，knowledge MCP 向量搜索依赖（BGE-M3 嵌入）"),
+    Dependency(name="sqlite_vec", kind="python", pip_name="sqlite-vec", preinstall=True,
                agents=["all"],
-               description=""),
+               description="SQLite 向量扩展，knowledge MCP 向量存储依赖"),
+    Dependency(name="graphiti_core", kind="python", pip_name="graphiti-core", preinstall=True,
+               agents=["all"],
+               description="Graphiti 时序知识图谱库，events MCP server 依赖"),
     # binary-analysis 逆向分析包
     Dependency(name="angr", kind="python", pip_name="angr", preinstall=True,
                agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
                description="二进制分析/符号执行框架，用于程序状态探索、漏洞发现、自动利用生成"),
-    Dependency(name="triton", kind="python", pip_name="triton", preinstall=True,
+    Dependency(name="triton", kind="python", pip_name="triton-library", preinstall=True,
+               platforms=["linux", "win32"],
                agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
                description="动态二进制分析框架，用于符号执行、污点分析、约束求解"),
     Dependency(name="z3", kind="python", pip_name="z3-solver", preinstall=True,
@@ -217,7 +227,7 @@ PYTHON_PACKAGES: list[Dependency] = [
     Dependency(name="sympy", kind="python", pip_name="sympy", preinstall=True,
                agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis", "ai-security-analysis"],
                description="符号数学库，用于代数方程求解、中国剩余定理(CRT)、数论构造"),
-    # 预装依赖（preinstall）：体积大、不自动装，由 --check-preinstall 按需检查；仅特定 agent 需要
+    # 预装依赖（preinstall）：历史遗留标志，现在 install 和 check-preinstall 都处理全部包
     Dependency(name="sage", kind="python", required=False, pip_name="sagemath-standard",
                conda_name="sage", agents=["crypto-analysis"], preinstall=True, installer="conda",
                description="数学软件系统，用于密码学攻击中的代数运算、格基归约、椭圆曲线计算"),
@@ -233,7 +243,7 @@ EXTERNAL_TOOLS: list[Dependency] = [
         executable="idat",
         install_hint=(
             "IDA Pro 未检测到。解决方式：\n"
-            "  1. 在 .ai_env 设置 IDA_PRO_HOME（IDA Pro 安装目录）：\n"
+            "  1. 在 .opencode/.ai_env 设置 IDA_PRO_HOME（IDA Pro 安装目录）：\n"
             "     IDA_PRO_HOME=/Applications/IDA Professional 9.1.app/Contents/MacOS\n"
             "  2. 或设置系统环境变量 IDA_PRO_HOME（shell export，优先级高于 .ai_env）"
         ),
@@ -244,6 +254,11 @@ EXTERNAL_TOOLS: list[Dependency] = [
         version_cmd=["--version"],
         description="APK 解包+反汇编工具",
         install_hint="apktool 未找到。安装: brew install apktool (macOS) / 参考 https://ibotpeaches.github.io/Apktool/install/",
+        platform_install_hint={
+            "darwin": "brew install apktool",
+            "linux":  "sudo apt install apktool 或从 https://ibotpeaches.github.io/Apktool/install/ 下载",
+            "win32": "从 https://ibotpeaches.github.io/Apktool/install/ 下载（需要 Java）",
+        },
     ),
     Dependency(
         name="jadx", kind="tool", preinstall=True,
@@ -251,6 +266,11 @@ EXTERNAL_TOOLS: list[Dependency] = [
         version_cmd=["--version"],
         description="DEX→Java 反编译器",
         install_hint="jadx 未找到。安装: brew install jadx (macOS) / 参考 https://github.com/skylot/jadx",
+        platform_install_hint={
+            "darwin": "brew install jadx",
+            "linux":  "从 https://github.com/skylot/jadx/releases 下载最新 release zip",
+            "win32": "从 https://github.com/skylot/jadx/releases 下载最新 release zip",
+        },
     ),
     Dependency(
         name="adb", kind="tool", preinstall=True,
@@ -258,40 +278,38 @@ EXTERNAL_TOOLS: list[Dependency] = [
         version_cmd=["version"],
         description="Android Debug Bridge",
         install_hint="adb 未找到。安装: brew install --cask android-platform-tools (macOS) / 参考 https://developer.android.com/tools/adb",
+        platform_install_hint={
+            "darwin": "brew install --cask android-platform-tools",
+            "linux":  "sudo apt install adb",
+            "win32": "从 https://developer.android.com/tools/releases/platform-tools 下载",
+        },
     ),
     Dependency(
         name="otool", kind="tool", preinstall=True,
         agents=["mobile-analysis"], required=False,
         description="Mach-O 文件查看器（macOS 自带）",
         install_hint="otool 未找到（macOS 自带，非 macOS 无需配置）",
+        platforms=["darwin"],
     ),
     Dependency(
         name="ldid", kind="tool", preinstall=True,
         agents=["mobile-analysis"], required=False,
         description="iOS 伪签名工具",
         install_hint="ldid 未找到。安装: brew install ldid (macOS)",
+        platforms=["darwin"],
     ),
     Dependency(
         name="GoReSym", kind="tool", preinstall=True,
         agents=["binary-analysis", "crypto-analysis"], required=False,
         description="Go 符号恢复工具",
         install_hint="GoReSym 未找到。参考 https://github.com/mandiant/GoReSym",
+        platform_install_hint={
+            "darwin": "从 https://github.com/mandiant/GoReSym/releases 下载 darwin 版本",
+            "linux":  "从 https://github.com/mandiant/GoReSym/releases 下载 linux 版本",
+            "win32": "从 https://github.com/mandiant/GoReSym/releases 下载 windows 版本",
+        },
     ),
 ]
-
-def _load_cache(force=False):
-    if force:
-        return None
-    if not os.path.isfile(CACHE_FILE):
-        return None
-    try:
-        with open(CACHE_FILE, "r", encoding="utf-8") as f:
-            cache = json.load(f)
-        if time.time() - cache.get("timestamp", 0) < CACHE_TTL:
-            return cache.get("data")
-    except (json.JSONDecodeError, KeyError) as e:
-        _warn("env_cache.json 解析失败或字段缺失，将重新检测", exc=e)
-    return None
 
 
 def _save_cache(data):
@@ -435,7 +453,7 @@ def _detect_package(name, version_via=None):
         if result.returncode == 0:
             return {"available": True, "version": result.stdout.strip() or "unknown"}
         # returncode≠0：记录 stderr 帮助区分"未安装"和"包损坏"
-        _warn(f"检测 {name} 失败（退出码 {result.returncode}）", detail=_stderr_tail(result))
+        _warn(f"检测 {name} 失败（退出码 {result.returncode}）")
     except subprocess.TimeoutExpired as e:
         _warn(f"检测 {name} 超时（import 可能较慢或卡死）", exc=e)
     except OSError as e:
@@ -456,16 +474,6 @@ def _install_package(pip_name, timeout=60):
         _warn(f"pip install {pip_name} 异常", exc=e)
     return False
 
-
-def _build_install_cmd(dep: Dependency):
-    """根据 dep 的 installer 字段生成安装命令（配置驱动，不硬编码包名）。
-    用于 _check_preinstall 生成给用户看的 install_hint。
-    sys.prefix 在 conda env 里指向 env 根目录（跨平台）。"""
-    if dep.installer == "conda":
-        name = dep.conda_name or dep.pip_name
-        conda_cmd = os.environ.get("CONDA_CMD", "conda")
-        return f"{conda_cmd} install -p '{sys.prefix}' -y {name}"
-    return f"{sys.executable} -m pip install {dep.pip_name}"
 
 
 def _detect_playwright_browser():
@@ -497,7 +505,7 @@ def _post_install_playwright(timeout=300):
     try:
         result = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=True, text=True, timeout=timeout,
+            timeout=timeout,
         )
         if result.returncode == 0:
             _log("[+] Playwright Chromium 安装成功")
@@ -509,20 +517,6 @@ def _post_install_playwright(timeout=300):
         _warn("Playwright 浏览器安装异常", exc=e)
     return False
 
-
-def _check_playwright_post_install(skip_install, errors):
-    """检测并按需安装 Playwright Chromium 浏览器（post_install 步骤）。
-    包已安装但浏览器二进制可能缺失（需额外 playwright install chromium）。
-    skip_install=True 时仅检测不装，缺失记 error 提示用户手动安装。"""
-    if _detect_playwright_browser():
-        return
-    manual_cmd = f"{sys.executable} -m playwright install chromium"
-    if skip_install:
-        _log("[!] Playwright 浏览器未安装（--skip-install）")
-        errors.append(f"Playwright 浏览器未安装。请运行: {manual_cmd}")
-    else:
-        if not _post_install_playwright():
-            errors.append(f"Playwright 浏览器安装失败。请手动运行: {manual_cmd}")
 
 
 def _resolve_tool(dep: Dependency) -> tuple[str, bool]:
@@ -574,62 +568,165 @@ def _get_tool_version(resolved_path, version_cmd):
     return None
 
 
-def _detect_tools():
-    """遍历 EXTERNAL_TOOLS registry 全量检测可用性（写入 env_cache 供 Plugin 读取）。
-    IDA Pro 由 _detect_ida_pro 单独处理，此处跳过。
-    env_cache 是全局共享的，故全量检测（不按 agent 过滤）；必需性检查由 --check-preinstall 按 agent 负责。"""
-    result = {}
+
+
+def _get_platform_install_hint(dep: Dependency) -> str:
+    """返回当前 OS 的安装描述。优先 platform_install_hint[sys.platform]，降级到 install_hint。"""
+    if dep.platform_install_hint:
+        hint = dep.platform_install_hint.get(sys.platform)
+        if hint:
+            return hint
+    return dep.install_hint or f"{dep.name} 未安装，请参考官方文档"
+
+
+def _platform_matches(dep: Dependency) -> bool:
+    """检查 dep 是否适用于当前 OS。空 platforms = 全平台。"""
+    return not dep.platforms or sys.platform in dep.platforms
+
+
+def _run_install():
+    """安装全部依赖（install 子命令入口）。
+
+    覆盖：Python 包（pip/conda）+ Playwright Chromium + 外部工具提示 + events MCP 基础设施。
+    所有输出走 stderr（_log），与 check-preinstall 的 stdout JSON 输出不冲突。
+    任何安装失败 → 立即 sys.exit(1)，不继续后续步骤。
+    """
+    import subprocess as sp
+
+    def _install_fail(msg):
+        """安装失败 → 打印错误 → 立即中断。"""
+        print(f"\n[ERROR] {msg}", file=sys.stderr)
+        print("安装中断。请修复上述错误后重新运行此脚本。", file=sys.stderr)
+        sys.exit(1)
+
+    # 1. Python 包
+    _log("[*] === 安装 Python 依赖包 ===")
+    _log(f"[*] Python: {sys.executable}")
+    _log("[*] 升级 pip...")
+    pip_upgrade = sp.run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
+    if pip_upgrade.returncode != 0:
+        _install_fail("pip 升级失败")
+
+    for dep in PYTHON_PACKAGES:
+        if not _platform_matches(dep):
+            _log(f"[*] 跳过 {dep.name}（当前平台不适用）")
+            continue
+        pkg = dep.pip_name or dep.name
+        if dep.installer == "conda":
+            conda_name = dep.conda_name or dep.pip_name
+            conda_cmd = shutil.which("conda")
+            if not conda_cmd:
+                _install_fail(f"{dep.name} 需要 conda 安装（{conda_name}），但 conda 命令不存在。请先安装 Miniforge。")
+            _log(f"[*] conda install {conda_name}...")
+            result = sp.run(
+                [conda_cmd, "install", "-p", sys.prefix, "-y", conda_name],
+                timeout=600,
+            )
+            if result.returncode != 0:
+                _install_fail(f"{dep.name} conda 安装失败")
+            _log(f"[+] {dep.name} 安装成功")
+            continue
+
+        _log(f"[*] pip install {pkg}...")
+        result = sp.run([sys.executable, "-m", "pip", "install", pkg])
+        if result.returncode != 0:
+            _install_fail(f"{dep.name} pip 安装失败")
+        _log(f"[+] {dep.name} 安装成功")
+
+    # 2. Playwright Chromium（post_install）
+    _log("[*] === 安装 Playwright Chromium ===")
+    if not _post_install_playwright():
+        _install_fail("Playwright Chromium 安装失败")
+
+    # 3. 外部工具（全量检测，缺失打印安装建议）
+    _log("[*] === 检测外部工具 ===")
     for dep in EXTERNAL_TOOLS:
-        if dep.name == "ida_pro":
-            continue  # IDA Pro 由 _detect_ida_pro 单独处理
+        if not _platform_matches(dep):
+            continue
         resolved, found = _resolve_tool(dep)
         if found:
-            version = _get_tool_version(resolved, dep.version_cmd)
-            result[dep.name] = {"available": True, "version": version,
-                                "description": dep.description, "resolved_path": resolved}
+            ver = _get_tool_version(resolved, dep.version_cmd) or "已安装"
+            _log(f"[+] {dep.name}: {ver}")
         else:
-            result[dep.name] = {"available": False, "version": None,
-                                "description": dep.description, "resolved_path": None}
-    return result
+            hint = _get_platform_install_hint(dep)
+            _log(f"[!] {dep.name}: 未安装")
+            print(f"  → {hint}")
+
+    # 4. events MCP 基础设施（ZHIPU_API_KEY 门控）
+    _log("[*] === events MCP 基础设施 ===")
+    mcp_servers = _detect_mcp_deps(auto_create=True)
+    neo4j = mcp_servers.get("_neo4j", {})
+    zhipu = mcp_servers.get("_zhipu_api_key", {})
+
+    if not zhipu.get("available"):
+        print("[!] ZHIPU_API_KEY 未配置。")
+        print("  events MCP 的实体提取功能将不可用（无法写入新事件，已有事件仍可搜索）。")
+        print("  请在 .opencode/.ai_env 中设置 ZHIPU_API_KEY=<your-key>")
+    elif not neo4j.get("available"):
+        print(f"[!] {neo4j.get('message', 'Neo4j 不可用')}")
+    else:
+        _log(f"[+] {neo4j.get('message', 'Neo4j 运行中')}")
+
+    for name, info in mcp_servers.items():
+        if name.startswith("_"):
+            continue
+        if info.get("available"):
+            _log(f"[+] MCP/{name}: 依赖齐全")
+        else:
+            _log(f"[!] MCP/{name}: 缺少 {', '.join(info.get('missing', []))}")
+
+    _log("[+] 安装完成")
 
 
-def _build_install_hint(dep):
-    """生成缺失依赖的安装提示。
-    优先用 dep.install_hint（EXTERNAL_TOOLS 自带），否则动态生成。"""
-    if dep.install_hint:
-        return dep.install_hint
-    install_cmd = _build_install_cmd(dep)
-    agents_str = "/".join(dep.agents)
-    pkg_name = dep.conda_name or dep.pip_name
-    preinstall_desc_part1 = f"预装依赖 {dep.name}（{dep.installer}: {pkg_name}）未安装"
-    desc = f"{agents_str} 需要的{preinstall_desc_part1}" if agents_str else preinstall_desc_part1
-    return f"{desc}\n安装命令：{install_cmd}"
+def _build_install_guide():
+    """生成一键安装提示（当依赖检测不通过时返回给用户）。
+
+    Plugin 的 env-check.ts 优先读取 install_guide 字段，
+    展示这条简洁提示而非逐条列出所有缺失依赖。"""
+    opencode_root = _get_opencode_root()
+    import platform
+    if platform.system() == "Windows":
+        script = os.path.join(opencode_root, "install.ps1")
+        cmd = f'powershell -ExecutionPolicy Bypass -File "{script}"'
+    else:
+        script = os.path.join(opencode_root, "install.sh")
+        cmd = f'bash "{script}"'
+    return (
+        f"环境未完全配置。请运行一键安装脚本：\n"
+        f"  {cmd}\n"
+        f"安装完成后重新发送消息。"
+    )
 
 
 def _check_preinstall(agent):
-    """检查指定 Agent 的所有依赖是否就绪 + 生成 env_cache。
+    """检查指定 Agent 的依赖是否就绪（fail-fast：第一个缺失即返回 install_guide）。
 
-    agent="all" 时检测所有依赖（errors 不做 agent 过滤），用于 Coordinator。
+    agent="all" 时不按 agent 过滤（Coordinator 用）。
 
-    检测范围：Python 包（find_spec + 版本）+ 编译器 + IDA Pro + 外部工具。
-    不自动装、不读缓存（实时检测，每次反映最新状态）。
-    data 全量写入 env_cache.json（供 Plugin buildEnvSection/shell.env 读取）；
-    errors 按当前 agent 过滤（只报该 agent 缺的包）。"""
+    检测顺序：Python 包 → 编译器 → IDA Pro → 外部工具 → MCP 依赖（信息性）。
+    任何必需依赖缺失 → 立即返回 {success: False, install_guide: ...}，不继续检测。
+    全部通过 → 收集完整 data 写入 env_cache.json → 返回 {success: True, data: ...}。
+
+    MCP 依赖（Neo4j/ZHIPU_API_KEY/MCP 包）是信息性的，不触发 fail-fast。
+    """
     import importlib.util
     import importlib.metadata
-    errors = []
-    packages = {}
-    tools = {}
 
     def _agent_matches(dep):
-        """all = 不过滤；否则 dep.agents 为空或包含当前 agent 即匹配"""
         if agent == "all":
             return True
-        return not dep.agents or agent in dep.agents
+        return not dep.agents or "all" in dep.agents or agent in dep.agents
 
-    # --- Python 包检测（全量检测写 cache，errors 按 agent 过滤）---
+    def _fail(item_name):
+        """fail-fast：记录日志 + 返回 install_guide。"""
+        _log(f"[!] 依赖未就绪: {item_name}")
+        return {"success": False, "data": {}, "errors": [], "install_guide": _build_install_guide()}
+
+    packages = {}
+
+    # --- 1. Python 包（fail-fast，忽略 preinstall 标志）---
     for dep in PYTHON_PACKAGES:
-        if not dep.preinstall:
+        if not _platform_matches(dep):
             continue
         try:
             spec = importlib.util.find_spec(dep.name)
@@ -638,32 +735,37 @@ def _check_preinstall(agent):
             raise
         if spec is None:
             if dep.required and _agent_matches(dep):
-                errors.append({"package": dep.name, "install_hint": _build_install_hint(dep)})
+                return _fail(dep.name)
             continue
-        # 版本收集（importlib.metadata 只查 distribution metadata，不 import 包本身）
         try:
             version = importlib.metadata.version(dep.pip_name or dep.name)
-        except importlib.metadata.PackageNotFoundError:
-            version = "unknown"
         except Exception:
             version = "unknown"
         packages[dep.name] = {"available": True, "version": version}
 
-    # --- 编译器 ---
-    compiler = _detect_compiler()
+        # post_install：playwright 包通过后检测 chromium 二进制
+        if dep.post_install and dep.name == "playwright" and dep.required and _agent_matches(dep):
+            if not _detect_playwright_browser():
+                return _fail("playwright chromium")
 
-    # --- IDA Pro（全量检测写 cache，errors 按 agent 过滤）---
+    # --- 2. 编译器（fail-fast）---
+    compiler = _detect_compiler()
+    if not compiler["available"]:
+        return _fail("compiler")
+
+    # --- 3. IDA Pro（fail-fast，按 agent 过滤）---
     ida_pro = _detect_ida_pro()
     if not ida_pro["available"]:
         ida_dep = next((d for d in EXTERNAL_TOOLS if d.name == "ida_pro"), None)
         if ida_dep and ida_dep.required and _agent_matches(ida_dep):
-            errors.append({"package": "ida_pro", "install_hint": _build_install_hint(ida_dep)})
+            return _fail("ida_pro")
 
-    # --- 外部工具（跳过 ida_pro，已单独处理；全量检测写 cache，errors 按 agent 过滤）---
+    # --- 4. 外部工具（fail-fast，按 agent + platform 过滤）---
+    tools = {}
     for dep in EXTERNAL_TOOLS:
-        if not dep.preinstall:
-            continue
         if dep.name == "ida_pro":
+            continue
+        if not _platform_matches(dep):
             continue
         resolved, found = _resolve_tool(dep)
         if found:
@@ -674,130 +776,272 @@ def _check_preinstall(agent):
             tools[dep.name] = {"available": False, "version": None,
                                "description": dep.description, "resolved_path": None}
             if dep.required and _agent_matches(dep):
-                errors.append({"package": dep.name, "install_hint": _build_install_hint(dep)})
+                return _fail(dep.name)
 
-    # --- 组装 data + 写 cache ---
+    # --- 5. events MCP 基础设施（ZHIPU_API_KEY 门控）---
+    # ZHIPU_API_KEY 未配置 → 不阻塞（stderr 日志），跳过 Docker/容器检查。
+    # ZHIPU_API_KEY 已配置 → Docker/容器不可用 → fail-fast。
+    # 三者齐全时 _detect_mcp_deps 已静默自动启动容器。
+    mcp_servers = _detect_mcp_deps()
+    optional_warnings = []
+
+    zhipu = mcp_servers.get("_zhipu_api_key", {})
+    neo4j = mcp_servers.get("_neo4j", {})
+    if not zhipu.get("available"):
+        # ZHIPU_API_KEY 未配置 → 不阻塞
+        _log(f"[!] zhipu_api_key: {zhipu.get('message', '未配置')}")
+    elif not neo4j.get("available"):
+        # ZHIPU 已配置但 Docker/容器不可用 → fail-fast
+        return _fail(f"neo4j: {neo4j.get('message', '不可用')}")
+
+    # --- 全部必需依赖通过 → 写 cache ---
     data = {
         "compiler": compiler,
         "packages": packages,
         "ida_pro": ida_pro,
         "tools": tools,
+        "mcp_servers": mcp_servers,
     }
     _save_cache(data)
+    result: dict = {"success": True, "data": data, "errors": []}
+    if optional_warnings:
+        result["optional_warnings"] = optional_warnings
+    return result
 
-    return {"success": len(errors) == 0, "data": data, "errors": errors}
 
+def _ensure_docker_running(timeout=90):
+    """确保 Docker daemon 运行；未运行则尝试自动启动。
 
-def run_detection(skip_install=False):
-    errors = []
+    用 shutil.which("docker") 判断是否安装（不依赖硬编码安装路径）。
+    macOS: open -a Docker；Linux: systemctl/service；Windows: 启动 Docker Desktop。
+    返回 (running, message)。running=True 表示 daemon 已就绪可执行 docker 命令。
+    """
+    import subprocess as sp
+    import time
 
-    _log(f"[+] Python: {sys.executable}")
+    # docker CLI 不在 PATH = 未安装（通用判断，不依赖硬编码安装路径）
+    if not shutil.which("docker"):
+        return False, "未从 PATH 检测到 docker 命令，判定 Docker 未安装（events MCP 需要 Docker 运行 Neo4j）"
 
-    _log("[*] 正在检测 C/C++ 编译器...")
-    compiler = _detect_compiler()
-    if compiler["available"]:
-        _log(f"[+] 编译器: {compiler['type']} — {compiler['path']}")
-    else:
-        system = platform.system()
-        if system == "Windows":
-            hint = "请安装 VS Build Tools: https://visualstudio.microsoft.com/visual-cpp-build-tools/"
-        elif system == "Darwin":
-            hint = "请运行: xcode-select --install"
-        else:
-            hint = "请运行: sudo apt install build-essential (Debian/Ubuntu) 或 sudo yum groupinstall 'Development Tools' (RHEL/CentOS)"
-        msg = f"C/C++ 编译器未找到。{hint}"
-        errors.append(msg)
-        _log(f"[!] {msg}")
+    def _daemon_up():
+        try:
+            sp.run(["docker", "info"], capture_output=True, timeout=10, check=True, text=True)
+            return True
+        except (sp.CalledProcessError, sp.TimeoutExpired):
+            return False
 
-    _log("[*] 正在检测 Python 架构...")
-    python_arch = platform.architecture()[0]
-    _log(f"[+] Python 架构: {python_arch}")
+    # 1. 已运行？
+    if _daemon_up():
+        return True, "Docker 已运行"
 
-    packages = {}
-    for dep in PYTHON_PACKAGES:
-        if dep.preinstall:
-            continue  # 预装依赖不在此处自动装，由 --check-preinstall 单独检查
-        _log(f"[*] 正在检测 {dep.name}...")
-        pkg_info = _detect_package(dep.name, version_via=dep.version_via)
-        if not pkg_info["available"] and not skip_install:
-            _log(f"[*] {dep.name} 未安装，正在自动安装...")
-            if _install_package(dep.pip_name):
-                pkg_info = _detect_package(dep.name, version_via=dep.version_via)
-                if not pkg_info["available"]:
-                    # 首次 import 可能因动态库初始化延迟失败（如 macOS PyObjC），重试一次
-                    time.sleep(1)
-                    pkg_info = _detect_package(dep.name, version_via=dep.version_via)
-                if pkg_info["available"]:
-                    # 处理 post_install（如 playwright 需要额外安装浏览器）
-                    if dep.post_install and dep.name == "playwright":
-                        _check_playwright_post_install(skip_install, errors)
-                    _log(f"[+] {dep.name} 安装成功: {pkg_info['version']}")
-                else:
-                    _log(f"[!] {dep.name} 安装后仍无法导入")
+    # 2. 按平台自动启动 daemon（直接尝试，失败由 except 捕获；不预检安装路径）
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            sp.run(["open", "-a", "Docker"], check=True)
+            _log("[*] 正在启动 Docker Desktop（open -a Docker）...")
+        elif system == "Linux":
+            if shutil.which("systemctl"):
+                sp.run(["systemctl", "start", "docker"])
+            elif shutil.which("service"):
+                sp.run(["service", "docker", "start"])
             else:
-                manual_cmd = f"{sys.executable} -m pip install {dep.pip_name}"
-                if dep.required:
-                    errors.append(f"{dep.name} 安装失败，请手动运行: {manual_cmd}")
-                else:
-                    _log(f"[!] {dep.name} 安装失败（可选包，不影响核心流程）。手动安装: {manual_cmd}")
-        elif pkg_info["available"]:
-            # 已安装的包也需要检查 post_install
-            if dep.post_install and dep.name == "playwright":
-                _check_playwright_post_install(skip_install, errors)
-            _log(f"[+] {dep.name}: {pkg_info['version']}")
+                return False, "Docker 未运行且无法自动启动（请手动启动 dockerd）"
+            _log("[*] 正在启动 Docker...")
+        elif system == "Windows":
+            # 从 docker CLI 实际位置推断 Docker Desktop.exe（不硬编码安装路径）
+            # 标准布局：…/Docker/Docker/resources/bin/docker.exe → 上三级即 …/Docker/Docker
+            dd_exe = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(shutil.which("docker")))),
+                "Docker Desktop.exe",
+            )
+            sp.run(["powershell", "-NoProfile", "-Command", f"Start-Process '{dd_exe}'"])
+            _log("[*] 正在启动 Docker Desktop（Windows）...")
         else:
-            if dep.required:
-                manual_cmd = f"{sys.executable} -m pip install {dep.pip_name}"
-                errors.append(f"{dep.name} 未安装。请运行: {manual_cmd}")
-            _log(f"[!] {dep.name} 未安装（--skip-install）")
-        packages[dep.name] = pkg_info
+            return False, f"不支持的系统: {system}（请手动启动 Docker）"
+    except Exception as e:
+        return False, f"自动启动 Docker 失败（{system}）：{e}"
 
-    _log("[*] 正在检测 IDA Pro...")
-    ida_pro = _detect_ida_pro()
-    if ida_pro["available"]:
-        _log(f"[+] IDA Pro: {ida_pro['path']}")
+    # 3. 轮询等待 daemon 就绪
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(3)
+        if _daemon_up():
+            _log("[+] Docker daemon 已就绪")
+            return True, "Docker 已自动启动"
+    return False, f"Docker 启动超时（等待 {timeout}s 未就绪，请手动启动 Docker）"
+
+
+def _pull_image_with_progress(image, timeout=600):
+    """docker pull 并实时把进度转发到 _log，避免长时间无反馈。
+
+    docker pull 非 TTY（管道）模式输出行式日志（每层状态一行），逐行转发给用户。
+    镜像已是最新则秒过（输出 'Image is up to date'）；首次下载时实时显示各层进度。
+    """
+    import subprocess as sp
+    _log(f"[*] docker pull {image}（首次需下载镜像，请耐心等待）...")
+    proc = sp.Popen(
+        ["docker", "pull", image],
+        stdout=sp.PIPE, stderr=sp.STDOUT, text=True, bufsize=1,
+    )
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                _log(f"    {line}")
+        proc.wait(timeout=timeout)
+    except sp.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise
+    if proc.returncode != 0:
+        raise sp.CalledProcessError(proc.returncode, ["docker", "pull", image])
+    _log(f"[+] {image} 镜像就绪")
+
+
+def _detect_mcp_deps(auto_create=False):
+    """检测 MCP server 的 Python 依赖包 + Neo4j + ZHIPU_API_KEY。
+
+    auto_create=False（check-preinstall 用）：容器不存在 → 返回 unavailable（fail-fast）
+    auto_create=True（install 用）：容器不存在 → docker run 创建+启动
+
+    Docker daemon 未运行时自动启动（_ensure_docker_running），无需用户手动开 Docker Desktop。
+    """
+    import subprocess as sp
+
+    opencode_root = _get_opencode_root()
+
+    # 依赖包检测
+    mcp_config = {
+        "knowledge": {
+            "script": os.path.join(opencode_root, "mcp-servers", "knowledge", "server.py"),
+            "packages": ["mcp", "sentence_transformers", "sqlite_vec"],
+        },
+        "events": {
+            "script": os.path.join(opencode_root, "mcp-servers", "events", "server.py"),
+            "packages": ["mcp", "graphiti_core"],
+        },
+    }
+    result = {}
+    for name, cfg in mcp_config.items():
+        missing = []
+        for pkg in cfg["packages"]:
+            try:
+                __import__(pkg)
+            except ImportError:
+                missing.append(pkg)
+        result[name] = {
+            "available": len(missing) == 0,
+            "missing": missing,
+            "script": cfg["script"],
+        }
+
+    # ZHIPU_API_KEY 先检（门控：未配置则跳过全部 Docker/容器操作）
+    zhipu_key = os.environ.get("ZHIPU_API_KEY", "")
+    zhipu_ok = bool(zhipu_key.strip())
+
+    # Docker + Neo4j：仅在 ZHIPU 已配置时才检查
+    if not zhipu_ok:
+        neo4j_status = {"available": False, "message": "ZHIPU_API_KEY 未配置，跳过 Docker/Neo4j 检查"}
     else:
-        _log("[!] IDA Pro 未配置")
+        neo4j_status = {"available": False, "message": ""}
+        try:
+            # 确保 Docker daemon 运行（未运行则自动启动 Docker Desktop 等）
+            _docker_ok, _docker_msg = _ensure_docker_running()
+            if not _docker_ok:
+                raise RuntimeError(_docker_msg)
 
-    _log("[*] 正在检测外部工具...")
-    tools = _detect_tools()
-    for name, info in tools.items():
-        if info["available"]:
-            ver = info["version"] or "未知版本"
-            _log(f"[+] {name}: {ver}")
-        else:
-            _log(f"[!] {name}: 未找到")
+            # 1. 容器已在运行？
+            ps_result = sp.run(
+                ["docker", "ps", "--filter", "name=neo4j-events", "--format", "{{.Names}}"],
+                capture_output=True, timeout=10, text=True,
+            )
+            if ps_result.stdout.strip() == "neo4j-events":
+                neo4j_status = {"available": True, "message": "Neo4j 容器已在运行"}
 
-    data = {
-        "compiler": compiler,
-        "python_arch": python_arch,
-        "packages": packages,
-        "ida_pro": ida_pro,
-        "tools": tools,
+            # 2. 容器存在但停止？→ docker start
+            else:
+                psa_result = sp.run(
+                    ["docker", "ps", "-a", "--filter", "name=neo4j-events", "--format", "{{.Names}}"],
+                    capture_output=True, timeout=10, text=True,
+                )
+                if psa_result.stdout.strip() == "neo4j-events":
+                    sp.run(["docker", "start", "neo4j-events"],
+                           capture_output=True, timeout=30, check=True, text=True)
+                    _log("[+] Neo4j 容器已启动（原已存在但停止）")
+                    neo4j_status = {"available": True, "message": "Neo4j 容器已启动"}
+
+                # 3. 容器不存在
+                else:
+                    if auto_create:
+                        # install 模式：创建+启动
+                        data_dir = os.path.join(os.path.expanduser("~"), "bw-security-analysis", "db", "events")
+                        os.makedirs(data_dir, exist_ok=True)
+                        # 先 pull 镜像并实时显示进度（避免 docker run 隐式 pull 时长时间无反馈）
+                        _pull_image_with_progress("neo4j:5")
+                        sp.run(
+                            ["docker", "run", "-d", "--name", "neo4j-events",
+                             "-p", "7474:7474", "-p", "7687:7687",
+                             "-e", "NEO4J_AUTH=neo4j/neo4j_password",
+                             "-v", f"{data_dir}:/data", "neo4j:5"],
+                            capture_output=True, timeout=60, text=True, check=True,
+                        )
+                        _log(f"[+] Neo4j 容器已创建并启动，数据目录: {data_dir}")
+                        neo4j_status = {"available": True, "message": "Neo4j 容器已创建并启动"}
+                    else:
+                        # check-preinstall 模式：不创建，返回 unavailable（→ fail-fast）
+                        neo4j_status = {"available": False, "message": "Neo4j 容器不存在，请运行安装脚本"}
+
+        except RuntimeError as e:
+            # _ensure_docker_running 启动/确认失败（未安装、启动超时、无法自动启动）
+            neo4j_status = {"available": False, "message": str(e)}
+        except FileNotFoundError:
+            neo4j_status = {"available": False, "message": "Docker 未安装（events MCP 需要 Docker 运行 Neo4j）"}
+        except sp.CalledProcessError as e:
+            neo4j_status = {"available": False, "message": f"Docker 命令失败: {e}"}
+        except sp.TimeoutExpired:
+            neo4j_status = {"available": False, "message": "Docker 操作超时"}
+        except Exception as e:
+            neo4j_status = {"available": False, "message": f"Docker 异常: {e}"}
+
+    zhipu_status = {
+        "available": zhipu_ok,
+        "message": "已配置" if zhipu_ok else "未配置（请在 .opencode/.ai_env 中设置 ZHIPU_API_KEY）",
     }
 
-    success = len(errors) == 0
-    result = {"success": success, "data": data, "errors": errors}
-
-    _save_cache(data)
-
+    result["_neo4j"] = neo4j_status
+    result["_zhipu_api_key"] = zhipu_status
     return result
 
 
 def main():
     _ensure_ai_env_template()
     _load_ai_env()
-    parser = argparse.ArgumentParser(description="逆向分析环境检测")
-    parser.add_argument("--output", "-o", help="输出 JSON 文件路径")
-    parser.add_argument("--force", "-f", action="store_true", help="强制重新检测（忽略缓存）")
-    parser.add_argument("--check-preinstall", metavar="AGENT",
-                        help="检查指定 Agent 的依赖是否就绪（不自动装、不缓存），输出 JSON 后退出。"
-                             "AGENT=all 时检测所有依赖（Coordinator 用）")
+    parser = argparse.ArgumentParser(
+        description="安全分析环境检测与安装",
+        usage="detect_env.py <command> [options]\n\n"
+              "子命令:\n"
+              "  install                      安装全部依赖（install.sh 调用）\n"
+              "  check-preinstall <agent>     按 agent 检测依赖（plugin 调用）",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # install 子命令
+    sub.add_parser("install", help="安装全部依赖")
+
+    # check-preinstall 子命令
+    chk = sub.add_parser("check-preinstall", help="按 agent 检测依赖是否就绪")
+    chk.add_argument("agent", help="Agent 名字（all=全部）")
+    chk.add_argument("--output", "-o", help="输出 JSON 文件路径")
+
     args = parser.parse_args()
 
-    # --check-preinstall：按 agent 的依赖检查模式，早退（Plugin chat.message 用此模式）
-    if args.check_preinstall:
-        result = _check_preinstall(args.check_preinstall)
+    if args.command == "install":
+        _run_install()
+        return
+
+    if args.command == "check-preinstall":
+        result = _check_preinstall(args.agent)
         output_json = json.dumps(result, ensure_ascii=False, indent=2)
         if args.output:
             os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
@@ -805,34 +1049,9 @@ def main():
                 f.write(output_json)
             _log(f"[+] 结果已写入: {args.output}")
         print(output_json)
+        if not result["success"]:
+            sys.exit(1)
         return
-
-    # 默认模式：缓存命中时用缓存；未命中/--force 时全量实时检测
-    cached = _load_cache(force=args.force)
-    if cached and not args.force:
-        if cached.get("packages"):
-            result = {"success": True, "data": cached, "errors": []}
-            _log("[*] 使用缓存的环境检测结果（使用 --force 强制重新检测）")
-        else:
-            _log("[!] 缓存数据不完整，重新检测...")
-            cached = None
-
-    if not cached or args.force:
-        result = _check_preinstall("all")
-
-    output_json = json.dumps(result, indent=2, ensure_ascii=False)
-
-    if args.output:
-        os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(output_json)
-        _log(f"[+] 结果已写入: {args.output}")
-
-    # stdout 始终输出 JSON（--output 文件是额外副本，两者内容相同）
-    print(output_json)
-
-    if not result["success"]:
-        sys.exit(1)
 
 
 if __name__ == "__main__":

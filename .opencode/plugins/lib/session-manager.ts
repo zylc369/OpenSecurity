@@ -36,6 +36,7 @@ export class SessionData {
   activelyTerminated: boolean | null = null;
   /** 待输出的错误信息。chat.message 主动终止时保存，session.idle 时取出并通过 session.prompt 输出给用户 */
   pendingErrorMessage: string | null = null;
+  pendingErrorCallbackMessage: boolean = false;
   /** 上次 resume prompt 植入的完成标记。maybeResumeAnalysis 发 prompt 成功后写入；
    *  chat.message 时清成 null（用户新消息 = 新一轮，旧 marker 不再相关）。
    *  完成检测用它精确匹配 lastText，强制 LLM 原样复制本次植入的具体值，

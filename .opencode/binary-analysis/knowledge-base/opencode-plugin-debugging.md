@@ -28,14 +28,14 @@ node --check .opencode/plugins/security-analysis.ts
 
 **验证 system.transform 是否生效**:
 
-1. 确保 `~/bw-security-analysis/env_cache.json` 存在（detect_env.py --force 生成）
+1. 确保 `~/bw-security-analysis/env_cache.json` 存在（detect_env.py check-preinstall all 生成）
 2. 切换到 BinaryAnalysis Agent（Tab 键）
 3. 让 Agent "描述一下当前的环境信息"
 4. 如果 Agent 能说出 IDA 路径、脚本目录、编译器信息 → `system.transform` 正常
 5. 如果 Agent 说"未看到环境信息" → `system.transform` 未生效
 
 **可能原因**:
-- `env_cache.json` 不存在 → 运行 `detect_env.py --force` 生成
+- `env_cache.json` 不存在 → 运行 `detect_env.py check-preinstall all` 生成
 - Plugin 文件不在 `.opencode/plugins/` 目录
 - Plugin 导出名称不是默认导出（应为 `export const SecurityAnalysisPlugin = ...`）
 
@@ -78,7 +78,7 @@ node --check .opencode/plugins/security-analysis.ts
 1. env_cache.json 是否存在？
    → ~/bw-security-analysis/env_cache.json
    → Windows: C:\Users\<用户名>\bw-security-analysis\env_cache.json
-   → 不存在则运行: $PYTHON_CMD "$SHARED_DIR/scripts/detect_env.py" --force
+   → 不存在则运行: $PYTHON_CMD "$SHARED_DIR/scripts/detect_env.py" check-preinstall all
 
 2. IDA_PRO_HOME 是否配置？
    → 检查 $OPENCODE_ROOT/.ai_env 含 IDA_PRO_HOME=<路径>
@@ -144,7 +144,7 @@ oh-my-openagent 使用 `src/shared/logger.ts` 写日志，包含 hook 创建、�
 
 ### 场景 2: 环境信息测试
 
-1. 确认 `~/bw-security-analysis/env_cache.json` 存在（detect_env.py --force 生成）
+1. 确认 `~/bw-security-analysis/env_cache.json` 存在（detect_env.py check-preinstall all 生成）
 2. 切换到 BinaryAnalysis Agent
 3. 问"当前环境有哪些工具？"
 4. 验证：Agent 应列出 capstone、unicorn、gmpy2 等信息
@@ -162,7 +162,7 @@ oh-my-openagent 使用 `src/shared/logger.ts` 写日志，包含 hook 创建、�
 | 问题 | 原因 | 解决 |
 |------|------|------|
 | Plugin 语法检查通过但不生效 | 导出名称不匹配 | 确认 `export const SecurityAnalysisPlugin` |
-| 环境信息为空 | env_cache.json 不存在 | 运行 `detect_env.py --force` 生成 |
+| 环境信息为空 | env_cache.json 不存在 | 运行 `detect_env.py check-preinstall all` 生成 |
 | 压缩后环境信息/分析状态丢失 | compacting 未注入或 justCompacted 未触发 system.transform 重注入 | 检查 output.context.push() + session.justCompacted 标识 |
 | Agent 未在 Tab 列表中显示 | frontmatter 格式错误 | 检查 YAML --- 分隔符 |
 | Agent 加载但不读知识库 | prompt 中引用路径错误 | 确认使用 `$SHARED_DIR/knowledge-base/` |

@@ -19,7 +19,7 @@ const MCP_SERVERS = [
     name: "events",
     script: join(OPENCODE_ROOT, "mcp-servers", "events", "server.py"),
     timeout: 10000,
-    requiredPackages: ["mcp"],
+    requiredPackages: ["mcp", "graphiti_core"],
   },
 ] as const;
 

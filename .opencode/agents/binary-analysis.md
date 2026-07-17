@@ -208,7 +208,7 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 ### 环境检测脚本
 
 ```bash
-$PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" --output "$TASK_DIR/env.json"
+$PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" check-preinstall all --output "$TASK_DIR/env.json"
 ```
 
 ### GUI 自动化工具

@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from db import MemoryDB, DEFAULT_TOP_K  # noqa: E402
 
 DATA_DIR = Path.home() / "bw-security-analysis"
-DB_PATH = DATA_DIR / "knowledge.db"
+DB_PATH = DATA_DIR / "db" / "knowledge" / "knowledge.db"
 MODEL_NAME = "BAAI/bge-m3"
 
 VALID_TYPES = ("guide", "vulnerability", "code", "tool", "other")

@@ -1,10 +1,11 @@
 [project]
 name = "opensec-events-mcp"
-version = "0.1.0"
-description = "Graphiti temporal knowledge graph MCP server (STUB - Phase 2 will implement)"
+version = "0.2.0"
+description = "Events MCP server with Graphiti backend for episodic memory"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.0",
+    "graphiti-core>=0.29",
 ]
 
 [build-system]

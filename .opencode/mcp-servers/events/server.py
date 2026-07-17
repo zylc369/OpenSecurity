@@ -1,33 +1,79 @@
-"""事件库 MCP 服务器（桩实现）。
+"""事件库 MCP server（Graphiti 后端）。
 
-存储过往 LLM 响应和工具执行记录的事件库。全部 7 个搜索方法返回空结果（stub）。
-二期替换为真实后端（Graphiti/Neo4j）。
+存储过往 LLM 响应和工具执行记录的事件库。7 个搜索方法通过 graphiti-core 查询 Neo4j。
+Neo4j 不可用时降级为空返回，不影响 agent 基本功能。
 
-方法签名对齐 PentAGI graphiti_search.go:18-24（共 7 个方法），
-参数形态对齐 github.com/vxcontrol/graphiti-go-client@v0.9.0/types.go。
+LLM：ZhipuAI glm-4-flash（实体提取）
+Embedding：BGE-M3 本地模型（向量搜索）
+存储：Neo4j（bolt://localhost:7687）
 """
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-STUB_NOTE = "Events backend not implemented yet - returning empty results. See Phase 2 plan."
+# 延迟初始化的 Graphiti 连接
+_graphiti = None
+_initialized = False
+
+
+async def _ensure_ready():
+    """首次调用时初始化 Graphiti 连接 + 建索引。后续调用跳过。"""
+    global _graphiti, _initialized
+    if _initialized:
+        return
+    from graphiti_config import create_graphiti
+
+    graphiti, err = create_graphiti()
+    if err:
+        raise RuntimeError(err)
+    _graphiti = graphiti
+    await _graphiti.build_indices_and_constraints()
+    _initialized = True
+
+
+def _empty_result(error: str | None = None) -> str:
+    """降级空返回（Neo4j 不可用时）。"""
+    payload: dict[str, Any] = {"edges": [], "nodes": [], "episodes": []}
+    if error:
+        payload["error"] = error
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _format_results(results: Any, query: str) -> str:
+    """统一序列化 SearchResults 为 JSON。"""
+    return json.dumps({
+        "query": query,
+        "edges": [{
+            "name": e.name,
+            "fact": e.fact,
+            "uuid": e.uuid,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+            "source_node_uuid": e.source_node_uuid,
+            "target_node_uuid": e.target_node_uuid,
+        } for e in results.edges],
+        "edge_scores": list(results.edge_reranker_scores),
+        "nodes": [{
+            "name": n.name,
+            "uuid": n.uuid,
+            "labels": list(n.labels) if hasattr(n, "labels") else [],
+            "summary": getattr(n, "summary", None),
+            "created_at": n.created_at.isoformat() if hasattr(n, "created_at") and n.created_at else None,
+        } for n in results.nodes],
+        "node_scores": list(results.node_reranker_scores),
+        "episodes": [{
+            "source": getattr(ep, "source", None),
+            "content": getattr(ep, "content", None),
+            "source_description": getattr(ep, "source_description", None),
+            "created_at": ep.created_at.isoformat() if hasattr(ep, "created_at") and ep.created_at else None,
+            "uuid": getattr(ep, "uuid", None),
+        } for ep in results.episodes],
+        "episode_scores": list(results.episode_reranker_scores),
+    }, ensure_ascii=False, default=str)
+
 
 mcp = FastMCP("events")
-
-
-def _empty_result(extra: dict[str, Any] | None = None) -> str:
-    """返回一个规范的 Graphiti 风格空响应，并附带一条说明。"""
-    payload: dict[str, Any] = {
-        "edges": [],
-        "nodes": [],
-        "episodes": [],
-        "note": STUB_NOTE,
-    }
-    if extra:
-        payload.update(extra)
-    return json.dumps(payload)
 
 
 @mcp.tool(
@@ -36,24 +82,44 @@ def _empty_result(extra: dict[str, Any] | None = None) -> str:
         "Use when you need events/entities bounded by a start and end time."
     ),
 )
-def temporal_window_search(
+async def temporal_window_search(
     query: str,
     time_start: str,
     time_end: str,
     max_results: int = 15,
 ) -> str:
-    """Search by temporal window.
+    """Search by temporal window."""
+    from graphiti_core.search.search_config import (
+        SearchConfig, EdgeSearchConfig, NodeSearchConfig,
+        EdgeSearchMethod, NodeSearchMethod,
+    )
+    from graphiti_core.search.search_filters import SearchFilters, DateFilter, ComparisonOperator
 
-    Args:
-        query: English semantic query.
-        time_start: ISO 8601 datetime string (inclusive).
-        time_end: ISO 8601 datetime string (inclusive).
-        max_results: Cap on returned edges/nodes (default 15).
-    """
-    return _empty_result({
-        "time_window": {"start": time_start, "end": time_end},
-        "max_results": max_results,
-    })
+    try:
+        await _ensure_ready()
+        ts = datetime.fromisoformat(time_start.replace("Z", "+00:00"))
+        te = datetime.fromisoformat(time_end.replace("Z", "+00:00"))
+        results = await _graphiti.search_(
+            query=query,
+            config=SearchConfig(
+                limit=max_results,
+                edge_config=EdgeSearchConfig(
+                    search_methods=[EdgeSearchMethod.bm25, EdgeSearchMethod.cosine_similarity],
+                ),
+                node_config=NodeSearchConfig(
+                    search_methods=[NodeSearchMethod.bm25, NodeSearchMethod.cosine_similarity],
+                ),
+            ),
+            search_filter=SearchFilters(
+                created_at=[[
+                    DateFilter(date=ts, comparison_operator=ComparisonOperator.greater_than_equal),
+                    DateFilter(date=te, comparison_operator=ComparisonOperator.less_than_equal),
+                ]],
+            ),
+        )
+        return _format_results(results, query)
+    except Exception as e:
+        return _empty_result(f"temporal_window_search failed: {e}")
 
 
 @mcp.tool(
@@ -62,7 +128,7 @@ def temporal_window_search(
         "node. Requires a known center_node_uuid from a prior search result."
     ),
 )
-def entity_relationships_search(
+async def entity_relationships_search(
     query: str,
     center_node_uuid: str,
     max_depth: int = 2,
@@ -70,17 +136,33 @@ def entity_relationships_search(
     edge_types: list[str] | None = None,
     max_results: int = 20,
 ) -> str:
-    """BFS from a center node within max_depth.
+    """BFS from a center node within max_depth."""
+    from graphiti_core.search.search_config import (
+        SearchConfig, EdgeSearchConfig,
+        EdgeSearchMethod,
+    )
+    from graphiti_core.search.search_filters import SearchFilters
 
-    Args:
-        query: English semantic query for relevance scoring.
-        center_node_uuid: UUID of the BFS root (from a prior search result).
-        max_depth: Hop distance cap (default 2).
-        node_labels: Optional filter - only traverse nodes with these labels.
-        edge_types: Optional filter - only traverse edges with these types.
-        max_results: Cap on returned edges (default 20).
-    """
-    return _empty_result({"center_node_uuid": center_node_uuid, "max_depth": max_depth})
+    try:
+        await _ensure_ready()
+        results = await _graphiti.search_(
+            query=query,
+            center_node_uuid=center_node_uuid,
+            config=SearchConfig(
+                limit=max_results,
+                edge_config=EdgeSearchConfig(
+                    search_methods=[EdgeSearchMethod.breadth_first_search],
+                    bfs_max_depth=min(max_depth, 3),
+                ),
+            ),
+            search_filter=SearchFilters(
+                node_labels=node_labels,
+                edge_types=edge_types,
+            ),
+        )
+        return _format_results(results, query)
+    except Exception as e:
+        return _empty_result(f"entity_relationships_search failed: {e}")
 
 
 @mcp.tool(
@@ -89,19 +171,35 @@ def entity_relationships_search(
         "redundancy. Use when you want broad coverage of distinct topics."
     ),
 )
-def diverse_results_search(
+async def diverse_results_search(
     query: str,
     diversity_level: str = "medium",
     max_results: int = 10,
 ) -> str:
-    """MMR-ranked diverse search.
+    """MMR-ranked diverse search."""
+    from graphiti_core.search.search_config import (
+        SearchConfig, EdgeSearchConfig,
+        EdgeSearchMethod, EdgeReranker,
+    )
 
-    Args:
-        query: English semantic query.
-        diversity_level: low/medium/high (default medium).
-        max_results: Cap on returned edges (default 10).
-    """
-    return _empty_result({"diversity_level": diversity_level})
+    try:
+        await _ensure_ready()
+        mmr_map = {"low": 0.3, "medium": 0.5, "high": 0.7}
+        mmr_lambda = mmr_map.get(diversity_level, 0.5)
+        results = await _graphiti.search_(
+            query=query,
+            config=SearchConfig(
+                limit=max_results,
+                edge_config=EdgeSearchConfig(
+                    search_methods=[EdgeSearchMethod.bm25, EdgeSearchMethod.cosine_similarity],
+                    reranker=EdgeReranker.cross_encoder,
+                    mmr_lambda=mmr_lambda,
+                ),
+            ),
+        )
+        return _format_results(results, query)
+    except Exception as e:
+        return _empty_result(f"diverse_results_search failed: {e}")
 
 
 @mcp.tool(
@@ -110,17 +208,30 @@ def diverse_results_search(
         "Use when you need chronological context of what happened in past engagements."
     ),
 )
-def episode_context_search(
+async def episode_context_search(
     query: str,
     max_results: int = 10,
 ) -> str:
-    """Episode-centric search.
+    """Episode-centric search."""
+    from graphiti_core.search.search_config import (
+        SearchConfig, EpisodeSearchConfig,
+        EpisodeSearchMethod,
+    )
 
-    Args:
-        query: English semantic query.
-        max_results: Cap on returned episodes (default 10).
-    """
-    return _empty_result({"max_results": max_results})
+    try:
+        await _ensure_ready()
+        results = await _graphiti.search_(
+            query=query,
+            config=SearchConfig(
+                limit=max_results,
+                episode_config=EpisodeSearchConfig(
+                    search_methods=[EpisodeSearchMethod.bm25],
+                ),
+            ),
+        )
+        return _format_results(results, query)
+    except Exception as e:
+        return _empty_result(f"episode_context_search failed: {e}")
 
 
 @mcp.tool(
@@ -129,19 +240,47 @@ def episode_context_search(
         "Use to recall which tools/commands previously worked for similar goals."
     ),
 )
-def successful_tools_search(
+async def successful_tools_search(
     query: str,
     min_mentions: int = 2,
     max_results: int = 15,
 ) -> str:
-    """Recall successful past tool executions by query similarity.
+    """Recall successful past tool executions by query similarity."""
+    from graphiti_core.search.search_config import (
+        SearchConfig, NodeSearchConfig,
+        NodeSearchMethod,
+    )
+    from graphiti_core.search.search_filters import SearchFilters
 
-    Args:
-        query: English semantic query about what you want to do.
-        min_mentions: Filter - tool must have succeeded >= this many times.
-        max_results: Cap on returned tool nodes (default 15).
-    """
-    return _empty_result({"min_mentions": min_mentions})
+    try:
+        await _ensure_ready()
+        results = await _graphiti.search_(
+            query=query,
+            config=SearchConfig(
+                limit=max_results * 2,
+                node_config=NodeSearchConfig(
+                    search_methods=[NodeSearchMethod.bm25, NodeSearchMethod.cosine_similarity],
+                ),
+            ),
+            search_filter=SearchFilters(
+                node_labels=["Tool"],
+            ),
+        )
+        filtered = [
+            n for n in results.nodes
+            if getattr(n, "attributes", {}).get("mention_count", 0) >= min_mentions
+        ][:max_results]
+        return json.dumps({
+            "query": query,
+            "nodes": [{
+                "name": n.name, "uuid": n.uuid,
+                "summary": getattr(n, "summary", None),
+                "mention_count": getattr(n, "attributes", {}).get("mention_count", 0),
+            } for n in filtered],
+            "count": len(filtered),
+        }, ensure_ascii=False, default=str)
+    except Exception as e:
+        return _empty_result(f"successful_tools_search failed: {e}")
 
 
 @mcp.tool(
@@ -150,45 +289,69 @@ def successful_tools_search(
         "Use for 'what just happened' queries."
     ),
 )
-def recent_context_search(
+async def recent_context_search(
     query: str,
     recency_window: str = "24h",
     max_results: int = 10,
 ) -> str:
-    """Recent context search.
+    """Recent context search."""
+    from graphiti_core.search.search_config import SearchConfig
+    from graphiti_core.search.search_filters import SearchFilters, DateFilter, ComparisonOperator
 
-    Args:
-        query: English semantic query.
-        recency_window: 1h/6h/24h/7d/30d/90d (default 24h).
-        max_results: Cap on returned edges (default 10).
-    """
-    return _empty_result({
-        "time_window": {"recency": recency_window},
-        "max_results": max_results,
-    })
+    try:
+        await _ensure_ready()
+        window_map = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720, "90d": 2160}
+        hours = window_map.get(recency_window, 24)
+        since = datetime.now() - timedelta(hours=hours)
+        results = await _graphiti.search_(
+            query=query,
+            config=SearchConfig(limit=max_results),
+            search_filter=SearchFilters(
+                created_at=[[DateFilter(date=since, comparison_operator=ComparisonOperator.greater_than_equal)]],
+            ),
+        )
+        return _format_results(results, query)
+    except Exception as e:
+        return _empty_result(f"recent_context_search failed: {e}")
 
 
 @mcp.tool(
     description=(
-        "Search entities by their labels (Neo4j node labels). "
+        "Search entities by their labels. "
         "Use when you know the entity type (e.g., CVE, Host, Tool) but not the UUID."
     ),
 )
-def entity_by_label_search(
+async def entity_by_label_search(
     query: str,
     node_labels: list[str],
     edge_types: list[str] | None = None,
     max_results: int = 25,
 ) -> str:
-    """Search entities filtered by Neo4j labels.
+    """Search entities filtered by labels."""
+    from graphiti_core.search.search_config import (
+        SearchConfig, NodeSearchConfig,
+        NodeSearchMethod,
+    )
+    from graphiti_core.search.search_filters import SearchFilters
 
-    Args:
-        query: English semantic query.
-        node_labels: Required - which node labels to filter on (e.g., ["CVE", "Host"]).
-        edge_types: Optional edge-type filter.
-        max_results: Cap on returned nodes (default 25).
-    """
-    return _empty_result({"node_labels": node_labels, "max_results": max_results})
+    try:
+        await _ensure_ready()
+        results = await _graphiti.search_(
+            query=query,
+            config=SearchConfig(
+                limit=max_results,
+                node_config=NodeSearchConfig(
+                    search_methods=[NodeSearchMethod.bm25, NodeSearchMethod.cosine_similarity],
+                ),
+            ),
+            search_filter=SearchFilters(
+                node_labels=node_labels,
+                edge_types=edge_types,
+            ),
+        )
+        return _format_results(results, query)
+    except Exception as e:
+        return _empty_result(f"entity_by_label_search failed: {e}")
 
 
 if __name__ == "__main__":

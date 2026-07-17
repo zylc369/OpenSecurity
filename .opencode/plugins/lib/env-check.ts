@@ -16,15 +16,15 @@ import { ctx } from "./context";
 
 export type EnvironmentCheckResult = {
   ready: boolean;
-  message: string; // ready=true 时为空；否则是给用户看的错误消息
+  message: string; // ready=false: 阻塞消息；ready=true: 空或可选依赖警告
 };
 
 /**
  * 构造 detect_env.py 的命令行参数（不含脚本路径本身）。
  * 纯函数，便于测试。
  *
- * - Coordinator → "--check-preinstall all"（检测所有子 agent 依赖）
- * - 其他 agent → "--check-preinstall <agent>"（只检测该 agent 的依赖）
+ * - Coordinator → "check-preinstall all"（检测所有子 agent 依赖）
+ * - 其他 agent → "check-preinstall <agent>"（只检测该 agent 的依赖）
  * - 有 taskDir → 追加 "--output <taskDir>/env.json"
  */
 export function buildDetectEnvArgs(
@@ -32,7 +32,7 @@ export function buildDetectEnvArgs(
   taskDir: string | null | undefined,
 ): string[] {
   const checkAgent = agent === AGENT_SECURITY_COORDINATOR ? "all" : agent;
-  const args = ["--check-preinstall", checkAgent];
+  const args = ["check-preinstall", checkAgent];
   if (taskDir) {
     args.push("--output", join(taskDir, "env.json"));
   }
@@ -46,7 +46,7 @@ export function buildDetectEnvArgs(
  * 四条路径：
  * 1. r.error（进程启动失败/超时）→ message 含 error.message + stderr 尾部
  * 2. stdout 非合法 JSON → message 含 JSON 错误 + stderr 尾部
- * 3. success=false → message 含 errors 的 install_hint（按 agent 过滤后的）
+ * 3. success=false → install_guide（指向一键安装脚本）
  * 4. success=true → {ready:true}
  */
 export function interpretDetectEnvResult(
@@ -61,7 +61,7 @@ export function interpretDetectEnvResult(
         (stderrTail ? `\n检测日志（最后 300 字符）:\n${stderrTail}` : ""),
     };
   }
-  let result: { success?: boolean; errors?: Array<string | { package?: string; install_hint?: string }> };
+  let result: { success?: boolean; install_guide?: string; optional_warnings?: string[] };
   try {
     result = JSON.parse(r.stdout);
   } catch (e) {
@@ -73,18 +73,20 @@ export function interpretDetectEnvResult(
     };
   }
   if (result.success !== true) {
-    // errors 混合两类：字符串（全量检测）和 {package, install_hint}（preinstall）
-    const errs = Array.isArray(result.errors) ? result.errors : [];
-    const hints = errs
-      .map((e) => typeof e === "string" ? e : (e.install_hint || e.package || ""))
-      .filter(Boolean)
-      .join("\n");
     return {
       ready: false,
-      message: hints
-        ? `[环境检测未通过] ${agent} 需要的依赖未就绪：\n${hints}\n装完后重新发送消息。`
-        : `[环境检测未通过] ${agent}：detect_env 返回 success 非 true 但无 errors`,
+      message: result.install_guide
+        ? `[环境检测未通过] ${result.install_guide}`
+        : `[环境检测未通过] ${agent}：环境检测失败，请运行安装脚本后重试`,
     };
+  }
+  // success=true：必需依赖全通过，agent 可以运行。
+  // optional_warnings（Docker/Neo4j/ZHIPU 缺失）不注入 system prompt —
+  // events MCP 有降级机制，用户在实际使用时自然会发现。
+  // 警告保留在 JSON 的 optional_warnings 字段 + debugLog 供排查。
+  const warnings = Array.isArray(result.optional_warnings) ? result.optional_warnings : [];
+  if (warnings.length > 0) {
+    debugLog(`optional_warnings (不阻塞): ${warnings.join("; ")}`, undefined);
   }
   return { ready: true, message: "" };
 }
