@@ -1,8 +1,10 @@
-"""测试 graphiti_config.py 的组件：create_graphiti / BgeM3Embedder / DummyCrossEncoder。
+"""测试 graphiti_config.py 的组件：create_graphiti / DeepSeekLLMClient / BgeM3Embedder / BgeRerankerClient。
 
 不 mock，测试真实的组件创建和基本功能。
+前置条件：.ai_env 有 DEEPSEEK_API_KEY（完整测试需要 Neo4j 运行中）。
 """
 import asyncio
+import inspect
 import sys
 from pathlib import Path
 
@@ -20,57 +22,90 @@ class TestCreateGraphiti:
         assert err is None, f"create_graphiti 返回错误: {err}"
         assert g is not None
 
-    def test_llm_client_is_openai_client(self, graphiti_instance):
-        from graphiti_core.llm_client.openai_client import OpenAIClient
-        assert isinstance(graphiti_instance.llm_client, OpenAIClient)
+    def test_llm_client_is_deepseek_client(self, graphiti_instance):
+        from llm_client import DeepSeekLLMClient
+        assert isinstance(graphiti_instance.llm_client, DeepSeekLLMClient), \
+            f"期望 DeepSeekLLMClient，实际 {type(graphiti_instance.llm_client)}"
 
     def test_embedder_is_bge_m3(self, graphiti_instance):
         from graphiti_config import BgeM3Embedder
         assert isinstance(graphiti_instance.embedder, BgeM3Embedder)
 
-    def test_cross_encoder_is_openai_reranker(self, graphiti_instance):
-        from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
-        assert isinstance(graphiti_instance.cross_encoder, OpenAIRerankerClient)
+    def test_cross_encoder_is_bge_reranker(self, graphiti_instance):
+        from reranker import BgeRerankerClient
+        assert isinstance(graphiti_instance.cross_encoder, BgeRerankerClient), \
+            f"期望 BgeRerankerClient，实际 {type(graphiti_instance.cross_encoder)}"
+
+    def test_llm_config_uses_deepseek_endpoint(self, graphiti_instance):
+        """LLM config 的 base_url 应该指向 DeepSeek API。"""
+        config = graphiti_instance.llm_client.config
+        assert "deepseek.com" in str(config.base_url), \
+            f"base_url 应指向 DeepSeek，实际: {config.base_url}"
+
+    def test_llm_config_temperature_zero(self, graphiti_instance):
+        """temperature 应该为 0（graphiti 需要确定性输出）。"""
+        config = graphiti_instance.llm_client.config
+        assert config.temperature == 0, f"temperature 应为 0，实际: {config.temperature}"
 
 
 class TestBgeM3Embedder:
-    """测试 BGE-M3 embedding 生成。"""
+    """测试 BGE-M3 embedding 生成（async 接口）。"""
+
+    def test_create_is_async(self):
+        from graphiti_config import BgeM3Embedder
+        assert inspect.iscoroutinefunction(BgeM3Embedder.create), \
+            "create 应该是 async（graphiti 调 await embedder.create()）"
+
+    def test_create_batch_is_async(self):
+        from graphiti_config import BgeM3Embedder
+        assert inspect.iscoroutinefunction(BgeM3Embedder.create_batch)
 
     def test_single_string_embedding(self):
         from graphiti_config import BgeM3Embedder
         emb = BgeM3Embedder()
-        result = emb.create("hello world")
+        result = asyncio.run(emb.create("hello world"))
         assert isinstance(result, list)
         assert len(result) == 1024, f"期望 1024 维，实际 {len(result)}"
 
     def test_batch_embedding(self):
+        """create_batch 返回多个 embedding（每个 1024 维）。"""
         from graphiti_config import BgeM3Embedder
         emb = BgeM3Embedder()
-        result = emb.create(["hello", "world"])
+        result = asyncio.run(emb.create_batch(["hello", "world"]))
         assert isinstance(result, list)
         assert len(result) == 2
+        assert all(len(r) == 1024 for r in result)
+
+    def test_create_single_element_list(self):
+        """create 传入单元素列表 [text] 应返回扁平 list[float]（graphiti 的调用方式）。"""
+        from graphiti_config import BgeM3Embedder
+        emb = BgeM3Embedder()
+        result = asyncio.run(emb.create(["single text"]))
+        assert isinstance(result, list)
+        assert len(result) == 1024
+        assert all(isinstance(x, float) for x in result)
+
+    def test_create_batch_method(self):
+        from graphiti_config import BgeM3Embedder
+        emb = BgeM3Embedder()
+        result = asyncio.run(emb.create_batch(["test1", "test2", "test3"]))
+        assert isinstance(result, list)
+        assert len(result) == 3
         assert all(len(r) == 1024 for r in result)
 
     def test_embedding_consistency(self):
         """相同输入应该产生相同向量。"""
         from graphiti_config import BgeM3Embedder
         emb = BgeM3Embedder()
-        v1 = emb.create("test consistency")
-        v2 = emb.create("test consistency")
+        v1 = asyncio.run(emb.create("test consistency"))
+        v2 = asyncio.run(emb.create("test consistency"))
         assert v1 == v2, "相同输入的 embedding 不一致"
 
 
-class TestCrossEncoder:
-    """测试 OpenAIRerankerClient 配置（验证实例可用，不做实际 API 调用）。"""
+class TestBgeRerankerClientIntegration:
+    """测试 BgeRerankerClient 在 Graphiti 实例中的集成。"""
 
-    def test_reranker_has_client(self, graphiti_instance):
-        """reranker 应该有内部 client（AsyncOpenAI 实例）。"""
+    def test_reranker_lazy_loaded(self, graphiti_instance):
+        """reranker 创建时模型不应加载（lazy）。"""
         ce = graphiti_instance.cross_encoder
-        assert hasattr(ce, "client"), "OpenAIRerankerClient 应该有 client 属性"
-
-    def test_reranker_config_has_zhipuai_base_url(self, graphiti_instance):
-        """reranker config 应该指向 ZhipuAI 端点。"""
-        ce = graphiti_instance.cross_encoder
-        assert hasattr(ce, "config"), "OpenAIRerankerClient 应该有 config 属性"
-        assert "bigmodel.cn" in str(ce.config.base_url), \
-            f"base_url 应该指向 ZhipuAI，实际: {ce.config.base_url}"
+        assert ce._model is None, "BgeRerankerClient 创建时不应加载模型"

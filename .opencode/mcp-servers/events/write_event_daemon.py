@@ -7,7 +7,7 @@
   - stdin EOF（plugin 退出）→ 排空队列 → 退出
 
 并发模型：asyncio + Semaphore(5) + 无界 Queue
-  - 最多 5 个 add_episode 并发（ZhipuAI API 限流保护）
+  - 最多 5 个 add_episode 并发（DeepSeek API 限流保护）
   - 超过 5 个排队等待
   - timestamp 由 plugin 传入 → reference_time 保证时序
 
@@ -35,23 +35,36 @@ def log(msg: str):
 
 
 async def worker(name: str, queue: asyncio.Queue, graphiti):
-    """从队列取事件，调 add_episode。单事件失败不影响其他事件。"""
-    from graphiti_core.nodes import EpisodeType
+    """从队列取消息，根据 action 字段路由到 add_episode 或 delete_group。"""
+    from graphiti_core.nodes import EpisodeType, EntityNode, EpisodicNode
 
     while True:
         event = await queue.get()
         try:
-            await graphiti.add_episode(
-                name=event["name"],
-                episode_body=event["body"],
-                source_description=event["source"],
-                reference_time=datetime.fromtimestamp(event["timestamp"] / 1000),
-                source=EpisodeType.message,
-                group_id=event["group_id"],
-            )
-            log(f"[+] episode added: {event['name']}")
+            action = event.get("action")
+
+            if action == "delete":
+                # 删除指定 group 的所有事件数据
+                group_id = event.get("group_id", "")
+                if not group_id:
+                    log(f"[!] delete 消息缺少 group_id")
+                else:
+                    await EntityNode.delete_by_group_id(graphiti.driver, group_id)
+                    await EpisodicNode.delete_by_group_id(graphiti.driver, group_id)
+                    log(f"[+] group deleted: {group_id}")
+            else:
+                # 正常事件 → add_episode
+                await graphiti.add_episode(
+                    name=event["name"],
+                    episode_body=event["body"],
+                    source_description=event["source"],
+                    reference_time=datetime.fromtimestamp(event["timestamp"] / 1000),
+                    source=EpisodeType.message,
+                    group_id=event["group_id"],
+                )
+                log(f"[+] episode added: {event['name']}")
         except Exception as e:
-            log(f"[!] episode failed: {event.get('name', '?')} — {type(e).__name__}: {e}")
+            log(f"[!] event failed: {event.get('name', event.get('action', '?'))} — {type(e).__name__}: {e}")
         finally:
             queue.task_done()
 

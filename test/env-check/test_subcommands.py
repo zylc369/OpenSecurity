@@ -102,24 +102,24 @@ class TestInstallBootstrap:
         detect_env_module._bootstrap_venv()  # 不抛异常 = 通过
 
 
-class TestZhipuGateLogic:
-    """测试 ZHIPU_API_KEY 门控逻辑（通过 _detect_mcp_deps 行为）。"""
+class TestDeepseekGateLogic:
+    """测试 DEEPSEEK_API_KEY 门控逻辑（通过 _detect_mcp_deps 行为）。"""
 
-    def test_zhipu_not_configured_skips_docker(self, detect_env_module, monkeypatch):
-        """ZHIPU_API_KEY 未配置时 _detect_mcp_deps 跳过 Docker 检查。"""
-        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+    def test_deepseek_not_configured_skips_docker(self, detect_env_module, monkeypatch):
+        """DEEPSEEK_API_KEY 未配置时 _detect_mcp_deps 跳过 Docker 检查。"""
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         result = detect_env_module._detect_mcp_deps()
         neo4j = result.get("_neo4j", {})
         assert neo4j.get("available") == False
-        assert "ZHIPU_API_KEY" in neo4j.get("message", "")
+        assert "DEEPSEEK_API_KEY" in neo4j.get("message", "")
 
-    def test_zhipu_configured_checks_docker(self, detect_env_module, monkeypatch):
-        """ZHIPU_API_KEY 已配置时 _detect_mcp_deps 检查 Docker。"""
-        monkeypatch.setenv("ZHIPU_API_KEY", "test-key")
+    def test_deepseek_configured_checks_docker(self, detect_env_module, monkeypatch):
+        """DEEPSEEK_API_KEY 已配置时 _detect_mcp_deps 检查 Docker。"""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
         result = detect_env_module._detect_mcp_deps()
         neo4j = result.get("_neo4j", {})
-        # Docker 可能可用也可能不可用，但不应包含"ZHIPU_API_KEY 未配置"
-        assert "ZHIPU_API_KEY 未配置" not in neo4j.get("message", "")
+        # Docker 可能可用也可能不可用，但不应包含"DEEPSEEK_API_KEY 未配置"
+        assert "DEEPSEEK_API_KEY 未配置" not in neo4j.get("message", "")
 
 
 class TestVenvTs:

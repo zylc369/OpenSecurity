@@ -1,7 +1,7 @@
 """events MCP 共享 fixtures。
 
-所有测试都需要真实的 Graphiti 实例（Neo4j + ZhipuAI + BGE-M3），不 mock。
-前置条件：Docker + neo4j-events 容器运行中 + .ai_env 有 ZHIPU_API_KEY。
+所有测试都需要真实的 Graphiti 实例（Neo4j + DeepSeek + BGE-M3 + BGE-Reranker），不 mock。
+前置条件：Docker + neo4j-events 容器运行中 + .ai_env 有 DEEPSEEK_API_KEY。
 """
 import sys
 from pathlib import Path
@@ -28,3 +28,9 @@ def graphiti_instance():
 def test_group_id():
     """测试用 group_id（隔离测试数据）。"""
     return "test-mcp-events-session"
+
+
+@pytest.fixture(scope="session")
+def test_group_id_2():
+    """第二个测试用 group_id（测试 group 隔离）。"""
+    return "test-mcp-events-other"

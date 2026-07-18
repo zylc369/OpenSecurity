@@ -3,9 +3,14 @@
 存储过往 LLM 响应和工具执行记录的事件库。7 个搜索方法通过 graphiti-core 查询 Neo4j。
 Neo4j 不可用时降级为空返回，不影响 agent 基本功能。
 
-LLM：ZhipuAI glm-4-flash（实体提取）
+LLM：DeepSeek API（deepseek-v4-pro/flash，实体提取）
 Embedding：BGE-M3 本地模型（向量搜索）
+CrossEncoder：bge-reranker-v2-m3 本地模型（搜索结果重排序）
 存储：Neo4j（bolt://localhost:7687）
+
+搜索工具的 group_id 参数：
+  限定搜索范围到当前分析任务的事件分区（OPENSECURITY_FLOW_ID）。
+  主任务和它的所有子任务共享同一个 group_id。
 """
 import json
 from datetime import datetime, timedelta
@@ -84,6 +89,7 @@ mcp = FastMCP("events")
 )
 async def temporal_window_search(
     query: str,
+    group_id: str,
     time_start: str,
     time_end: str,
     max_results: int = 15,
@@ -101,6 +107,7 @@ async def temporal_window_search(
         te = datetime.fromisoformat(time_end.replace("Z", "+00:00"))
         results = await _graphiti.search_(
             query=query,
+            group_ids=[group_id],
             config=SearchConfig(
                 limit=max_results,
                 edge_config=EdgeSearchConfig(
@@ -130,6 +137,7 @@ async def temporal_window_search(
 )
 async def entity_relationships_search(
     query: str,
+    group_id: str,
     center_node_uuid: str,
     max_depth: int = 2,
     node_labels: list[str] | None = None,
@@ -147,6 +155,7 @@ async def entity_relationships_search(
         await _ensure_ready()
         results = await _graphiti.search_(
             query=query,
+            group_ids=[group_id],
             center_node_uuid=center_node_uuid,
             config=SearchConfig(
                 limit=max_results,
@@ -173,10 +182,11 @@ async def entity_relationships_search(
 )
 async def diverse_results_search(
     query: str,
+    group_id: str,
     diversity_level: str = "medium",
     max_results: int = 10,
 ) -> str:
-    """MMR-ranked diverse search."""
+    """MMR-ranked diverse search with cross-encoder reranking."""
     from graphiti_core.search.search_config import (
         SearchConfig, EdgeSearchConfig,
         EdgeSearchMethod, EdgeReranker,
@@ -188,6 +198,7 @@ async def diverse_results_search(
         mmr_lambda = mmr_map.get(diversity_level, 0.5)
         results = await _graphiti.search_(
             query=query,
+            group_ids=[group_id],
             config=SearchConfig(
                 limit=max_results,
                 edge_config=EdgeSearchConfig(
@@ -210,6 +221,7 @@ async def diverse_results_search(
 )
 async def episode_context_search(
     query: str,
+    group_id: str,
     max_results: int = 10,
 ) -> str:
     """Episode-centric search."""
@@ -222,6 +234,7 @@ async def episode_context_search(
         await _ensure_ready()
         results = await _graphiti.search_(
             query=query,
+            group_ids=[group_id],
             config=SearchConfig(
                 limit=max_results,
                 episode_config=EpisodeSearchConfig(
@@ -242,6 +255,7 @@ async def episode_context_search(
 )
 async def successful_tools_search(
     query: str,
+    group_id: str,
     min_mentions: int = 2,
     max_results: int = 15,
 ) -> str:
@@ -256,6 +270,7 @@ async def successful_tools_search(
         await _ensure_ready()
         results = await _graphiti.search_(
             query=query,
+            group_ids=[group_id],
             config=SearchConfig(
                 limit=max_results * 2,
                 node_config=NodeSearchConfig(
@@ -291,6 +306,7 @@ async def successful_tools_search(
 )
 async def recent_context_search(
     query: str,
+    group_id: str,
     recency_window: str = "24h",
     max_results: int = 10,
 ) -> str:
@@ -305,6 +321,7 @@ async def recent_context_search(
         since = datetime.now() - timedelta(hours=hours)
         results = await _graphiti.search_(
             query=query,
+            group_ids=[group_id],
             config=SearchConfig(limit=max_results),
             search_filter=SearchFilters(
                 created_at=[[DateFilter(date=since, comparison_operator=ComparisonOperator.greater_than_equal)]],
@@ -323,6 +340,7 @@ async def recent_context_search(
 )
 async def entity_by_label_search(
     query: str,
+    group_id: str,
     node_labels: list[str],
     edge_types: list[str] | None = None,
     max_results: int = 25,
@@ -338,6 +356,7 @@ async def entity_by_label_search(
         await _ensure_ready()
         results = await _graphiti.search_(
             query=query,
+            group_ids=[group_id],
             config=SearchConfig(
                 limit=max_results,
                 node_config=NodeSearchConfig(
@@ -352,6 +371,25 @@ async def entity_by_label_search(
         return _format_results(results, query)
     except Exception as e:
         return _empty_result(f"entity_by_label_search failed: {e}")
+
+
+@mcp.tool(
+    description=(
+        "Delete all events (nodes, edges, episodes) for a given group_id. "
+        "Called automatically when a session is deleted to clean up orphan data."
+    ),
+)
+async def delete_session_events(group_id: str) -> str:
+    """Delete all graph data for a group_id."""
+    try:
+        await _ensure_ready()
+        from graphiti_core.nodes import EntityNode, EpisodicNode
+
+        await EntityNode.delete_by_group_id(_graphiti.driver, group_id)
+        await EpisodicNode.delete_by_group_id(_graphiti.driver, group_id)
+        return json.dumps({"deleted": group_id}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": f"delete_session_events failed: {e}"}, ensure_ascii=False)
 
 
 if __name__ == "__main__":

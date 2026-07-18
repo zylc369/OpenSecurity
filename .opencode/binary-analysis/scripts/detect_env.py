@@ -232,6 +232,12 @@ _AI_ENV_TEMPLATE = """\
 # Linux: /opt/ida-9.0
 # Windows: C:\\Program Files\\IDA Pro 9.0
 IDA_PRO_HOME=
+
+# DeepSeek API Key（events MCP 实体提取用，https://platform.deepseek.com 申请）
+DEEPSEEK_API_KEY=
+# events MCP 模型配置（可选，按需修改）
+# DEEPSEEK_MODEL=deepseek-v4-pro        # 核心提取模型（费用吃不消时改成 deepseek-v4-flash）
+# DEEPSEEK_SMALL_MODEL=deepseek-v4-flash # 时间戳推断模型
 """
 
 
@@ -748,16 +754,16 @@ def _run_install():
             _log(f"[!] {dep.name}: 未安装")
             print(f"  → {hint}")
 
-    # 4. events MCP 基础设施（ZHIPU_API_KEY 门控）
+    # 4. events MCP 基础设施（DEEPSEEK_API_KEY 门控）
     _log("[*] === events MCP 基础设施 ===")
     mcp_servers = _detect_mcp_deps(auto_create=True)
     neo4j = mcp_servers.get("_neo4j", {})
-    zhipu = mcp_servers.get("_zhipu_api_key", {})
+    deepseek = mcp_servers.get("_deepseek_api_key", {})
 
-    if not zhipu.get("available"):
-        print("[!] ZHIPU_API_KEY 未配置。")
+    if not deepseek.get("available"):
+        print("[!] DEEPSEEK_API_KEY 未配置。")
         print("  events MCP 的实体提取功能将不可用（无法写入新事件，已有事件仍可搜索）。")
-        print("  请在 .opencode/.ai_env 中设置 ZHIPU_API_KEY=<your-key>")
+        print("  请在 .opencode/.ai_env 中设置 DEEPSEEK_API_KEY=<your-key>")
     elif not neo4j.get("available"):
         print(f"[!] {neo4j.get('message', 'Neo4j 不可用')}")
     else:
@@ -812,7 +818,7 @@ def _check_preinstall(agent):
     任何必需依赖缺失 → 立即返回 {success: False, install_guide: ...}，不继续检测。
     全部通过 → 收集完整 data 写入 env_cache.json → 返回 {success: True, data: ...}。
 
-    MCP 依赖（Neo4j/ZHIPU_API_KEY/MCP 包）是信息性的，不触发 fail-fast。
+    MCP 依赖（Neo4j/DEEPSEEK_API_KEY/MCP 包）是信息性的，不触发 fail-fast。
     """
     import importlib.util
     import importlib.metadata
@@ -883,20 +889,20 @@ def _check_preinstall(agent):
             if dep.required and _agent_matches(dep):
                 return _fail(dep.name)
 
-    # --- 5. events MCP 基础设施（ZHIPU_API_KEY 门控）---
-    # ZHIPU_API_KEY 未配置 → 不阻塞（stderr 日志），跳过 Docker/容器检查。
-    # ZHIPU_API_KEY 已配置 → Docker/容器不可用 → fail-fast。
+    # --- 5. events MCP 基础设施（DEEPSEEK_API_KEY 门控）---
+    # DEEPSEEK_API_KEY 未配置 → 不阻塞（stderr 日志），跳过 Docker/容器检查。
+    # DEEPSEEK_API_KEY 已配置 → Docker/容器不可用 → fail-fast。
     # 三者齐全时 _detect_mcp_deps 已静默自动启动容器。
     mcp_servers = _detect_mcp_deps()
     optional_warnings = []
 
-    zhipu = mcp_servers.get("_zhipu_api_key", {})
+    deepseek = mcp_servers.get("_deepseek_api_key", {})
     neo4j = mcp_servers.get("_neo4j", {})
-    if not zhipu.get("available"):
-        # ZHIPU_API_KEY 未配置 → 不阻塞
-        _log(f"[!] zhipu_api_key: {zhipu.get('message', '未配置')}")
+    if not deepseek.get("available"):
+        # DEEPSEEK_API_KEY 未配置 → 不阻塞
+        _log(f"[!] deepseek_api_key: {deepseek.get('message', '未配置')}")
     elif not neo4j.get("available"):
-        # ZHIPU 已配置但 Docker/容器不可用 → fail-fast
+        # DEEPSEEK 已配置但 Docker/容器不可用 → fail-fast
         return _fail(f"neo4j: {neo4j.get('message', '不可用')}")
 
     # --- 全部必需依赖通过 → 写 cache ---
@@ -1005,7 +1011,7 @@ def _pull_image_with_progress(image, timeout=600):
 
 
 def _detect_mcp_deps(auto_create=False):
-    """检测 MCP server 的 Python 依赖包 + Neo4j + ZHIPU_API_KEY。
+    """检测 MCP server 的 Python 依赖包 + Neo4j + DEEPSEEK_API_KEY。
 
     auto_create=False（check-preinstall 用）：容器不存在 → 返回 unavailable（fail-fast）
     auto_create=True（install 用）：容器不存在 → docker run 创建+启动
@@ -1041,13 +1047,13 @@ def _detect_mcp_deps(auto_create=False):
             "script": cfg["script"],
         }
 
-    # ZHIPU_API_KEY 先检（门控：未配置则跳过全部 Docker/容器操作）
-    zhipu_key = os.environ.get("ZHIPU_API_KEY", "")
-    zhipu_ok = bool(zhipu_key.strip())
+    # DEEPSEEK_API_KEY 先检（门控：未配置则跳过全部 Docker/容器操作）
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    deepseek_ok = bool(deepseek_key.strip())
 
-    # Docker + Neo4j：仅在 ZHIPU 已配置时才检查
-    if not zhipu_ok:
-        neo4j_status = {"available": False, "message": "ZHIPU_API_KEY 未配置，跳过 Docker/Neo4j 检查"}
+    # Docker + Neo4j：仅在 DEEPSEEK 已配置时才检查
+    if not deepseek_ok:
+        neo4j_status = {"available": False, "message": "DEEPSEEK_API_KEY 未配置，跳过 Docker/Neo4j 检查"}
     else:
         neo4j_status = {"available": False, "message": ""}
         try:
@@ -1109,13 +1115,13 @@ def _detect_mcp_deps(auto_create=False):
         except Exception as e:
             neo4j_status = {"available": False, "message": f"Docker 异常: {e}"}
 
-    zhipu_status = {
-        "available": zhipu_ok,
-        "message": "已配置" if zhipu_ok else "未配置（请在 .opencode/.ai_env 中设置 ZHIPU_API_KEY）",
+    deepseek_status = {
+        "available": deepseek_ok,
+        "message": "已配置" if deepseek_ok else "未配置（请在 .opencode/.ai_env 中设置 DEEPSEEK_API_KEY）",
     }
 
     result["_neo4j"] = neo4j_status
-    result["_zhipu_api_key"] = zhipu_status
+    result["_deepseek_api_key"] = deepseek_status
     return result
 
 

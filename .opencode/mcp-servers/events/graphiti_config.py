@@ -1,13 +1,20 @@
-"""graphiti-core 配置：ZhipuAI LLM + BGE-M3 本地 Embedding + Neo4j 存储。
+"""graphiti-core 配置：DeepSeek LLM + BGE-M3 本地 Embedding + BGE-Reranker + Neo4j 存储。
 
-从 .ai_env 读取 ZHIPU_API_KEY，配置 graphiti-core 使用：
-- LLM：ZhipuAI glm-4-flash（实体提取）
+从 .ai_env 读取配置，配置 graphiti-core 使用：
+- LLM：DeepSeek API（deepseek-v4-pro 核心提取 / deepseek-v4-flash 时间戳推断）
 - Embedding：BGE-M3 本地模型（向量搜索）
+- CrossEncoder：bge-reranker-v2-m3 本地模型（搜索结果重排序）
 - 存储：Neo4j（bolt://localhost:7687）
+
+模型可通过 .ai_env 环境变量切换：
+  DEEPSEEK_MODEL=deepseek-v4-pro       （核心提取模型，可改为 deepseek-v4-flash 省钱）
+  DEEPSEEK_SMALL_MODEL=deepseek-v4-flash（时间戳推断模型）
 """
+import asyncio
 import os
 from pathlib import Path
 
+import numpy as np
 from graphiti_core.embedder.client import EmbedderClient
 
 
@@ -26,14 +33,14 @@ def load_ai_env() -> None:
             os.environ.setdefault(key, value.strip())
 
 
-def get_zhipu_api_key() -> str | None:
-    """获取 ZhipuAI API key（从 .ai_env 或环境变量）。"""
+def get_deepseek_api_key() -> str | None:
+    """获取 DeepSeek API key（从 .ai_env 或环境变量）。"""
     load_ai_env()
-    return os.environ.get("ZHIPU_API_KEY")
+    return os.environ.get("DEEPSEEK_API_KEY")
 
 
 def create_graphiti():
-    """创建配置好的 Graphiti 实例（ZhipuAI LLM + BGE-M3 embedding）。
+    """创建配置好的 Graphiti 实例（DeepSeek LLM + BGE-M3 embedding + BGE-Reranker）。
 
     必须在 async 上下文中调用（graphiti-core 的初始化是 async）。
     返回 (graphiti, error)：
@@ -41,28 +48,30 @@ def create_graphiti():
     - 失败（缺 API key / 缺依赖）：(None, error_message)
     """
     from graphiti_core import Graphiti
-
-    api_key = get_zhipu_api_key()
-    if not api_key:
-        return None, "ZHIPU_API_KEY 未配置（请在 .opencode/.ai_env 中设置）"
-
-    # 配置 LLM：ZhipuAI（OpenAI 兼容端点）
     from graphiti_core.llm_client.config import LLMConfig
-    from graphiti_core.llm_client.openai_client import OpenAIClient
-    from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
+
+    from llm_client import DeepSeekLLMClient
+    from reranker import BgeRerankerClient
+
+    api_key = get_deepseek_api_key()
+    if not api_key:
+        return None, "DEEPSEEK_API_KEY 未配置（请在 .opencode/.ai_env 中设置）"
+
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
+    small_model = os.environ.get("DEEPSEEK_SMALL_MODEL", "deepseek-v4-flash")
 
     llm_config = LLMConfig(
         api_key=api_key,
-        base_url="https://open.bigmodel.cn/api/paas/v4/",
-        model="glm-4-flash",
+        base_url="https://api.deepseek.com",
+        model=model,
+        small_model=small_model,
+        temperature=0,
     )
-    llm_client = OpenAIClient(config=llm_config)
+    llm_client = DeepSeekLLMClient(config=llm_config)
 
-    # 配置 Embedding：BGE-M3 本地模型
     embedder = BgeM3Embedder()
 
-    # 配置 CrossEncoder（搜索结果重排序）：复用 ZhipuAI 端点
-    cross_encoder = OpenAIRerankerClient(config=llm_config)
+    cross_encoder = BgeRerankerClient()
 
     graphiti = Graphiti(
         uri="bolt://localhost:7687",
@@ -80,10 +89,12 @@ class BgeM3Embedder(EmbedderClient):
 
     替代 OpenAI embedding API——零成本、无网络依赖。
     输出 1024 维向量，与 graphiti-core 默认 EMBEDDING_DIM=1024 一致。
+
+    create 方法是 async（graphiti-core 的 EntityNode.generate_name_embedding
+    调 await embedder.create()）。同步的 model.encode 用 asyncio.to_thread 包装。
     """
 
     def __init__(self):
-        from sentence_transformers import SentenceTransformer
         self._model = None
         self._embedding_dim = 1024
 
@@ -92,23 +103,40 @@ class BgeM3Embedder(EmbedderClient):
         """延迟加载 BGE-M3 模型（首次调用时加载，约 10 秒）。"""
         if self._model is None:
             from sentence_transformers import SentenceTransformer
+
             self._model = SentenceTransformer("BAAI/bge-m3")
         return self._model
 
-    def create(self, input_data) -> list[float]:
-        """生成 embedding 向量。
+    async def create(self, input_data) -> list[float]:
+        """生成 embedding 向量（async）。
+
+        graphiti 的 EntityNode/EntityEdge 调 await embedder.create(input_data=[text])，
+        传入单元素列表，期望返回扁平的 list[float]（不是 list[list[float]]）。
 
         Args:
-            input_data: 字符串或字符串列表
+            input_data: 字符串、单元素字符串列表 [text]、或预计算向量
 
         Returns:
-            单个输入 → list[float]（1024 维）
-            多个输入 → list[list[float]]（每个 1024 维）
+            list[float]（1024 维扁平向量）
         """
-        import numpy as np
-        if isinstance(input_data, str):
-            vec = self.model.encode(input_data, convert_to_numpy=True)
+        # graphiti 传 [text]（单元素列表）→ 取第一个元素做 embedding
+        if isinstance(input_data, list) and len(input_data) > 0 and isinstance(input_data[0], str):
+            text = input_data[0]
+            vec = await asyncio.to_thread(self.model.encode, text, convert_to_numpy=True)
             return np.asarray(vec).tolist()
-        # 列表输入
-        vecs = self.model.encode(list(input_data), convert_to_numpy=True)
+
+        if isinstance(input_data, str):
+            vec = await asyncio.to_thread(self.model.encode, input_data, convert_to_numpy=True)
+            return np.asarray(vec).tolist()
+
+        # 预计算向量（Iterable[int]）→ 原样返回
+        return [float(x) for x in input_data]
+
+    async def create_batch(self, input_data: list[str]) -> list[list[float]]:
+        """批量生成 embedding 向量（async）。"""
+        return await asyncio.to_thread(self._encode_batch, input_data)
+
+    def _encode_batch(self, texts: list[str]) -> list[list[float]]:
+        """同步批量编码（内部方法，被 async 方法通过 to_thread 调用）。"""
+        vecs = self.model.encode(texts, convert_to_numpy=True)
         return [np.asarray(v).tolist() for v in vecs]

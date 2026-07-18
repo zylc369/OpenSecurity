@@ -168,6 +168,9 @@ async function buildEnvSection(
     }
 
     envSection += `- 共享目录($SHARED_DIR)路径，它里面有共享的通用的知识、工具和脚本: ${SHARED_DIR}\n`;
+
+    // OPENSECURITY_FLOW_ID：事件库分区标识
+    envSection += `- 事件库 Flow ID ($OPENSECURITY_FLOW_ID): ${session.flowId}。标识当前分析任务的事件库分区。主任务和它启动的所有子任务共享同一个 Flow ID——子 agent 写入的事件（工具执行记录、LLM 响应）和父 agent 写入的事件存在同一个分区里，互相可搜索。调用事件库 MCP 的搜索工具时，将此值作为 group_id 参数传入，限定搜索范围到当前任务的事件，避免搜到其他无关任务的数据。\n`;
     const idaPro = envInfo?.ida_pro;
     if (idaPro?.available && idaPro.idat_path) {
       envSection += `- IDA Pro: ${idaPro.path}\n`;
@@ -674,6 +677,30 @@ function fireAndForgetEvent(
   }
 }
 
+/**
+ * 删除指定 flowId 的所有事件库数据（fire-and-forget）。
+ * 通过 write_event_daemon 的 stdin 发送 delete 消息，daemon 复用已有 Neo4j 连接执行删除。
+ * daemon 不可用时只记日志，不影响 session 删除流程。
+ */
+function deleteGraphitiEvents(flowId: string): void {
+  if (!writerDaemon || !writerDaemon.stdin || writerDaemon.stdin.destroyed) {
+    debugLog(`deleteGraphitiEvents: daemon 不可用，跳过 flowId=${flowId}`);
+    return;
+  }
+
+  const msg = JSON.stringify({ action: "delete", group_id: flowId }) + "\n";
+  try {
+    const canWrite = writerDaemon.stdin.write(msg);
+    if (canWrite) {
+      debugLog(`deleteGraphitiEvents: 已发送 delete flowId=${flowId}`);
+    } else {
+      debugLog(`deleteGraphitiEvents: stdin 背压，delete 可能延迟 flowId=${flowId}`);
+    }
+  } catch (e) {
+    debugLog(`deleteGraphitiEvents: stdin 写入失败 flowId=${flowId} err=${(e as Error)?.message}`);
+  }
+}
+
 export const SecurityAnalysisPlugin: Plugin = async (input) => {
   const { client, directory } = input;
 
@@ -1015,6 +1042,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           output.env.TASK_DIR = taskDir;
         }
 
+        // OPENSECURITY_FLOW_ID（事件库分区标识，agent 调搜索工具时作为 group_id 传入）
+        output.env.OPENSECURITY_FLOW_ID = session.flowId;
+
         // IDAT（从 env_cache.json 的 ida_pro.idat_path 读取，detect_env 检测后写入）
         const envData = TaskSessionPersistence.readEnvCache<EnvData>(sessionID);
         const idatPath = envData?.data?.ida_pro?.idat_path;
@@ -1031,6 +1061,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             ` AGENT_DIR=${scriptDir ?? "无"}` +
             ` SHARED_DIR=${output.env.SHARED_DIR}` +
             ` TASK_DIR=${taskDir ?? "无"}` +
+            ` OPENSECURITY_FLOW_ID=${session.flowId}` +
             ` IDAT=${output.env.IDAT ?? "无"}` +
             ` PATH=${output.env.PATH ? "已注入venv/bin" : "无"}`,
           sessionID,
@@ -1123,7 +1154,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             `${toolName} execution`,
             body,
             `${agentName} tool execution`,
-            sid,
+            session.flowId,
           );
         }
 
@@ -1153,7 +1184,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           `${agentName} agent response`,
           body,
           `${agentName} response`,
-          sid,
+          session.flowId,
         );
       } catch (e) {
         debugLog(
@@ -1188,14 +1219,25 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           }
         }
 
-        // 删除 session：统一清理所有状态 + task session 文件
+        // 删除 session：统一清理所有状态 + task session 文件 + graphiti 事件数据
         if (event.type === "session.deleted") {
           if (sessionID) {
             debugLog(`event: session.deleted id=${sessionID}`, sessionID);
+
+            // 先取 flowId（sessionManager.delete 会从内存 Map 移除 SessionData）
+            const session = ctx.sessionManager.get(sessionID);
+            const flowId = session?.flowId;
+
             flushTimeline(sessionID);
             ctx.sessionManager.delete(sessionID);
-            TaskSessionPersistence.removeTaskSession(sessionID);
+            removeTaskSession(sessionID);
+
+            // 清理 graphiti 事件数据（fire-and-forget，失败只记日志）
+            if (flowId) {
+              deleteGraphitiEvents(flowId);
+            }
           }
+        }
         }
 
         // 压缩完成：仅记录日志（状态恢复由 compacting hook 在压缩前注入）
