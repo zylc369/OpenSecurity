@@ -1,15 +1,27 @@
 import { join } from "path";
 import type { OpencodeClient, Part, UserMessage } from "@opencode-ai/sdk";
-import { SECURITY_AGENTS, BASIC_GENERAL_AGENTS } from "./constants";
+import {
+  SECURITY_AGENTS,
+  BASIC_GENERAL_AGENTS,
+  ALL_REGISTERED_AGENTS,
+} from "./constants";
 import { debugLog } from "./logging";
-import { createTaskDir } from "./task-session";
 import { Result } from "./result";
+import TaskSessionPersistence from "./task-session-persistence";
+import TaskSessionPersistenceUtils, {
+  TaskRawData,
+} from "./task-session-persistence-utils";
 
 function localIsSecurityAgent(agentName: string): boolean {
   return SECURITY_AGENTS.includes(agentName);
 }
 
+function localIsRegisteredAgent(agentName: string): boolean {
+  return ALL_REGISTERED_AGENTS.includes(agentName);
+}
+
 export class SessionData {
+  readonly flowId: string;
   /** session 创建时间戳（毫秒）。调试参考，不用于业务逻辑 */
   readonly createdAt: number;
   /** 当前 agent 名（如 "binary-analysis"）。由 chat.message 更新。保证非空——createFromAPI 在缺失时抛异常 */
@@ -52,11 +64,13 @@ export class SessionData {
   pendingResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
+    flowId: string,
     agentName: string,
     sessionID: string,
     rootSessionID: string,
     parentSessionID?: string,
   ) {
+    this.flowId = flowId;
     this.createdAt = Date.now();
     this.lastUserMessageAt = this.createdAt;
     this.agentName = agentName;
@@ -76,7 +90,11 @@ export class SessionData {
   }
 
   isRegisteredAgent(): boolean {
-    return this.isSecurityAgent() || this.isBasicGeneralAgent();
+    return localIsRegisteredAgent(this.agentName);
+  }
+
+  isPrimarySession() {
+    return !this.isChildSession();
   }
 
   /** 当前未使用，预留给编排 agent 子任务方案 */
@@ -112,7 +130,9 @@ export class SessionData {
     return (
       this.resumeMarker !== null &&
       output.parts.some(
-        (p) => p.type === "text" && (p as { text?: string }).text === this.resumePrompt,
+        (p) =>
+          p.type === "text" &&
+          (p as { text?: string }).text === this.resumePrompt,
       )
     );
   }
@@ -373,6 +393,7 @@ export class SessionDataManager {
     }
     let rootSessionID: string | undefined = undefined;
     let parentSession: SessionData | undefined = undefined;
+    let flowId: string | null = null;
     const parentSessionID = (sessionInfo as { parentID?: string })?.parentID;
     if (parentSessionID) {
       // 子 session（非根 session）需要沿用根 session 的 task_dir。先创建父 session 再获取 rootSessionID。
@@ -384,10 +405,23 @@ export class SessionDataManager {
         );
       }
       rootSessionID = parentSession.rootSessionID;
+      flowId = parentSession.flowId;
     } else {
+      // 根会话
+
       rootSessionID = sessionID;
     }
+
+    // 创建 task_dir 映射文件（幂等，已存在则返回已有）
+    const taskSession = this.createTaskSession(
+      sessionID,
+      agentName,
+      parentSession,
+      flowId,
+    );
+
     const session = new SessionData(
+      taskSession.flowId,
       agentName,
       sessionID,
       rootSessionID,
@@ -398,13 +432,7 @@ export class SessionDataManager {
       `SessionDataManager: 创建 sessionID=${sessionID} agent=${agentName} parentID=${parentSessionID || "无"}`,
       sessionID,
     );
-
-    // 创建 task_dir 映射文件（幂等，已存在则返回已有）
-    const taskDir = this.getOrCreateTaskDir(
-      sessionID,
-      agentName,
-      parentSession,
-    );
+    const taskDir = taskSession.taskDir ? taskSession.taskDir : null;
     session.setTaskDir(taskDir);
     if (!parentSessionID) {
       session.rootTaskDir = taskDir; // 根 session 任务目录
@@ -414,21 +442,25 @@ export class SessionDataManager {
     return session;
   }
 
-  private getOrCreateTaskDir(
+  private createTaskSession(
     sessionID: string,
     agentName: string,
     parentSession: SessionData | undefined,
-  ): string | null | undefined {
+    flowId: string | null,
+  ): TaskRawData {
     const isCurrentPrimaryAgent = !parentSession?.sessionID;
     let baseDir = parentSession?.rootTaskDir;
 
     if (isCurrentPrimaryAgent) {
-      if (!localIsSecurityAgent(agentName)) {
+      if (!localIsRegisteredAgent(agentName)) {
         debugLog(
-          `getOrCreateTaskDir: 根 session 且非 Security Agent，不创建 task_dir sessionID=${sessionID} agent=${agentName}`,
+          `根 session 且非注册的Agent，不创建 task_dir sessionID=${sessionID} agent=${agentName}`,
           sessionID,
         );
-        return null;
+        return {
+          taskDir: "",
+          flowId: `${agentName}-${TaskSessionPersistenceUtils.genFlowId()}`,
+        };
       }
     } else {
       if (baseDir) {
@@ -436,6 +468,15 @@ export class SessionDataManager {
       }
     }
 
-    return createTaskDir(sessionID, agentName, baseDir);
+    const finalFlowId = flowId
+      ? flowId
+      : TaskSessionPersistenceUtils.genFlowId();
+
+    return TaskSessionPersistence.createTaskSession(
+      sessionID,
+      agentName,
+      finalFlowId,
+      baseDir,
+    );
   }
 }

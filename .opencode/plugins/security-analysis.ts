@@ -37,8 +37,8 @@ import {
 import { ctx } from "./lib/context";
 import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
-import { readJsonSafe, removeTaskSession } from "./lib/task-session";
-import { getPythonCmd, getCondaCmd, getCondaInstallHint } from "./lib/venv";
+import TaskSessionPersistence from "./lib/task-session-persistence";
+import { getPythonCmd, getInstallHint } from "./lib/venv";
 import {
   hasBuwaiExtensionId,
   loadSnippet,
@@ -292,7 +292,7 @@ async function checkEnvironment(
 
   const pythonCmd = getPythonCmd();
   if (!pythonCmd) {
-    return { ready: false, message: getCondaInstallHint() };
+    return { ready: false, message: getInstallHint() };
   }
 
   return await runDetectEnv(agent, pythonCmd, sessionID);
@@ -914,7 +914,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           return;
         }
 
-        const envData = readJsonSafe<EnvData>(ENV_CACHE_FILE, sessionID);
+        const envData = TaskSessionPersistence.readEnvCache<EnvData>(sessionID);
         const envInfo = envData?.data;
 
         const envSection = await buildEnvSection(agentName, envInfo, session);
@@ -1000,12 +1000,6 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             .filter(Boolean)
             .join(delimiter);
         }
-        // CONDA_CMD（惰性缓存，getPythonCmd 已触发 ensureCondaEnvPython 设置缓存；
-        // 用于 detect_env.py 生成准确的 conda 安装提示）
-        const condaCmd = getCondaCmd();
-        if (condaCmd) {
-          output.env.CONDA_CMD = condaCmd;
-        }
         output.env.OPENCODE_ROOT = OPENCODE_ROOT;
         output.env.SHARED_DIR = SHARED_DIR;
 
@@ -1022,7 +1016,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         }
 
         // IDAT（从 env_cache.json 的 ida_pro.idat_path 读取，detect_env 检测后写入）
-        const envData = readJsonSafe<EnvData>(ENV_CACHE_FILE, sessionID);
+        const envData = TaskSessionPersistence.readEnvCache<EnvData>(sessionID);
         const idatPath = envData?.data?.ida_pro?.idat_path;
         if (idatPath) {
           output.env.IDAT = idatPath;
@@ -1033,7 +1027,6 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             ` SESSION_ID=${sessionID}` +
             ` AGENT_NAME=${agentName}` +
             ` PYTHON_CMD=${pythonCmd ?? "未初始化"}` +
-            ` CONDA_CMD=${condaCmd ?? "未初始化"}` +
             ` OPENCODE_ROOT=${OPENCODE_ROOT}` +
             ` AGENT_DIR=${scriptDir ?? "无"}` +
             ` SHARED_DIR=${output.env.SHARED_DIR}` +
@@ -1201,7 +1194,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             debugLog(`event: session.deleted id=${sessionID}`, sessionID);
             flushTimeline(sessionID);
             ctx.sessionManager.delete(sessionID);
-            removeTaskSession(sessionID);
+            TaskSessionPersistence.removeTaskSession(sessionID);
           }
         }
 

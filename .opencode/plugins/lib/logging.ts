@@ -13,7 +13,8 @@ import {
   MAX_LOG_SIZE,
   KEEP_SIZE,
 } from "./constants";
-import { getTaskDirRaw, getAgentName } from "./utils";
+import { getAgentName } from "./utils";
+import TaskSessionPersistenceUtils from "./task-session-persistence-utils";
 
 function getLogFilePath(agentName: string | undefined): string {
   if (agentName && SECURITY_AGENTS.includes(agentName)) {
@@ -57,9 +58,10 @@ function writeLog(logFile: string, msg: string): void {
  */
 export function debugLog(msg: string, sessionID?: string | null): void {
   if (sessionID) {
-    const result = getTaskDirRaw(sessionID);
-    if (result.path) {
-      writeLog(join(result.path, "logs", "plugin.log"), msg);
+    const result = TaskSessionPersistenceUtils.getTaskDir(sessionID);
+    const path = result.data;
+    if (path) {
+      writeLog(join(path, "logs", "plugin.log"), msg);
       return;
     }
     // path 为 null（文件不存在/损坏/无 task_dir）→ 回退到 agent 日志文件

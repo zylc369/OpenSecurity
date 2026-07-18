@@ -9,7 +9,6 @@
 import { join } from "path";
 import type { ProcessResult } from "./spawn";
 import { SHARED_DIR, AGENT_SECURITY_COORDINATOR, OPENCODE_ROOT } from "./constants";
-import { getCondaCmd } from "./venv";
 import { runProcess } from "./spawn";
 import { debugLog } from "./logging";
 import { ctx } from "./context";
@@ -104,9 +103,7 @@ export async function runDetectEnv(
   const detectEnv = join(SHARED_DIR, "scripts", "detect_env.py");
   const taskDir = ctx.sessionManager.getTaskDir(sessionID);
   const args = [detectEnv, ...buildDetectEnvArgs(agent, taskDir)];
-  const condaCmd = getCondaCmd();
   const childEnv: Record<string, string> = { OPENCODE_ROOT };
-  if (condaCmd) childEnv.CONDA_CMD = condaCmd;
   const r = await runProcess(pythonCmd, args, { timeout: 8000, env: childEnv });
 
   const stderrTail = (r.stderr || "").trim().slice(-300);

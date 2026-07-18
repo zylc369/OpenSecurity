@@ -58,9 +58,17 @@ export const SECURITY_AGENTS = [
 ];
 
 // 不可委派agents
-export const NON_DELEGATABLE_SECURITY_AGENTS = [AGENT_SECURITY_COORDINATOR, AGENT_SECURITY_ANALYSIS_EVOLVE]
+export const NON_DELEGATABLE_SECURITY_AGENTS = [
+  AGENT_SECURITY_COORDINATOR,
+  AGENT_SECURITY_ANALYSIS_EVOLVE,
+];
 
-export const BASIC_GENERAL_AGENTS = [AGENT_SEARCHER, AGENT_MEMORIST]
+export const BASIC_GENERAL_AGENTS = [AGENT_SEARCHER, AGENT_MEMORIST];
+
+export const ALL_REGISTERED_AGENTS = [
+  ...BASIC_GENERAL_AGENTS,
+  ...SECURITY_AGENTS,
+];
 
 // 所有参与跨 agent 委派的 agent。插件会向每个成员的系统提示词中注入
 // 一个"可委派 Agent"区块（从每个 agent 的 .md frontmatter description 中收集）。
@@ -72,8 +80,9 @@ export const BASIC_GENERAL_AGENTS = [AGENT_SEARCHER, AGENT_MEMORIST]
 // 这并非 SECURITY_AGENTS 的超集——两个列表在 5 个领域 agent 上有重叠，
 // 但各自都包含对方没有的成员。
 export const AGENTS_WITH_DELEGATION_RULES = [
-  ...BASIC_GENERAL_AGENTS,
-  ...SECURITY_AGENTS.filter(agent => !NON_DELEGATABLE_SECURITY_AGENTS.includes(agent))
+  ...ALL_REGISTERED_AGENTS.filter(
+    (agent) => !NON_DELEGATABLE_SECURITY_AGENTS.includes(agent),
+  ),
 ];
 
 export const AGENT_SCRIPT_DIRS: Record<string, string> = {};

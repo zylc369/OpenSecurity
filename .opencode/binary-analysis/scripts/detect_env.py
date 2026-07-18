@@ -37,6 +37,117 @@ from typing import Literal
 
 CACHE_DIR = os.path.expanduser("~/bw-security-analysis")
 CACHE_FILE = os.path.join(CACHE_DIR, "env_cache.json")
+VENV_DIR = os.path.join(CACHE_DIR, ".venv")
+
+
+def _find_conda():
+    """跨平台搜索 conda：PATH + 常见安装路径。返回 conda 可执行路径或 None。"""
+    conda = shutil.which("conda")
+    if conda:
+        return conda
+    home = os.path.expanduser("~")
+    candidates = (
+        [os.path.join(home, "miniforge3", "Scripts", "conda.exe"),
+         os.path.join(home, "miniconda3", "Scripts", "conda.exe")]
+        if os.name == "nt" else
+        [os.path.join(home, "miniforge3", "bin", "conda"),
+         os.path.join(home, "miniconda3", "bin", "conda"),
+         "/opt/homebrew/Caskroom/miniforge/base/condabin/conda",
+         "/opt/miniforge3/bin/conda",
+         "/opt/miniconda3/bin/conda"]
+    )
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _get_venv_python():
+    """返回 venv Python 可执行路径（跨平台）。"""
+    if os.name == "nt":
+        return os.path.join(VENV_DIR, "Scripts", "python.exe")
+    return os.path.join(VENV_DIR, "bin", "python")
+
+
+def _bootstrap_venv():
+    """检查当前是否在目标 venv 内，不在则创建并重启自己。
+
+    前提：系统里有任意 Python 3.10+ + conda（miniforge/miniconda）。
+    流程：
+      1. sys.executable == venv Python → 已在 venv 内，直接返回
+      2. 不在 venv → 搜 conda → 不存在 → 打印指引 + exit(1)
+      3. conda 存在 → conda create → 校验 venv Python 存在
+      4. 重启自己：Unix os.execv / Windows subprocess + sys.exit
+    """
+    venv_python = _get_venv_python()
+
+    # 已在 venv 内
+    if os.path.abspath(sys.executable) == os.path.abspath(venv_python):
+        return
+
+    # 防死循环：bootstrap 标记
+    if os.environ.get("_DETECT_ENV_BOOTSTRAPPED") == "1":
+        _log("[!] bootstrap 已执行过但仍在非 venv 环境，终止")
+        sys.exit(1)
+
+    _log(f"[*] 当前 Python: {sys.executable}")
+    _log(f"[*] 目标 venv Python: {venv_python}")
+    _log("[*] 不在目标 venv 内，开始 bootstrap...")
+
+    # 搜 conda
+    conda = _find_conda()
+    if not conda:
+        print("\n[ERROR] 未找到 conda（miniforge/miniconda）。", file=sys.stderr)
+        print("请先安装 Miniforge：", file=sys.stderr)
+        system = platform.system()
+        if system == "Darwin":
+            arch = os.uname().machine
+            print(f"  curl -L -o /tmp/miniforge.sh https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-MacOSX-{arch}.sh", file=sys.stderr)
+            print(f"  bash /tmp/miniforge.sh -b -p $HOME/miniforge3", file=sys.stderr)
+        elif system == "Windows":
+            print("  从 https://github.com/conda-forge/miniforge#download 下载安装", file=sys.stderr)
+        else:
+            arch = os.uname().machine
+            print(f"  curl -L -o /tmp/miniforge.sh https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-{arch}.sh", file=sys.stderr)
+            print(f"  bash /tmp/miniforge.sh -b -p $HOME/miniforge3", file=sys.stderr)
+        print("\n安装后重新打开终端，再次运行安装脚本。", file=sys.stderr)
+        sys.exit(1)
+
+    _log(f"[+] conda: {conda}")
+
+    # 创建 venv（不设超时——输出实时流到终端，用户能看到进度；
+    # 用户可随时 Ctrl+C 终止，SIGINT 会传递给整个进程组包括 conda 子进程）
+    if not os.path.isfile(venv_python):
+        _log(f"[*] conda create -p {VENV_DIR} python=3.13 -y ...")
+        import subprocess as sp
+        result = sp.run(
+            [conda, "create", "-p", VENV_DIR, "python=3.13", "-y"],
+        )
+        if result.returncode != 0:
+            print(f"\n[ERROR] conda create 失败（退出码 {result.returncode}）", file=sys.stderr)
+            sys.exit(1)
+        _log("[+] venv 创建成功")
+    else:
+        _log("[+] venv 已存在，跳过创建")
+
+    # 校验 venv Python 可执行
+    if not os.path.isfile(venv_python):
+        print(f"\n[ERROR] venv Python 不存在: {venv_python}", file=sys.stderr)
+        print("可能 conda create 被中断。请删除目录后重试:", file=sys.stderr)
+        print(f"  rm -rf {VENV_DIR}", file=sys.stderr)
+        sys.exit(1)
+
+    # 重启自己
+    _log(f"[*] 重启到 venv Python: {venv_python}")
+    os.environ["_DETECT_ENV_BOOTSTRAPPED"] = "1"
+    if os.name == "nt":
+        # Windows: os.execv 不可靠，用 subprocess + sys.exit
+        import subprocess as sp
+        result = sp.run([venv_python, os.path.abspath(__file__)] + sys.argv[1:])
+        sys.exit(result.returncode)
+    else:
+        # Unix: 进程替换
+        os.execv(venv_python, [venv_python, os.path.abspath(__file__)] + sys.argv[1:])
 
 
 @dataclass
@@ -461,21 +572,6 @@ def _detect_package(name, version_via=None):
     return {"available": False, "version": None}
 
 
-def _install_package(pip_name, timeout=60):
-    pip_cmd = [sys.executable, "-m", "pip", "install", pip_name]
-    try:
-        result = subprocess.run(pip_cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode == 0:
-            return True
-        _warn(f"pip install {pip_name} 失败（退出码 {result.returncode}）", detail=_stderr_tail(result))
-    except subprocess.TimeoutExpired as e:
-        _warn(f"pip install {pip_name} 超时（{timeout}s）", exc=e)
-    except OSError as e:
-        _warn(f"pip install {pip_name} 异常", exc=e)
-    return False
-
-
-
 def _detect_playwright_browser():
     """检测 Playwright Chromium 浏览器是否已安装。"""
     try:
@@ -499,20 +595,18 @@ def _detect_playwright_browser():
     return False
 
 
-def _post_install_playwright(timeout=300):
-    """安装 Playwright Chromium 浏览器二进制（约 150-200MB）。"""
+def _post_install_playwright():
+    """安装 Playwright Chromium 浏览器二进制（约 150-200MB）。
+    不设超时——输出实时流到终端，用户可 Ctrl+C 终止。"""
     _log("[*] 正在安装 Playwright Chromium 浏览器（首次安装约 150-200MB）...")
     try:
         result = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
-            timeout=timeout,
         )
         if result.returncode == 0:
             _log("[+] Playwright Chromium 安装成功")
             return True
-        _warn(f"Playwright 浏览器安装失败（退出码 {result.returncode}）", detail=_stderr_tail(result))
-    except subprocess.TimeoutExpired as e:
-        _warn(f"Playwright 浏览器安装超时（{timeout}s）", exc=e)
+        _warn(f"Playwright 浏览器安装失败（退出码 {result.returncode}）")
     except OSError as e:
         _warn("Playwright 浏览器安装异常", exc=e)
     return False
@@ -587,11 +681,14 @@ def _platform_matches(dep: Dependency) -> bool:
 def _run_install():
     """安装全部依赖（install 子命令入口）。
 
-    覆盖：Python 包（pip/conda）+ Playwright Chromium + 外部工具提示 + events MCP 基础设施。
+    覆盖：bootstrap venv + Python 包（pip/conda）+ Playwright Chromium + 外部工具提示 + events MCP 基础设施。
     所有输出走 stderr（_log），与 check-preinstall 的 stdout JSON 输出不冲突。
     任何安装失败 → 立即 sys.exit(1)，不继续后续步骤。
     """
     import subprocess as sp
+
+    # bootstrap：确保在目标 venv 内运行
+    _bootstrap_venv()
 
     def _install_fail(msg):
         """安装失败 → 打印错误 → 立即中断。"""
@@ -620,7 +717,6 @@ def _run_install():
             _log(f"[*] conda install {conda_name}...")
             result = sp.run(
                 [conda_cmd, "install", "-p", sys.prefix, "-y", conda_name],
-                timeout=600,
             )
             if result.returncode != 0:
                 _install_fail(f"{dep.name} conda 安装失败")
@@ -676,6 +772,15 @@ def _run_install():
             _log(f"[!] MCP/{name}: 缺少 {', '.join(info.get('missing', []))}")
 
     _log("[+] 安装完成")
+    _log("[*] === 验证安装结果 ===")
+    import subprocess as sp_verify
+    verify = sp_verify.run(
+        [sys.executable, os.path.abspath(__file__), "check-preinstall", "all"],
+    )
+    if verify.returncode != 0:
+        _log("[!] 部分依赖未就绪（见上方输出），请按提示手动配置。")
+    else:
+        _log("[+] 全部检测通过！")
 
 
 def _build_install_guide():
