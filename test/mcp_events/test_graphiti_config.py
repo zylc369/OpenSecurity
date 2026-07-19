@@ -27,6 +27,11 @@ class TestCreateGraphiti:
         assert isinstance(graphiti_instance.llm_client, DeepSeekLLMClient), \
             f"期望 DeepSeekLLMClient，实际 {type(graphiti_instance.llm_client)}"
 
+    def test_llm_client_inherits_anthropic_client(self, graphiti_instance):
+        from graphiti_core.llm_client.anthropic_client import AnthropicClient
+        assert isinstance(graphiti_instance.llm_client, AnthropicClient), \
+            "DeepSeekLLMClient 应继承 AnthropicClient"
+
     def test_embedder_is_bge_m3(self, graphiti_instance):
         from graphiti_config import BgeM3Embedder
         assert isinstance(graphiti_instance.embedder, BgeM3Embedder)
@@ -36,11 +41,11 @@ class TestCreateGraphiti:
         assert isinstance(graphiti_instance.cross_encoder, BgeRerankerClient), \
             f"期望 BgeRerankerClient，实际 {type(graphiti_instance.cross_encoder)}"
 
-    def test_llm_config_uses_deepseek_endpoint(self, graphiti_instance):
-        """LLM config 的 base_url 应该指向 DeepSeek API。"""
+    def test_llm_config_uses_deepseek_anthropic_endpoint(self, graphiti_instance):
+        """LLM config 的 base_url 应该指向 DeepSeek Anthropic API。"""
         config = graphiti_instance.llm_client.config
-        assert "deepseek.com" in str(config.base_url), \
-            f"base_url 应指向 DeepSeek，实际: {config.base_url}"
+        assert "deepseek.com/anthropic" in str(config.base_url), \
+            f"base_url 应指向 DeepSeek Anthropic 端点，实际: {config.base_url}"
 
     def test_llm_config_temperature_zero(self, graphiti_instance):
         """temperature 应该为 0（graphiti 需要确定性输出）。"""

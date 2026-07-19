@@ -1,29 +1,33 @@
-"""DeepSeek LLM 客户端 — 通过 DeepSeek API 调用 LLM。
+"""DeepSeek LLM 客户端 — 通过 DeepSeek Anthropic API 调用 LLM。
 
-继承 BaseOpenAIClient（而非 LLMClient），复用其验证错误重试逻辑：
-当 LLM 返回的 JSON 字段名与 Pydantic model 不匹配时，BaseOpenAIClient 会追加
-错误上下文并重试，让 LLM 自我纠正。
+使用 Anthropic 的 tool use 机制实现结构化输出：
+  - tool_choice={"type": "tool"} 强制模型按 input_schema 输出
+  - 服务端约束字段名和结构，无需应用层补丁
 
-DeepSeek 不支持 OpenAI Responses API，因此重写：
-- _create_completion / _create_structured_completion → 统一用 chat.completions.create
-- _handle_structured_response → 处理 ChatCompletion 响应（而非 Responses API 的 output_text）
+DeepSeek 的 Anthropic API 端点：https://api.deepseek.com/anthropic
+兼容性：支持 input_schema / tool_choice / thinking=disabled
 """
 import json
 import logging
 import typing
 
-from openai import AsyncOpenAI
-from openai.types.chat import ChatCompletionMessageParam
+from anthropic import AsyncAnthropic
+from graphiti_core.llm_client.anthropic_client import AnthropicClient
+from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
+from graphiti_core.llm_client.errors import RateLimitError, RefusalError
+from graphiti_core.prompts.models import Message
 from pydantic import BaseModel
-
-from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, LLMConfig
-from graphiti_core.llm_client.openai_base_client import BaseOpenAIClient
 
 logger = logging.getLogger(__name__)
 
 
-class DeepSeekLLMClient(BaseOpenAIClient):
-    """通过 DeepSeek API 调用 LLM（继承 BaseOpenAIClient 的验证重试逻辑）。"""
+class DeepSeekLLMClient(AnthropicClient):
+    """通过 DeepSeek Anthropic API 调用 LLM。
+
+    继承 graphiti 原生 AnthropicClient，复用其 tool use 结构化输出机制。
+    唯一改动：注入 thinking={"type": "disabled"}（DeepSeek 默认启用思考模式，
+    与 tool_choice 不兼容）。
+    """
 
     def __init__(
         self,
@@ -32,255 +36,77 @@ class DeepSeekLLMClient(BaseOpenAIClient):
     ):
         if config is None:
             config = LLMConfig()
-        super().__init__(config, cache=False, max_tokens=max_tokens)
 
-        self.client = AsyncOpenAI(
+        # 创建指向 DeepSeek Anthropic 端点的 AsyncAnthropic 客户端
+        from anthropic import AsyncAnthropic
+
+        client = AsyncAnthropic(
             api_key=config.api_key,
             base_url=config.base_url,
+            max_retries=1,
         )
 
-    async def _create_completion(
-        self,
-        model: str,
-        messages: list[ChatCompletionMessageParam],
-        temperature: float | None,
-        max_tokens: int,
-        response_model: type[BaseModel] | None = None,
-        reasoning: str | None = None,
-        verbosity: str | None = None,
-    ):
-        """DeepSeek chat completion（json_object 模式 + thinking disabled）。"""
-        # DeepSeek json_object 要求 prompt 含 "json"——确保满足
-        msgs = list(messages)
-        if not any("json" in str(m.get("content", "")).lower() for m in msgs):
-            msgs[-1]["content"] = str(msgs[-1].get("content", "")) + "\n\nRespond in JSON format."
-
-        request_kwargs: dict[str, typing.Any] = {
-            "model": model,
-            "messages": msgs,
-            "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"},
-            "extra_body": {"thinking": {"type": "disabled"}},
-        }
-        if temperature is not None:
-            request_kwargs["temperature"] = temperature
-
-        return await self.client.chat.completions.create(**request_kwargs)
-
-    async def _create_structured_completion(
-        self,
-        model: str,
-        messages: list[ChatCompletionMessageParam],
-        temperature: float | None,
-        max_tokens: int,
-        response_model: type[BaseModel],
-        reasoning: str | None = None,
-        verbosity: str | None = None,
-    ):
-        """DeepSeek 不支持 Responses API → 统一走 chat completion。
-
-        额外处理：graphiti prompt 的自然语言描述（如 "entities"）与 Pydantic model
-        的字段名（如 "extracted_entities"）可能不一致。DeepSeek 会跟随 prompt 文本
-        而非 schema 字段名。解决：把消息末尾的原始 JSON Schema 替换为简化版字段示例，
-        用 Pydantic model 的真实字段名，强制 LLM 遵循。
-        """
-        self._simplify_schema_in_messages(messages, response_model)
-
-        return await self._create_completion(
-            model, messages, temperature, max_tokens, response_model,
-        )
-
-    @staticmethod
-    def _simplify_schema_in_messages(
-        messages: list[ChatCompletionMessageParam], response_model: type[BaseModel]
-    ) -> None:
-        """把 graphiti 注入的原始 JSON Schema 替换为简化版字段名示例。
-
-        graphiti 基类在消息末尾追加 "Respond with a JSON object in the following format: {raw_schema}"。
-        原始 schema 含 type/properties/anyOf/$defs/title 等元数据，DeepSeek 会回显。
-        替换为只含字段名 + 类型默认值的简化示例，用 model 真实字段名。
-        """
-        if not messages:
-            return
-
-        content = str(messages[-1].get("content", ""))
-        marker = "Respond with a JSON object in the following format:"
-        idx = content.find(marker)
-        if idx == -1:
-            return
-
-        try:
-            schema = response_model.model_json_schema()
-            example = DeepSeekLLMClient._schema_to_example(schema)
-            example_str = json.dumps(example, indent=2, ensure_ascii=False)
-        except Exception:
-            return
-
-        messages[-1]["content"] = (
-            content[:idx]
-            + "Respond with a JSON object in the following format "
-            + "(use these EXACT field names, replace default values with actual data):\n\n"
-            + example_str
-        )
-
-    @staticmethod
-    def _schema_to_example(schema: dict, defs: dict | None = None) -> typing.Any:
-        """递归把 JSON Schema 转为带默认值的 JSON 示例。"""
-        if defs is None:
-            defs = schema.get("$defs", schema.get("definitions", {}))
-        if schema.get("type") == "object" or "properties" in schema:
-            result: dict[str, typing.Any] = {}
-            for key, prop in schema.get("properties", {}).items():
-                result[key] = DeepSeekLLMClient._prop_to_example(prop, defs)
-            return result
-        return DeepSeekLLMClient._prop_to_example(schema, defs)
-
-    @staticmethod
-    def _prop_to_example(prop: dict, defs: dict) -> typing.Any:
-        """把单个 JSON Schema 属性转为示例值。"""
-        if "$ref" in prop:
-            ref_name = prop["$ref"].split("/")[-1]
-            if ref_name in defs:
-                return DeepSeekLLMClient._schema_to_example(defs[ref_name])
-            return {}
-
-        if "anyOf" in prop or "oneOf" in prop:
-            options = prop.get("anyOf") or prop.get("oneOf")
-            for opt in options:
-                if opt.get("type") != "null":
-                    return DeepSeekLLMClient._prop_to_example(opt, defs)
-            return None
-
-        type_ = prop.get("type")
-
-        if "allOf" in prop:
-            merged = {}
-            for sub in prop["allOf"]:
-                if "$ref" in sub:
-                    ref_name = sub["$ref"].split("/")[-1]
-                    if ref_name in defs:
-                        merged.update(DeepSeekLLMClient._schema_to_example(defs[ref_name]))
-                elif "properties" in sub:
-                    for k, v in sub["properties"].items():
-                        merged[k] = DeepSeekLLMClient._prop_to_example(v, defs)
-            return merged
-
-        if type_ == "array":
-            return []
-        elif type_ == "string":
-            return ""
-        elif type_ == "object":
-            return DeepSeekLLMClient._schema_to_example(prop, defs)
-        elif type_ in ("number", "integer"):
-            return 0
-        elif type_ == "boolean":
-            return False
-        return None
-
-    def _handle_structured_response(self, response: typing.Any) -> tuple[dict[str, typing.Any], int, int]:
-        """重写：处理 ChatCompletion 响应（而非 Responses API 的 output_text）。"""
-        result = response.choices[0].message.content or "{}"
-
-        input_tokens = 0
-        output_tokens = 0
-        if hasattr(response, "usage") and response.usage:
-            input_tokens = getattr(response.usage, "prompt_tokens", 0) or 0
-            output_tokens = getattr(response.usage, "completion_tokens", 0) or 0
-
-        return json.loads(result), input_tokens, output_tokens
+        super().__init__(config=config, client=client, max_tokens=max_tokens)
 
     async def _generate_response(
         self,
-        messages: list,
+        messages: list[Message],
         response_model: type[BaseModel] | None = None,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-        model_size: typing.Any = None,
+        model_size: ModelSize = ModelSize.medium,
     ) -> tuple[dict[str, typing.Any], int, int]:
-        """重写：调用 BaseOpenAIClient 后修复字段名不匹配。
+        """调用 DeepSeek Anthropic API。
 
-        graphiti 的 prompt 文本使用的字段名（如 "entities"）有时与 Pydantic model
-        的字段名（如 "extracted_entities"）不一致。BaseOpenAIClient 的重试机制能捕获
-        部分错误，但 DeepSeek 可能反复犯同一错误。此方法在返回前做字段名映射。
+        和父类 AnthropicClient._generate_response 的区别：
+        1. 注入 thinking={"type": "disabled"}（DeepSeek 默认启用思考模式，与 tool_choice 不兼容）
+        2. max_tokens 不走 _resolve_max_tokens（DeepSeek 模型不在 Anthropic 的已知模型列表里，
+           _resolve_max_tokens 会截断到 8192，这里直接用传入值）
+
+        不在此方法里记录 token（父类 generate_response 统一记录，避免重复计数）。
         """
-        result, input_tokens, output_tokens = await super()._generate_response(
-            messages, response_model, max_tokens, model_size
-        )
+        import anthropic
 
-        if response_model is not None and isinstance(result, dict):
-            result = self._coerce_field_names(result, response_model)
-        elif response_model is not None and isinstance(result, list):
-            # LLM 返回裸 list 而非 {"field": [...]} → 包装到唯一的 list 字段
-            import typing as t
-            for fname, finfo in response_model.model_fields.items():
-                ann = getattr(finfo, "annotation", None)
-                if hasattr(ann, "__origin__") and ann.__origin__ is list:
-                    result = {fname: result}
-                    logger.debug(f"裸 list 包装到字段: {fname}")
-                    break
+        system_message = messages[0]
+        user_messages: list[dict[str, str]] = [
+            {"role": m.role, "content": m.content} for m in messages[1:]
+        ]
 
-        return result, input_tokens, output_tokens
+        tools, tool_choice = self._create_tool(response_model)
 
-    @staticmethod
-    def _coerce_field_names(
-        data: dict[str, typing.Any], model_class: type[BaseModel]
-    ) -> dict[str, typing.Any]:
-        """修复 graphiti prompt 字段名与 Pydantic model 字段名的不一致。
+        try:
+            result = await self.client.messages.create(
+                system=system_message.content,
+                max_tokens=max_tokens,
+                temperature=self.temperature,
+                messages=user_messages,
+                model=self.model,
+                tools=tools,
+                tool_choice=tool_choice,
+                thinking={"type": "disabled"},
+            )
+        except anthropic.RateLimitError as e:
+            raise RateLimitError(f"Rate limit exceeded: {e}") from e
+        except anthropic.APIError as e:
+            if "refused to respond" in str(e).lower():
+                raise RefusalError(str(e)) from e
+            raise
 
-        策略：对 model 的每个必需字段，如果 data 中缺失，尝试从已知同义名映射。
-        常见模式：extracted_entities ↔ entities, entity_name ↔ name。
-        """
-        model_fields = model_class.model_fields
+        input_tokens = getattr(result.usage, "input_tokens", 0) if result.usage else 0
+        output_tokens = getattr(result.usage, "output_tokens", 0) if result.usage else 0
 
-        for field_name in model_fields:
-            if field_name in data:
-                continue
+        # 从 tool_use 响应提取结构化数据
+        for content_item in result.content:
+            if content_item.type == "tool_use":
+                if isinstance(content_item.input, dict):
+                    return content_item.input, input_tokens, output_tokens
+                return json.loads(str(content_item.input)), input_tokens, output_tokens
 
-            # 生成候选同义名列表
-            candidates: list[str] = []
-            # 常见前缀：extracted_ / entity_ / edge_
-            for prefix in ("extracted_", "entity_", "edge_"):
-                if field_name.startswith(prefix):
-                    candidates.append(field_name[len(prefix):])
-            # graphiti 里 edge 和 fact 互用
-            if field_name in ("edges", "extracted_edges"):
-                candidates.extend(["facts", "edges", "extracted_edges"])
-            # 去掉复数/单数
-            candidates.append(field_name.rstrip("s"))
-            candidates.append(field_name + "s")
+        # 降级：从文本提取 JSON
+        for content_item in result.content:
+            if content_item.type == "text":
+                try:
+                    return json.loads(content_item.text), input_tokens, output_tokens
+                except json.JSONDecodeError:
+                    continue
 
-            for candidate in candidates:
-                if candidate in data:
-                    data[field_name] = data.pop(candidate)
-                    logger.debug(f"字段名映射: {candidate} → {field_name}")
-                    break
-
-        # 反向映射：data 里的 entity_name / extracted_X → model 的 X
-        model_field_names = set(model_fields.keys())
-        for data_key in list(data.keys()):
-            if data_key in model_field_names:
-                continue
-            for prefix in ("entity_", "extracted_", "edge_"):
-                if data_key.startswith(prefix):
-                    stripped = data_key[len(prefix):]
-                    if stripped in model_field_names:
-                        data[stripped] = data.pop(data_key)
-                        logger.debug(f"反向字段名映射: {data_key} → {stripped}")
-                        break
-
-        # 递归修复嵌套 dict 里的字段名（如 extracted_entities 列表里的 entity_name → name）
-        for field_name, field_info in model_fields.items():
-            if field_name in data:
-                inner_type = getattr(field_info, "annotation", None)
-                if hasattr(inner_type, "__origin__") and inner_type.__origin__ is list:
-                    args = typing.get_args(inner_type)
-                    if args and isinstance(args[0], type) and issubclass(args[0], BaseModel):
-                        items = data[field_name]
-                        if isinstance(items, list):
-                            data[field_name] = [
-                                DeepSeekLLMClient._coerce_field_names(item, args[0])
-                                if isinstance(item, dict) else item
-                                for item in items
-                            ]
-
-        return data
-
+        raise ValueError(f"No structured response from model: {result.content}")

@@ -1,10 +1,7 @@
-"""graphiti-core 配置：DeepSeek LLM + BGE-M3 本地 Embedding + BGE-Reranker + Neo4j 存储。
+"""graphiti-core 配置：DeepSeek Anthropic API + BGE-M3 本地 Embedding + BGE-Reranker + Neo4j 存储。
 
-从 .ai_env 读取配置，配置 graphiti-core 使用：
-- LLM：DeepSeek API（deepseek-v4-pro 核心提取 / deepseek-v4-flash 时间戳推断）
-- Embedding：BGE-M3 本地模型（向量搜索）
-- CrossEncoder：bge-reranker-v2-m3 本地模型（搜索结果重排序）
-- 存储：Neo4j（bolt://localhost:7687）
+使用 DeepSeek 的 Anthropic API 端点（https://api.deepseek.com/anthropic），
+通过 tool use 机制实现服务端强制结构化输出，无需应用层补丁。
 
 模型可通过 .ai_env 环境变量切换：
   DEEPSEEK_MODEL=deepseek-v4-pro       （核心提取模型，可改为 deepseek-v4-flash 省钱）
@@ -62,7 +59,7 @@ def create_graphiti():
 
     llm_config = LLMConfig(
         api_key=api_key,
-        base_url="https://api.deepseek.com",
+        base_url="https://api.deepseek.com/anthropic",
         model=model,
         small_model=small_model,
         temperature=0,
