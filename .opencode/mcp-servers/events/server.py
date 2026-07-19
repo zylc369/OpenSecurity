@@ -1,6 +1,6 @@
 """事件库 MCP server（Graphiti 后端）。
 
-存储过往 LLM 响应和工具执行记录的事件库。7 个搜索方法通过 graphiti-core 查询 Neo4j。
+存储过往 LLM 响应和工具执行记录的事件库。8 个工具（7 个搜索 + 1 个 delete）通过 graphiti-core 查询 Neo4j。
 Neo4j 不可用时降级为空返回，不影响 agent 基本功能。
 
 LLM：DeepSeek API（deepseek-v4-pro/flash，实体提取）
@@ -11,31 +11,80 @@ CrossEncoder：bge-reranker-v2-m3 本地模型（搜索结果重排序）
 搜索工具的 group_id 参数：
   限定搜索范围到当前分析任务的事件分区（OPENSECURITY_FLOW_ID）。
   主任务和它的所有子任务共享同一个 group_id。
+
+启动模式（lazy 加载，对齐 knowledge MCP）：
+  - 模块顶层不加载 BGE-M3/reranker，stdio 握手快
+  - lifespan startup 内 run_in_executor 后台加载模型（fire-and-forget）
+  - 工具函数调用前 await _ensure_ready()：模型已就绪立即返回；未就绪则等待
+  - build_indices_and_constraints 是 async，留在 asyncio loop 内首次工具调用时执行
 """
+import asyncio
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-# 延迟初始化的 Graphiti 连接
-_graphiti = None
-_initialized = False
+# ── lazy 加载共享状态 ─────────────────────────────────────
+_state: dict = {"graphiti": None, "indices_built": False}
+_ready = asyncio.Event()
+_init_error: list[Exception] = []
+_loop: asyncio.AbstractEventLoop | None = None
+_load_future = None
+_indices_lock = asyncio.Lock()  # 保护 build_indices_and_constraints 并发执行
 
 
-async def _ensure_ready():
-    """首次调用时初始化 Graphiti 连接 + 建索引。后续调用跳过。"""
-    global _graphiti, _initialized
-    if _initialized:
-        return
-    from graphiti_config import create_graphiti
+def _preload_models_blocking() -> None:
+    """子线程同步加载 BGE-M3 + 创建 Graphiti 对象。
 
-    graphiti, err = create_graphiti()
-    if err:
-        raise RuntimeError(err)
-    _graphiti = graphiti
-    await _graphiti.build_indices_and_constraints()
-    _initialized = True
+    通过 graphiti.embedder.model 触发 @property 延迟加载 BGE-M3（几乎所有搜索都用）。
+    reranker（bge-reranker-v2-m3）保持真 lazy——仅 diverse_results_search 显式用
+    EdgeReranker.cross_encoder 时才加载（默认 NodeReranker.rrf 是数学融合，不需要模型）。
+
+    build_indices_and_constraints 是 async，留给 _ensure_ready 在 loop 内跑。
+    """
+    try:
+        from graphiti_config import create_graphiti
+        graphiti, err = create_graphiti()
+        if err:
+            _init_error.append(RuntimeError(err))
+            return
+        # 触发 BGE-M3 加载（@property）——几乎所有搜索路径都用
+        _ = graphiti.embedder.model
+        # reranker 不预加载：仅 diverse_results_search 用，避免无谓加载
+        _state["graphiti"] = graphiti
+    except Exception as e:
+        _init_error.append(e)
+    finally:
+        # Event 是主 loop 的对象，子线程必须用 call_soon_threadsafe 唤醒
+        if _loop is not None:
+            _loop.call_soon_threadsafe(_ready.set)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    """FastMCP lifespan：startup 内启动后台加载任务，立即 yield 让 stdio 握手快速完成。"""
+    global _loop, _load_future
+    _loop = asyncio.get_running_loop()
+    _load_future = _loop.run_in_executor(None, _preload_models_blocking)  # fire-and-forget
+    yield
+
+
+async def _ensure_ready() -> None:
+    """等待模型加载完成（_ready Event），首次调用时建 Neo4j 索引（async）。
+
+    用 asyncio.Lock + double-check 保护 build_indices_and_constraints：
+    多并发首次调用时只有一个协程执行 build。
+    """
+    await _ready.wait()
+    if _init_error:
+        raise RuntimeError(f"events MCP 加载失败: {_init_error[0]}")
+    if not _state["indices_built"]:
+        async with _indices_lock:
+            if not _state["indices_built"]:  # double-check
+                await _state["graphiti"].build_indices_and_constraints()
+                _state["indices_built"] = True
 
 
 def _empty_result(error: str | None = None) -> str:
@@ -78,7 +127,7 @@ def _format_results(results: Any, query: str) -> str:
     }, ensure_ascii=False, default=str)
 
 
-mcp = FastMCP("events")
+mcp = FastMCP("events", lifespan=lifespan)
 
 
 @mcp.tool(
@@ -105,7 +154,7 @@ async def temporal_window_search(
         await _ensure_ready()
         ts = datetime.fromisoformat(time_start.replace("Z", "+00:00"))
         te = datetime.fromisoformat(time_end.replace("Z", "+00:00"))
-        results = await _graphiti.search_(
+        results = await _state["graphiti"].search_(
             query=query,
             group_ids=[group_id],
             config=SearchConfig(
@@ -153,7 +202,7 @@ async def entity_relationships_search(
 
     try:
         await _ensure_ready()
-        results = await _graphiti.search_(
+        results = await _state["graphiti"].search_(
             query=query,
             group_ids=[group_id],
             center_node_uuid=center_node_uuid,
@@ -196,7 +245,7 @@ async def diverse_results_search(
         await _ensure_ready()
         mmr_map = {"low": 0.3, "medium": 0.5, "high": 0.7}
         mmr_lambda = mmr_map.get(diversity_level, 0.5)
-        results = await _graphiti.search_(
+        results = await _state["graphiti"].search_(
             query=query,
             group_ids=[group_id],
             config=SearchConfig(
@@ -232,7 +281,7 @@ async def episode_context_search(
 
     try:
         await _ensure_ready()
-        results = await _graphiti.search_(
+        results = await _state["graphiti"].search_(
             query=query,
             group_ids=[group_id],
             config=SearchConfig(
@@ -268,7 +317,7 @@ async def successful_tools_search(
 
     try:
         await _ensure_ready()
-        results = await _graphiti.search_(
+        results = await _state["graphiti"].search_(
             query=query,
             group_ids=[group_id],
             config=SearchConfig(
@@ -319,7 +368,7 @@ async def recent_context_search(
         window_map = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720, "90d": 2160}
         hours = window_map.get(recency_window, 24)
         since = datetime.now() - timedelta(hours=hours)
-        results = await _graphiti.search_(
+        results = await _state["graphiti"].search_(
             query=query,
             group_ids=[group_id],
             config=SearchConfig(limit=max_results),
@@ -354,7 +403,7 @@ async def entity_by_label_search(
 
     try:
         await _ensure_ready()
-        results = await _graphiti.search_(
+        results = await _state["graphiti"].search_(
             query=query,
             group_ids=[group_id],
             config=SearchConfig(
@@ -385,8 +434,8 @@ async def delete_session_events(group_id: str) -> str:
         await _ensure_ready()
         from graphiti_core.nodes import EntityNode, EpisodicNode
 
-        await EntityNode.delete_by_group_id(_graphiti.driver, group_id)
-        await EpisodicNode.delete_by_group_id(_graphiti.driver, group_id)
+        await EntityNode.delete_by_group_id(_state["graphiti"].driver, group_id)
+        await EpisodicNode.delete_by_group_id(_state["graphiti"].driver, group_id)
         return json.dumps({"deleted": group_id}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": f"delete_session_events failed: {e}"}, ensure_ascii=False)
