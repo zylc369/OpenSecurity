@@ -42,7 +42,7 @@ START
     选合适的搜索类型（见"事件库 搜索类型决策表"），传入 1 个中文 query
   ↓
 有结果？──YES──→ [3]
-  ↓ NO（含 stub 返回空）
+  ↓ NO（返回空或无数据）
 [2] mcp__knowledge__search_in_memory（执行记忆补充）
     传入 1-5 个中文问句
   ↓
@@ -82,13 +82,15 @@ START
 
 参数说明见 MCP 工具 schema（调用工具时自动可见），不需要在此重复。
 
-**如果 事件库 返回空**（所有结果为空 或 note 字段含 "not implemented"）：跳过 事件库，直接进入 [2] search_in_memory。不要用不同参数重试——当前是 stub，无论如何返回空。
+**如果 事件库 返回空**（所有结果为空）：跳过 事件库，直接进入 [2] search_in_memory。
 
 ### `mcp__knowledge__search_in_memory`（执行记忆库）
 
 - **查询范围**：只查执行记忆库（doc_type=memory）——工具执行记录、历史操作日志
+- **数据来源**：框架自动记录每次工具执行（bash/read/write/webfetch/websearch 等）的参数和结果
 - **参数**：`questions`（1-5 个中文问句）、`message`（任务语言日志）
 - **返回**：JSON `{results: [{id, question, answer, type, score}], count}`，按 score 降序
+- **score 阈值**：低于 0.2 的结果自动过滤
 
 ### Read / Glob / Grep / Bash
 

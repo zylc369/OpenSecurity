@@ -1,20 +1,27 @@
 """基于 SQLite + sqlite-vec 的向量存储（knowledge MCP server 后端）。
 
 双表设计：
-  - answers（普通 SQLite 表）：id, question, answer, type, doc_type, created_at
+  - answers（普通 SQLite 表）：id, question, answer, type, doc_type, guide_type, code_lang, created_at
   - answer_vectors（vec0 虚拟表）：rowid <-> answers.id，embedding float[1024]
 
-doc_type 区分两种知识类型（与 PentAGI 一致）：
+doc_type 区分四种知识类型（与 PentAGI 一致）：
   - "answer"：答案知识库（searcher 用 search_answer 查 / store_answer 写）
+  - "guide"：指南知识库（searcher 用 search_guide 查 / store_guide 写）
+  - "code"：代码片段库（searcher 用 search_code 查 / store_code 写）
   - "memory"：执行记忆库（memorist 用 search_in_memory 查；写入由框架自动完成）
+
+Embedding 目标：embed content（answer/guide/code 文本），不是 question。
+  对齐 PentAGI：documentloaders.NewText(anonymizedAnswer).Load() → embed 内容文本。
+  question 存在 answers 表但不 embed——作为元数据供展示。
 
 Embedding 模型：BAAI/bge-m3（1024 维，归一化输出，多语言）。
 距离度量：cosine（sqlite-vec 返回 1 - cosine_similarity）。
 
-分数阈值（基于 BGE-M3 标定，见 retrieval-strategy.md）：
+分数阈值（对齐 PentAGI 的 0.2）：
+  - score < 0.2 的结果被过滤（不返回）
   - >= 0.75：强匹配，可直接引用
   - 0.50-0.75：中等匹配，使用前需校验
-  - < 0.50：弱匹配，忽略
+  - 0.20-0.50：弱匹配，仅供参考
 """
 import sqlite3
 import sqlite_vec
@@ -28,6 +35,7 @@ from sentence_transformers import SentenceTransformer
 
 EMBEDDING_DIM = 1024
 DEFAULT_TOP_K = 5
+SCORE_THRESHOLD = 0.2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS answers (
@@ -36,11 +44,23 @@ CREATE TABLE IF NOT EXISTS answers (
     answer TEXT NOT NULL,
     type TEXT NOT NULL,
     doc_type TEXT NOT NULL DEFAULT 'answer',
+    guide_type TEXT NOT NULL DEFAULT '',
+    code_lang TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
 );
+"""
+
+INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_answers_type ON answers(type);
 CREATE INDEX IF NOT EXISTS idx_answers_doc_type ON answers(doc_type);
+CREATE INDEX IF NOT EXISTS idx_answers_guide_type ON answers(guide_type);
+CREATE INDEX IF NOT EXISTS idx_answers_code_lang ON answers(code_lang);
 """
+
+MIGRATE_COLUMNS = [
+    ("guide_type", "TEXT NOT NULL DEFAULT ''"),
+    ("code_lang", "TEXT NOT NULL DEFAULT ''"),
+]
 
 
 class MemoryDB:
@@ -58,30 +78,48 @@ class MemoryDB:
 
     def _init_schema(self) -> None:
         self._conn.executescript(SCHEMA_SQL)
+        self._migrate_schema()
+        self._conn.executescript(INDEX_SQL)
         self._conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS answer_vectors "
             f"USING vec0(embedding float[{EMBEDDING_DIM}] distance_metric=cosine)"
         )
         self._conn.commit()
 
+    def _migrate_schema(self) -> None:
+        """检查并添加缺失的列（向后兼容旧数据库）。"""
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(answers)").fetchall()}
+        for col_name, col_def in MIGRATE_COLUMNS:
+            if col_name not in columns:
+                self._conn.execute(f"ALTER TABLE answers ADD COLUMN {col_name} {col_def}")
+                self._conn.commit()
+
     def _embed(self, text: str) -> bytes:
-        """将文本编码为 384 维归一化向量，打包为小端序浮点数字节流。"""
+        """将文本编码为 1024 维归一化向量，打包为小端序浮点数字节流。"""
         vec = self.embedder.encode(text, convert_to_numpy=True)
         return struct.pack(f"{EMBEDDING_DIM}f", *vec.tolist())
 
-    def store(self, question: str, answer: str, type: str, doc_type: str = "answer") -> int:
-        """插入一行 (question, answer, type, doc_type) 及其 question 的 embedding。
+    def store(
+        self,
+        question: str,
+        answer: str,
+        type: str,
+        doc_type: str = "answer",
+        guide_type: str = "",
+        code_lang: str = "",
+    ) -> int:
+        """插入一行及其 content 的 embedding。
 
-        不做去重 —— 由 LLM 在调用前判断该 answer 是否"新"。
-        返回新行 id。
+        embed 目标是 answer（content 文本），不是 question。
+        对齐 PentAGI：embed 内容文本，question 存表不 embed。
         """
-        embedding = self._embed(question)
+        embedding = self._embed(answer)
         cur = self._conn.execute(
-            "INSERT INTO answers(question, answer, type, doc_type, created_at) VALUES (?, ?, ?, ?, ?)",
-            (question, answer, type, doc_type, time.time()),
+            "INSERT INTO answers(question, answer, type, doc_type, guide_type, code_lang, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (question, answer, type, doc_type, guide_type, code_lang, time.time()),
         )
         row_id = cur.lastrowid
-        # lastrowid 是 int；转换为 int 以满足 vec0 rowid 的类型要求
         self._conn.execute(
             "INSERT INTO answer_vectors(rowid, embedding) VALUES (?, ?)",
             (int(row_id), embedding),
@@ -94,23 +132,17 @@ class MemoryDB:
         questions: list[str],
         type: str | None = None,
         doc_type: str = "answer",
+        guide_type: str = "",
+        code_lang: str = "",
         top_k: int = DEFAULT_TOP_K,
     ) -> list[dict[str, Any]]:
-        """对每个查询：按 cosine 找最近的 top_k 个，按 doc_type + type（可选）过滤，再合并。
+        """对每个查询：按 cosine 找最近的，按 doc_type + type/guide_type/code_lang 过滤，再合并。
 
-        返回至多 top_k 个去重后的结果，按跨查询的最高分排序。
-        Score = 1 - distance（即 cosine 相似度）。
-
-        参数：
-          - type: 如果不为 None，按 type 硬过滤（guide/vulnerability/code/tool/other）。
-                  如果为 None，跳过 type 过滤（用于 doc_type=memory 的通用查询）。
-          - doc_type: "answer"（答案知识库）或 "memory"（执行记忆库）。
+        score < SCORE_THRESHOLD 的结果被过滤（不返回）。
         """
         if not questions:
             return []
 
-        # 构建候选集：对每个查询，取 top_k*3 行（留出余量，
-        # 因为 doc_type/type 过滤会丢弃一部分）。
         per_query = max(top_k * 3, top_k)
         seen: dict[int, dict[str, Any]] = {}
         for q in questions:
@@ -123,7 +155,8 @@ class MemoryDB:
             ).fetchall()
             for row_id, distance in rows:
                 score = 1.0 - float(distance)
-                # 跟踪跨查询的最高分
+                if score < SCORE_THRESHOLD:
+                    continue
                 if row_id in seen:
                     if score > seen[row_id]["score"]:
                         seen[row_id]["score"] = score
@@ -133,21 +166,27 @@ class MemoryDB:
         if not seen:
             return []
 
-        # 按 id 取 answers 行，按 doc_type + type（可选）过滤
+        # 构建过滤条件
         ids = list(seen.keys())
         placeholders = ",".join("?" * len(ids))
+        conditions = [f"id IN ({placeholders})", "doc_type = ?"]
+        params: list[Any] = [*ids, doc_type]
+
         if type is not None:
-            rows = self._conn.execute(
-                f"SELECT id, question, answer, type FROM answers "
-                f"WHERE id IN ({placeholders}) AND doc_type = ? AND type = ?",
-                (*ids, doc_type, type),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                f"SELECT id, question, answer, type FROM answers "
-                f"WHERE id IN ({placeholders}) AND doc_type = ?",
-                (*ids, doc_type),
-            ).fetchall()
+            conditions.append("type = ?")
+            params.append(type)
+        if guide_type:
+            conditions.append("guide_type = ?")
+            params.append(guide_type)
+        if code_lang:
+            conditions.append("code_lang = ?")
+            params.append(code_lang)
+
+        where_clause = " AND ".join(conditions)
+        rows = self._conn.execute(
+            f"SELECT id, question, answer, type FROM answers WHERE {where_clause}",
+            params,
+        ).fetchall()
 
         results = []
         for row_id, question, answer, ans_type in rows:
@@ -160,7 +199,6 @@ class MemoryDB:
                 "score": round(entry["score"], 4),
             })
 
-        # 按分数降序排序，取 top_k 个
         results.sort(key=lambda r: r["score"], reverse=True)
         return results[:top_k]
 

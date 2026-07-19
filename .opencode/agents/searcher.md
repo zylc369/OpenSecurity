@@ -127,9 +127,32 @@ score ≥ 0.75 且未被排除？──YES──→ [交付]
 ### `mcp__knowledge__store_answer`（沉淀新知到 doc_type=answer）
 
 - **参数**：`question`（一个中文问句，按"未来谁会查"的角度表述）、`answer`（中文叙述 + 英文术语原样保留）、`type`、`message`
-- **决策**：见下方"store_answer 决策树"
+- **决策**：见下方"store 决策树"
+- **匿名化**：store 前自动清洗 IP/凭证/域名（你不需要手动匿名化，但仍建议避免在 answer 里写明文凭证）
 
-## store_answer 决策树
+### `mcp__knowledge__search_guide`（搜索指南，doc_type=guide）
+
+- **参数**：`questions`（1-5 个中文问句）、`type`（install/configure/use/pentest/development/other，必填硬过滤）、`message`
+- **用途**：搜索步骤指南、安装配置方法、渗透测试流程等操作类知识
+- **何时用**：需要"怎么做"的操作指引时（区别于 search_answer 的"是什么"知识）
+
+### `mcp__knowledge__store_guide`（存储指南，doc_type=guide）
+
+- **参数**：`guide`（markdown 格式指南文本）、`question`（问题）、`type`（install/configure/use/pentest/development/other）、`message`
+- **匿名化**：自动清洗敏感信息
+- **决策**：与 store_answer 相同决策树，但 content 是操作步骤/配置方法而非答案
+
+### `mcp__knowledge__search_code`（搜索代码片段，doc_type=code）
+
+- **参数**：`questions`（1-5 个中文问句）、`lang`（编程语言如 python/bash/golang，必填）、`message`
+- **用途**：搜索可复用的代码片段、payload、脚本模板
+
+### `mcp__knowledge__store_code`（存储代码片段，doc_type=code）
+
+- **参数**：`code`（源代码）、`question`（问题）、`lang`（编程语言）、`explanation`（代码详细说明）、`description`（简短摘要）、`message`
+- **匿名化**：自动清洗敏感信息
+
+## store 决策树（answer/guide/code 通用）
 
 ```
 knowledge 搜索是否已返回此精确信息且 score ≥ 0.75？
@@ -145,10 +168,12 @@ knowledge 搜索是否已返回此精确信息且 score ≥ 0.75？
   NO  → 不存储
   YES ↓
 
-  → store_answer：
+  → 选择存储工具：
+      - 操作步骤/配置方法 → store_guide（type=install/configure/use/pentest/development/other）
+      - 可运行代码/payload/脚本 → store_code（lang=编程语言）
+      - 知识/答案/分析 → store_answer（type=guide/vulnerability/code/tool/other）
       - question: 用"本应能命中此答案的查询"表述（中文问句）
-      - answer:   完整 markdown，中文叙述 + 英文技术术语原样保留
-      - type:     guide | vulnerability | code | tool | other
+      - content:  完整 markdown，中文叙述 + 英文技术术语原样保留
 ```
 
 **type 分类**：

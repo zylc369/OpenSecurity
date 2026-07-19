@@ -701,6 +701,100 @@ function deleteGraphitiEvents(flowId: string): void {
   }
 }
 
+/**
+ * 常驻 memory writer daemon 管理（对齐 PentAGI executor.go storeToolResult）。
+ * 工具执行后自动把结果写入 knowledge 向量库（doc_type=memory）。
+ */
+let memoryDaemon: import("child_process").ChildProcess | null = null;
+let memoryDaemonReady = false;
+const KNOWLEDGE_DAEMON_SCRIPT = join(OPENCODE_ROOT, "mcp-servers", "knowledge", "memory_writer_daemon.py");
+
+function ensureMemoryDaemon(): void {
+  if (memoryDaemon && !memoryDaemon.killed) {
+    return;
+  }
+
+  const python = getPythonCmd();
+  if (!python) {
+    debugLog(`ensureMemoryDaemon: Python 未就绪`);
+    return;
+  }
+
+  try {
+    memoryDaemon = spawn(python, [KNOWLEDGE_DAEMON_SCRIPT], {
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: false,
+    });
+
+    memoryDaemon.stdout?.on("data", (data: Buffer) => {
+      const output = data.toString().trim();
+      if (output === "READY") {
+        memoryDaemonReady = true;
+        debugLog(`memory daemon: READY`);
+      }
+    });
+
+    memoryDaemon.stderr?.on("data", (data: Buffer) => {
+      debugLog(`memory daemon: ${data.toString().trim()}`);
+    });
+
+    memoryDaemon.on("exit", (code) => {
+      debugLog(`memory daemon: exited code=${code}`);
+      memoryDaemon = null;
+      memoryDaemonReady = false;
+    });
+
+    if (!exitHandlerRegistered) {
+      exitHandlerRegistered = true;
+      process.on("exit", () => {
+        memoryDaemon?.kill("SIGTERM");
+      });
+    }
+
+    debugLog(`memory daemon: spawning ${python} ${KNOWLEDGE_DAEMON_SCRIPT}`);
+  } catch (e) {
+    debugLog(`ensureMemoryDaemon: spawn 失败 err=${(e as Error)?.message}`);
+  }
+}
+
+/**
+ * 异步写入工具执行结果到 knowledge 向量库（doc_type=memory）。
+ * 对齐 PentAGI executor.go:519 storeToolResult。
+ * fire-and-forget，失败只记日志，不影响 agent 运行。
+ */
+function fireAndForgetMemory(
+  toolName: string,
+  args: unknown,
+  output: string,
+): void {
+  ensureMemoryDaemon();
+
+  if (!memoryDaemon || !memoryDaemon.stdin || memoryDaemon.stdin.destroyed) {
+    debugLog(`fireAndForgetMemory: daemon 不可用，跳过 tool=${toolName}`);
+    return;
+  }
+
+  // 对齐 PentAGI executor.go:530 的格式
+  const text = `### Incoming arguments\n\n\`\`\`json\n${JSON.stringify(args).slice(0, 2000)}\n\`\`\`\n\n#### Tool result\n\n${(output || "").slice(0, 2000)}\n`;
+  const question = `${toolName} execution`;
+
+  const entry = JSON.stringify({
+    question,
+    answer: text,
+    type: toolName,
+  }) + "\n";
+
+  if (memoryDaemonReady) {
+    try {
+      memoryDaemon.stdin.write(entry);
+    } catch (e) {
+      debugLog(`fireAndForgetMemory: stdin 写入失败 tool=${toolName} err=${(e as Error)?.message}`);
+    }
+  } else {
+    debugLog(`fireAndForgetMemory: daemon 未就绪，跳过 tool=${toolName}`);
+  }
+}
+
 export const SecurityAnalysisPlugin: Plugin = async (input) => {
   const { client, directory } = input;
 
@@ -1156,6 +1250,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             `${agentName} tool execution`,
             session.flowId,
           );
+
+          // 写入 knowledge 向量库 memory（对齐 PentAGI executor.go:519 storeToolResult）
+          fireAndForgetMemory(toolName, input.args, output.output || "");
         }
 
         debugLog(`tool.execute.after: tool=${toolName}`, sid);
@@ -1237,7 +1334,6 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
               deleteGraphitiEvents(flowId);
             }
           }
-        }
         }
 
         // 压缩完成：仅记录日志（状态恢复由 compacting hook 在压缩前注入）
