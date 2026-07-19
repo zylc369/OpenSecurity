@@ -7,7 +7,7 @@
   - stdin EOF（plugin 退出）→ 排空队列 → 退出
 
 并发模型：asyncio + Semaphore(5) + 无界 Queue
-  - 最多 5 个 add_episode 并发（DeepSeek API 限流保护）
+  - 最多 5 个 add_episode 并发（本地资源保护：BGE-M3 CPU + Neo4j 写锁 + 内存）
   - 超过 5 个排队等待
   - timestamp 由 plugin 传入 → reference_time 保证时序
 
