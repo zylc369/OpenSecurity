@@ -116,6 +116,10 @@ class BgeM3Embedder(EmbedderClient):
         Returns:
             list[float]（1024 维扁平向量）
         """
+        # 空输入 → 报错（而非返回 [] 导致后续 cosine similarity 维度不匹配）
+        if isinstance(input_data, (list, tuple)) and len(input_data) == 0:
+            raise ValueError("Cannot generate embedding for empty input")
+
         # graphiti 传 [text]（单元素列表）→ 取第一个元素做 embedding
         if isinstance(input_data, list) and len(input_data) > 0 and isinstance(input_data[0], str):
             text = input_data[0]
