@@ -26,7 +26,7 @@ from pathlib import Path
 # 确保能 import graphiti_config
 sys.path.insert(0, str(Path(__file__).parent))
 
-MAX_CONCURRENT = 5
+MAX_CONCURRENT = 10
 
 
 def log(msg: str):

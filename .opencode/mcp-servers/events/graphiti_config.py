@@ -134,10 +134,13 @@ class BgeM3Embedder(EmbedderClient):
         return [float(x) for x in input_data]
 
     async def create_batch(self, input_data: list[str]) -> list[list[float]]:
-        """批量生成 embedding 向量（async）。"""
-        return await asyncio.to_thread(self._encode_batch, input_data)
+        """批量生成 embedding 向量（async）。
 
-    def _encode_batch(self, texts: list[str]) -> list[list[float]]:
-        """同步批量编码（内部方法，被 async 方法通过 to_thread 调用）。"""
-        vecs = self.model.encode(texts, convert_to_numpy=True)
-        return [np.asarray(v).tolist() for v in vecs]
+        self.model 必须在主线程解析（避免工作线程竞态导致重复加载模型），
+        只把 encode 调用交给 to_thread。
+        """
+        model = self.model  # 主线程解析，确保 lazy load 只执行一次
+        def _do_encode():
+            vecs = model.encode(input_data, convert_to_numpy=True)
+            return [np.asarray(v).tolist() for v in vecs]
+        return await asyncio.to_thread(_do_encode)

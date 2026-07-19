@@ -26,6 +26,7 @@ Embedding 模型：BAAI/bge-m3（1024 维，归一化输出，多语言）。
 import sqlite3
 import sqlite_vec
 import struct
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -70,21 +71,26 @@ class MemoryDB:
         self.db_path = db_path
         self.embedder = embedder
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path)
+        # check_same_thread=False：knowledge MCP 的 db 在子线程构造（lifespan run_in_executor），
+        # 但工具函数在 asyncio loop 线程调用——必须允许跨线程访问。
+        # _lock 串行化所有 SQL 操作（SQLite 默认串行，多线程并发会数据损坏）。
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.enable_load_extension(True)
         sqlite_vec.load(self._conn)
         self._conn.enable_load_extension(False)
         self._init_schema()
 
     def _init_schema(self) -> None:
-        self._conn.executescript(SCHEMA_SQL)
-        self._migrate_schema()
-        self._conn.executescript(INDEX_SQL)
-        self._conn.execute(
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS answer_vectors "
-            f"USING vec0(embedding float[{EMBEDDING_DIM}] distance_metric=cosine)"
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.executescript(SCHEMA_SQL)
+            self._migrate_schema()
+            self._conn.executescript(INDEX_SQL)
+            self._conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS answer_vectors "
+                f"USING vec0(embedding float[{EMBEDDING_DIM}] distance_metric=cosine)"
+            )
+            self._conn.commit()
 
     def _migrate_schema(self) -> None:
         """检查并添加缺失的列（向后兼容旧数据库）。"""
@@ -92,7 +98,7 @@ class MemoryDB:
         for col_name, col_def in MIGRATE_COLUMNS:
             if col_name not in columns:
                 self._conn.execute(f"ALTER TABLE answers ADD COLUMN {col_name} {col_def}")
-                self._conn.commit()
+        self._conn.commit()
 
     def _embed(self, text: str) -> bytes:
         """将文本编码为 1024 维归一化向量，打包为小端序浮点数字节流。"""
@@ -114,18 +120,19 @@ class MemoryDB:
         对齐 PentAGI：embed 内容文本，question 存表不 embed。
         """
         embedding = self._embed(answer)
-        cur = self._conn.execute(
-            "INSERT INTO answers(question, answer, type, doc_type, guide_type, code_lang, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (question, answer, type, doc_type, guide_type, code_lang, time.time()),
-        )
-        row_id = cur.lastrowid
-        self._conn.execute(
-            "INSERT INTO answer_vectors(rowid, embedding) VALUES (?, ?)",
-            (int(row_id), embedding),
-        )
-        self._conn.commit()
-        return int(row_id)
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO answers(question, answer, type, doc_type, guide_type, code_lang, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (question, answer, type, doc_type, guide_type, code_lang, time.time()),
+            )
+            row_id = cur.lastrowid
+            self._conn.execute(
+                "INSERT INTO answer_vectors(rowid, embedding) VALUES (?, ?)",
+                (int(row_id), embedding),
+            )
+            self._conn.commit()
+            return int(row_id)
 
     def search(
         self,
@@ -145,62 +152,65 @@ class MemoryDB:
 
         per_query = max(top_k * 3, top_k)
         seen: dict[int, dict[str, Any]] = {}
-        for q in questions:
-            q_emb = self._embed(q)
+        # embed 在 lock 外（CPU-bound，不涉及 SQL；并发安全：embedder 内部线程安全）
+        q_embs = [self._embed(q) for q in questions]
+        with self._lock:
+            for q_emb in q_embs:
+                rows = self._conn.execute(
+                    "SELECT rowid, distance FROM answer_vectors "
+                    "WHERE embedding MATCH ? AND k = ? "
+                    "ORDER BY distance",
+                    (q_emb, per_query),
+                ).fetchall()
+                for row_id, distance in rows:
+                    score = 1.0 - float(distance)
+                    if score < SCORE_THRESHOLD:
+                        continue
+                    if row_id in seen:
+                        if score > seen[row_id]["score"]:
+                            seen[row_id]["score"] = score
+                        continue
+                    seen[row_id] = {"id": int(row_id), "score": score}
+
+            if not seen:
+                return []
+
+            # 构建过滤条件
+            ids = list(seen.keys())
+            placeholders = ",".join("?" * len(ids))
+            conditions = [f"id IN ({placeholders})", "doc_type = ?"]
+            params: list[Any] = [*ids, doc_type]
+
+            if type is not None:
+                conditions.append("type = ?")
+                params.append(type)
+            if guide_type:
+                conditions.append("guide_type = ?")
+                params.append(guide_type)
+            if code_lang:
+                conditions.append("code_lang = ?")
+                params.append(code_lang)
+
+            where_clause = " AND ".join(conditions)
             rows = self._conn.execute(
-                "SELECT rowid, distance FROM answer_vectors "
-                "WHERE embedding MATCH ? AND k = ? "
-                "ORDER BY distance",
-                (q_emb, per_query),
+                f"SELECT id, question, answer, type FROM answers WHERE {where_clause}",
+                params,
             ).fetchall()
-            for row_id, distance in rows:
-                score = 1.0 - float(distance)
-                if score < SCORE_THRESHOLD:
-                    continue
-                if row_id in seen:
-                    if score > seen[row_id]["score"]:
-                        seen[row_id]["score"] = score
-                    continue
-                seen[row_id] = {"id": int(row_id), "score": score}
 
-        if not seen:
-            return []
-
-        # 构建过滤条件
-        ids = list(seen.keys())
-        placeholders = ",".join("?" * len(ids))
-        conditions = [f"id IN ({placeholders})", "doc_type = ?"]
-        params: list[Any] = [*ids, doc_type]
-
-        if type is not None:
-            conditions.append("type = ?")
-            params.append(type)
-        if guide_type:
-            conditions.append("guide_type = ?")
-            params.append(guide_type)
-        if code_lang:
-            conditions.append("code_lang = ?")
-            params.append(code_lang)
-
-        where_clause = " AND ".join(conditions)
-        rows = self._conn.execute(
-            f"SELECT id, question, answer, type FROM answers WHERE {where_clause}",
-            params,
-        ).fetchall()
-
-        results = []
-        for row_id, question, answer, ans_type in rows:
-            entry = seen[row_id]
-            results.append({
-                "id": int(row_id),
-                "question": question,
-                "answer": answer,
-                "type": ans_type,
-                "score": round(entry["score"], 4),
-            })
+            results = []
+            for row_id, question, answer, ans_type in rows:
+                entry = seen[row_id]
+                results.append({
+                    "id": int(row_id),
+                    "question": question,
+                    "answer": answer,
+                    "type": ans_type,
+                    "score": round(entry["score"], 4),
+                })
 
         results.sort(key=lambda r: r["score"], reverse=True)
         return results[:top_k]
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()

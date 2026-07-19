@@ -833,7 +833,14 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   }
 
   // ── 动态注册 MCP server（跨平台，不写死路径）──
-  // fire-and-forget：不 await，避免阻塞插件加载（knowledge server 加载 BGE-M3 需 ~16s）
+  // fire-and-forget：必须不 await。OpenCode Plugin API 限制——plugin.setup 在 Effect runtime
+  // 内 await（vendor plugin/promise.ts:90），如果 setup 内 await client.mcp.add()，而
+  // mcp.add 又依赖同一个 Effect runtime → 死锁（实测 60s+ 卡住，无 McpManager 日志）。
+  // vendor project/bootstrap.ts 也用 Effect.forkDetach 让 init() 是 fire-and-forget。
+  //
+  // 时序保障：knowledge MCP 已改为 lifespan lazy 加载，握手从 15s 降到 ~5s；
+  // fire-and-forget 后 ~7s 内 MCP 工具就可调用（实测）。
+  // 错误隔离：mcp-manager.ts:registerOne 已 try/catch 单 server 失败。
   const mcpManager = new McpManager(client);
   mcpManager.registerAll().catch((e) => {
     debugLog(`[McpManager] registerAll 失败: ${e?.message ?? e}`);
