@@ -144,6 +144,7 @@ Task(
 - 明确说明期望的分析深度和输出要求
 - 如果依赖前置子任务的发现，要在 prompt 中概括这些发现
 - 告知子 Agent 将报告写入 `$TASK_DIR` 目录（用实际路径替换）
+- 告知子 Agent："分析前先委派 searcher 查已有知识（subagent_type=searcher），分析结论用 mcp__knowledge__store_answer 存储"
 
 ### 1.4 收集结果
 

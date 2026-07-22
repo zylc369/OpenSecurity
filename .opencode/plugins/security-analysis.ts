@@ -711,6 +711,7 @@ function ensureMemoryDaemon(): void {
   }
 
   try {
+    const { spawn } = require("child_process");
     memoryDaemon = spawn(python, [KNOWLEDGE_DAEMON_SCRIPT], {
       stdio: ["pipe", "pipe", "pipe"],
       detached: false,

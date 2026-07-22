@@ -102,6 +102,8 @@ Remove-Item Env:\IDA_ENV_JSON
 
 ---
 
+{{buwai-rule:knowledge-management}}
+
 ## 逆向分析核心原则
 
 1. **找关键点，不逆向机制** — 目标是找到关键调用、关键值、关键跳转

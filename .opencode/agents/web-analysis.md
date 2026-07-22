@@ -152,6 +152,8 @@ permission:
 
 ---
 
+{{buwai-rule:knowledge-management}}
+
 ## Web 安全分析核心原则
 
 1. **攻击面优先** — 先找所有用户可控的输入点，再逐个分析每个输入点能影响什么

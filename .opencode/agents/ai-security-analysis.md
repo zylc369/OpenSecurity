@@ -140,6 +140,8 @@ permission:
 
 ---
 
+{{buwai-rule:knowledge-management}}
+
 ## AI 安全分析核心原则
 
 1. **先建基线，再注入** — 先用正常输入建立 LLM 行为基线，再逐步添加注入

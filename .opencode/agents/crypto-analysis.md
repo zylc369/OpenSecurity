@@ -79,6 +79,8 @@ permission:
 
 ---
 
+{{buwai-rule:knowledge-management}}
+
 ## 核心原则
 
 1. **模式匹配优先** — 先识别属哪类已知攻击，再动手；不盲目爆破
