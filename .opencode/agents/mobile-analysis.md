@@ -85,10 +85,6 @@ permission:
 
 {{buwai-rule:execution-discipline}}
 
-### 循环控制
-
-{{buwai-rule:loop-control}}
-
 ---
 
 ## 逆向分析核心原则

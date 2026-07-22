@@ -76,7 +76,6 @@ permission:
 > 注：sage 是否已装由 **plugin 在 chat.message 检查**（`detect_env check-preinstall`）——缺失时直接拦截整个 crypto-analysis 并提示安装，agent 运行时 sage 已就绪，无需自行处理"sage 没装"。
 
 {{buwai-rule:execution-discipline}}
-{{buwai-rule:loop-control}}
 
 ---
 

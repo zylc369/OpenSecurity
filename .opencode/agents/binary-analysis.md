@@ -100,11 +100,6 @@ Remove-Item Env:\IDA_ENV_JSON
 | 已知工具脱壳失败 | 切 IDA 调试器 dump → Frida dump → 静态分析 |
 | 假设标准算法但结果不匹配 | 停止推理，用 `process_patch.py` 捕获实际中间值，与标准算法对比 |
 
-### 循环控制
-
-{{buwai-rule:loop-control}}
-| 数据库锁 | 锁定 = 立即退出，不计入重试次数 |
-
 ---
 
 ## 逆向分析核心原则
