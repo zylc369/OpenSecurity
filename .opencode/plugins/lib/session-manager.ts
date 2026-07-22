@@ -228,7 +228,7 @@ export class SessionDataManager {
   requireRegisteredAgent(
     hookName: string,
     sessionID?: string,
-  ): SessionData | undefined {
+  ): SessionData | null {
     return this.requireAgent(
       hookName,
       (session) => {
@@ -242,7 +242,7 @@ export class SessionDataManager {
   requireSecurityAgent(
     hookName: string,
     sessionID?: string,
-  ): SessionData | undefined {
+  ): SessionData | null {
     return this.requireAgent(
       hookName,
       (session) => {
@@ -256,24 +256,24 @@ export class SessionDataManager {
     hookName: string,
     matchFunc: (session: SessionData) => boolean,
     sessionID?: string,
-  ): SessionData | undefined {
+  ): SessionData | null {
     if (!sessionID) {
       debugLog(`[${hookName}] 跳过 — 无 sessionID`);
-      return undefined;
+      return null;
     }
     const session = this.get(sessionID);
     if (!session) {
       debugLog(
         `[${hookName}] 跳过 — session 未创建（等待 chat.message）, sessionID=${sessionID}`,
       );
-      return undefined;
+      return null;
     }
     if (!matchFunc(session)) {
       debugLog(
         `[${hookName}] 跳过 — 非 Security Agent agent=${session.agentName} sessionID=${sessionID}`,
         sessionID,
       );
-      return undefined;
+      return null;
     }
     return session;
   }

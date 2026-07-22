@@ -694,10 +694,14 @@ function deleteGraphitiEvents(flowId: string): void {
     if (canWrite) {
       debugLog(`deleteGraphitiEvents: 已发送 delete flowId=${flowId}`);
     } else {
-      debugLog(`deleteGraphitiEvents: stdin 背压，delete 可能延迟 flowId=${flowId}`);
+      debugLog(
+        `deleteGraphitiEvents: stdin 背压，delete 可能延迟 flowId=${flowId}`,
+      );
     }
   } catch (e) {
-    debugLog(`deleteGraphitiEvents: stdin 写入失败 flowId=${flowId} err=${(e as Error)?.message}`);
+    debugLog(
+      `deleteGraphitiEvents: stdin 写入失败 flowId=${flowId} err=${(e as Error)?.message}`,
+    );
   }
 }
 
@@ -707,7 +711,12 @@ function deleteGraphitiEvents(flowId: string): void {
  */
 let memoryDaemon: import("child_process").ChildProcess | null = null;
 let memoryDaemonReady = false;
-const KNOWLEDGE_DAEMON_SCRIPT = join(OPENCODE_ROOT, "mcp-servers", "knowledge", "memory_writer_daemon.py");
+const KNOWLEDGE_DAEMON_SCRIPT = join(
+  OPENCODE_ROOT,
+  "mcp-servers",
+  "knowledge",
+  "memory_writer_daemon.py",
+);
 
 function ensureMemoryDaemon(): void {
   if (memoryDaemon && !memoryDaemon.killed) {
@@ -778,17 +787,20 @@ function fireAndForgetMemory(
   const text = `### Incoming arguments\n\n\`\`\`json\n${JSON.stringify(args).slice(0, 2000)}\n\`\`\`\n\n#### Tool result\n\n${(output || "").slice(0, 2000)}\n`;
   const question = `${toolName} execution`;
 
-  const entry = JSON.stringify({
-    question,
-    answer: text,
-    type: toolName,
-  }) + "\n";
+  const entry =
+    JSON.stringify({
+      question,
+      answer: text,
+      type: toolName,
+    }) + "\n";
 
   if (memoryDaemonReady) {
     try {
       memoryDaemon.stdin.write(entry);
     } catch (e) {
-      debugLog(`fireAndForgetMemory: stdin 写入失败 tool=${toolName} err=${(e as Error)?.message}`);
+      debugLog(
+        `fireAndForgetMemory: stdin 写入失败 tool=${toolName} err=${(e as Error)?.message}`,
+      );
     }
   } else {
     debugLog(`fireAndForgetMemory: daemon 未就绪，跳过 tool=${toolName}`);
@@ -1099,13 +1111,13 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           `shell.env: 触发 sessionID=${sessionID} cwd=${input.cwd} callID=${input.callID ?? "无"}`,
           sessionID,
         );
-        const session = ctx.sessionManager.requireSecurityAgent(
+        const session = ctx.sessionManager.requireRegisteredAgent(
           "shell.env",
           sessionID,
         );
         if (!session) {
           debugLog(
-            `shell.env: 跳过 — 非 Security Agent sessionID=${sessionID}`,
+            `shell.env: 跳过 — 非注册 agent sessionID=${sessionID}`,
             sessionID,
           );
           return;
@@ -1180,13 +1192,13 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     "tool.execute.before": async (input, output) => {
       try {
         const sid = input.sessionID;
-        const session = ctx.sessionManager.requireSecurityAgent(
+        const session = ctx.sessionManager.requireRegisteredAgent(
           "tool.execute.before",
           sid,
         );
         if (!session) {
           debugLog(
-            `tool.execute.before: 跳过 — 非 Security Agent, sessionID=${sid}`,
+            `tool.execute.before: 跳过 — 非注册 Agent, sessionID=${sid}`,
             sid,
           );
           return;
@@ -1222,13 +1234,13 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     "tool.execute.after": async (input, output) => {
       try {
         const sid = input.sessionID;
-        const session = ctx.sessionManager.requireSecurityAgent(
+        const session = ctx.sessionManager.requireRegisteredAgent(
           "tool.execute.after",
           sid,
         );
         if (!session) {
           debugLog(
-            `tool.execute.after: 跳过 — 非 Security Agent, sessionID=${sid}`,
+            `tool.execute.after: 跳过 — 非注册 agent, sessionID=${sid}`,
             sid,
           );
           return;

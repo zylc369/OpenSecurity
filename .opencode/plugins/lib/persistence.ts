@@ -8,6 +8,7 @@ import {
 } from "./constants";
 import { ctx } from "./context";
 import { debugLog } from "./logging";
+import { SessionData } from "./session-manager";
 import StringUtils from "./string-utils";
 
 // ─── 完成标记（动态生成 + 精确匹配）──────────────────────────────
@@ -166,18 +167,11 @@ async function getLastAssistantText(sessionID: string): Promise<string | null> {
 
 /** 发送 resume prompt 并记录状态。从 maybeResumeAnalysis 和冷却 setTimeout 回调两处调用。
  *  内部通过 get 获取最新 session——setTimeout 回调可能延迟很久，闭包捕获的 session 可能已失效。 */
-async function sendResume(sessionID: string): Promise<void> {
+async function sendResume(session: SessionData): Promise<void> {
+  const sessionID = session.sessionID;
   if (!ctx.client) {
     debugLog(
       `sendResume: ctx.client 不可用，跳过 sessionID=${sessionID}`,
-      sessionID,
-    );
-    return;
-  }
-  const session = ctx.sessionManager.get(sessionID);
-  if (!session || !session.isSecurityAgent()) {
-    debugLog(
-      `sendResume: session 不存在或非 Security Agent，跳过 sessionID=${sessionID}`,
       sessionID,
     );
     return;
@@ -318,7 +312,7 @@ export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
         if (session.pendingResumeTimer) {
           // 恢复定时器还在的情况下，再发送恢复消息
           session.pendingResumeTimer = null;
-          sendResume(sessionID).catch((e) => {
+          sendResume(session).catch((e) => {
             debugLog(
               `session.idle: 冷却恢复异常 sessionID=${sessionID} error=${e}`,
               sessionID,
@@ -329,7 +323,7 @@ export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
       return;
     }
 
-    await sendResume(sessionID);
+    await sendResume(session);
   } catch (e) {
     debugLog(
       `session.idle: 恢复异常 sessionID=${sessionID} error=${e}`,
