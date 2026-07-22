@@ -87,52 +87,33 @@ function getCompactionContext(agentName: string): string {
 当总结此会话时，如果包含分析相关内容，你必须保留以下信息：
 
 ### 1. 分析目标
-- 目标文件路径和类型
-- 文件架构
+- 目标路径（文件路径 / URL / 源码目录 / APK·IPA 路径等）
+- 目标架构 / 技术栈 / 框架版本
 
-### 2. 已完成的分析
-- 已识别的关键函数/类及其地址/名称和用途
-- 已发现的分析结论
+### 2. 环境状态
+- 工具与环境配置（IDA 数据库路径、设备连接状态/Frida 端口、解包路径、SageMath 会话、目标服务地址等）
+- 已执行的工具查询及结果摘要（idat 查询结果、Frida hook 结果、SageMath 计算结果、HTTP 请求/响应等）
+- 任何运行中的进程或服务
+
+### 3. 已完成的分析
+- 已识别的关键函数 / 类 / 组件及其地址 / 名称和用途
+- 已识别的 native 库（.so / .dylib / .dll）、框架、加密算法或保护机制
+- 已发现的分析结论和漏洞
+- 已发现的攻击面和攻击链进度（含已测试的攻击方向和结果）
 - 当前分析阶段和待完成步骤
 - 失败记录（已尝试方向，避免重复）
 - 验证结果和置信度
 - 用户显式约束`;
 
-  if (agentName === AGENT_BINARY_ANALYSIS) {
-    context += `
-
-### IDA 分析状态
-- IDA 数据库路径
-- 已执行的 idat 查询和结果摘要`;
-  }
-
-  if (agentName === AGENT_MOBILE_ANALYSIS) {
-    context += `
-
-### 移动端分析状态
-- 已解包路径
-- 已识别的 native 库列表（.so / .dylib）
-- 当前设备连接状态（device_id、frida_server 运行/端口）`;
-  }
-
-  if (agentName === AGENT_WEB_ANALYSIS) {
-    context += `
-
-### Web 分析状态
-- 目标 URL 和/或源码目录路径
-- 已识别的技术栈和框架版本
-- 已发现的攻击面和攻击链进度
-- 已测试的攻击方向和结果`;
-  }
-
+  // Coordinator 不是分析 agent，而是编排 agent——需要保留编排状态
   if (agentName === AGENT_SECURITY_COORDINATOR) {
     context += `
 
-### Coordinator 编排状态
+### 编排状态
 - 父任务目录路径
 - 已完成的子任务列表（Agent 名、关键发现摘要）
 - 待执行的子任务列表（Agent 名、任务描述）
-- 当前执行阶段（分析/分发/聚合）`;
+- 当前执行阶段（分析 / 分发 / 聚合）`;
   }
 
   return context;
