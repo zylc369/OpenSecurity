@@ -9,6 +9,12 @@ dependencies = [
     "sqlite-vec>=0.1",
 ]
 
+[tool.opensecurity]
+# 运行时元数据，供 detect_env.py 读取
+# import_names：检测时用 __import__(name)，已转换为 import 形式
+# 无 requires_docker：knowledge MCP 不依赖 Docker
+import_names = ["mcp", "sentence_transformers", "sqlite_vec"]
+
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"

@@ -14,17 +14,28 @@ CrossEncoder：bge-reranker-v2-m3 本地模型（搜索结果重排序）
 
 启动模式（lazy 加载，对齐 knowledge MCP）：
   - 模块顶层不加载 BGE-M3/reranker，stdio 握手快
-  - lifespan startup 内 run_in_executor 后台加载模型（fire-and-forget）
-  - 工具函数调用前 await _ensure_ready()：模型已就绪立即返回；未就绪则等待
+  - lifespan startup 内 run_in_executor 后台启动 Docker + 容器 + 加载模型（fire-and-forget）
+  - 工具函数调用前 await _ensure_ready()：所有基础设施就绪后立即返回；未就绪则等待
   - build_indices_and_constraints 是 async，留在 asyncio loop 内首次工具调用时执行
 """
 import asyncio
 import json
+import os
+import platform
+import shutil
+import subprocess as sp
+import sys
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+
+# ── Docker / Neo4j 配置 ──────────────────────────────────
+_NEO4J_CONTAINER = "neo4j-events"
+_NEO4J_IMAGE = "neo4j:5"
+_NEO4J_DATA_DIR = os.path.expanduser("~/bw-security-analysis/db/events")
 
 # ── lazy 加载共享状态 ─────────────────────────────────────
 _state: dict = {"graphiti": None, "indices_built": False}
@@ -35,16 +46,138 @@ _load_future = None
 _indices_lock = asyncio.Lock()  # 保护 build_indices_and_constraints 并发执行
 
 
+# ── Docker 启动辅助（子线程内调用）──────────────────────────
+def _ensure_docker_daemon_blocking(timeout: int = 90) -> None:
+    """确保 Docker daemon 运行（首次启动可能耗时 30-90s）。
+
+    步骤：
+    1. docker --version（检查二进制存在）
+    2. docker info（检查 daemon 状态）
+    3. 若未运行 → 启动 daemon（open -a Docker / systemctl start docker）
+    4. 轮询 docker info（最多 timeout 秒）
+
+    Note: 与 detect_env.py 的 _ensure_docker_running 同源（跨模块独立维护）。
+    """
+    # 1. 检查二进制
+    try:
+        sp.run(["docker", "--version"], capture_output=True, timeout=3, check=True)
+    except (FileNotFoundError, sp.TimeoutExpired, sp.CalledProcessError):
+        raise RuntimeError("Docker 未安装（events MCP 需要 Docker 运行 Neo4j）")
+
+    # 2. 已运行？
+    try:
+        sp.run(["docker", "info"], capture_output=True, timeout=3, check=True)
+        return
+    except (sp.TimeoutExpired, sp.CalledProcessError):
+        pass
+
+    # 3. 启动 daemon
+    system = platform.system()
+    print(f"[events-mcp] 启动 Docker daemon（{system}）...", file=sys.stderr)
+    if system == "Darwin":
+        sp.run(["open", "-a", "Docker"], check=True)
+    elif system == "Linux":
+        if shutil.which("systemctl"):
+            sp.run(["systemctl", "start", "docker"], check=False)
+        elif shutil.which("service"):
+            sp.run(["service", "docker", "start"], check=False)
+        else:
+            raise RuntimeError("Linux 上未找到 systemctl/service，请手动启动 dockerd")
+    else:
+        raise RuntimeError(f"不支持的系统: {system}（请手动启动 Docker）")
+
+    # 4. 轮询等待 daemon 就绪
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(3)
+        try:
+            sp.run(["docker", "info"], capture_output=True, timeout=3, check=True)
+            print("[events-mcp] Docker daemon 已就绪", file=sys.stderr)
+            return
+        except (sp.TimeoutExpired, sp.CalledProcessError):
+            continue
+    raise RuntimeError(f"Docker daemon 启动超时（{timeout}s 未就绪，请手动启动 Docker）")
+
+
+def _pull_image_with_progress(image: str, timeout: int = 600) -> None:
+    """docker pull 并把进度打印到 stderr（避免长时间无反馈）。
+
+    Note: 与 detect_env.py 的 _pull_image_with_progress 同源（跨模块独立维护）。
+    """
+    print(f"[events-mcp] docker pull {image}（首次需下载镜像，请耐心等待）...", file=sys.stderr)
+    proc = sp.Popen(
+        ["docker", "pull", image],
+        stdout=sp.PIPE, stderr=sp.STDOUT, text=True, bufsize=1,
+    )
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                print(f"  {line}", file=sys.stderr)
+        proc.wait(timeout=timeout)
+        if proc.returncode != 0:
+            raise RuntimeError(f"docker pull 失败（exit={proc.returncode}）")
+    except sp.TimeoutExpired:
+        proc.kill()
+        raise RuntimeError(f"docker pull 超时（{timeout}s）")
+    print(f"[events-mcp] {image} 镜像就绪", file=sys.stderr)
+
+
+def _ensure_neo4j_container_blocking() -> None:
+    """确保 neo4j-events 容器运行（不存在则创建）。
+
+    Note: 与 detect_env.py 的 _ensure_mcp_infra 容器启动逻辑同源（跨模块独立维护）。
+    """
+    # 1. 容器已运行？
+    r = sp.run(
+        ["docker", "ps", "--filter", f"name={_NEO4J_CONTAINER}", "--format", "{{.Names}}"],
+        capture_output=True, timeout=10, text=True,
+    )
+    if r.stdout.strip() == _NEO4J_CONTAINER:
+        return  # 已运行
+
+    # 2. 容器存在但停止？
+    r = sp.run(
+        ["docker", "ps", "-a", "--filter", f"name={_NEO4J_CONTAINER}", "--format", "{{.Names}}"],
+        capture_output=True, timeout=10, text=True,
+    )
+    if r.stdout.strip() == _NEO4J_CONTAINER:
+        print(f"[events-mcp] docker start {_NEO4J_CONTAINER}...", file=sys.stderr)
+        sp.run(["docker", "start", _NEO4J_CONTAINER],
+               capture_output=True, timeout=30, check=True)
+        return
+
+    # 3. 容器不存在 → 创建+启动
+    os.makedirs(_NEO4J_DATA_DIR, exist_ok=True)
+    _pull_image_with_progress(_NEO4J_IMAGE)
+    print(f"[events-mcp] docker run {_NEO4J_CONTAINER}...", file=sys.stderr)
+    sp.run(
+        ["docker", "run", "-d", f"--name={_NEO4J_CONTAINER}",
+         "-p", "7474:7474", "-p", "7687:7687",
+         "-e", "NEO4J_AUTH=neo4j/neo4j_password",
+         "-v", f"{_NEO4J_DATA_DIR}:/data", _NEO4J_IMAGE],
+        capture_output=True, timeout=60, check=True,
+    )
+    print(f"[events-mcp] 容器已创建并启动，数据目录: {_NEO4J_DATA_DIR}", file=sys.stderr)
+
+
 def _preload_models_blocking() -> None:
-    """子线程同步加载 BGE-M3 + 创建 Graphiti 对象。
+    """子线程：Docker daemon + 容器 + BGE-M3 加载（按顺序）。
 
-    通过 graphiti.embedder.model 触发 @property 延迟加载 BGE-M3（几乎所有搜索都用）。
-    reranker（bge-reranker-v2-m3）保持真 lazy——仅 diverse_results_search 显式用
-    EdgeReranker.cross_encoder 时才加载（默认 NodeReranker.rrf 是数学融合，不需要模型）。
+    完整初始化序列：
+    1. 确保 Docker daemon 运行（_ensure_docker_daemon_blocking）
+    2. 确保 neo4j-events 容器运行（_ensure_neo4j_container_blocking）
+    3. 创建 Graphiti 对象 + 加载 BGE-M3
 
-    build_indices_and_constraints 是 async，留给 _ensure_ready 在 loop 内跑。
+    任何步骤失败 → _init_error 记录 → finally 唤醒 _ready。
+    工具调用 await _ready.wait() 后，要么全部就绪，要么抛 RuntimeError。
     """
     try:
+        print("[events-mcp] 确保 Docker daemon 运行...", file=sys.stderr)
+        _ensure_docker_daemon_blocking()
+        print("[events-mcp] 确保 neo4j-events 容器运行...", file=sys.stderr)
+        _ensure_neo4j_container_blocking()
+        print("[events-mcp] 加载 BGE-M3...", file=sys.stderr)
         from graphiti_config import create_graphiti
         graphiti, err = create_graphiti()
         if err:
@@ -54,8 +187,10 @@ def _preload_models_blocking() -> None:
         _ = graphiti.embedder.model
         # reranker 不预加载：仅 diverse_results_search 用，避免无谓加载
         _state["graphiti"] = graphiti
+        print("[events-mcp] 全部就绪（Docker + 容器 + BGE-M3）", file=sys.stderr)
     except Exception as e:
         _init_error.append(e)
+        print(f"[events-mcp] 初始化失败: {e}", file=sys.stderr)
     finally:
         # Event 是主 loop 的对象，子线程必须用 call_soon_threadsafe 唤醒
         if _loop is not None:
@@ -72,12 +207,20 @@ async def lifespan(app):
 
 
 async def _ensure_ready() -> None:
-    """等待模型加载完成（_ready Event），首次调用时建 Neo4j 索引（async）。
+    """等待所有基础设施就绪（Docker + 容器 + 模型），首次调用时建 Neo4j 索引。
+
+    _ready.wait() 最多等 60 秒：
+    - 已就绪 → 立即返回
+    - 60s 内就绪 → 等待后继续
+    - 60s 内未就绪 → 抛 RuntimeError（工具的 try/except 捕获后返回 _empty_result）
 
     用 asyncio.Lock + double-check 保护 build_indices_and_constraints：
     多并发首次调用时只有一个协程执行 build。
     """
-    await _ready.wait()
+    try:
+        await asyncio.wait_for(_ready.wait(), timeout=60)
+    except asyncio.TimeoutError:
+        raise RuntimeError("events MCP 仍在初始化（Docker/模型加载中），请稍后重试")
     if _init_error:
         raise RuntimeError(f"events MCP 加载失败: {_init_error[0]}")
     if not _state["indices_built"]:

@@ -39,6 +39,10 @@ CACHE_DIR = os.path.expanduser("~/bw-security-analysis")
 CACHE_FILE = os.path.join(CACHE_DIR, "env_cache.json")
 VENV_DIR = os.path.join(CACHE_DIR, ".venv")
 
+# events MCP Docker 基础设施配置（与 events/server.py 的 _NEO4J_* 常量保持一致）
+NEO4J_IMAGE = "neo4j:5"
+NEO4J_CONTAINER_NAME = "neo4j-events"
+
 
 def _find_conda():
     """跨平台搜索 conda：PATH + 常见安装路径。返回 conda 可执行路径或 None。"""
@@ -756,9 +760,11 @@ def _run_install():
 
     # 4. events MCP 基础设施（DEEPSEEK_API_KEY 门控）
     _log("[*] === events MCP 基础设施 ===")
-    mcp_servers = _detect_mcp_deps(auto_create=True)
+    # 单独检测 DEEPSEEK_API_KEY（_ensure_mcp_infra 只负责 Docker/容器）
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    deepseek = {"available": bool(deepseek_key.strip())}
+    mcp_servers = _ensure_mcp_infra()
     neo4j = mcp_servers.get("_neo4j", {})
-    deepseek = mcp_servers.get("_deepseek_api_key", {})
 
     if not deepseek.get("available"):
         print("[!] DEEPSEEK_API_KEY 未配置。")
@@ -890,10 +896,10 @@ def _check_preinstall(agent):
                 return _fail(dep.name)
 
     # --- 5. events MCP 基础设施（DEEPSEEK_API_KEY 门控）---
-    # DEEPSEEK_API_KEY 未配置 → 不阻塞（stderr 日志），跳过 Docker/容器检查。
+    # DEEPSEEK_API_KEY 未配置 → 不阻塞（stderr 日志），跳过 Docker/容器检测。
     # DEEPSEEK_API_KEY 已配置 → Docker/容器不可用 → fail-fast。
-    # 三者齐全时 _detect_mcp_deps 已静默自动启动容器。
-    mcp_servers = _detect_mcp_deps()
+    # _check_mcp_deps_fast 仅检测不启动（启动职责在 events/server.py lifespan 内）
+    mcp_servers = _check_mcp_deps_fast()
     optional_warnings = []
 
     deepseek = mcp_servers.get("_deepseek_api_key", {})
@@ -902,8 +908,13 @@ def _check_preinstall(agent):
         # DEEPSEEK_API_KEY 未配置 → 不阻塞
         _log(f"[!] deepseek_api_key: {deepseek.get('message', '未配置')}")
     elif not neo4j.get("available"):
-        # DEEPSEEK 已配置但 Docker/容器不可用 → fail-fast
-        return _fail(f"neo4j: {neo4j.get('message', '不可用')}")
+        # neo4j 不可用时区分：events lifespan 能自动恢复的 vs 需要用户安装的
+        if neo4j.get("auto_recoverable"):
+            # Docker daemon 未运行 / 容器停止/不存在 → events MCP lifespan 会自动启动，不阻塞
+            _log(f"[!] neo4j: {neo4j.get('message')}（不阻塞，events MCP lifespan 会自动恢复）")
+        else:
+            # Docker 未安装 / 未声明 requires_docker → 需要用户手动处理，fail-fast
+            return _fail(f"neo4j: {neo4j.get('message', '不可用')}")
 
     # --- 全部必需依赖通过 → 写 cache ---
     data = {
@@ -1010,31 +1021,105 @@ def _pull_image_with_progress(image, timeout=600):
     _log(f"[+] {image} 镜像就绪")
 
 
-def _detect_mcp_deps(auto_create=False):
-    """检测 MCP server 的 Python 依赖包 + Neo4j + DEEPSEEK_API_KEY。
+def _load_mcp_metadata():
+    """从 mcp-servers/<name>/pyproject.toml 读 MCP server 元数据。
 
-    auto_create=False（check-preinstall 用）：容器不存在 → 返回 unavailable（fail-fast）
-    auto_create=True（install 用）：容器不存在 → docker run 创建+启动
-
-    Docker daemon 未运行时自动启动（_ensure_docker_running），无需用户手动开 Docker Desktop。
+    返回 {server_name: {script, packages, requires_docker}} 字典。
+    解析失败时打印 stderr 日志（不降级到硬编码）。
     """
-    import subprocess as sp
+    import tomllib  # Python 3.11+ 内置
 
     opencode_root = _get_opencode_root()
-
-    # 依赖包检测
-    mcp_config = {
-        "knowledge": {
-            "script": os.path.join(opencode_root, "mcp-servers", "knowledge", "server.py"),
-            "packages": ["mcp", "sentence_transformers", "sqlite_vec"],
-        },
-        "events": {
-            "script": os.path.join(opencode_root, "mcp-servers", "events", "server.py"),
-            "packages": ["mcp", "graphiti_core"],
-        },
-    }
     result = {}
-    for name, cfg in mcp_config.items():
+    for server_name in ["knowledge", "events"]:
+        toml_path = os.path.join(opencode_root, "mcp-servers", server_name, "pyproject.toml")
+        if not os.path.exists(toml_path):
+            _warn(f"_load_mcp_metadata: {toml_path} 不存在")
+            continue
+        try:
+            with open(toml_path, "rb") as f:
+                data = tomllib.load(f)
+            tool_cfg = data.get("tool", {}).get("opensecurity", {})
+            result[server_name] = {
+                "script": os.path.join(opencode_root, "mcp-servers", server_name, "server.py"),
+                "packages": tool_cfg.get("import_names", []),
+                "requires_docker": tool_cfg.get("requires_docker"),
+            }
+        except Exception as e:
+            _warn(f"_load_mcp_metadata: 解析 {toml_path} 失败: {e}", exc=e)
+    return result
+
+
+def _check_docker_binary_and_daemon():
+    """检测 Docker 二进制存在 + daemon 运行状态（不启动，仅检测）。
+
+    返回 {installed: bool, daemon_running: bool}。
+    """
+    import subprocess as sp
+    # 1. docker --version（检查二进制存在，不连 daemon）
+    try:
+        sp.run(["docker", "--version"], capture_output=True, timeout=3, check=True)
+    except (FileNotFoundError, sp.TimeoutExpired, sp.CalledProcessError):
+        return {"installed": False, "daemon_running": False}
+    # 2. docker info（检查 daemon 运行，不启动）
+    try:
+        sp.run(["docker", "info"], capture_output=True, timeout=3, check=True)
+        return {"installed": True, "daemon_running": True}
+    except (sp.TimeoutExpired, sp.CalledProcessError):
+        return {"installed": True, "daemon_running": False}
+
+
+def _check_container_status(container_name):
+    """检测容器状态（不启动）。
+
+    返回 'running' / 'stopped' / 'not_exists' / 'unknown'。
+    """
+    import subprocess as sp
+    try:
+        # 1. docker ps（运行中的容器）
+        r = sp.run(["docker", "ps", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
+                   capture_output=True, timeout=5, text=True)
+        if r.stdout.strip() == container_name:
+            return "running"
+        # 2. docker ps -a（所有容器，含停止的）
+        r = sp.run(["docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
+                   capture_output=True, timeout=5, text=True)
+        if r.stdout.strip() == container_name:
+            return "stopped"
+        return "not_exists"
+    except (sp.TimeoutExpired, sp.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+def _check_image_exists(image_name):
+    """检测 Docker 镜像是否已下载（不启动，不下载）。
+
+    返回 True/False/None（None = 检测失败）。
+    """
+    import subprocess as sp
+    try:
+        r = sp.run(["docker", "images", image_name, "--format", "{{.Repository}}"],
+                   capture_output=True, timeout=5, text=True)
+        return r.stdout.strip() != ""
+    except (sp.TimeoutExpired, sp.CalledProcessError, FileNotFoundError):
+        return None
+    except (sp.TimeoutExpired, sp.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+def _check_mcp_deps_fast():
+    """快速检测 MCP 依赖状态（check-preinstall 用，不启动任何东西）。
+
+    替代旧 _detect_mcp_deps 在 check-preinstall 路径上的职责。
+    所有检测都是只读的（无副作用），<5s 完成。
+
+    返回 {server_name: {...}, "_neo4j": {...}, "_deepseek_api_key": {...}}。
+    """
+    metadata = _load_mcp_metadata()
+    result = {}
+
+    for name, cfg in metadata.items():
+        # 1. Python 包检测（__import__）
         missing = []
         for pkg in cfg["packages"]:
             try:
@@ -1047,82 +1132,124 @@ def _detect_mcp_deps(auto_create=False):
             "script": cfg["script"],
         }
 
-    # DEEPSEEK_API_KEY 先检（门控：未配置则跳过全部 Docker/容器操作）
+    # 2. DEEPSEEK_API_KEY 检测（门控 Docker/容器检测）
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
     deepseek_ok = bool(deepseek_key.strip())
-
-    # Docker + Neo4j：仅在 DEEPSEEK 已配置时才检查
-    if not deepseek_ok:
-        neo4j_status = {"available": False, "message": "DEEPSEEK_API_KEY 未配置，跳过 Docker/Neo4j 检查"}
-    else:
-        neo4j_status = {"available": False, "message": ""}
-        try:
-            # 确保 Docker daemon 运行（未运行则自动启动 Docker Desktop 等）
-            _docker_ok, _docker_msg = _ensure_docker_running()
-            if not _docker_ok:
-                raise RuntimeError(_docker_msg)
-
-            # 1. 容器已在运行？
-            ps_result = sp.run(
-                ["docker", "ps", "--filter", "name=neo4j-events", "--format", "{{.Names}}"],
-                capture_output=True, timeout=10, text=True,
-            )
-            if ps_result.stdout.strip() == "neo4j-events":
-                neo4j_status = {"available": True, "message": "Neo4j 容器已在运行"}
-
-            # 2. 容器存在但停止？→ docker start
-            else:
-                psa_result = sp.run(
-                    ["docker", "ps", "-a", "--filter", "name=neo4j-events", "--format", "{{.Names}}"],
-                    capture_output=True, timeout=10, text=True,
-                )
-                if psa_result.stdout.strip() == "neo4j-events":
-                    sp.run(["docker", "start", "neo4j-events"],
-                           capture_output=True, timeout=30, check=True, text=True)
-                    _log("[+] Neo4j 容器已启动（原已存在但停止）")
-                    neo4j_status = {"available": True, "message": "Neo4j 容器已启动"}
-
-                # 3. 容器不存在
-                else:
-                    if auto_create:
-                        # install 模式：创建+启动
-                        data_dir = os.path.join(os.path.expanduser("~"), "bw-security-analysis", "db", "events")
-                        os.makedirs(data_dir, exist_ok=True)
-                        # 先 pull 镜像并实时显示进度（避免 docker run 隐式 pull 时长时间无反馈）
-                        _pull_image_with_progress("neo4j:5")
-                        sp.run(
-                            ["docker", "run", "-d", "--name", "neo4j-events",
-                             "-p", "7474:7474", "-p", "7687:7687",
-                             "-e", "NEO4J_AUTH=neo4j/neo4j_password",
-                             "-v", f"{data_dir}:/data", "neo4j:5"],
-                            capture_output=True, timeout=60, text=True, check=True,
-                        )
-                        _log(f"[+] Neo4j 容器已创建并启动，数据目录: {data_dir}")
-                        neo4j_status = {"available": True, "message": "Neo4j 容器已创建并启动"}
-                    else:
-                        # check-preinstall 模式：不创建，返回 unavailable（→ fail-fast）
-                        neo4j_status = {"available": False, "message": "Neo4j 容器不存在，请运行安装脚本"}
-
-        except RuntimeError as e:
-            # _ensure_docker_running 启动/确认失败（未安装、启动超时、无法自动启动）
-            neo4j_status = {"available": False, "message": str(e)}
-        except FileNotFoundError:
-            neo4j_status = {"available": False, "message": "Docker 未安装（events MCP 需要 Docker 运行 Neo4j）"}
-        except sp.CalledProcessError as e:
-            neo4j_status = {"available": False, "message": f"Docker 命令失败: {e}"}
-        except sp.TimeoutExpired:
-            neo4j_status = {"available": False, "message": "Docker 操作超时"}
-        except Exception as e:
-            neo4j_status = {"available": False, "message": f"Docker 异常: {e}"}
-
-    deepseek_status = {
+    result["_deepseek_api_key"] = {
         "available": deepseek_ok,
         "message": "已配置" if deepseek_ok else "未配置（请在 .opencode/.ai_env 中设置 DEEPSEEK_API_KEY）",
     }
 
-    result["_neo4j"] = neo4j_status
-    result["_deepseek_api_key"] = deepseek_status
+    # 3. Docker + 容器检测（仅在 DEEPSEEK 已配置时）
+    if not deepseek_ok:
+        result["_neo4j"] = {
+            "available": False,
+            "auto_recoverable": False,
+            "message": "DEEPSEEK_API_KEY 未配置，跳过 Docker/Neo4j 检测",
+        }
+    else:
+        events_cfg = metadata.get("events", {})
+        container_name = events_cfg.get("requires_docker")
+        if not container_name:
+            result["_neo4j"] = {"available": False, "auto_recoverable": False, "message": "events MCP 未声明 requires_docker"}
+        else:
+            docker_status = _check_docker_binary_and_daemon()
+            if not docker_status["installed"]:
+                # Docker 未安装 → 需要用户手动安装，events lifespan 无法自动恢复
+                result["_neo4j"] = {"available": False, "auto_recoverable": False, "message": "Docker 未安装"}
+            elif not docker_status["daemon_running"]:
+                # Docker daemon 未运行 → events lifespan 会自动启动 daemon
+                result["_neo4j"] = {"available": False, "auto_recoverable": True, "message": "Docker daemon 未运行（events MCP lifespan 会自动启动）"}
+            else:
+                container_status = _check_container_status(container_name)
+                if container_status == "running":
+                    result["_neo4j"] = {"available": True, "auto_recoverable": True, "message": "Neo4j 容器已在运行"}
+                elif container_status == "stopped":
+                    # 容器已停止 → events lifespan 会自动 docker start
+                    result["_neo4j"] = {"available": False, "auto_recoverable": True, "message": f"容器 {container_name} 已停止（events MCP lifespan 会自动启动）"}
+                else:
+                    # 容器不存在 → 检查镜像是否已下载
+                    image_ok = _check_image_exists(NEO4J_IMAGE)
+                    if image_ok:
+                        # 镜像已下载 → events lifespan docker run 很快，可自动恢复
+                        result["_neo4j"] = {"available": False, "auto_recoverable": True, "message": f"容器 {container_name} 不存在（events MCP lifespan 会自动创建）"}
+                    else:
+                        # 镜像未下载 → docker pull 需要几分钟，不应该自动恢复
+                        result["_neo4j"] = {"available": False, "auto_recoverable": False, "message": f"容器 {container_name} 不存在且 {NEO4J_IMAGE} 镜像未下载，请运行 install.sh"}
+
     return result
+
+
+def _ensure_mcp_infra():
+    """启动 MCP 基础设施（install 子命令用，有副作用）。
+
+    职责：
+    - 启动 Docker daemon（如果未运行，调 _ensure_docker_running）
+    - 启动声明的容器（如果停止）
+    - 创建容器（如果不存在）
+
+    check-preinstall 路径不调用此函数。
+    """
+    import subprocess as sp
+
+    metadata = _load_mcp_metadata()
+    events_cfg = metadata.get("events", {})
+    container_name = events_cfg.get("requires_docker")
+
+    if not container_name:
+        return {"_neo4j": {"available": False, "message": "events MCP 未声明 requires_docker"}}
+
+    # 1. 确保 Docker daemon 运行（_ensure_docker_running 已存在，含自动启动）
+    try:
+        _docker_ok, _docker_msg = _ensure_docker_running()
+        if not _docker_ok:
+            return {"_neo4j": {"available": False, "message": _docker_msg}}
+    except Exception as e:
+        return {"_neo4j": {"available": False, "message": f"Docker 启动失败: {e}"}}
+
+    # 2. 容器已在运行？
+    try:
+        ps_result = sp.run(
+            ["docker", "ps", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
+            capture_output=True, timeout=10, text=True,
+        )
+        if ps_result.stdout.strip() == container_name:
+            _log(f"[+] {container_name} 容器已在运行")
+            return {"_neo4j": {"available": True, "message": f"{container_name} 容器已在运行"}}
+
+        # 3. 容器存在但停止？→ docker start
+        psa_result = sp.run(
+            ["docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
+            capture_output=True, timeout=10, text=True,
+        )
+        if psa_result.stdout.strip() == container_name:
+            sp.run(["docker", "start", container_name],
+                   capture_output=True, timeout=30, check=True, text=True)
+            _log(f"[+] {container_name} 容器已启动（原已存在但停止）")
+            return {"_neo4j": {"available": True, "message": f"{container_name} 容器已启动"}}
+
+        # 4. 容器不存在 → 创建+启动
+        data_dir = os.path.join(os.path.expanduser("~"), "bw-security-analysis", "db", "events")
+        os.makedirs(data_dir, exist_ok=True)
+        _pull_image_with_progress(NEO4J_IMAGE)
+        sp.run(
+            ["docker", "run", "-d", f"--name={container_name}",
+             "-p", "7474:7474", "-p", "7687:7687",
+             "-e", "NEO4J_AUTH=neo4j/neo4j_password",
+             "-v", f"{data_dir}:/data", NEO4J_IMAGE],
+            capture_output=True, timeout=60, text=True, check=True,
+        )
+        _log(f"[+] {container_name} 容器已创建并启动，数据目录: {data_dir}")
+        return {"_neo4j": {"available": True, "message": f"{container_name} 容器已创建并启动"}}
+
+    except sp.CalledProcessError as e:
+        return {"_neo4j": {"available": False, "message": f"Docker 命令失败: {e}"}}
+    except sp.TimeoutExpired:
+        return {"_neo4j": {"available": False, "message": "Docker 操作超时"}}
+    except Exception as e:
+        return {"_neo4j": {"available": False, "message": f"Docker 异常: {e}"}}
+
+
 
 
 def main():
