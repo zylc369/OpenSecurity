@@ -1,12 +1,11 @@
 import { join } from "path";
 import {
   existsSync,
-  readFileSync,
   unlinkSync,
   mkdirSync,
   writeFileSync,
 } from "fs";
-import { ENV_CACHE_FILE, TASK_SESSIONS_DIR, WORKSPACE_DIR } from "./constants";
+import { TASK_SESSIONS_DIR, WORKSPACE_DIR } from "./constants";
 import { debugLog } from "./logging";
 import TaskSessionPersistenceUtils, {
   TaskRawData,
@@ -85,18 +84,5 @@ export default class TaskSessionPersistence {
         sessionID,
       );
     }
-  }
-
-  /** 读取 环境缓存 文件，失败返回 null */
-  static readEnvCache<T>(sessionID?: string): T | null {
-    const filePath = ENV_CACHE_FILE;
-    try {
-      if (existsSync(filePath)) {
-        return JSON.parse(readFileSync(filePath, "utf-8")) as T;
-      }
-    } catch (e) {
-      debugLog(`readJsonSafe failed: ${filePath} error=${e}`, sessionID);
-    }
-    return null;
   }
 }

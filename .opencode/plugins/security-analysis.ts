@@ -3,8 +3,6 @@ import {
   readFileSync,
   statSync,
   existsSync,
-  openSync,
-  closeSync,
 } from "fs";
 import { join, dirname, delimiter } from "path";
 import { tmpdir } from "os";
@@ -15,7 +13,6 @@ import {
   PLUGIN_DIR,
   OPENCODE_ROOT,
   DATA_DIR,
-  ENV_CACHE_FILE,
   WORKSPACE_DIR,
   TASK_SESSIONS_DIR,
   LOGS_DIR,
@@ -27,6 +24,7 @@ import {
   AGENT_SECURITY_ANALYSIS_EVOLVE,
   AGENT_SECURITY_COORDINATOR,
   SECURITY_AGENTS,
+  SECURITY_ANALYSIS_AGENTS,
   AGENTS_WITH_DELEGATION_RULES,
   AGENT_SEARCHER,
   AGENT_MEMORIST,
@@ -38,7 +36,7 @@ import { ctx } from "./lib/context";
 import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
 import TaskSessionPersistence from "./lib/task-session-persistence";
-import { getPythonCmd, getInstallHint } from "./lib/venv";
+import { getPythonCmd, getInstallHint, getIdatPath, getCompilerName } from "./lib/venv";
 import {
   hasBuwaiExtensionId,
   loadSnippet,
@@ -48,33 +46,6 @@ import { maybeResumeAnalysis } from "./lib/persistence";
 import { recordTimeline, flushTimeline } from "./lib/timeline";
 import { runDetectEnv, type EnvironmentCheckResult } from "./lib/env-check";
 import { McpManager } from "./lib/mcp-manager";
-
-interface EnvData {
-  data?: {
-    venv_python?: string;
-    compiler?: {
-      available: boolean;
-      type: string;
-      path: string;
-      vcvarsall?: string;
-    };
-    packages?: Record<string, { available: boolean; version: string }>;
-    ida_pro?: {
-      available: boolean;
-      path: string | null;
-      idat_path?: string | null;
-    };
-    tools?: Record<
-      string,
-      {
-        available: boolean;
-        version: string | null;
-        description?: string;
-        resolved_path?: string | null;
-      }
-    >;
-  };
-}
 
 // 根据 agent 名获取脚本目录；不在映射表中时返回 undefined
 function getScriptDir(agentName: string | undefined): string | undefined {
@@ -121,7 +92,6 @@ function getCompactionContext(agentName: string): string {
 
 async function buildEnvSection(
   agentName: string | undefined,
-  envInfo: EnvData["data"],
   session: SessionData,
 ): Promise<string> {
   const sessionID = session.sessionID;
@@ -152,46 +122,26 @@ async function buildEnvSection(
 
     // OPENSECURITY_FLOW_ID：事件库分区标识
     envSection += `- 事件库 Flow ID ($OPENSECURITY_FLOW_ID): ${session.flowId}。标识当前分析任务的事件库分区。主任务和它启动的所有子任务共享同一个 Flow ID——子 agent 写入的事件（工具执行记录、LLM 响应）和父 agent 写入的事件存在同一个分区里，互相可搜索。调用事件库 MCP 的搜索工具时，将此值作为 group_id 参数传入，限定搜索范围到当前任务的事件，避免搜到其他无关任务的数据。\n`;
-    const idaPro = envInfo?.ida_pro;
-    if (idaPro?.available && idaPro.idat_path) {
-      envSection += `- IDA Pro: ${idaPro.path}\n`;
-      envSection += `- IDA Pro 命令行工具 idat ($IDAT): ${idaPro.idat_path}\n`;
+
+    // IDA Pro（用 getIdatPath 判断是否配置，不注入完整路径——shell.env 已注入 $IDAT）
+    const idatPath = getIdatPath();
+    if (idatPath) {
+      envSection += `- IDA Pro: 已配置（用 $IDAT 调用 idat）\n`;
     } else {
       envSection += `- IDA Pro: 未配置\n`;
     }
+
     const pythonCmd = getPythonCmd();
     if (pythonCmd) {
       envSection += `- Python ($PYTHON_CMD): ${pythonCmd}\n`;
     }
 
-    if (envInfo) {
-      const compiler = envInfo.compiler;
-      if (compiler?.available) {
-        envSection += `- 编译器: ${compiler.type} (${compiler.path})\n`;
-        if (compiler.vcvarsall) {
-          envSection += `- vcvarsall: ${compiler.vcvarsall}\n`;
-        }
-      } else {
-        envSection += `- 编译器: 未检测到\n`;
-      }
-      if (envInfo.packages) {
-        const pkgs = Object.entries(envInfo.packages)
-          .filter(([, v]) => v.available)
-          .map(([k, v]) => `${k}@${v.version}`)
-          .join(", ");
-        envSection += `- Python 包: ${pkgs}\n`;
-      }
-    }
-
-    // 注入外部工具（状态来自 env_cache.json，detect_env 已按 agent 过滤写入）
-    const envTools = envInfo?.tools || {};
-    for (const [name, toolStatus] of Object.entries(envTools)) {
-      if (toolStatus.available) {
-        const ver = toolStatus.version || "可用";
-        const desc = toolStatus.description || name;
-        const resolved = toolStatus.resolved_path || "";
-        envSection += `- ${desc}: ${resolved} (${ver})\n`;
-      }
+    // 编译器（用 getCompilerName 检测 PATH 中的编译器，只告知可用性，不注入完整路径）
+    const compilerName = getCompilerName();
+    if (compilerName) {
+      envSection += `- 编译器: ${compilerName}（在 PATH 中可用）\n`;
+    } else {
+      envSection += `- 编译器: 未检测到\n`;
     }
 
     return envSection;
@@ -258,28 +208,32 @@ async function abortSession(sessionID: string, reason: string): Promise<void> {
 // 工具开始执行时间戳（tool.execute.before → tool.execute.after 配对计算耗时）
 const toolStartTimes = new Map<string, number>();
 
-// 统一环境检测入口（chat.message 调用此函数）
-// 检测顺序：PythonCmd 可用性 → 环境检测（全量+预装）
-async function checkEnvironment(
-  agent: string,
-  sessionID: string,
-): Promise<EnvironmentCheckResult> {
-  // 确保 .ai_env 存在（首次启动时 Plugin 自动创建，避免 detect_env 报错）
-  const aiEnvPath = join(OPENCODE_ROOT, ".ai_env");
-  if (!existsSync(aiEnvPath)) {
-    debugLog(
-      `checkEnvironment: .ai_env 不存在，自动创建 sessionID=${sessionID}`,
-      sessionID,
-    );
-    closeSync(openSync(aiEnvPath, "w"));
-  }
+// ─── 环境检测：并行预热 + Promise cache ────────────────────────
+//
+// 启动时并行预热所有领域 agent + Coordinator 的环境检测。
+// chat.message 命中 Promise cache 时直接 await（已完成则零开销）。
+// 检测失败的 Promise 会在 chat.message 里被重新 set（异步重试，不阻塞当前 abort）。
+const envCheckPromises = new Map<string, Promise<EnvironmentCheckResult>>();
 
+/**
+ * 单个 agent 的环境检测（封装为 Promise，供并行预热 + chat.message 复用）。
+ * - venv 未就绪 → 返回 {ready: false, message: 安装提示}
+ * - venv 就绪 → spawn detect_env.py check-preinstall <agent>
+ * - 任何异常 → catch 后返回 {ready: false, message: 异常信息}
+ *
+ * sessionID 传 "preheat"：预热时无真实 session，runDetectEnv 的 getTaskDir 返回 null，
+ * buildDetectEnvArgs 不加 --output，detect_env.py 不写 taskDir/env.json。
+ * .ai_env 文件不存在时由 detect_env.py 的 _ensure_ai_env_template 自动创建带注释模板。
+ */
+function preheatEnvCheck(agent: string): Promise<EnvironmentCheckResult> {
   const pythonCmd = getPythonCmd();
   if (!pythonCmd) {
-    return { ready: false, message: getInstallHint() };
+    return Promise.resolve({ ready: false, message: getInstallHint() });
   }
-
-  return await runDetectEnv(agent, pythonCmd, sessionID);
+  return runDetectEnv(agent, pythonCmd, "preheat").catch((e) => ({
+    ready: false,
+    message: `[预热异常] ${agent}: ${(e as Error)?.message ?? String(e)}`,
+  }));
 }
 
 // 终止 session 并保存错误信息到 sessionData（由 session.idle 事件取出输出）。
@@ -800,13 +754,11 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   debugLog(`  PLUGIN_DIR: ${PLUGIN_DIR}`);
   debugLog(`  OPENCODE_ROOT: ${OPENCODE_ROOT}`);
   debugLog(`  DATA_DIR: ${DATA_DIR}`);
-  debugLog(`  ENV_CACHE_FILE: ${ENV_CACHE_FILE}`);
   debugLog(`  WORKSPACE_DIR: ${WORKSPACE_DIR}`);
   debugLog(`  TASK_SESSIONS_DIR: ${TASK_SESSIONS_DIR}`);
   debugLog(`  LOGS_DIR: ${LOGS_DIR}`);
   debugLog(`  DEFAULT_LOG: ${DEFAULT_LOG}`);
   debugLog(`  directory param: ${directory}`);
-  debugLog(`  env_cache exists: ${existsSync(ENV_CACHE_FILE)}`);
   debugLog(`  ctx.client: ${!!ctx.client}`);
   debugLog(
     `  PYTHON_CMD: ${getPythonCmd() ?? "未初始化（等待首次 chat.message 触发）"}`,
@@ -839,6 +791,18 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   mcpManager.registerAll().catch((e) => {
     debugLog(`[McpManager] registerAll 失败: ${e?.message ?? e}`);
   });
+
+  // ── 并行预热环境检测（fire-and-forget）──
+  // 启动时立即并行检测所有领域 agent + Coordinator 的环境。
+  // chat.message 命中 Promise cache 时直接 await（已完成则零开销）。
+  // venv 未就绪时 preheatEnvCheck 返回 {ready: false}，不 spawn。
+  const preheatAgents = [...SECURITY_ANALYSIS_AGENTS, AGENT_SECURITY_COORDINATOR];
+  for (const agent of preheatAgents) {
+    envCheckPromises.set(agent, preheatEnvCheck(agent));
+  }
+  debugLog(
+    `并行预热 ${preheatAgents.length} 个 agent 的环境检测: ${preheatAgents.join(", ")}`,
+  );
 
   return {
     tool: {},
@@ -882,9 +846,40 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           sessionID,
         );
 
-        // 环境检测：不 ready → 存错误信息到 sessionData + 终止（不 throw，不调 session.prompt）
-        const envCheck = await checkEnvironment(agent, sessionID);
-        if (!envCheck.ready) {
+        // 环境检测（三分支）：
+        //   1. 命中预热 cache（领域 agent + Coordinator）→ await Promise，失败时重新 set 异步重试
+        //   2. evolve/searcher/memorist → 只查 venv，不跑 runDetectEnv（它们的工作不依赖领域专用包）
+        //   3. 其他未识别 agent → 跳过
+        // 不 ready → 存错误信息到 sessionData + 终止（不 throw，不调 session.prompt）
+        let envCheck: EnvironmentCheckResult | null = null;
+
+        if (envCheckPromises.has(agent)) {
+          // 分支 1: 命中预热 cache
+          envCheck = await envCheckPromises.get(agent)!;
+          if (!envCheck.ready) {
+            // 失败时重新 set 异步 preheat（fire-and-forget），让用户修复后下次有机会重试
+            envCheckPromises.set(agent, preheatEnvCheck(agent));
+          }
+        } else if (
+          agent === AGENT_SECURITY_ANALYSIS_EVOLVE ||
+          agent === AGENT_SEARCHER ||
+          agent === AGENT_MEMORIST
+        ) {
+          // 分支 2: evolve/searcher/memorist → 只查 venv
+          const pythonCmd = getPythonCmd();
+          if (!pythonCmd) {
+            envCheck = { ready: false, message: getInstallHint() };
+          } else {
+            envCheck = null; // venv 就绪，无需检测
+            debugLog(
+              `chat.message: ${agent} 跳过 runDetectEnv（轻量路径，只查 venv）`,
+              sessionID,
+            );
+          }
+        }
+        // 分支 3: 其他 agent → envCheck 保持 null，跳过环境检测
+
+        if (envCheck && !envCheck.ready) {
           debugLog(
             `chat.message: 环境检测未通过 agent=${agent}，输出错误并终止`,
             sessionID,
@@ -1036,10 +1031,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           return;
         }
 
-        const envData = TaskSessionPersistence.readEnvCache<EnvData>(sessionID);
-        const envInfo = envData?.data;
-
-        const envSection = await buildEnvSection(agentName, envInfo, session);
+        const envSection = await buildEnvSection(agentName, session);
         output.system.push(envSection);
 
         // 注入"可委派 agent 清单"——只对 AGENTS_WITH_DELEGATION_RULES 成员生效
@@ -1140,9 +1132,8 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         // OPENSECURITY_FLOW_ID（事件库分区标识，agent 调搜索工具时作为 group_id 传入）
         output.env.OPENSECURITY_FLOW_ID = session.flowId;
 
-        // IDAT（从 env_cache.json 的 ida_pro.idat_path 读取，detect_env 检测后写入）
-        const envData = TaskSessionPersistence.readEnvCache<EnvData>(sessionID);
-        const idatPath = envData?.data?.ida_pro?.idat_path;
+        // IDAT（从 getIdatPath 获取，惰性缓存，读 .ai_env 的 IDA_PRO_HOME 拼接 + 校验）
+        const idatPath = getIdatPath();
         if (idatPath) {
           output.env.IDAT = idatPath;
         }
@@ -1170,7 +1161,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     },
 
     // 工具执行前触发（awaited）
-    // 职责：记录时间线（环境变量注入已迁移到 shell.env hook；任务初始化+环境检测由 chat.message 的 checkEnvironment 兜底）
+    // 职责：记录时间线（环境变量注入已迁移到 shell.env hook；任务初始化+环境检测由 chat.message 的 preheatEnvCheck 兜底）
     "tool.execute.before": async (input, output) => {
       try {
         const sid = input.sessionID;

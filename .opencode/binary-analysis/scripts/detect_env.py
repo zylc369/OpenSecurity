@@ -36,7 +36,6 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 CACHE_DIR = os.path.expanduser("~/bw-security-analysis")
-CACHE_FILE = os.path.join(CACHE_DIR, "env_cache.json")
 VENV_DIR = os.path.join(CACHE_DIR, ".venv")
 
 # events MCP Docker 基础设施配置（与 events/server.py 的 _NEO4J_* 常量保持一致）
@@ -431,12 +430,6 @@ EXTERNAL_TOOLS: list[Dependency] = [
         },
     ),
 ]
-
-
-def _save_cache(data):
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"timestamp": time.time(), "data": data}, f, indent=2, ensure_ascii=False)
 
 
 def _detect_compiler():
@@ -916,7 +909,7 @@ def _check_preinstall(agent):
             # Docker 未安装 / 未声明 requires_docker → 需要用户手动处理，fail-fast
             return _fail(f"neo4j: {neo4j.get('message', '不可用')}")
 
-    # --- 全部必需依赖通过 → 写 cache ---
+    # --- 全部必需依赖通过 → 组装 data ---
     data = {
         "compiler": compiler,
         "packages": packages,
@@ -924,7 +917,6 @@ def _check_preinstall(agent):
         "tools": tools,
         "mcp_servers": mcp_servers,
     }
-    _save_cache(data)
     result: dict = {"success": True, "data": data, "errors": []}
     if optional_warnings:
         result["optional_warnings"] = optional_warnings

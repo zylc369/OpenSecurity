@@ -22,7 +22,6 @@ export const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 export const OPENCODE_ROOT = findOpenCodeRoot(PLUGIN_DIR);
 
 export const DATA_DIR = join(homedir(), "bw-security-analysis");
-export const ENV_CACHE_FILE = join(DATA_DIR, "env_cache.json");
 export const WORKSPACE_DIR = join(DATA_DIR, "workspace");
 export const TASK_SESSIONS_DIR = join(WORKSPACE_DIR, ".task_sessions");
 

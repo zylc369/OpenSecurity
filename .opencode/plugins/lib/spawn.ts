@@ -1,14 +1,19 @@
-import { spawnSync } from "child_process";
-
 /**
- * 标准化的子进程执行结果。
- * 贴近 Node.js spawnSync 的返回结构，便于业务代码从 spawnSync 迁移。
+ * 跨平台执行子进程，返回标准化结果。永不 reject（包括子进程启动失败、
+ * 运行崩溃、超时等情况都通过 error 字段返回），调用方可以放心 await。
+ *
+ * 统一用 Bun.spawn（异步），两个平台同一套代码。
+ * OpenCode 跑在 Bun runtime 上，Bun.spawn 全局可用。
+ *
+ * 历史：曾用 spawnSync（同步），但 async 函数里调用 spawnSync 会阻塞整个事件循环
+ * （spawnSync 在返回 Promise 之前就同步执行完了）。并行预热 6 个检测时阻塞 ~27 秒，
+ * 导致 OpenCode 启动黑屏。改用异步 Bun.spawn 后 6 个检测真正并行（~5 秒），不阻塞。
  */
+
+/** 标准化的子进程执行结果。 */
 export interface ProcessResult {
-  /** 进程退出码；被信号终止或超时时为 null */
+  /** 进程退出码；被信号终止或超时时遵循 POSIX 约定（128+signal_num，如 SIGTERM→143） */
   status: number | null;
-  /** 终止进程的信号名（Unix 概念）；Windows 上始终为 null */
-  signal: string | null;
   /** stdout 内容（已转字符串） */
   stdout: string;
   /** stderr 内容（已转字符串） */
@@ -26,24 +31,8 @@ export interface RunProcessOptions {
 }
 
 /**
- * 跨平台执行子进程，返回标准化结果。永不 reject（包括子进程启动失败、
- * 运行崩溃、超时等情况都通过 error 字段返回），调用方可以放心 await。
- *
- * 平台分支：
- * - Windows：用 Bun.spawn（异步）绕开 spawnSync 的 bug。
- *   现象：OpenCode 进程内 spawnSync（无论目标 exe 是 python.exe 还是
- *     cmd.exe、是否 shell:true）约 50% 概率 4-9ms 立即返回 ETIMEDOUT
- *     （未真正等 timeout 满）。独立 Node/Bun 脚本无法复现——触发条件
- *     与 OpenCode 主进程内部状态相关，未完全定位。
- *   历史：曾误归到 Bun issue #32011
- *     （https://github.com/oven-sh/bun/issues/32011），但 #32011 症状
- *     是稳定挂起 5 秒、shell:true 可修；本环境的症状是 4-9ms 立即假超时、
- *     shell:true 无效——不是同一个 bug。
- * - Unix：直接用 Node.js spawnSync。Unix 上 spawnSync 工作正常，无需绕开。
- *
- * 设计权衡：函数签名统一为 async（即使 Unix 路径是同步实现）。
- * TypeScript 不允许同一函数既 sync 又 async，统一 async 让业务代码
- * 不用关心平台差异。Unix 路径付出一次 await 代价，但不需处理 stream。
+ * 跨平台执行子进程，返回标准化结果。永不 reject。
+ * 用 Bun.spawn（异步）避免阻塞事件循环。
  */
 export async function runProcess(
   exe: string,
@@ -56,67 +45,50 @@ export async function runProcess(
   // Unix 上默认就是 UTF-8，加上是无害的防御性配置，保持两端行为一致。
   const env = { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", ...options.env };
 
-  // ── Unix 路径：直接用 spawnSync ──────────────────────────────────
-  if (process.platform !== "win32") {
-    const r = spawnSync(exe, args, {
-      encoding: "utf8",
-      env,
-      timeout: options.timeout,
-    });
-    return {
-      status: r.status,
-      signal: r.signal,
-      stdout: r.stdout ?? "",
-      stderr: r.stderr ?? "",
-      error: r.error ?? null,
-    };
-  }
-
-  // ── Windows 路径：Bun.spawn 异步，手动管理超时 ────────────────────
-  const TIMEOUT_MS = options.timeout;
-  let proc: any;
-  try {
-    // Bun 全局：OpenCode 跑在 Bun runtime（用 globalThis as any 避开 TS 类型报错）
-    proc = (globalThis as any).Bun.spawn({
-      cmd: [exe, ...args],
-      env,
-      stdout: "pipe",
-      stderr: "pipe",
-      stdin: "ignore",
-    });
-  } catch (e) {
-    return {
-      status: null,
-      signal: null,
-      stdout: "",
-      stderr: "",
-      error: e as Error,
-    };
-  }
-
   return await new Promise<ProcessResult>((resolve) => {
     let settled = false;
-    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
-    const finish = (res: ProcessResult) => {
+    const finish = (result: ProcessResult) => {
       if (settled) return;
       settled = true;
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-      resolve(res);
+      if (timer) clearTimeout(timer);
+      resolve(result);
     };
 
+    // Bun.spawn 是全局 API（OpenCode 跑在 Bun runtime 上），用 globalThis as any 避开 TS 类型报错
+    let proc: any;
+    try {
+      proc = (globalThis as any).Bun.spawn({
+        cmd: [exe, ...args],
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+        stdin: "ignore",
+      });
+    } catch (e) {
+      finish({
+        status: null,
+        stdout: "",
+        stderr: "",
+        error: e as Error,
+      });
+      return;
+    }
+
     // 超时分支：到达 timeout 强制 kill 并返回错误
-    if (TIMEOUT_MS !== undefined) {
-      timeoutHandle = setTimeout(() => {
-        try { proc.kill(); } catch {}
+    if (options.timeout) {
+      timer = setTimeout(() => {
+        try {
+          proc.kill();
+        } catch {}
         finish({
           status: null,
-          signal: null, // Windows 没有 Unix 信号概念，硬编码会误导日志
           stdout: "",
           stderr: "",
-          error: new Error(`Bun.spawn 超时（${TIMEOUT_MS}ms）`),
+          error: new Error(`Bun.spawn 超时（${options.timeout}ms）`),
         });
-      }, TIMEOUT_MS);
+      }, options.timeout);
     }
 
     // 正常分支：消费 stdout/stderr 流 + 等退出码
@@ -128,11 +100,10 @@ export async function runProcess(
         const exitCode = await proc.exited; // Promise<number>
         const stdout = await stdoutPromise;
         const stderr = await stderrPromise;
-        finish({ status: exitCode, signal: null, stdout, stderr, error: null });
+        finish({ status: exitCode, stdout, stderr, error: null });
       } catch (e) {
         finish({
           status: null,
-          signal: null,
           stdout: "",
           stderr: "",
           error: e as Error,
