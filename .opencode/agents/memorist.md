@@ -86,9 +86,9 @@ START
 
 ### `mcp__knowledge__search_in_memory`（执行记忆库）
 
-- **查询范围**：只查执行记忆库（doc_type=memory）——工具执行记录、历史操作日志
-- **数据来源**：框架自动记录每次工具执行（bash/read/write/webfetch/websearch 等）的参数和结果
-- **参数**：`questions`（1-5 个中文问句）、`message`（任务语言日志）
+- **查询范围**：只查执行记忆库（doc_type=memory）——当前任务的工具执行记录
+- **数据来源**：框架自动记录每次工具执行（bash/read/websearch/webfetch/task）的参数和结果
+- **按任务隔离**：memory 按 flow_id 隔离，只返回当前任务的执行记录。调用时传 `flow_id` 参数（从 system prompt 的 $OPENSECURITY_FLOW_ID 获取）
 - **返回**：JSON `{results: [{id, question, answer, type, score}], count}`，按 score 降序
 - **score 阈值**：低于 0.2 的结果自动过滤
 

@@ -34,11 +34,22 @@ def main():
             continue
         try:
             entry = json.loads(line)
+            question = entry.get("question", "").strip()
+            answer = entry.get("answer", "").strip()
+            tool_type = entry.get("type", "").strip()
+            flow_id = entry.get("flow_id") or None
+            if not question or not answer:
+                print(f"[!] 跳过空记录: question 或 answer 为空", file=sys.stderr, flush=True)
+                continue
+            if not tool_type:
+                print(f"[!] 跳过记录: type（工具名）为空", file=sys.stderr, flush=True)
+                continue
             db.store(
-                question=entry.get("question", ""),
-                answer=entry.get("answer", ""),
-                type=entry.get("type", ""),
+                question=question,
+                answer=answer,
+                type=tool_type,
                 doc_type="memory",
+                flow_id=flow_id,
             )
         except json.JSONDecodeError as e:
             print(f"[!] invalid JSON: {e}", file=sys.stderr, flush=True)

@@ -61,6 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_answers_code_lang ON answers(code_lang);
 MIGRATE_COLUMNS = [
     ("guide_type", "TEXT NOT NULL DEFAULT ''"),
     ("code_lang", "TEXT NOT NULL DEFAULT ''"),
+    ("flow_id", "TEXT DEFAULT NULL"),
 ]
 
 
@@ -94,10 +95,19 @@ class MemoryDB:
 
     def _migrate_schema(self) -> None:
         """检查并添加缺失的列（向后兼容旧数据库）。"""
-        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(answers)").fetchall()}
+        col_info = {row[1]: row for row in self._conn.execute("PRAGMA table_info(answers)").fetchall()}
+        columns = set(col_info.keys())
         for col_name, col_def in MIGRATE_COLUMNS:
             if col_name not in columns:
                 self._conn.execute(f"ALTER TABLE answers ADD COLUMN {col_name} {col_def}")
+            elif col_name == "flow_id":
+                # flow_id 列已存在——检查是否允许 NULL（旧版是 NOT NULL DEFAULT ''）
+                # PRAGMA table_info 第 4 列 = notnull（1 = NOT NULL）
+                if col_info[col_name][3] == 1:  # notnull = 1
+                    # SQLite 3.35+ 支持 DROP COLUMN
+                    self._conn.execute("ALTER TABLE answers DROP COLUMN flow_id")
+                    self._conn.execute("ALTER TABLE answers ADD COLUMN flow_id TEXT DEFAULT NULL")
+                    self._conn.commit()
         self._conn.commit()
 
     def _embed(self, text: str) -> bytes:
@@ -113,18 +123,20 @@ class MemoryDB:
         doc_type: str = "answer",
         guide_type: str = "",
         code_lang: str = "",
+        flow_id: str | None = None,
     ) -> int:
         """插入一行及其 content 的 embedding。
 
         embed 目标是 answer（content 文本），不是 question。
         对齐 PentAGI：embed 内容文本，question 存表不 embed。
+        flow_id 仅 memory 类型用（按任务隔离）；answer/guide/code 为 None（全局共享）。
         """
         embedding = self._embed(answer)
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO answers(question, answer, type, doc_type, guide_type, code_lang, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (question, answer, type, doc_type, guide_type, code_lang, time.time()),
+                "INSERT INTO answers(question, answer, type, doc_type, guide_type, code_lang, flow_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (question, answer, type, doc_type, guide_type, code_lang, flow_id, time.time()),
             )
             row_id = cur.lastrowid
             self._conn.execute(
@@ -142,10 +154,12 @@ class MemoryDB:
         guide_type: str = "",
         code_lang: str = "",
         top_k: int = DEFAULT_TOP_K,
+        flow_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """对每个查询：按 cosine 找最近的，按 doc_type + type/guide_type/code_lang 过滤，再合并。
+        """对每个查询：按 cosine 找最近的，按 doc_type + type/guide_type/code_lang/flow_id 过滤，再合并。
 
         score < SCORE_THRESHOLD 的结果被过滤（不返回）。
+        flow_id 仅 doc_type=memory 且非 None 时生效（按任务隔离）；其他 doc_type 忽略 flow_id。
         """
         if not questions:
             return []
@@ -190,6 +204,10 @@ class MemoryDB:
             if code_lang:
                 conditions.append("code_lang = ?")
                 params.append(code_lang)
+            # flow_id 过滤：仅 doc_type=memory 且 flow_id 非 None 时生效（按任务隔离）
+            if doc_type == "memory" and flow_id is not None:
+                conditions.append("flow_id = ?")
+                params.append(flow_id)
 
             where_clause = " AND ".join(conditions)
             rows = self._conn.execute(

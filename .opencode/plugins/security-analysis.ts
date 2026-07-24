@@ -704,14 +704,30 @@ function ensureMemoryDaemon(): void {
 
 /**
  * 异步写入工具执行结果到 knowledge 向量库（doc_type=memory）。
- * 对齐 PentAGI executor.go:519 storeToolResult。
+ * 对齐 PentAGI executor.go:519 storeToolResult + registry.go:149 allowedStoringInMemoryTools。
  * fire-and-forget，失败只记日志，不影响 agent 运行。
  */
+
+// 白名单：只有有信息价值的工具结果才存入 memory（对齐 PentAGI allowedStoringInMemoryTools）
+const MEMORY_ALLOWED_TOOLS = new Set([
+  "bash",       // 命令输出有技术价值（对应 PentAGI Terminal）
+  "read",       // 文件内容可能有价值（对应 PentAGI File）
+  "websearch",  // 外部搜索结果（对应 PentAGI Google/DuckDuckGo）
+  "webfetch",   // 外部资料获取
+  "task",       // 子 agent 返回的精炼结果（对应 PentAGI Search/Coder/Pentester/Advice）
+]);
+
 function fireAndForgetMemory(
   toolName: string,
   args: unknown,
   output: string,
+  flowId: string,
 ): void {
+  // 白名单检查（对齐 PentAGI allowedStoringInMemoryTools）
+  if (!MEMORY_ALLOWED_TOOLS.has(toolName)) {
+    return;
+  }
+
   ensureMemoryDaemon();
 
   if (!memoryDaemon || !memoryDaemon.stdin || memoryDaemon.stdin.destroyed) {
@@ -728,6 +744,7 @@ function fireAndForgetMemory(
       question,
       answer: text,
       type: toolName,
+      flow_id: flowId,
     }) + "\n";
 
   if (memoryDaemonReady) {
@@ -1221,13 +1238,17 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
 
         const toolName = input.tool;
 
-        // 时间线记录：工具执行完成（计算耗时）
+        // 时间线记录：工具执行完成（计算耗时 + 操作日志）
         const startTime = toolStartTimes.get(input.callID);
         toolStartTimes.delete(input.callID);
+        // 从工具参数提取 message（对齐 PentAGI executor.go:510 getMessage）
+        const toolArgs = input.args as Record<string, unknown> | undefined;
+        const toolMessage = typeof toolArgs?.message === "string" ? toolArgs.message.trim().slice(0, 80) : "";
         recordTimeline(sid, {
           timestamp: Date.now(),
           type: "tool.after",
           tool: toolName,
+          detail: toolMessage || undefined,
           duration: startTime ? Date.now() - startTime : undefined,
         });
 
@@ -1244,7 +1265,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           );
 
           // 写入 knowledge 向量库 memory（对齐 PentAGI executor.go:519 storeToolResult）
-          fireAndForgetMemory(toolName, input.args, output.output || "");
+          fireAndForgetMemory(toolName, input.args, output.output || "", session.flowId);
         }
 
         debugLog(`tool.execute.after: tool=${toolName}`, sid);

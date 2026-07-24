@@ -19,34 +19,29 @@ permission:
 
 ## 语言策略（中文叙述 + 英文技术术语原样保留）
 
-你在**两条并行通道**上工作。每个工具参数的通道由下面的规则固定，不要从上下文推断。
+你在**两条并行通道**上工作。
 
-1. **向量库通道 —— 中文（叙述） + 英文（技术术语原样保留）**
-   - `mcp__knowledge__search_answer.questions`：**字符串数组**，1-5 个中文自然问句。每个问句独立 embed 并独立检索，结果合并按最高分排序
-     - 精确查 1 个事实：`["OpenSSL 心脏出血漏洞怎么利用"]`（1 个问句够用）
-     - 多角度查复杂概念：`["OpenSSL heartbeat 漏洞", "CVE-2014-0160 利用方法", "TLS 心跳扩展 内存泄露"]`（3 个不同角度，提高召回率）
-     - 上限 5 个：超过会浪费 embedding 计算
-   - `mcp__knowledge__store_answer.question`：**一个字符串**（不是数组）。中文自然问句，**用"未来谁会查这条知识、他会怎么问"的角度去表述**（例如：发现 Heartbleed 后存储时，question 写成 `"OpenSSL 心脏出血漏洞的利用方式"`，而不是写成答案式的 `"CVE-2014-0160 是 OpenSSL heartbeat 扩展的内存泄露漏洞"`）
-     - 调 `store_answer` 前必须先调 `search_answer`——看已有 question 怎么写，新 store 时模仿那个角度
-   - `mcp__knowledge__store_answer.answer`：中文叙述，但**遇到本身就是英文的专业标识符必须原样保留**（包括：CVE 编号如 `CVE-2014-0160`、函数名如 `Interceptor.attach`、payload、shell 命令、URL、库名、错误字符串）。例如：`"CVE-2014-0160 允许通过 heartbeat 扩展读取 64KB 内存。PoC: python heartbleed-poc.py --target <url>"`
-   - 原因：BGE-M3 同语言匹配分数最高（~0.84 vs 跨语言 ~0.63）。问句式 question + 中文表述让未来中文查询以最高分命中。
+1. **向量库通道 —— 中文**
+   - knowledge MCP 工具（search_answer/store_answer/search_guide/store_guide/search_code/store_code/search_in_memory）的所有 `questions`/`question`/`answer`/`guide`/`code` 参数：用中文
+   - 每个问句独立 embed 并独立检索，结果合并按最高分排序
+   - 原因：BGE-M3 同语言匹配分数最高（~0.84 vs 跨语言 ~0.63）
+   - 查询示例：
+     - 精确查 1 个事实：`["OpenSSL 心脏出血漏洞怎么利用"]`
+     - 多角度查复杂概念：`["OpenSSL heartbeat 漏洞", "CVE-2014-0160 利用方法", "TLS 心跳扩展 内存泄露"]`
 
 2. **外部搜索通道 —— 用英文查询**
-   - 外部搜索工具（websearch/webfetch/web_render.py等）的查询参数：必须英文（技术内容英文主导，例如 exa.ai 对英文 query 召回质量最佳；如果调用方传了中文请求，调用查询前先把查询翻译成英文）
+   - websearch/webfetch/web_render.py 的查询参数：必须英文（技术内容英文主导，exa.ai 对英文 query 召回质量最佳）
 
 3. **memorist 委派 —— 中文**
    - 委派给 memorist 的 `Task(prompt)`：中文叙述
-   - memorist 共享本语言策略
 
 4. **返回给调用方 —— 中文叙述 + 英文技术术语原样保留**
    - 最终总结：叙述、解释、结论用中文
    - 原样保留英文：CVE 编号、payload、shell 命令、函数名、URL、库名、错误消息、代码块
-   - 示例：`"OpenSSL Heartbleed 漏洞（CVE-2014-0160）允许读取 64KB 内存，PoC：python heartbleed-poc.py --target {url}"`
-
-5. 工具的语言策略标识：`<tool>`的`queryLang`属性代表查询的主体语言、`storeLang`属性代表存储的主体语言。主体语言的设置和**遇到本身就是英文的专业标识符必须原样保留**这个规则不矛盾。
-
 
 **永远不要翻译英文专业标识符** —— 把 `CVE-2014-0160` 写成 `CVE-2014-0160 漏洞`（追加中文名词）是可以的，但不要改写 CVE 编号本身。Payload 和命令必须字节精确。
+
+**各参数的具体格式和枚举值参见 MCP 工具 schema（调用时自动可见），此处不重复。**
 
 ## 搜索流程（唯一权威，按此执行）
 
@@ -89,68 +84,38 @@ score ≥ 0.75 且未被排除？──YES──→ [交付]
 
 ## 工具说明（按流程顺序）
 
-### `mcp__knowledge__search_answer`（必起手，doc_type=answer）
+### `mcp__knowledge__search_answer`（必起手）
 
-- **参数**：`questions`（1-5 个中文问句，详见语言策略）、`type`（guide/vulnerability/code/tool/other 硬过滤）、`message`（任务语言日志）
 - **返回**：JSON `{results: [{id, question, answer, type, score}], count}`，按 score 降序
 - **查询范围**：只查答案知识库（doc_type=answer）—— searcher 主动存储的精炼 Q&A 知识
 
 ### `Task(subagent_type: "memorist")`
 
-- **委派 prompt 必须含**：明确的英文查询主题 + 期望返回的历史范围
-- **示例**：
-  ```
-  Task(
-    subagent_type: "memorist",
-    description: "Retrieve prior OpenSSL 1.0.1 analysis history",
-    prompt: "Find any prior agent analysis, scripts, or findings related to OpenSSL 1.0.1 heartbeat function vulnerabilities. Include both stored answers and execution history from $TASK_DIR."
-  )
-  ```
+- **委派 prompt 必须含**：明确的中文查询主题 + 期望返回的历史范围
 - **上限**：单次 searcher 调用最多 1 次委派（开销大）
 
 ### `websearch`（外部通用查询）
 
-- **参数**：`query`（**必须英文**，详见语言策略）、`numResults`、`type`（auto/fast/deep）
+- **查询参数必须英文**（详见语言策略）
 - **供应商**：exa.ai（语义搜索，技术/学术/文档内容强；实时新闻、非英文内容较弱）
 - **上限**：单次 searcher 调用最多 2 次不同 query
 
 ### `webfetch`（已知 URL 直读）
 
-- **参数**：`url`、`format`（markdown 默认/text/html）
-- **返回**：页面内容按 format 转换
+- **返回**：页面内容按 format 转换（markdown 默认）
 
 ### `bash: python $SHARED_DIR/scripts/web_render.py`
 
-- **参数**：`--url <URL> --format markdown|text|html --screenshot <PATH>`
 - **代价**：启动浏览器，比 webfetch 慢
 
-### `mcp__knowledge__store_answer`（沉淀新知到 doc_type=answer）
+### `mcp__knowledge__store_answer`（沉淀新知）
 
-- **参数**：`question`（一个中文问句，按"未来谁会查"的角度表述）、`answer`（中文叙述 + 英文术语原样保留）、`type`、`message`
 - **决策**：见下方"store 决策树"
-- **匿名化**：store 前自动清洗 IP/凭证/域名（你不需要手动匿名化，但仍建议避免在 answer 里写明文凭证）
+- **匿名化**：store 前自动清洗 IP/凭证/域名
 
-### `mcp__knowledge__search_guide`（搜索指南，doc_type=guide）
+### `mcp__knowledge__search_guide` / `store_guide` / `search_code` / `store_code`
 
-- **参数**：`questions`（1-5 个中文问句）、`type`（install/configure/use/pentest/development/other，必填硬过滤）、`message`
-- **用途**：搜索步骤指南、安装配置方法、渗透测试流程等操作类知识
-- **何时用**：需要"怎么做"的操作指引时（区别于 search_answer 的"是什么"知识）
-
-### `mcp__knowledge__store_guide`（存储指南，doc_type=guide）
-
-- **参数**：`guide`（markdown 格式指南文本）、`question`（问题）、`type`（install/configure/use/pentest/development/other）、`message`
-- **匿名化**：自动清洗敏感信息
-- **决策**：与 store_answer 相同决策树，但 content 是操作步骤/配置方法而非答案
-
-### `mcp__knowledge__search_code`（搜索代码片段，doc_type=code）
-
-- **参数**：`questions`（1-5 个中文问句）、`lang`（编程语言如 python/bash/golang，必填）、`message`
-- **用途**：搜索可复用的代码片段、payload、脚本模板
-
-### `mcp__knowledge__store_code`（存储代码片段，doc_type=code）
-
-- **参数**：`code`（源代码）、`question`（问题）、`lang`（编程语言）、`explanation`（代码详细说明）、`description`（简短摘要）、`message`
-- **匿名化**：自动清洗敏感信息
+- 何时用、怎么填参见 MCP schema 和下方"store 决策树"
 
 ## store 决策树（answer/guide/code 通用）
 
@@ -169,19 +134,10 @@ knowledge 搜索是否已返回此精确信息且 score ≥ 0.75？
   YES ↓
 
   → 选择存储工具：
-      - 操作步骤/配置方法 → store_guide（type=install/configure/use/pentest/development/other）
-      - 可运行代码/payload/脚本 → store_code（lang=编程语言）
-      - 知识/答案/分析 → store_answer（type=guide/vulnerability/code/tool/other）
-      - question: 用"本应能命中此答案的查询"表述（中文问句）
-      - content:  完整 markdown，中文叙述 + 英文技术术语原样保留
+      - 操作步骤/配置方法 → store_guide
+      - 可运行代码/payload/脚本 → store_code
+      - 知识/答案/分析 → store_answer
 ```
-
-**type 分类**：
-- `guide` — how-to / 方法论
-- `vulnerability` — CVE / bug / 漏洞利用细节
-- `code` — 可运行脚本 / payload / 命令
-- `tool` — 工具/库用法
-- `other` — 其他（很少用到）
 
 ## 查询工程模式
 

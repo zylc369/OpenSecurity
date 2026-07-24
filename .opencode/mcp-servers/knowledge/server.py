@@ -19,8 +19,10 @@ import json
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated, Literal
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 sys.path.insert(0, str(Path(__file__).parent))
 from anonymizer import anonymize  # noqa: E402
@@ -90,27 +92,14 @@ mcp = FastMCP("knowledge", lifespan=lifespan)
 
 
 @mcp.tool(
-    description=(
-        "Retrieve prior answers from the vector store. ALWAYS call this FIRST "
-        "before external searches to avoid re-researching known facts. "
-        "Returns up to 5 semantically similar stored answers, filtered by type."
-    ),
+    description="从向量库检索已有答案。必须首先调用，避免重复研究。返回最多 5 条语义相似的答案，按 type 过滤。",
 )
 async def search_answer(
-    questions: list[str],
-    type: str = "other",
-    message: str = "",
+    questions: Annotated[list[str], Field(description="1-5 个中文语义查询问句。")],
+    type: Annotated[Literal["guide", "vulnerability", "code", "tool", "other"], Field(description="硬过滤。guide=操作指南, vulnerability=漏洞分析, code=代码相关, tool=工具用法, other=其他")] = "other",
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
-    """Retrieve prior answers from the vector store.
-
-    Args:
-        questions: 1-5 English semantic queries (each with context and intent).
-        type: Hard filter - one of: guide, vulnerability, code, tool, other.
-        message: Engagement log entry in the engagement language.
-
-    Returns:
-        JSON string: {"results": [{id, question, answer, type, score}], "count": N}
-    """
+    """从向量库检索已有答案，按 type 过滤。"""
     await _ensure_ready()
     if type not in VALID_ANSWER_TYPES:
         return json.dumps({"error": f"invalid type '{type}'", "results": [], "count": 0})
@@ -121,19 +110,15 @@ async def search_answer(
 
 
 @mcp.tool(
-    description=(
-        "Persist a new (question, answer) pair to the vector store for future "
-        "retrieval. ONLY call when you discovered information not already in "
-        "the knowledge base. Anonymizes sensitive data before storage."
-    ),
+    description="存储新的(问题, 答案)到向量库供未来检索。仅在发现知识库中不存在的新知识时调用。存储前自动匿名化。",
 )
 async def store_answer(
-    question: str,
-    answer: str,
-    type: str = "other",
-    message: str = "",
+    question: Annotated[str, Field(description='关联问句。用"未来谁会查这条知识、他会怎么问"的角度表述（中文）。例：发现栈溢出后，question 写 "Windows x64 栈溢出漏洞的利用方法"')],
+    answer: Annotated[str, Field(description="答案正文（中文叙述）。英文技术标识符原样保留（CVE 编号、函数名、payload、shell 命令、URL）。存储前自动匿名化。")],
+    type: Annotated[Literal["guide", "vulnerability", "code", "tool", "other"], Field(description="guide=操作指南, vulnerability=漏洞分析, code=代码相关, tool=工具用法, other=其他")] = "other",
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
-    """Persist a new (question, answer) pair. Anonymizes before storage."""
+    """存储新的(问题, 答案)。存储前自动匿名化。"""
     await _ensure_ready()
     if type not in VALID_ANSWER_TYPES:
         return json.dumps({"stored": False, "error": f"invalid type '{type}'"})
@@ -149,23 +134,14 @@ async def store_answer(
 
 
 @mcp.tool(
-    description=(
-        "Search guides in the vector store by type. Use when you need "
-        "step-by-step procedures (install/configure/use/pentest/development). "
-        "Returns up to 5 semantically similar guides."
-    ),
+    description="从向量库搜索操作指南。需要操作指引时使用（区别于 search_answer 的知识）。返回最多 5 条。",
 )
 async def search_guide(
-    questions: list[str],
-    type: str,
-    message: str = "",
+    questions: Annotated[list[str], Field(description="1-5 个中文语义查询问句。")],
+    type: Annotated[Literal["install", "configure", "use", "pentest", "development", "other"], Field(description="必填硬过滤。install=安装步骤, configure=配置方法, use=使用方法, pentest=渗透测试方法, development=开发指南, other=其他")],
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
-    """Search guides filtered by guide_type.
-
-    Args:
-        questions: 1-5 English semantic queries.
-        type: Required filter - one of: install, configure, use, pentest, development, other.
-    """
+    """按 guide_type 过滤搜索操作指南。"""
     await _ensure_ready()
     if type not in VALID_GUIDE_TYPES:
         return json.dumps({"error": f"invalid guide type '{type}'", "results": [], "count": 0})
@@ -176,24 +152,15 @@ async def search_guide(
 
 
 @mcp.tool(
-    description=(
-        "Store a guide to the vector store for future retrieval. "
-        "Anonymizes sensitive data (IPs, domains, credentials) before storage."
-    ),
+    description="存储操作指南到向量库供未来检索。存储前自动匿名化（IP、域名、凭证）。",
 )
 async def store_guide(
-    guide: str,
-    question: str,
-    type: str,
-    message: str = "",
+    guide: Annotated[str, Field(description="指南正文，markdown 格式。操作步骤或配置方法。")],
+    question: Annotated[str, Field(description='关联问句。用"未来谁会查这条指南"的角度表述（中文）。')],
+    type: Annotated[Literal["install", "configure", "use", "pentest", "development", "other"], Field(description="install=安装步骤, configure=配置方法, use=使用方法, pentest=渗透测试方法, development=开发指南, other=其他")],
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
-    """Store a guide. Anonymizes before storage.
-
-    Args:
-        guide: Guide text in markdown format.
-        question: Question that led to this guide (co-indexed).
-        type: install, configure, use, pentest, development, or other.
-    """
+    """存储操作指南。存储前自动匿名化。"""
     await _ensure_ready()
     if type not in VALID_GUIDE_TYPES:
         return json.dumps({"stored": False, "error": f"invalid guide type '{type}'"})
@@ -209,22 +176,14 @@ async def store_guide(
 
 
 @mcp.tool(
-    description=(
-        "Search code samples in the vector store by programming language. "
-        "Returns up to 5 semantically similar code samples."
-    ),
+    description="从向量库搜索代码片段，按编程语言过滤。返回最多 5 条语义相似的代码。",
 )
 async def search_code(
-    questions: list[str],
-    lang: str,
-    message: str = "",
+    questions: Annotated[list[str], Field(description="1-5 个中文语义查询问句。")],
+    lang: Annotated[str, Field(description="编程语言（python、bash、golang 等）。")],
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
-    """Search code samples filtered by language.
-
-    Args:
-        questions: 1-5 English semantic queries.
-        lang: Programming language (python, bash, golang, etc.).
-    """
+    """按编程语言过滤搜索代码片段。"""
     await _ensure_ready()
     if not questions:
         return json.dumps({"error": "questions must be non-empty", "results": [], "count": 0})
@@ -235,35 +194,23 @@ async def search_code(
 
 
 @mcp.tool(
-    description=(
-        "Store a code sample to the vector store for future retrieval. "
-        "Anonymizes sensitive data (IPs, domains, credentials, API keys) before storage."
-    ),
+    description="存储代码片段到向量库供未来检索。存储前自动匿名化（IP、域名、凭证、API key）。",
 )
 async def store_code(
-    code: str,
-    question: str,
-    lang: str,
-    explanation: str,
-    description: str,
-    message: str = "",
+    code: Annotated[str, Field(description="源代码。")],
+    question: Annotated[str, Field(description='关联问句。用"未来谁会查这段代码"的角度表述（中文）。')],
+    lang: Annotated[str, Field(description="编程语言（python、bash、golang 等）。")],
+    explanation: Annotated[str, Field(description="代码的详细说明。")],
+    description: Annotated[str, Field(description="代码的简短摘要。")],
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
-    """Store a code sample. Anonymizes before storage.
-
-    Args:
-        code: Raw source code.
-        question: Question that led to this code (co-indexed).
-        lang: Programming language (python, bash, golang, etc.).
-        explanation: Detailed explanation of the code.
-        description: Short summary of the code.
-    """
+    """存储代码片段。存储前自动匿名化。"""
     await _ensure_ready()
     if not code.strip() or not question.strip():
         return json.dumps({"stored": False, "error": "code and question must be non-empty"})
     safe_code = anonymize(code)
     safe_q = anonymize(question)
     safe_explanation = anonymize(explanation)
-    # 将 code + explanation 拼接作为 content（对齐 PentAGI embed content 的逻辑）
     content = f"{safe_code}\n\n{safe_explanation}"
     row_id = _state["db"].store(safe_q, content, "code", doc_type="code", code_lang=lang)
     return json.dumps({"stored": True, "id": row_id})
@@ -273,21 +220,21 @@ async def store_code(
 
 
 @mcp.tool(
-    description=(
-        "Retrieve prior execution memory from the vector store (doc_type=memory). "
-        "Use this to recall what tools were run, what results were obtained, and "
-        "what the team has previously done on related topics."
-    ),
+    description="从向量库检索执行记忆（doc_type=memory）。用于回顾当前任务中执行过哪些工具、得到了什么结果。按 flow_id 隔离，只返回当前任务的记录。",
 )
 async def search_in_memory(
-    questions: list[str],
-    message: str = "",
+    questions: Annotated[list[str], Field(description="1-5 个中文语义查询问句，关于之前的工具执行和结果。")],
+    flow_id: Annotated[str | None, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。memory 按此隔离，只返回当前任务的记录。")] = None,
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
-    """Retrieve execution memory (doc_type=memory)."""
+    """检索执行记忆（doc_type=memory），按 flow_id 隔离。"""
     await _ensure_ready()
     if not questions:
         return json.dumps({"error": "questions must be non-empty", "results": [], "count": 0})
-    results = _state["db"].search(questions, type=None, doc_type="memory", top_k=DEFAULT_TOP_K)
+    results = _state["db"].search(
+        questions, type=None, doc_type="memory", top_k=DEFAULT_TOP_K,
+        flow_id=flow_id,
+    )
     return json.dumps({"results": results, "count": len(results)})
 
 

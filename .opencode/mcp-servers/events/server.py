@@ -28,9 +28,10 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 # ── Docker / Neo4j 配置 ──────────────────────────────────
 _NEO4J_CONTAINER = "neo4j-events"
@@ -274,17 +275,15 @@ mcp = FastMCP("events", lifespan=lifespan)
 
 
 @mcp.tool(
-    description=(
-        "Search the temporal knowledge graph for facts within a time window. "
-        "Use when you need events/entities bounded by a start and end time."
-    ),
+    description="在时间窗口内搜索事件图谱。需要按时间段查找事件/实体时使用。",
 )
 async def temporal_window_search(
-    query: str,
-    group_id: str,
-    time_start: str,
-    time_end: str,
-    max_results: int = 15,
+    query: Annotated[str, Field(description="中文自然语言查询，描述要查找的事件。")],
+    group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。限定搜索范围到当前任务。")],
+    time_start: Annotated[str, Field(description="时间窗口起始，ISO 8601 格式（如 2026-01-01T00:00:00Z）。必填。")],
+    time_end: Annotated[str, Field(description="时间窗口结束，ISO 8601 格式。必填。")],
+    max_results: Annotated[int, Field(description="最大返回结果数。", ge=1, le=100)] = 15,
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """Search by temporal window."""
     from graphiti_core.search.search_config import (
@@ -322,19 +321,17 @@ async def temporal_window_search(
 
 
 @mcp.tool(
-    description=(
-        "Search for entities/relationships within max_depth hops of a center "
-        "node. Requires a known center_node_uuid from a prior search result."
-    ),
+    description="从中心节点出发搜索实体关系。需要已知 center_node_uuid（从前序搜索结果获取）。",
 )
 async def entity_relationships_search(
-    query: str,
-    group_id: str,
-    center_node_uuid: str,
-    max_depth: int = 2,
-    node_labels: list[str] | None = None,
-    edge_types: list[str] | None = None,
-    max_results: int = 20,
+    query: Annotated[str, Field(description="中文自然语言查询。")],
+    group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
+    center_node_uuid: Annotated[str, Field(description="中心实体 UUID，从前序搜索结果获取。必填。")],
+    max_depth: Annotated[int, Field(description="图遍历最大深度（默认 2，最大 3）。", ge=1, le=3)] = 2,
+    node_labels: Annotated[list[str] | None, Field(description="按实体类型过滤（如 ['Tool', 'CVE', 'Host']）。")] = None,
+    edge_types: Annotated[list[str] | None, Field(description="按关系类型过滤。")] = None,
+    max_results: Annotated[int, Field(description="最大返回结果数。")] = 20,
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """BFS from a center node within max_depth."""
     from graphiti_core.search.search_config import (
@@ -367,16 +364,14 @@ async def entity_relationships_search(
 
 
 @mcp.tool(
-    description=(
-        "Diverse (MMR-ranked) results search - balances relevance against "
-        "redundancy. Use when you want broad coverage of distinct topics."
-    ),
+    description="多元搜索（MMR 排序），平衡相关性和多样性。需要广泛覆盖不同主题时使用。",
 )
 async def diverse_results_search(
-    query: str,
-    group_id: str,
-    diversity_level: str = "medium",
-    max_results: int = 10,
+    query: Annotated[str, Field(description="中文自然语言查询。")],
+    group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
+    diversity_level: Annotated[Literal["low", "medium", "high"], Field(description="多样性优先级。low=更相似，high=更多样。")] = "medium",
+    max_results: Annotated[int, Field(description="最大返回结果数。")] = 10,
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """MMR-ranked diverse search with cross-encoder reranking."""
     from graphiti_core.search.search_config import (
@@ -406,15 +401,13 @@ async def diverse_results_search(
 
 
 @mcp.tool(
-    description=(
-        "Search for episodes (event clusters) and the nodes they mention. "
-        "Use when you need chronological context of what happened in past engagements."
-    ),
+    description="搜索事件片段及其关联节点。需要了解过往分析的时间线上下文时使用。",
 )
 async def episode_context_search(
-    query: str,
-    group_id: str,
-    max_results: int = 10,
+    query: Annotated[str, Field(description="中文自然语言查询，关于过往 agent 的推理和工具输出。")],
+    group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
+    max_results: Annotated[int, Field(description="最大返回结果数。")] = 10,
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """Episode-centric search."""
     from graphiti_core.search.search_config import (
@@ -440,16 +433,14 @@ async def episode_context_search(
 
 
 @mcp.tool(
-    description=(
-        "Search for tool/command executions that succeeded in past engagements. "
-        "Use to recall which tools/commands previously worked for similar goals."
-    ),
+    description="搜索过去成功使用过的工具/命令。回忆哪些工具/技术在类似场景中成功过。",
 )
 async def successful_tools_search(
-    query: str,
-    group_id: str,
-    min_mentions: int = 2,
-    max_results: int = 15,
+    query: Annotated[str, Field(description="中文自然语言查询，关于之前成功使用过的工具/命令。")],
+    group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
+    min_mentions: Annotated[int, Field(description="工具被提及的最少次数（默认 2）。", ge=1)] = 2,
+    max_results: Annotated[int, Field(description="最大返回结果数。")] = 15,
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """Recall successful past tool executions by query similarity."""
     from graphiti_core.search.search_config import (
@@ -491,16 +482,14 @@ async def successful_tools_search(
 
 
 @mcp.tool(
-    description=(
-        "Search recent context within a recency window (1h/6h/24h/7d/30d/90d). "
-        "Use for 'what just happened' queries."
-    ),
+    description="搜索最近时间窗口内的上下文。用于查询刚刚发生了什么。",
 )
 async def recent_context_search(
-    query: str,
-    group_id: str,
-    recency_window: str = "24h",
-    max_results: int = 10,
+    query: Annotated[str, Field(description="中文自然语言查询，关于最近的发现。")],
+    group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
+    recency_window: Annotated[Literal["1h", "6h", "24h", "7d", "30d", "90d"], Field(description="时间窗口。1h=最近1小时, 24h=最近1天, 7d=最近1周, 30d=最近1月, 90d=最近3月。")] = "24h",
+    max_results: Annotated[int, Field(description="最大返回结果数。")] = 10,
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """Recent context search."""
     from graphiti_core.search.search_config import SearchConfig
@@ -525,17 +514,15 @@ async def recent_context_search(
 
 
 @mcp.tool(
-    description=(
-        "Search entities by their labels. "
-        "Use when you know the entity type (e.g., CVE, Host, Tool) but not the UUID."
-    ),
+    description="按实体标签搜索实体。知道实体类型（如 CVE、Host、Tool）但不知道 UUID 时使用。",
 )
 async def entity_by_label_search(
-    query: str,
-    group_id: str,
-    node_labels: list[str],
-    edge_types: list[str] | None = None,
-    max_results: int = 25,
+    query: Annotated[str, Field(description="中文自然语言查询。")],
+    group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
+    node_labels: Annotated[list[str], Field(description="实体类型过滤（如 ['Tool', 'CVE', 'Host', 'Service']）。必填。")],
+    edge_types: Annotated[list[str] | None, Field(description="按关系类型过滤。可选。")] = None,
+    max_results: Annotated[int, Field(description="最大返回结果数。")] = 25,
+    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """Search entities filtered by labels."""
     from graphiti_core.search.search_config import (
@@ -566,12 +553,11 @@ async def entity_by_label_search(
 
 
 @mcp.tool(
-    description=(
-        "Delete all events (nodes, edges, episodes) for a given group_id. "
-        "Called automatically when a session is deleted to clean up orphan data."
-    ),
+    description="删除指定 group_id 的所有事件数据（节点、边、事件片段）。session 删除时自动调用。",
 )
-async def delete_session_events(group_id: str) -> str:
+async def delete_session_events(
+    group_id: Annotated[str, Field(description="要删除的任务 Flow ID。该 group_id 下所有数据将被移除。")],
+) -> str:
     """Delete all graph data for a group_id."""
     try:
         await _ensure_ready()
