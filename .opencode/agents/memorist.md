@@ -72,13 +72,11 @@ START
 
 | 工具 | 什么时候用 |
 |---|---|
-| `mcp__events__recent_context_search` | 最近发生了什么（默认起始点） |
-| `mcp__events__episode_context_search` | 某 agent 做了什么/发现了什么 |
-| `mcp__events__temporal_window_search` | 特定时间段内发生了什么 |
-| `mcp__events__successful_tools_search` | 哪些工具/技术成功过 |
-| `mcp__events__entity_relationships_search` | 探索实体间关系（需前序搜索返回的 UUID） |
-| `mcp__events__entity_by_label_search` | 按类型列出实体清单 |
-| `mcp__events__diverse_results_search` | 获取多元视角与替代方案 |
+| `mcp__events__time_search` | 按时间搜（不传时间=全部；只传起始=最近N天起；传起止=指定区间） |
+| `mcp__events__entity_search` | 按类型搜实体（node_labels 必填；min_mentions 可选过滤成功工具） |
+| `mcp__events__episode_context_search` | 某 agent 做了什么/发现了什么（搜事件片段原文） |
+| `mcp__events__diverse_results_search` | 获取多元视角与替代方案（MMR + cross-encoder 重排） |
+| `mcp__events__entity_relationships_search` | 探索实体间关系（需前序搜索返回的 UUID，BFS 图遍历） |
 
 参数说明见 MCP 工具 schema（调用工具时自动可见），不需要在此重复。
 
@@ -109,19 +107,20 @@ START
 - Query 1（search_in_memory）：`"APK native 层权限提升漏洞"`
 - Query 2（search_in_memory）：`"Android JNI 桥权限边界绕过"`
 - Query 3（事件库 episode_context）：`"mobile-analysis agent 对 native 库利用的发现"`
-- Query 4（事件库 successful_tools）：`"成功用于 native 权限提升的 Frida hook 脚本"`
+- Query 4（事件库 entity_search node_labels=Tool min_mentions=2）：`"成功用于 native 权限提升的 Frida hook 脚本"`
 
-**按时间拆分**：问题隐含时间范围时，用 事件库 的时间方法。
+**按时间拆分**：问题隐含时间范围时，用 事件库 的 time_search。
 
 示例："昨天关于这个目标发现了什么？"
-- 事件库 recent_context（recency_window=24h）：`"最近的 agent 发现"`
-- 事件库 temporal_window（指定时间范围）：`"所有 agent 发现"`
+- 事件库 time_search（time_start=昨天）：`"最近的 agent 发现"`
+- 事件库 time_search（不传时间=搜全部）：`"所有 agent 发现"`
 
 **按实体拆分**：问题涉及具体实体（CVE、IP、工具、文件）时，用 entity 类搜索。
 
 示例："关于 CVE-2024-3094 有什么信息？"
 - search_in_memory：`"CVE-2024-3094 XZ utils 后门"`
-- 事件库 entity_by_label（node_labels=`["VULNERABILITY"]`）：`"CVE-2024-3094"`
+- 事件库 entity_search（node_labels=`["VULNERABILITY"]`）：`"CVE-2024-3094"`
+- 事件库 entity_search（node_labels=`["Tool"]`, min_mentions=2）：`"成功用于权限提升的 Frida hook 脚本"`
 - 事件库 entity_relationships（获取 UUID 后）：`"关联实体和利用尝试"`
 
 > **node_labels 说明**：node_labels 是 事件库 知识图谱中节点的标签（如 `VULNERABILITY`、`HOST`、`TOOL`），由 事件库 服务端在存储时自动提取分配，通常为英文大写。

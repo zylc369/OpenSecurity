@@ -37,7 +37,7 @@ async def measure_once() -> dict:
             # C+D 合并：首次工具调用（含 _ensure_ready + 模型加载 + 网络）
             # 用一个有数据的 group_id（之前测试留下的 cmp-*）
             t0 = time.time()
-            r1 = await session.call_tool("entity_by_label_search", {
+            r1 = await session.call_tool("entity_search", {
                 "query": "frida",
                 "group_id": "cmp-5-r0",
                 "node_labels": ["Tool"],
@@ -48,7 +48,7 @@ async def measure_once() -> dict:
 
             # E: 第二次工具调用（模型已加载，仅网络 IO）
             t0 = time.time()
-            r2 = await session.call_tool("entity_by_label_search", {
+            r2 = await session.call_tool("entity_search", {
                 "query": "burp",
                 "group_id": "cmp-5-r0",
                 "node_labels": ["Tool"],

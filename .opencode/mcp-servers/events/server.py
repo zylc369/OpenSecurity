@@ -1,6 +1,6 @@
 """事件库 MCP server（Graphiti 后端）。
 
-存储过往 LLM 响应和工具执行记录的事件库。8 个工具（7 个搜索 + 1 个 delete）通过 graphiti-core 查询 Neo4j。
+存储过往 LLM 响应和工具执行记录的事件库。6 个工具（5 个搜索 + 1 个 delete）通过 graphiti-core 查询 Neo4j。
 Neo4j 不可用时降级为空返回，不影响 agent 基本功能。
 
 LLM：DeepSeek API（deepseek-v4-pro/flash，实体提取）
@@ -27,7 +27,7 @@ import subprocess as sp
 import sys
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -275,17 +275,17 @@ mcp = FastMCP("events", lifespan=lifespan)
 
 
 @mcp.tool(
-    description="在时间窗口内搜索事件图谱。需要按时间段查找事件/实体时使用。",
+    description="按时间搜索事件图谱。不传时间=搜全部；只传 time_start=从指定时间起；传 time_start+time_end=指定区间。",
 )
-async def temporal_window_search(
+async def time_search(
     query: Annotated[str, Field(description="中文自然语言查询，描述要查找的事件。")],
     group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。限定搜索范围到当前任务。")],
-    time_start: Annotated[str, Field(description="时间窗口起始，ISO 8601 格式（如 2026-01-01T00:00:00Z）。必填。")],
-    time_end: Annotated[str, Field(description="时间窗口结束，ISO 8601 格式。必填。")],
+    time_start: Annotated[str, Field(description="可选：起始时间，ISO 8601 格式（如 2026-01-01T00:00:00Z）。不传则不限起始。")] = "",
+    time_end: Annotated[str, Field(description="可选：结束时间，ISO 8601 格式。不传则不限结束。")] = "",
     max_results: Annotated[int, Field(description="最大返回结果数。", ge=1, le=100)] = 15,
     message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
-    """Search by temporal window."""
+    """Search by time range. time_start/time_end are optional."""
     from graphiti_core.search.search_config import (
         SearchConfig, EdgeSearchConfig, NodeSearchConfig,
         EdgeSearchMethod, NodeSearchMethod,
@@ -294,8 +294,20 @@ async def temporal_window_search(
 
     try:
         await _ensure_ready()
-        ts = datetime.fromisoformat(time_start.replace("Z", "+00:00"))
-        te = datetime.fromisoformat(time_end.replace("Z", "+00:00"))
+
+        # 构建时间过滤条件（可选）
+        date_filters: list[DateFilter] = []
+        if time_start:
+            ts = datetime.fromisoformat(time_start.replace("Z", "+00:00"))
+            date_filters.append(DateFilter(date=ts, comparison_operator=ComparisonOperator.greater_than_equal))
+        if time_end:
+            te = datetime.fromisoformat(time_end.replace("Z", "+00:00"))
+            date_filters.append(DateFilter(date=te, comparison_operator=ComparisonOperator.less_than_equal))
+
+        search_filter = None
+        if date_filters:
+            search_filter = SearchFilters(created_at=[date_filters])
+
         results = await _state["graphiti"].search_(
             query=query,
             group_ids=[group_id],
@@ -308,16 +320,11 @@ async def temporal_window_search(
                     search_methods=[NodeSearchMethod.bm25, NodeSearchMethod.cosine_similarity],
                 ),
             ),
-            search_filter=SearchFilters(
-                created_at=[[
-                    DateFilter(date=ts, comparison_operator=ComparisonOperator.greater_than_equal),
-                    DateFilter(date=te, comparison_operator=ComparisonOperator.less_than_equal),
-                ]],
-            ),
+            search_filter=search_filter,
         )
         return _format_results(results, query)
     except Exception as e:
-        return _empty_result(f"temporal_window_search failed: {e}")
+        return _empty_result(f"time_search failed: {e}")
 
 
 @mcp.tool(
@@ -433,98 +440,18 @@ async def episode_context_search(
 
 
 @mcp.tool(
-    description="搜索过去成功使用过的工具/命令。回忆哪些工具/技术在类似场景中成功过。",
+    description="按实体标签搜索实体。知道实体类型（如 CVE、Host、Tool）时使用。可选按提及次数过滤（搜成功工具时传 min_mentions=2）。",
 )
-async def successful_tools_search(
-    query: Annotated[str, Field(description="中文自然语言查询，关于之前成功使用过的工具/命令。")],
-    group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
-    min_mentions: Annotated[int, Field(description="工具被提及的最少次数（默认 2）。", ge=1)] = 2,
-    max_results: Annotated[int, Field(description="最大返回结果数。")] = 15,
-    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
-) -> str:
-    """Recall successful past tool executions by query similarity."""
-    from graphiti_core.search.search_config import (
-        SearchConfig, NodeSearchConfig,
-        NodeSearchMethod,
-    )
-    from graphiti_core.search.search_filters import SearchFilters
-
-    try:
-        await _ensure_ready()
-        results = await _state["graphiti"].search_(
-            query=query,
-            group_ids=[group_id],
-            config=SearchConfig(
-                limit=max_results * 2,
-                node_config=NodeSearchConfig(
-                    search_methods=[NodeSearchMethod.bm25, NodeSearchMethod.cosine_similarity],
-                ),
-            ),
-            search_filter=SearchFilters(
-                node_labels=["Tool"],
-            ),
-        )
-        filtered = [
-            n for n in results.nodes
-            if getattr(n, "attributes", {}).get("mention_count", 0) >= min_mentions
-        ][:max_results]
-        return json.dumps({
-            "query": query,
-            "nodes": [{
-                "name": n.name, "uuid": n.uuid,
-                "summary": getattr(n, "summary", None),
-                "mention_count": getattr(n, "attributes", {}).get("mention_count", 0),
-            } for n in filtered],
-            "count": len(filtered),
-        }, ensure_ascii=False, default=str)
-    except Exception as e:
-        return _empty_result(f"successful_tools_search failed: {e}")
-
-
-@mcp.tool(
-    description="搜索最近时间窗口内的上下文。用于查询刚刚发生了什么。",
-)
-async def recent_context_search(
-    query: Annotated[str, Field(description="中文自然语言查询，关于最近的发现。")],
-    group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
-    recency_window: Annotated[Literal["1h", "6h", "24h", "7d", "30d", "90d"], Field(description="时间窗口。1h=最近1小时, 24h=最近1天, 7d=最近1周, 30d=最近1月, 90d=最近3月。")] = "24h",
-    max_results: Annotated[int, Field(description="最大返回结果数。")] = 10,
-    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
-) -> str:
-    """Recent context search."""
-    from graphiti_core.search.search_config import SearchConfig
-    from graphiti_core.search.search_filters import SearchFilters, DateFilter, ComparisonOperator
-
-    try:
-        await _ensure_ready()
-        window_map = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720, "90d": 2160}
-        hours = window_map.get(recency_window, 24)
-        since = datetime.now() - timedelta(hours=hours)
-        results = await _state["graphiti"].search_(
-            query=query,
-            group_ids=[group_id],
-            config=SearchConfig(limit=max_results),
-            search_filter=SearchFilters(
-                created_at=[[DateFilter(date=since, comparison_operator=ComparisonOperator.greater_than_equal)]],
-            ),
-        )
-        return _format_results(results, query)
-    except Exception as e:
-        return _empty_result(f"recent_context_search failed: {e}")
-
-
-@mcp.tool(
-    description="按实体标签搜索实体。知道实体类型（如 CVE、Host、Tool）但不知道 UUID 时使用。",
-)
-async def entity_by_label_search(
+async def entity_search(
     query: Annotated[str, Field(description="中文自然语言查询。")],
     group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
     node_labels: Annotated[list[str], Field(description="实体类型过滤（如 ['Tool', 'CVE', 'Host', 'Service']）。必填。")],
-    edge_types: Annotated[list[str] | None, Field(description="按关系类型过滤。可选。")] = None,
+    min_mentions: Annotated[int, Field(description="可选：实体被提及的最少次数。不传或传0则不过滤。搜成功工具时传2。", ge=0)] = 0,
+    edge_types: Annotated[list[str] | None, Field(description="可选：按关系类型过滤。")] = None,
     max_results: Annotated[int, Field(description="最大返回结果数。")] = 25,
     message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
-    """Search entities filtered by labels."""
+    """Search entities filtered by labels, optionally by mention count."""
     from graphiti_core.search.search_config import (
         SearchConfig, NodeSearchConfig,
         NodeSearchMethod,
@@ -533,11 +460,13 @@ async def entity_by_label_search(
 
     try:
         await _ensure_ready()
+        # min_mentions > 0 时多取再后过滤（对齐原 successful_tools 逻辑）
+        fetch_limit = max_results * 2 if min_mentions > 0 else max_results
         results = await _state["graphiti"].search_(
             query=query,
             group_ids=[group_id],
             config=SearchConfig(
-                limit=max_results,
+                limit=fetch_limit,
                 node_config=NodeSearchConfig(
                     search_methods=[NodeSearchMethod.bm25, NodeSearchMethod.cosine_similarity],
                 ),
@@ -547,9 +476,28 @@ async def entity_by_label_search(
                 edge_types=edge_types,
             ),
         )
-        return _format_results(results, query)
+        # min_mentions 后过滤
+        if min_mentions > 0:
+            filtered_nodes = [
+                n for n in results.nodes
+                if getattr(n, "attributes", {}).get("mention_count", 0) >= min_mentions
+            ][:max_results]
+        else:
+            filtered_nodes = results.nodes[:max_results]
+
+        # 统一用 _format_results 的 node 格式 + 额外加 mention_count（如果有）
+        from graphiti_core.search.search_results import SearchResults
+        filtered_results = SearchResults(
+            edges=results.edges,
+            nodes=filtered_nodes,
+            episodes=results.episodes,
+            edge_reranker_scores=results.edge_reranker_scores,
+            node_reranker_scores=results.node_reranker_scores[:len(filtered_nodes)] if len(results.node_reranker_scores) >= len(filtered_nodes) else results.node_reranker_scores,
+            episode_reranker_scores=results.episode_reranker_scores,
+        )
+        return _format_results(filtered_results, query)
     except Exception as e:
-        return _empty_result(f"entity_by_label_search failed: {e}")
+        return _empty_result(f"entity_search failed: {e}")
 
 
 @mcp.tool(
