@@ -119,11 +119,11 @@ START
 
 示例："关于 CVE-2024-3094 有什么信息？"
 - search_in_memory：`"CVE-2024-3094 XZ utils 后门"`
-- 事件库 entity_search（node_labels=`["VULNERABILITY"]`）：`"CVE-2024-3094"`
+- 事件库 entity_search（node_labels=`["Vulnerability"]`）：`"CVE-2024-3094"`
 - 事件库 entity_search（node_labels=`["Tool"]`, min_mentions=2）：`"成功用于权限提升的 Frida hook 脚本"`
 - 事件库 entity_relationships（获取 UUID 后）：`"关联实体和利用尝试"`
 
-> **node_labels 说明**：node_labels 是 事件库 知识图谱中节点的标签（如 `VULNERABILITY`、`HOST`、`TOOL`），由 事件库 服务端在存储时自动提取分配，通常为英文大写。
+> **node_labels 说明**：node_labels 是 事件库 知识图谱中节点的标签。可选值：Tool（工具）、Host（主机）、Vulnerability（漏洞/CVE）、File（文件/二进制）、Endpoint（Web 端点）、Algorithm（加密算法）、Model（AI 模型）、Prompt（提示词）。由 graphiti 提取时自动分配，英文首字母大写。不传则搜全部类型。
 
 ### 良好查询 vs 差查询
 

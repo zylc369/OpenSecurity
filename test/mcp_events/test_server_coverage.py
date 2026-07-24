@@ -1,7 +1,7 @@
 """server.py 序列化层 + 未测 MCP 工具测试。
 
 覆盖 review 发现的最大盲区：_format_results 从未被非空数据测试过。
-覆盖 3 个零测试的 MCP 工具：entity_relationships_search / episode_context_search / successful_tools_search。
+覆盖 3 个零测试的 MCP 工具：entity_relationships_search / episode_context_search / entity_search。
 """
 import asyncio
 import json
@@ -244,33 +244,34 @@ class TestEpisodeContextSearch:
         assert "episodes" in parsed
 
 
-# ─── 未测 MCP 工具：successful_tools_search ───
+# ─── entity_search min_mentions 过滤 ───
 
 
-class TestSuccessfulToolsSearch:
-    """successful_tools_search 零测试 → 补充。"""
+class TestEntitySearchMinMentions:
+    """entity_search 的 min_mentions 过滤覆盖。"""
 
     def test_returns_json_with_nonexistent_group(self, event_loop):
         """不存在的 group 应返回有效 JSON。"""
         import server
         result = event_loop.run_until_complete(
-            server.successful_tools_search(
+            server.entity_search(
                 query="test",
                 group_id="nonexistent-unique-xyz",
+                node_labels=["Tool"],
                 min_mentions=2,
             )
         )
         parsed = json.loads(result)
         assert "nodes" in parsed
-        assert "count" in parsed
 
     def test_min_mentions_filter(self, event_loop):
-        """min_mentions 过滤逻辑不崩溃。"""
+        """min_mentions=5 过滤逻辑不崩溃。"""
         import server
         result = event_loop.run_until_complete(
-            server.successful_tools_search(
+            server.entity_search(
                 query="test",
                 group_id="nonexistent",
+                node_labels=["Tool"],
                 min_mentions=5,
                 max_results=3,
             )
@@ -278,52 +279,63 @@ class TestSuccessfulToolsSearch:
         parsed = json.loads(result)
         assert "nodes" in parsed
 
-
-# ─── recent_context_search 的 window_map 覆盖 ───
-
-
-class TestRecentContextWindowMapping:
-    """recent_context_search 的 recency_window 映射完整覆盖。"""
-
-    @pytest.mark.parametrize("window", ["1h", "6h", "24h", "7d", "30d", "90d"])
-    def test_valid_windows(self, event_loop, window):
-        """所有有效 window 值不应崩溃。"""
+    def test_no_min_mentions(self, event_loop):
+        """min_mentions=0（默认）不过滤。"""
         import server
         result = event_loop.run_until_complete(
-            server.recent_context_search(
+            server.entity_search(
                 query="test",
                 group_id="nonexistent",
-                recency_window=window,
+                node_labels=["Vulnerability"],
+            )
+        )
+        parsed = json.loads(result)
+        assert "nodes" in parsed
+
+
+# ─── time_search 时间参数覆盖 ───
+
+
+class TestTimeSearchParams:
+    """time_search 的时间参数组合覆盖。"""
+
+    def test_no_time_params(self, event_loop):
+        """不传时间参数=搜全部（不崩溃）。"""
+        import server
+        result = event_loop.run_until_complete(
+            server.time_search(
+                query="test",
+                group_id="nonexistent",
             )
         )
         parsed = json.loads(result)
         assert "episodes" in parsed
 
-    def test_invalid_window_fallback(self, event_loop):
-        """无效 window 应回退到 24h（不崩溃）。"""
+    def test_only_time_start(self, event_loop):
+        """只传 time_start=单向过滤。"""
         import server
         result = event_loop.run_until_complete(
-            server.recent_context_search(
+            server.time_search(
                 query="test",
                 group_id="nonexistent",
-                recency_window="invalid",
+                time_start="2026-01-01T00:00:00Z",
             )
         )
         parsed = json.loads(result)
         assert "episodes" in parsed
 
 
-# ─── temporal_window_search 无效日期 ───
+# ─── time_search 无效日期 ───
 
 
-class TestTemporalWindowInvalidDate:
-    """temporal_window_search 的无效日期处理。"""
+class TestTimeSearchInvalidDate:
+    """time_search 的无效日期处理。"""
 
     def test_invalid_date_returns_error(self, event_loop):
         """无效日期格式应返回 error 降级。"""
         import server
         result = event_loop.run_until_complete(
-            server.temporal_window_search(
+            server.time_search(
                 query="test",
                 group_id="nonexistent",
                 time_start="not-a-date",
@@ -337,7 +349,7 @@ class TestTemporalWindowInvalidDate:
         """不带 Z 后缀的 ISO 日期应正常解析。"""
         import server
         result = event_loop.run_until_complete(
-            server.temporal_window_search(
+            server.time_search(
                 query="test",
                 group_id="nonexistent",
                 time_start="2024-01-01T00:00:00",

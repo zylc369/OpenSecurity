@@ -20,7 +20,7 @@ Embedding 模型：BAAI/bge-m3（1024 维，归一化输出，多语言）。
   - 0.50-0.75：中等匹配，使用前需校验
   - 0.20-0.50：弱匹配，仅供参考
 
-向后兼容：旧列 type/guide_type/code_lang 仍保留在 schema 中（INDEX_SQL 建索引），
+向后兼容：旧列 type/guide_type/code_lang 仍保留在 schema 中（code_lang 仍有索引，type/guide_type 索引已移除），
 但新数据不再使用它们的有意义值（type 写 doc_type 值，guide_type 写空字符串，code_lang 写 lang 值）。
 """
 import sqlite3

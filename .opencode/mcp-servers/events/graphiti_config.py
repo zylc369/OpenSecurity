@@ -6,6 +6,11 @@
 模型可通过 .ai_env 环境变量切换：
   DEEPSEEK_MODEL=deepseek-v4-pro       （核心提取模型，可改为 deepseek-v4-flash 省钱）
   DEEPSEEK_SMALL_MODEL=deepseek-v4-flash（时间戳推断模型）
+
+实体类型（CUSTOM_ENTITY_TYPES）：
+  定义安全分析专用的 8 种实体类型，graphiti 提取时从这些类型 + Entity（兜底）中选择。
+  覆盖 5 个领域（binary/mobile/web/crypto/ai-security）的高频过滤维度。
+  冷门实体类型会被标为 Entity（兜底），语义搜索仍可找到。
 """
 import asyncio
 import os
@@ -13,6 +18,56 @@ from pathlib import Path
 
 import numpy as np
 from graphiti_core.embedder.client import EmbedderClient
+from pydantic import BaseModel
+
+
+# ── 安全分析专用实体类型 ────────────────────────────────────
+# graphiti 的 _build_entity_types_context 会在这些基础上加 {id:0, name:"Entity"}（兜底）。
+# 每个 class 的 docstring 是 graphiti 提取 prompt 中展示给 LLM 的类型描述。
+
+
+class ToolEntity(BaseModel):
+    """A software tool or utility used in security analysis (e.g., nmap, frida, IDA Pro, sqlmap, Ghidra)."""
+
+
+class HostEntity(BaseModel):
+    """A network host, server, or device identified by IP or hostname (e.g., 192.168.1.1, server.example.com)."""
+
+
+class VulnerabilityEntity(BaseModel):
+    """A security vulnerability, CVE, or weakness (e.g., CVE-2024-1234, buffer overflow, SQL injection)."""
+
+
+class FileEntity(BaseModel):
+    """A file, binary, or artifact being analyzed (e.g., target.exe, app.apk, config.yaml)."""
+
+
+class EndpointEntity(BaseModel):
+    """A web endpoint, URL path, or API route (e.g., /api/login, /actuator/env, /adminpanel)."""
+
+
+class AlgorithmEntity(BaseModel):
+    """A cryptographic algorithm or mathematical construct (e.g., RSA, AES, ECDLP, LLL lattice)."""
+
+
+class ModelEntity(BaseModel):
+    """An AI or LLM model being tested or attacked (e.g., GPT-4, Claude-3, Llama-3, custom model)."""
+
+
+class PromptEntity(BaseModel):
+    """A prompt, system instruction, or injection payload targeting AI systems (e.g., jailbreak prompt, system prompt leak)."""
+
+
+CUSTOM_ENTITY_TYPES = {
+    "Tool": ToolEntity,
+    "Host": HostEntity,
+    "Vulnerability": VulnerabilityEntity,
+    "File": FileEntity,
+    "Endpoint": EndpointEntity,
+    "Algorithm": AlgorithmEntity,
+    "Model": ModelEntity,
+    "Prompt": PromptEntity,
+}
 
 
 def load_ai_env() -> None:

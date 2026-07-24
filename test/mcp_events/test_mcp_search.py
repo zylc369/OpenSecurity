@@ -230,13 +230,13 @@ class TestServerToolBehavior:
     参数解析、group_id 传递、错误降级等逻辑。新版直接调 server 的工具函数。
     """
 
-    def test_temporal_window_search_parses_dates(self, event_loop):
-        """temporal_window_search 应正确解析 ISO 日期并返回 JSON。"""
+    def test_time_search_parses_dates(self, event_loop):
+        """time_search 应正确解析 ISO 日期并返回 JSON。"""
         import importlib
         server = importlib.import_module("server")
 
         result = event_loop.run_until_complete(
-            server.temporal_window_search(
+            server.time_search(
                 query="test",
                 group_id="nonexistent",
                 time_start="2024-01-01T00:00:00Z",
@@ -268,16 +268,15 @@ class TestServerToolBehavior:
             parsed = _json.loads(result)
             assert "edges" in parsed
 
-    def test_recent_context_search_window_mapping(self, event_loop):
-        """recent_context_search 的 recency_window 映射不崩溃。"""
+    def test_time_search_no_time_filter(self, event_loop):
+        """time_search 不传时间参数时不崩溃（搜全部模式）。"""
         import importlib
         server = importlib.import_module("server")
 
         result = event_loop.run_until_complete(
-            server.recent_context_search(
+            server.time_search(
                 query="test",
                 group_id="nonexistent",
-                recency_window="24h",
                 max_results=3,
             )
         )
@@ -285,16 +284,16 @@ class TestServerToolBehavior:
         parsed = _json.loads(result)
         assert "episodes" in parsed
 
-    def test_entity_by_label_search_requires_labels(self, event_loop):
-        """entity_by_label_search 应正确处理 node_labels 参数。"""
+    def test_entity_search_requires_labels(self, event_loop):
+        """entity_search 应正确处理 node_labels 参数。"""
         import importlib
         server = importlib.import_module("server")
 
         result = event_loop.run_until_complete(
-            server.entity_by_label_search(
+            server.entity_search(
                 query="test",
                 group_id="nonexistent",
-                node_labels=["Tool", "CVE"],
+                node_labels=["Tool", "Vulnerability"],
                 max_results=5,
             )
         )

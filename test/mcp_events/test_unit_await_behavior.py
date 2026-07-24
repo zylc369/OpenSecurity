@@ -68,7 +68,7 @@ class TestLayer1Contracts(unittest.IsolatedAsyncioTestCase):
 
     async def test_handshake_fast(self):
         """契约 1：握手快（lifespan 立即 yield，不等模型加载）。"""
-        res = await _spawn_and_call("entity_by_label_search", {
+        res = await _spawn_and_call("entity_search", {
             "query": "test", "group_id": "test", "node_labels": ["Tool"],
         })
         print(f"\n  握手: {res['handshake_time']:.2f}s")
@@ -82,7 +82,7 @@ class TestLayer1Contracts(unittest.IsolatedAsyncioTestCase):
 
         关键断言：调用耗时 >3s（说明在等待），且工具成功（说明等待后正常执行）。
         """
-        res = await _spawn_and_call("entity_by_label_search", {
+        res = await _spawn_and_call("entity_search", {
             "query": "frida", "group_id": "cmp-5-r0", "node_labels": ["Tool"],
         })
         print(f"\n  握手: {res['handshake_time']:.2f}s")
@@ -99,13 +99,13 @@ class TestLayer1Contracts(unittest.IsolatedAsyncioTestCase):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 t0 = time.time()
-                await session.call_tool("entity_by_label_search", {
+                await session.call_tool("entity_search", {
                     "query": "frida", "group_id": "cmp-5-r0", "node_labels": ["Tool"],
                 })
                 first = time.time() - t0
 
                 t0 = time.time()
-                await session.call_tool("entity_by_label_search", {
+                await session.call_tool("entity_search", {
                     "query": "burp", "group_id": "cmp-5-r0", "node_labels": ["Tool"],
                 })
                 second = time.time() - t0
@@ -126,7 +126,7 @@ class TestLayer2UserScenario(unittest.IsolatedAsyncioTestCase):
         """
         print("\n  模拟用户场景：spawn → 等 15s（用户思考） → 调用工具")
         res = await _spawn_and_call(
-            "entity_by_label_search",
+            "entity_search",
             {"query": "frida", "group_id": "cmp-5-r0", "node_labels": ["Tool"]},
             delay_before_call=15.0,
         )
@@ -154,10 +154,10 @@ class TestLayer3RaceCondition(unittest.IsolatedAsyncioTestCase):
                 await session.initialize()
                 t0 = time.time()
                 results = await asyncio.gather(
-                    session.call_tool("entity_by_label_search", {
+                    session.call_tool("entity_search", {
                         "query": "q1", "group_id": "cmp-5-r0", "node_labels": ["Tool"],
                     }),
-                    session.call_tool("entity_by_label_search", {
+                    session.call_tool("entity_search", {
                         "query": "q2", "group_id": "cmp-5-r0", "node_labels": ["Tool"],
                     }),
                 )
@@ -204,7 +204,7 @@ asyncio.run(server.mcp.run_stdio_async())
                 await session.initialize()
                 t0 = time.time()
                 result = await asyncio.wait_for(
-                    session.call_tool("entity_by_label_search", {
+                    session.call_tool("entity_search", {
                         "query": "test", "group_id": "test", "node_labels": ["Tool"],
                     }),
                     timeout=15.0,
@@ -238,8 +238,8 @@ class TestLayer5AllToolsSmoke(unittest.IsolatedAsyncioTestCase):
                 # 等 BGE-M3 加载完
                 await asyncio.sleep(15)
 
-                # 先用 entity_by_label_search 拿一个真实的 center_node_uuid（如果数据存在）
-                r = await session.call_tool("entity_by_label_search", {
+                # 先用 entity_search 拿一个真实的 center_node_uuid（如果数据存在）
+                r = await session.call_tool("entity_search", {
                     "query": "frida", "group_id": "cmp-5-r0", "node_labels": ["Tool"],
                 })
                 r_text = "".join(c.text for c in r.content if hasattr(c, "text"))
@@ -253,9 +253,9 @@ class TestLayer5AllToolsSmoke(unittest.IsolatedAsyncioTestCase):
                     pass
                 print(f"\n  center_uuid: {center_uuid}")
 
-                # 8 个工具的调用参数
+                # 6 个工具的调用参数
                 tools_to_test = [
-                    ("temporal_window_search", {
+                    ("time_search", {
                         "query": "frida", "group_id": "cmp-5-r0",
                         "time_start": "2026-01-01T00:00:00Z",
                         "time_end": "2026-12-31T23:59:59Z",
@@ -271,13 +271,12 @@ class TestLayer5AllToolsSmoke(unittest.IsolatedAsyncioTestCase):
                     ("episode_context_search", {
                         "query": "frida", "group_id": "cmp-5-r0",
                     }),
-                    ("successful_tools_search", {
+                    ("entity_search", {
                         "query": "frida", "group_id": "cmp-5-r0",
+                        "node_labels": ["Tool"],
+                        "min_mentions": 2,
                     }),
-                    ("recent_context_search", {
-                        "query": "frida", "group_id": "cmp-5-r0",
-                    }),
-                    ("entity_by_label_search", {
+                    ("entity_search", {
                         "query": "frida", "group_id": "cmp-5-r0",
                         "node_labels": ["Tool"],
                     }),
@@ -483,7 +482,7 @@ asyncio.run(server.mcp.run_stdio_async())
                 # 调用工具——应因 build_indices 失败而返回错误
                 t0 = time.time()
                 r = await asyncio.wait_for(
-                    session.call_tool("entity_by_label_search", {
+                    session.call_tool("entity_search", {
                         "query": "test", "group_id": "test", "node_labels": ["Tool"],
                     }),
                     timeout=15,
@@ -547,7 +546,7 @@ asyncio.run(server.mcp.run_stdio_async())
                 # 调用工具——graphiti.search_ 会抛错
                 t0 = time.time()
                 r = await asyncio.wait_for(
-                    session.call_tool("entity_by_label_search", {
+                    session.call_tool("entity_search", {
                         "query": "test", "group_id": "test", "node_labels": ["Tool"],
                     }),
                     timeout=15,

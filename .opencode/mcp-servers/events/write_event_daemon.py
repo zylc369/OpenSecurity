@@ -26,6 +26,8 @@ from pathlib import Path
 # 确保能 import graphiti_config
 sys.path.insert(0, str(Path(__file__).parent))
 
+from graphiti_config import CUSTOM_ENTITY_TYPES  # noqa: E402
+
 MAX_CONCURRENT = 10
 
 
@@ -61,6 +63,7 @@ async def worker(name: str, queue: asyncio.Queue, graphiti):
                     reference_time=datetime.fromtimestamp(event["timestamp"] / 1000),
                     source=EpisodeType.message,
                     group_id=event["group_id"],
+                    entity_types=CUSTOM_ENTITY_TYPES,
                 )
                 log(f"[+] episode added: {event['name']}")
         except Exception as e:

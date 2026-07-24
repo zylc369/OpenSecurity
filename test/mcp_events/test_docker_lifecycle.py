@@ -74,7 +74,7 @@ class TestLifespanFullSequence(unittest.IsolatedAsyncioTestCase):
 
                 # 立即调用工具——等待 Docker 检查 + 容器检查 + BGE-M3 加载
                 t0 = time.time()
-                r = await session.call_tool("entity_by_label_search", {
+                r = await session.call_tool("entity_search", {
                     "query": "frida", "group_id": "cmp-5-r0", "node_labels": ["Tool"],
                 })
                 first_call = time.time() - t0
@@ -97,10 +97,10 @@ class TestLifespanFullSequence(unittest.IsolatedAsyncioTestCase):
                 await session.initialize()
                 t0 = time.time()
                 results = await asyncio.gather(
-                    session.call_tool("entity_by_label_search", {
+                    session.call_tool("entity_search", {
                         "query": "q1", "group_id": "cmp-5-r0", "node_labels": ["Tool"],
                     }),
-                    session.call_tool("entity_by_label_search", {
+                    session.call_tool("entity_search", {
                         "query": "q2", "group_id": "cmp-5-r0", "node_labels": ["Tool"],
                     }),
                 )
@@ -128,7 +128,7 @@ class TestUserScenarioWithDelay(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(20)
 
                 t0 = time.time()
-                r = await session.call_tool("entity_by_label_search", {
+                r = await session.call_tool("entity_search", {
                     "query": "frida", "group_id": "cmp-5-r0", "node_labels": ["Tool"],
                 })
                 call_time = time.time() - t0

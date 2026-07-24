@@ -273,6 +273,15 @@ def _format_results(results: Any, query: str) -> str:
 
 mcp = FastMCP("events", lifespan=lifespan)
 
+# ── node_labels 统一描述（entity_search + entity_relationships_search 共用）──
+NODE_LABELS_DESCRIPTION = (
+    "实体类型过滤，可选值："
+    "Tool（工具）、Host（主机）、Vulnerability（漏洞/CVE）、"
+    "File（文件/二进制）、Endpoint（Web 端点）、"
+    "Algorithm（加密算法）、Model（AI 模型）、Prompt（提示词）。"
+    "不传则搜全部类型。"
+)
+
 
 @mcp.tool(
     description="按时间搜索事件图谱。不传时间=搜全部；只传 time_start=从指定时间起；传 time_start+time_end=指定区间。",
@@ -335,7 +344,7 @@ async def entity_relationships_search(
     group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
     center_node_uuid: Annotated[str, Field(description="中心实体 UUID，从前序搜索结果获取。必填。")],
     max_depth: Annotated[int, Field(description="图遍历最大深度（默认 2，最大 3）。", ge=1, le=3)] = 2,
-    node_labels: Annotated[list[str] | None, Field(description="按实体类型过滤（如 ['Tool', 'CVE', 'Host']）。")] = None,
+    node_labels: Annotated[list[str] | None, Field(description=NODE_LABELS_DESCRIPTION)] = None,
     edge_types: Annotated[list[str] | None, Field(description="按关系类型过滤。")] = None,
     max_results: Annotated[int, Field(description="最大返回结果数。")] = 20,
     message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
@@ -440,12 +449,12 @@ async def episode_context_search(
 
 
 @mcp.tool(
-    description="按实体标签搜索实体。知道实体类型（如 CVE、Host、Tool）时使用。可选按提及次数过滤（搜成功工具时传 min_mentions=2）。",
+    description="按实体标签搜索实体。知道实体类型（如 Vulnerability、Host、Tool）时使用。可选按提及次数过滤（搜成功工具时传 min_mentions=2）。",
 )
 async def entity_search(
     query: Annotated[str, Field(description="中文自然语言查询。")],
     group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
-    node_labels: Annotated[list[str], Field(description="实体类型过滤（如 ['Tool', 'CVE', 'Host', 'Service']）。必填。")],
+    node_labels: Annotated[list[str], Field(description=NODE_LABELS_DESCRIPTION)],
     min_mentions: Annotated[int, Field(description="可选：实体被提及的最少次数。不传或传0则不过滤。搜成功工具时传2。", ge=0)] = 0,
     edge_types: Annotated[list[str] | None, Field(description="可选：按关系类型过滤。")] = None,
     max_results: Annotated[int, Field(description="最大返回结果数。")] = 25,
@@ -454,7 +463,7 @@ async def entity_search(
     """Search entities filtered by labels, optionally by mention count."""
     from graphiti_core.search.search_config import (
         SearchConfig, NodeSearchConfig,
-        NodeSearchMethod,
+        NodeSearchMethod, SearchResults,
     )
     from graphiti_core.search.search_filters import SearchFilters
 
@@ -478,24 +487,25 @@ async def entity_search(
         )
         # min_mentions 后过滤
         if min_mentions > 0:
-            filtered_nodes = [
-                n for n in results.nodes
+            filtered_indices = [
+                i for i, n in enumerate(results.nodes)
                 if getattr(n, "attributes", {}).get("mention_count", 0) >= min_mentions
             ][:max_results]
+            filtered_nodes = [results.nodes[i] for i in filtered_indices]
+            filtered_scores = [results.node_reranker_scores[i] for i in filtered_indices] if len(results.node_reranker_scores) == len(results.nodes) else []
+            filtered_results = SearchResults(
+                edges=results.edges,
+                nodes=filtered_nodes,
+                episodes=results.episodes,
+                edge_reranker_scores=results.edge_reranker_scores,
+                node_reranker_scores=filtered_scores,
+                episode_reranker_scores=results.episode_reranker_scores,
+            )
+            return _format_results(filtered_results, query)
         else:
-            filtered_nodes = results.nodes[:max_results]
-
-        # 统一用 _format_results 的 node 格式 + 额外加 mention_count（如果有）
-        from graphiti_core.search.search_results import SearchResults
-        filtered_results = SearchResults(
-            edges=results.edges,
-            nodes=filtered_nodes,
-            episodes=results.episodes,
-            edge_reranker_scores=results.edge_reranker_scores,
-            node_reranker_scores=results.node_reranker_scores[:len(filtered_nodes)] if len(results.node_reranker_scores) >= len(filtered_nodes) else results.node_reranker_scores,
-            episode_reranker_scores=results.episode_reranker_scores,
-        )
-        return _format_results(filtered_results, query)
+            # 防御性截断：虽然 graphiti search_ 已用 limit 过滤，这里确保不超过 max_results
+            results.nodes = results.nodes[:max_results]
+            return _format_results(results, query)
     except Exception as e:
         return _empty_result(f"entity_search failed: {e}")
 
