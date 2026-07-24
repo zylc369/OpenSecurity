@@ -25,44 +25,34 @@ from sentence_transformers import SentenceTransformer
 DB_PATH = Path.home() / "bw-security-analysis" / "db" / "knowledge" / "knowledge_eval.db"
 MODEL_NAME = "BAAI/bge-m3"
 
-# 测试数据：(question, answer, type, doc_type)
+# 测试数据：(question, answer)
 # 覆盖 5 个领域，每个领域 2 条
 TEST_KNOWLEDGE = [
     # binary-analysis
     ("Windows PE x64 UPX 脱壳方法",
-     "使用 UPX 工具直接脱壳：upx -d target.exe。如果修改了 magic，先修复后再脱壳。",
-     "tool", "answer"),
+     "使用 UPX 工具直接脱壳：upx -d target.exe。如果修改了 magic，先修复后再脱壳。"),
     ("ARM64 栈溢出漏洞利用",
-     "通过 ROP 链绕过 NX：用 ropper 找 gadget，构造 pivot gadget 控制 SP，跳到 system('/bin/sh')。",
-     "vulnerability", "answer"),
+     "通过 ROP 链绕过 NX：用 ropper 找 gadget，构造 pivot gadget 控制 SP，跳到 system('/bin/sh')。"),
     # mobile-analysis
     ("Android APK Frida SSL Pinning 绕过",
-     "使用 frida-tools 的 objection：objection -g com.target explore -s 'android sslpinning disable'。或用 Frida 脚本 hook TrustManager。",
-     "tool", "answer"),
+     "使用 frida-tools 的 objection：objection -g com.target explore -s 'android sslpinning disable'。或用 Frida 脚本 hook TrustManager。"),
     ("iOS IPA class-dump 提取类信息",
-     "class-dump -H TargetApp -o headers/。需要先 decrypt 二进制（用 frida-ios-dump 或 clutch）。",
-     "tool", "answer"),
+     "class-dump -H TargetApp -o headers/。需要先 decrypt 二进制（用 frida-ios-dump 或 clutch）。"),
     # web-analysis
     ("Spring Boot Actuator 信息泄露利用",
-     "访问 /actuator/env 获取环境变量，/actuator/heapdump 获取内存转储。通过 /actuator/jolokia 可实现 RCE。",
-     "vulnerability", "answer"),
+     "访问 /actuator/env 获取环境变量，/actuator/heapdump 获取内存转储。通过 /actuator/jolokia 可实现 RCE。"),
     ("Web Cache Poisoning 攻击方法",
-     "识别 unkeyed header（如 X-Forwarded-Host），注入恶意值让缓存中毒。用 Param Miner 找 unkeyed inputs。",
-     "vulnerability", "answer"),
+     "识别 unkeyed header（如 X-Forwarded-Host），注入恶意值让缓存中毒。用 Param Miner 找 unkeyed inputs。"),
     # crypto-analysis
     ("RSA 小公钥指数攻击 Coppersmith",
-     "当 e 很小（如 e=3）且消息短时，m^e < n → 直接开 e 次方。如果 m^e > n 但接近，用 Coppersmith small_roots。",
-     "vulnerability", "answer"),
+     "当 e 很小（如 e=3）且消息短时，m^e < n → 直接开 e 次方。如果 m^e > n 但接近，用 Coppersmith small_roots。"),
     ("椭圆曲线 anomalous 攻击（Smart's attack）",
-     "当曲线阶等于有限域阶 p 时（anomalous），用 Smart's attack 在 O(1) 内解 ECDLP：通过 p-adic 提升计算。",
-     "vulnerability", "answer"),
+     "当曲线阶等于有限域阶 p 时（anomalous），用 Smart's attack 在 O(1) 内解 ECDLP：通过 p-adic 提升计算。"),
     # ai-security-analysis
     ("LLM 提示注入间接攻击",
-     "通过网页内容注入隐藏指令（如白色文本、HTML 注释），让 LLM 执行攻击者命令。绕过用户 prompt 的安全过滤。",
-     "vulnerability", "answer"),
+     "通过网页内容注入隐藏指令（如白色文本、HTML 注释），让 LLM 执行攻击者命令。绕过用户 prompt 的安全过滤。"),
     ("LLM 越狱攻击 DAN 模式",
-     "通过角色扮演（Do Anything Now）让 LLM 忽略安全约束。变种：AIM、STAN 等角色设定。",
-     "vulnerability", "answer"),
+     "通过角色扮演（Do Anything Now）让 LLM 忽略安全约束。变种：AIM、STAN 等角色设定。"),
 ]
 
 # 查询用例：(query, expected_match_index, description)
@@ -115,10 +105,10 @@ async def main():
 
     # 2. 存入测试知识
     print(f"\n存入 {len(TEST_KNOWLEDGE)} 条知识...")
-    for i, (q, a, t, dt) in enumerate(TEST_KNOWLEDGE):
+    for i, (q, a) in enumerate(TEST_KNOWLEDGE):
         safe_q = anonymize(q)
         safe_a = anonymize(a)
-        db.store(safe_q, safe_a, t, doc_type=dt)
+        db.store(safe_q, safe_a)
     print(f"  ✅ 存入完成")
 
     # 3. 查询测试
@@ -129,7 +119,7 @@ async def main():
     results = []
     for query, expected_idx, desc in TEST_QUERIES:
         expected_q = TEST_KNOWLEDGE[expected_idx][0]
-        search_results = db.search([query], type=None, doc_type="answer", top_k=5)
+        search_results = db.search([query], doc_type="knowledge", top_k=5)
 
         # 检查 expected 是否在 top-5
         found_rank = None

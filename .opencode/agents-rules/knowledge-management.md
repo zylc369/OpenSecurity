@@ -9,13 +9,11 @@
 - **遇到不熟悉的技术时**：查外部资料（CVE 详情、漏洞利用方案、工具文档）。在委派 prompt 中描述遇到的具体问题和上下文。searcher 有 websearch/webfetch 能力。
 
 **直接调 MCP 工具查**（简单检索，不需要委派）：
-- **需要操作指引时**：调 `mcp__knowledge__search_guide` 查是否已有同类操作步骤/配置方法。查到 → 按已有指南操作；查不到 → 自己摸索。
-- **需要编写较复杂的脚本时**（exploit/PoC/多步骤工具）：先调 `mcp__knowledge__search_code` 查是否已有同类可复用代码。查到 → 基于已有代码修改；查不到 → 从零编写。
+- **需要操作指引或可复用代码时**：调 `mcp__knowledge__search_knowledge` 查是否已有同类操作步骤/配置方法/可复用代码。查到 → 按已有知识操作；查不到 → 自己摸索。可选传 `lang` 参数按编程语言过滤代码。
 
 ### 存分析结论
 - **得出明确分析结论后**（确认漏洞 / 成功绕过 / 还原算法），**必须**存储知识到向量库：
-  - `mcp__knowledge__store_answer`：存分析结论
-  - `mcp__knowledge__store_guide`：存可复用的操作步骤（如果有）
-  - `mcp__knowledge__store_code`：存可复用的 PoC/脚本（如果有）
+  - `mcp__knowledge__store_knowledge`：存分析结论 / 可复用的操作步骤 / 可复用的 PoC/脚本
+  - 代码片段为主的内容传 `lang` 参数标记编程语言
 
 参数填什么、怎么填，参见 MCP 工具的参数描述（调用时自动可见）。

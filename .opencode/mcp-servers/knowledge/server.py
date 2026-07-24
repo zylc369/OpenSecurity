@@ -1,13 +1,11 @@
-"""OpenSecurity searcher/memorist agent 的知识库 MCP server。
+"""OpenSecurity 知识库 MCP server。
 
-提供七个工具（对齐 PentAGI）：
-  - search_answer / store_answer：答案知识库（doc_type=answer）
-  - search_guide / store_guide：指南知识库（doc_type=guide）
-  - search_code / store_code：代码片段库（doc_type=code）
+提供三个工具：
+  - search_knowledge / store_knowledge：知识库（doc_type=knowledge）
   - search_in_memory：执行记忆库（doc_type=memory）
 
-store 工具在存储前调 anonymize() 清洗敏感信息（IP/凭证/域名）。
-embed 目标是 content（answer/guide/code 文本），不是 question。
+store_knowledge 在存储前调 anonymize() 清洗敏感信息（IP/凭证/域名）。
+embed 目标是 content，不是 question。
 
 启动模式（lazy 加载）：
   - 模块顶层不加载 BGE-M3，stdio 握手快（<1s）
@@ -19,7 +17,7 @@ import json
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
@@ -31,9 +29,6 @@ from db import MemoryDB, DEFAULT_TOP_K  # noqa: E402
 DATA_DIR = Path.home() / "bw-security-analysis"
 DB_PATH = DATA_DIR / "db" / "knowledge" / "knowledge.db"
 MODEL_NAME = "BAAI/bge-m3"
-
-VALID_ANSWER_TYPES = ("guide", "vulnerability", "code", "tool", "other")
-VALID_GUIDE_TYPES = ("install", "configure", "use", "pentest", "development", "other")
 
 # ── lazy 加载共享状态 ─────────────────────────────────────
 _state: dict = {"embedder": None, "db": None}
@@ -88,131 +83,41 @@ async def _ensure_ready() -> None:
 mcp = FastMCP("knowledge", lifespan=lifespan)
 
 
-# ── answer 工具 ──────────────────────────────────────────
+# ── knowledge 工具 ────────────────────────────────────────
 
 
 @mcp.tool(
-    description="从向量库检索已有答案。必须首先调用，避免重复研究。返回最多 5 条语义相似的答案，按 type 过滤。",
+    description="从向量库检索已有知识。必须首先调用，避免重复研究。返回最多 5 条语义相似的结果。可选按编程语言过滤代码。",
 )
-async def search_answer(
+async def search_knowledge(
     questions: Annotated[list[str], Field(description="1-5 个中文语义查询问句。")],
-    type: Annotated[Literal["guide", "vulnerability", "code", "tool", "other"], Field(description="硬过滤。guide=操作指南, vulnerability=漏洞分析, code=代码相关, tool=工具用法, other=其他")] = "other",
+    lang: Annotated[str, Field(description="可选：按编程语言过滤（如 python、bash）。不传则搜全部。")] = "",
     message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
-    """从向量库检索已有答案，按 type 过滤。"""
+    """从向量库检索知识。可选按 lang 过滤。"""
     await _ensure_ready()
-    if type not in VALID_ANSWER_TYPES:
-        return json.dumps({"error": f"invalid type '{type}'", "results": [], "count": 0})
     if not questions:
         return json.dumps({"error": "questions must be non-empty", "results": [], "count": 0})
-    results = _state["db"].search(questions, type=type, doc_type="answer", top_k=DEFAULT_TOP_K)
+    results = _state["db"].search(questions, doc_type="knowledge", lang=lang, top_k=DEFAULT_TOP_K)
     return json.dumps({"results": results, "count": len(results)})
 
 
 @mcp.tool(
-    description="存储新的(问题, 答案)到向量库供未来检索。仅在发现知识库中不存在的新知识时调用。存储前自动匿名化。",
+    description="存储新知识到向量库供未来检索。仅在发现知识库中不存在的新知识时调用。存储前自动匿名化。",
 )
-async def store_answer(
+async def store_knowledge(
     question: Annotated[str, Field(description='关联问句。用"未来谁会查这条知识、他会怎么问"的角度表述（中文）。例：发现栈溢出后，question 写 "Windows x64 栈溢出漏洞的利用方法"')],
-    answer: Annotated[str, Field(description="答案正文（中文叙述）。英文技术标识符原样保留（CVE 编号、函数名、payload、shell 命令、URL）。存储前自动匿名化。")],
-    type: Annotated[Literal["guide", "vulnerability", "code", "tool", "other"], Field(description="guide=操作指南, vulnerability=漏洞分析, code=代码相关, tool=工具用法, other=其他")] = "other",
+    content: Annotated[str, Field(description="知识正文（中文叙述）。英文技术标识符原样保留（CVE 编号、函数名、payload、shell 命令、URL）。代码片段需附带文字说明。存储前自动匿名化。")],
+    lang: Annotated[str, Field(description="可选：内容主要语言的编程语言标记（如 python、bash）。纯文字知识不传。")] = "",
     message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
-    """存储新的(问题, 答案)。存储前自动匿名化。"""
+    """存储新知识。存储前自动匿名化。"""
     await _ensure_ready()
-    if type not in VALID_ANSWER_TYPES:
-        return json.dumps({"stored": False, "error": f"invalid type '{type}'"})
-    if not question.strip() or not answer.strip():
-        return json.dumps({"stored": False, "error": "question and answer must be non-empty"})
+    if not question.strip() or not content.strip():
+        return json.dumps({"stored": False, "error": "question and content must be non-empty"})
     safe_q = anonymize(question)
-    safe_a = anonymize(answer)
-    row_id = _state["db"].store(safe_q, safe_a, type, doc_type="answer")
-    return json.dumps({"stored": True, "id": row_id})
-
-
-# ── guide 工具 ───────────────────────────────────────────
-
-
-@mcp.tool(
-    description="从向量库搜索操作指南。需要操作指引时使用（区别于 search_answer 的知识）。返回最多 5 条。",
-)
-async def search_guide(
-    questions: Annotated[list[str], Field(description="1-5 个中文语义查询问句。")],
-    type: Annotated[Literal["install", "configure", "use", "pentest", "development", "other"], Field(description="必填硬过滤。install=安装步骤, configure=配置方法, use=使用方法, pentest=渗透测试方法, development=开发指南, other=其他")],
-    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
-) -> str:
-    """按 guide_type 过滤搜索操作指南。"""
-    await _ensure_ready()
-    if type not in VALID_GUIDE_TYPES:
-        return json.dumps({"error": f"invalid guide type '{type}'", "results": [], "count": 0})
-    if not questions:
-        return json.dumps({"error": "questions must be non-empty", "results": [], "count": 0})
-    results = _state["db"].search(questions, type=None, doc_type="guide", guide_type=type, top_k=DEFAULT_TOP_K)
-    return json.dumps({"results": results, "count": len(results)})
-
-
-@mcp.tool(
-    description="存储操作指南到向量库供未来检索。存储前自动匿名化（IP、域名、凭证）。",
-)
-async def store_guide(
-    guide: Annotated[str, Field(description="指南正文，markdown 格式。操作步骤或配置方法。")],
-    question: Annotated[str, Field(description='关联问句。用"未来谁会查这条指南"的角度表述（中文）。')],
-    type: Annotated[Literal["install", "configure", "use", "pentest", "development", "other"], Field(description="install=安装步骤, configure=配置方法, use=使用方法, pentest=渗透测试方法, development=开发指南, other=其他")],
-    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
-) -> str:
-    """存储操作指南。存储前自动匿名化。"""
-    await _ensure_ready()
-    if type not in VALID_GUIDE_TYPES:
-        return json.dumps({"stored": False, "error": f"invalid guide type '{type}'"})
-    if not guide.strip() or not question.strip():
-        return json.dumps({"stored": False, "error": "guide and question must be non-empty"})
-    safe_guide = anonymize(guide)
-    safe_q = anonymize(question)
-    row_id = _state["db"].store(safe_q, safe_guide, type, doc_type="guide", guide_type=type)
-    return json.dumps({"stored": True, "id": row_id})
-
-
-# ── code 工具 ────────────────────────────────────────────
-
-
-@mcp.tool(
-    description="从向量库搜索代码片段，按编程语言过滤。返回最多 5 条语义相似的代码。",
-)
-async def search_code(
-    questions: Annotated[list[str], Field(description="1-5 个中文语义查询问句。")],
-    lang: Annotated[str, Field(description="编程语言（python、bash、golang 等）。")],
-    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
-) -> str:
-    """按编程语言过滤搜索代码片段。"""
-    await _ensure_ready()
-    if not questions:
-        return json.dumps({"error": "questions must be non-empty", "results": [], "count": 0})
-    if not lang.strip():
-        return json.dumps({"error": "lang must be non-empty", "results": [], "count": 0})
-    results = _state["db"].search(questions, type=None, doc_type="code", code_lang=lang, top_k=DEFAULT_TOP_K)
-    return json.dumps({"results": results, "count": len(results)})
-
-
-@mcp.tool(
-    description="存储代码片段到向量库供未来检索。存储前自动匿名化（IP、域名、凭证、API key）。",
-)
-async def store_code(
-    code: Annotated[str, Field(description="源代码。")],
-    question: Annotated[str, Field(description='关联问句。用"未来谁会查这段代码"的角度表述（中文）。')],
-    lang: Annotated[str, Field(description="编程语言（python、bash、golang 等）。")],
-    explanation: Annotated[str, Field(description="代码的详细说明。")],
-    description: Annotated[str, Field(description="代码的简短摘要。")],
-    message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
-) -> str:
-    """存储代码片段。存储前自动匿名化。"""
-    await _ensure_ready()
-    if not code.strip() or not question.strip():
-        return json.dumps({"stored": False, "error": "code and question must be non-empty"})
-    safe_code = anonymize(code)
-    safe_q = anonymize(question)
-    safe_explanation = anonymize(explanation)
-    content = f"{safe_code}\n\n{safe_explanation}"
-    row_id = _state["db"].store(safe_q, content, "code", doc_type="code", code_lang=lang)
+    safe_c = anonymize(content)
+    row_id = _state["db"].store(safe_q, safe_c, doc_type="knowledge", lang=lang)
     return json.dumps({"stored": True, "id": row_id})
 
 
@@ -232,7 +137,7 @@ async def search_in_memory(
     if not questions:
         return json.dumps({"error": "questions must be non-empty", "results": [], "count": 0})
     results = _state["db"].search(
-        questions, type=None, doc_type="memory", top_k=DEFAULT_TOP_K,
+        questions, doc_type="memory", top_k=DEFAULT_TOP_K,
         flow_id=flow_id,
     )
     return json.dumps({"results": results, "count": len(results)})

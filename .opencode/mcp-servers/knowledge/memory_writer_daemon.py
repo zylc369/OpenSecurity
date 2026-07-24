@@ -44,10 +44,11 @@ def main():
             if not tool_type:
                 print(f"[!] 跳过记录: type（工具名）为空", file=sys.stderr, flush=True)
                 continue
+            # tool_type（工具名如 "bash"）拼进 question 前缀，保留来源信息
+            question_tagged = f"[{tool_type}] {question}"
             db.store(
-                question=question,
-                answer=answer,
-                type=tool_type,
+                question=question_tagged,
+                content=answer,
                 doc_type="memory",
                 flow_id=flow_id,
             )

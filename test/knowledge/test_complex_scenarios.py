@@ -5,7 +5,6 @@
   - 多条同类数据 + 排序
   - 中文 query 搜英文 content（实际使用模式）
   - 敏感数据全链路匿名化
-  - guide/code 端到端
   - memory daemon stdin → search_in_memory
 """
 import json
@@ -40,56 +39,39 @@ def db(embedder):
 
 
 # ═════════════════════════════════════════════════════════
-# 场景 1：store → search 往返（每种 doc_type）
+# 场景 1：store → search 往返
 # ═════════════════════════════════════════════════════════
 
 
 class TestStoreSearchRoundTrip:
     """存入后能搜到——最基本的端到端验证。"""
 
-    def test_answer_round_trip(self, db):
+    def test_knowledge_round_trip(self, db):
         db.store(
             question="Ghidra installation",
-            answer="Download Ghidra from official site, extract zip, run ghidraRun.bat",
-            type="guide",
-            doc_type="answer",
+            content="Download Ghidra from official site, extract zip, run ghidraRun.bat",
         )
-        results = db.search(["how to install Ghidra"], type="guide", doc_type="answer")
-        assert len(results) > 0, "应搜到刚存的 answer"
+        results = db.search(["how to install Ghidra"])
+        assert len(results) > 0, "应搜到刚存的 knowledge"
         assert "Ghidra" in results[0]["answer"]
-
-    def test_guide_round_trip(self, db):
-        db.store(
-            question="nmap scan guide",
-            answer="Step 1: nmap -sV target. Step 2: nmap -A target for OS detection.",
-            type="other",
-            doc_type="guide",
-            guide_type="pentest",
-        )
-        results = db.search(["nmap scanning steps"], type=None, doc_type="guide", guide_type="pentest")
-        assert len(results) > 0, "应搜到刚存的 guide"
-        assert "nmap" in results[0]["answer"]
 
     def test_code_round_trip(self, db):
         db.store(
             question="Python RSA decryption",
-            answer="from Crypto.PublicKey import RSA\nkey = RSA.import_key(open('private.pem').read())",
-            type="code",
-            doc_type="code",
-            code_lang="python",
+            content="from Crypto.PublicKey import RSA\nkey = RSA.import_key(open('private.pem').read())",
+            lang="python",
         )
-        results = db.search(["RSA decrypt python"], type=None, doc_type="code", code_lang="python")
+        results = db.search(["RSA decrypt python"], lang="python")
         assert len(results) > 0, "应搜到刚存的 code"
         assert "RSA" in results[0]["answer"]
 
     def test_memory_round_trip(self, db):
         db.store(
-            question="bash execution",
-            answer="Tool: bash\nArguments: nmap -sV 10.0.0.1\nResult: 22/tcp open ssh",
-            type="bash",
+            question="[bash] execution",
+            content="Tool: bash\nArguments: nmap -sV 10.0.0.1\nResult: 22/tcp open ssh",
             doc_type="memory",
         )
-        results = db.search(["nmap scan result"], type=None, doc_type="memory")
+        results = db.search(["nmap scan result"], doc_type="memory")
         assert len(results) > 0, "应搜到刚存的 memory"
         assert "nmap" in results[0]["answer"]
 
@@ -103,11 +85,11 @@ class TestMultipleEntriesRanking:
     """存多条数据，验证搜索排序正确。"""
 
     def test_more_relevant_ranks_higher(self, db):
-        db.store("intro", "Brief mention of SQL injection", "vulnerability")
+        db.store("intro", "Brief mention of SQL injection")
         db.store("details", "Detailed SQL injection exploitation with sqlmap, "
-                 "union-based and blind techniques, bypassing WAF", "vulnerability")
+                 "union-based and blind techniques, bypassing WAF")
 
-        results = db.search(["SQL injection exploitation sqlmap"], type="vulnerability")
+        results = db.search(["SQL injection exploitation sqlmap"])
         assert len(results) >= 2
 
         # 更详细的答案应排前面（与 query 更相关）
@@ -117,9 +99,9 @@ class TestMultipleEntriesRanking:
 
     def test_scores_in_descending_order(self, db):
         for i in range(5):
-            db.store(f"q{i}", f"Buffer overflow vulnerability number {i} in function sub_40{i}00", "vulnerability")
+            db.store(f"q{i}", f"Buffer overflow vulnerability number {i} in function sub_40{i}00")
 
-        results = db.search(["buffer overflow vulnerability"], type="vulnerability")
+        results = db.search(["buffer overflow vulnerability"])
         scores = [r["score"] for r in results]
         assert scores == sorted(scores, reverse=True), f"分数应降序排列，实际: {scores}"
 
@@ -132,38 +114,23 @@ class TestMultipleEntriesRanking:
 class TestChineseQueryEnglishContent:
     """agent 用中文搜索，content 是英文——BGE-M3 多语言能力验证。"""
 
-    def test_chinese_query_finds_english_answer(self, db):
+    def test_chinese_query_finds_english(self, db):
         db.store(
             question="SQL injection vulnerability",
-            answer="SQL injection allows attacker to execute arbitrary SQL commands "
+            content="SQL injection allows attacker to execute arbitrary SQL commands "
                    "via unsanitized user input in the login form parameter",
-            type="vulnerability",
         )
         # 中文 query
-        results = db.search(["登录表单的SQL注入漏洞"], type="vulnerability")
+        results = db.search(["登录表单的SQL注入漏洞"])
         assert len(results) > 0, "中文 query 应搜到英文 content"
-
-    def test_chinese_query_finds_english_guide(self, db):
-        db.store(
-            question="Ghidra usage",
-            answer="Open Ghidra, create new project, import binary, "
-                   "auto-analyze, navigate to target function using symbol tree",
-            type="other",
-            doc_type="guide",
-            guide_type="use",
-        )
-        results = db.search(["如何使用Ghidra分析二进制文件"], type=None, doc_type="guide", guide_type="use")
-        assert len(results) > 0, "中文 query 应搜到英文 guide"
 
     def test_chinese_query_finds_english_code(self, db):
         db.store(
             question="hash calculation",
-            answer="import hashlib\nresult = hashlib.sha256(b'data').hexdigest()",
-            type="code",
-            doc_type="code",
-            code_lang="python",
+            content="import hashlib\nresult = hashlib.sha256(b'data').hexdigest()",
+            lang="python",
         )
-        results = db.search(["Python哈希计算sha256"], type=None, doc_type="code", code_lang="python")
+        results = db.search(["Python哈希计算sha256"], lang="python")
         assert len(results) > 0, "中文 query 应搜到英文 code"
 
 
@@ -175,18 +142,17 @@ class TestChineseQueryEnglishContent:
 class TestAnonymizationFullChain:
     """store 含敏感数据 → 搜索返回 → 验证搜索结果不含原始敏感数据。
 
-    注意：db.py 的 store 方法不做匿名化——匿名化在 server.py 的 store 工具里做。
-    这里测试的是 server.py 的完整链路（store 工具调 anonymize 后再调 db.store）。
+    注意：db.py 的 store 方法不做匿名化——匿名化在 server.py 的 store_knowledge 工具里做。
+    这里测试的是 anonymizer → db.store 的完整链路。
     """
 
     def test_ip_anonymized_in_search_results(self, db):
-        """通过 server.store_answer 存入 → db.search 搜索 → 验证匿名化。"""
         from anonymizer import anonymize
-        raw_answer = "Connected to 192.168.1.50 via SSH and found open ports 22, 80, 443"
-        safe_answer = anonymize(raw_answer)
-        db.store("server connection", safe_answer, "other")
+        raw_content = "Connected to 192.168.1.50 via SSH and found open ports 22, 80, 443"
+        safe_content = anonymize(raw_content)
+        db.store("server connection", safe_content)
 
-        results = db.search(["server connection ports"], type="other")
+        results = db.search(["server connection ports"])
         assert len(results) > 0
         for r in results:
             assert "192.168.1.50" not in r["answer"], f"搜索结果不应含原始 IP"
@@ -194,11 +160,11 @@ class TestAnonymizationFullChain:
 
     def test_credential_anonymized_in_search_results(self, db):
         from anonymizer import anonymize
-        raw_answer = "Login with password=secret123 to access the admin panel at 10.0.0.5"
-        safe_answer = anonymize(raw_answer)
-        db.store("database access", safe_answer, "tool")
+        raw_content = "Login with password=secret123 to access the admin panel at 10.0.0.5"
+        safe_content = anonymize(raw_content)
+        db.store("database access", safe_content)
 
-        results = db.search(["database login admin"], type="tool")
+        results = db.search(["database login admin"])
         assert len(results) > 0
         for r in results:
             assert "secret123" not in r["answer"], "搜索结果不应含原始密码"
@@ -206,11 +172,11 @@ class TestAnonymizationFullChain:
 
 
 # ═════════════════════════════════════════════════════════
-# 场景 5：guide/code 完整端到端（存复杂内容 → 搜 → 验内容）
+# 场景 5：复杂内容完整端到端
 # ═════════════════════════════════════════════════════════
 
 
-class TestGuideCodeComplexContent:
+class TestComplexContent:
     """用真实安全分析场景的复杂内容测试。"""
 
     def test_complex_guide_pentest(self, db):
@@ -234,12 +200,9 @@ sqlmap -u "http://target/login" --data "user=*&pass=1" --dump
 """
         db.store(
             question="SQL injection exploitation guide",
-            answer=guide_text,
-            type="other",
-            doc_type="guide",
-            guide_type="pentest",
+            content=guide_text,
         )
-        results = db.search(["how to exploit SQL injection step by step"], type=None, doc_type="guide", guide_type="pentest")
+        results = db.search(["how to exploit SQL injection step by step"])
         assert len(results) > 0
         assert "UNION SELECT" in results[0]["answer"] or "sqlmap" in results[0]["answer"]
 
@@ -262,12 +225,10 @@ if __name__ == "__main__":
 """
         db.store(
             question="SQL injection exploit script",
-            answer=code_text,
-            type="code",
-            doc_type="code",
-            code_lang="python",
+            content=code_text,
+            lang="python",
         )
-        results = db.search(["python SQL injection exploit script"], type=None, doc_type="code", code_lang="python")
+        results = db.search(["python SQL injection exploit script"], lang="python")
         assert len(results) > 0
         assert "exploit_sqli" in results[0]["answer"] or "requests.post" in results[0]["answer"]
 
@@ -282,15 +243,11 @@ class TestMemoryDaemonEndToEnd:
 
     def test_daemon_write_then_search(self, embedder):
         """启动 daemon → 写入事件 → 用 MemoryDB 搜索验证。"""
-        import sqlite_vec
-        import struct
-
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "knowledge.db"
 
             # 预创建 DB（daemon 不创建，只写入）
-            import sqlite3
-            from db import MemoryDB, SCHEMA_SQL, INDEX_SQL, EMBEDDING_DIM
+            from db import MemoryDB
             db = MemoryDB(db_path, embedder)
             db.close()
 
@@ -329,7 +286,7 @@ class TestMemoryDaemonEndToEnd:
 
             # 用 MemoryDB 搜索
             db2 = MemoryDB(db_path, embedder)
-            results = db2.search(["nmap port scan ssh"], type=None, doc_type="memory")
+            results = db2.search(["nmap port scan ssh"], doc_type="memory")
             assert len(results) > 0, "daemon 写入的 memory 应可搜到"
             assert "nmap" in results[0]["answer"].lower()
             db2.close()

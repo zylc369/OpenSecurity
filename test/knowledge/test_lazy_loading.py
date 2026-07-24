@@ -25,9 +25,8 @@ async def test_first_call_takes_model_load_time(session):
     """首次工具调用：模型后台加载中，工具调用 await，最终成功返回。"""
     print("\n[测试 1] 首次工具调用（模型加载中）...")
     t0 = time.time()
-    result = await session.call_tool("search_answer", {
+    result = await session.call_tool("search_knowledge", {
         "questions": ["how to exploit buffer overflow"],
-        "type": "vulnerability",
     })
     elapsed = time.time() - t0
     print(f"  耗时: {elapsed:.2f}s")
@@ -41,9 +40,8 @@ async def test_second_call_is_fast(session):
     """第二次工具调用：模型已就绪，立即返回。"""
     print("\n[测试 2] 第二次工具调用（模型已就绪）...")
     t0 = time.time()
-    result = await session.call_tool("search_answer", {
+    result = await session.call_tool("search_knowledge", {
         "questions": ["another query"],
-        "type": "other",
     })
     elapsed = time.time() - t0
     print(f"  耗时: {elapsed:.3f}s")
@@ -57,10 +55,9 @@ async def test_store_and_search_end_to_end(session):
     """store + search 端到端：验证 lazy 加载后的 db 操作正确。"""
     print("\n[测试 3] store + search 端到端...")
     # store
-    store_result = await session.call_tool("store_answer", {
+    store_result = await session.call_tool("store_knowledge", {
         "question": "what is frida hook",
-        "answer": "Frida is a dynamic instrumentation toolkit. It lets you inject JavaScript into native apps.",
-        "type": "tool",
+        "content": "Frida is a dynamic instrumentation toolkit. It lets you inject JavaScript into native apps.",
     })
     store_text = "".join(c.text for c in store_result.content if hasattr(c, "text"))
     print(f"  store: {store_text}")
@@ -68,9 +65,8 @@ async def test_store_and_search_end_to_end(session):
         f"store 失败: {store_text}"
 
     # search（应该能搜到刚存的）
-    search_result = await session.call_tool("search_answer", {
+    search_result = await session.call_tool("search_knowledge", {
         "questions": ["dynamic instrumentation"],
-        "type": "tool",
     })
     search_text = "".join(c.text for c in search_result.content if hasattr(c, "text"))
     print(f"  search 返回长度: {len(search_text)} 字符")
@@ -92,9 +88,9 @@ async def test_concurrent_calls_during_loading():
             # 立即并发 3 个调用
             t0 = time.time()
             results = await asyncio.gather(
-                session.call_tool("search_answer", {"questions": ["q1"], "type": "other"}),
-                session.call_tool("search_answer", {"questions": ["q2"], "type": "other"}),
-                session.call_tool("search_answer", {"questions": ["q3"], "type": "other"}),
+                session.call_tool("search_knowledge", {"questions": ["q1"]}),
+                session.call_tool("search_knowledge", {"questions": ["q2"]}),
+                session.call_tool("search_knowledge", {"questions": ["q3"]}),
             )
             elapsed = time.time() - t0
             print(f"  3 个并发调用总耗时: {elapsed:.2f}s")
@@ -141,7 +137,7 @@ asyncio.run(server.mcp.run_stdio_async())
             # 工具函数 _ensure_ready 抛 RuntimeError
             t0 = time.time()
             result = await asyncio.wait_for(
-                session.call_tool("search_answer", {"questions": ["test"], "type": "other"}),
+                session.call_tool("search_knowledge", {"questions": ["test"]}),
                 timeout=15.0,
             )
             elapsed = time.time() - t0

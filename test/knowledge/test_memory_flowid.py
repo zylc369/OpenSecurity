@@ -3,7 +3,7 @@
 测试用例：
   1. 存 memory 带 flow_id=A → search flow_id=A 能搜到
   2. 存 memory 带 flow_id=A → search flow_id=B 搜不到
-  3. 存 answer（flow_id 空）→ search answer 不受 flow_id 影响
+  3. 存 knowledge（flow_id 空）→ search knowledge 不受 flow_id 影响
   4. 已有数据库迁移成功（flow_id 列存在）
 """
 import os
@@ -35,7 +35,7 @@ class TestMemoryFlowIdIsolation(unittest.TestCase):
         """存 memory flow_id=A → search flow_id=A 能搜到。"""
         rid = self.db.store(
             "test flow isolation", "This is a test memory for flow_id isolation test",
-            "test", doc_type="memory", flow_id="test-flow-A",
+            doc_type="memory", flow_id="test-flow-A",
         )
         results = self.db.search(
             ["flow_id isolation test"], doc_type="memory", flow_id="test-flow-A",
@@ -47,7 +47,7 @@ class TestMemoryFlowIdIsolation(unittest.TestCase):
         """存 memory flow_id=A → search flow_id=B 搜不到。"""
         rid = self.db.store(
             "test cross flow barrier", "This memory should not be visible from flow B",
-            "test", doc_type="memory", flow_id="test-flow-A",
+            doc_type="memory", flow_id="test-flow-A",
         )
         results = self.db.search(
             ["cross flow barrier"], doc_type="memory", flow_id="test-flow-B",
@@ -55,18 +55,17 @@ class TestMemoryFlowIdIsolation(unittest.TestCase):
         found = any(r["id"] == rid for r in results)
         self.assertFalse(found, f"flow_id=A 的 memory 不应该被 flow_id=B 搜到")
 
-    def test_03_answer_not_affected_by_flow_id(self):
-        """存 answer（flow_id 空）→ search answer 不受 flow_id 影响。"""
+    def test_03_knowledge_not_affected_by_flow_id(self):
+        """存 knowledge（flow_id 空）→ search knowledge 不受 flow_id 影响。"""
         rid = self.db.store(
-            "test answer global visibility", "This answer should be globally searchable",
-            "test", doc_type="answer",
+            "test knowledge global visibility", "This knowledge should be globally searchable",
         )
-        # search answer 不传 flow_id
+        # search knowledge 不传 flow_id
         results = self.db.search(
-            ["answer global visibility"], doc_type="answer",
+            ["knowledge global visibility"],
         )
         found = any(r["id"] == rid for r in results)
-        self.assertTrue(found, "answer 应该全局可见（不受 flow_id 影响）")
+        self.assertTrue(found, "knowledge 应该全局可见（不受 flow_id 影响）")
 
     def test_04_flow_id_column_exists(self):
         """answers 表有 flow_id 列。"""
@@ -77,7 +76,7 @@ class TestMemoryFlowIdIsolation(unittest.TestCase):
         """store 不传 flow_id 时默认 None（存入数据库为 NULL）。"""
         rid = self.db.store(
             "test default flow_id", "test content for default none",
-            "test", doc_type="memory",
+            doc_type="memory",
         )
         row = self.db._conn.execute(
             "SELECT flow_id FROM answers WHERE id = ?", (rid,),

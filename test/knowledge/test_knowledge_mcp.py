@@ -1,8 +1,8 @@
-"""Knowledge MCP 全面测试——对齐 PentAGI 后的功能验证。
+"""Knowledge MCP 全面测试——工具简化（7→3）后的功能验证。
 
 测试层次：
   1. anonymizer.py: 各模式清洗 + 多模式混合 + 边界
-  2. db.py: embed content、score 阈值、guide_type/code_lang 过滤、doc_type 隔离、多 query 合并、迁移
+  2. db.py: embed content、score 阈值、lang 过滤、doc_type 隔离、多 query 合并、迁移
   3. server.py: 直接调用工具函数（非 AST），验证参数验证 + 匿名化效果 + 端到端搜索
 """
 import json
@@ -136,111 +136,91 @@ def db(embedder):
 class TestDbEmbedContent:
     """验证 embed 目标是 content 不是 question。"""
 
-    def test_search_by_answer_content(self, db):
-        """用 answer 里的词（不在 question 里）能搜到。"""
+    def test_search_by_content(self, db):
+        """用 content 里的词（不在 question 里）能搜到。"""
         db.store(
             question="authentication",
-            answer="RBAC role-based access control with JWT tokens",
-            type="other",
+            content="RBAC role-based access control with JWT tokens",
         )
-        results = db.search(["RBAC permissions"], type="other")
-        assert len(results) > 0, "应通过 answer 内容搜到"
+        results = db.search(["RBAC permissions"])
+        assert len(results) > 0, "应通过 content 内容搜到"
 
-    def test_answer_match_higher_than_question_match(self, db):
-        """answer 内容匹配应比 question 匹配分数高。"""
+    def test_content_match_higher_than_question_match(self, db):
+        """content 内容匹配应比 question 匹配分数高。"""
         db.store(
             question="intro",
-            answer="Detailed analysis of SQL injection in login forms with sqlmap exploitation",
-            type="vulnerability",
+            content="Detailed analysis of SQL injection in login forms with sqlmap exploitation",
         )
-        # 搜 answer 里的词
-        answer_results = db.search(["SQL injection sqlmap"], type="vulnerability")
+        # 搜 content 里的词
+        content_results = db.search(["SQL injection sqlmap"])
         # 搜 question 里的词
-        question_results = db.search(["intro"], type="vulnerability")
+        question_results = db.search(["intro"])
 
-        answer_score = answer_results[0]["score"] if answer_results else 0
+        content_score = content_results[0]["score"] if content_results else 0
         question_score = question_results[0]["score"] if question_results else 0
-        assert answer_score >= question_score, f"answer 匹配({answer_score}) 应 >= question 匹配({question_score})"
+        assert content_score >= question_score, f"content 匹配({content_score}) 应 >= question 匹配({question_score})"
 
 
 class TestDbDocTypeIsolation:
-    """验证不同 doc_type 之间数据隔离。"""
+    """验证 knowledge 和 memory 之间数据隔离。"""
 
-    def test_answer_search_excludes_guide(self, db):
-        db.store("install", "How to install Ghidra on Linux", "other", doc_type="guide", guide_type="install")
-        db.store("install", "Installation dependencies for Ghidra", "other", doc_type="answer")
+    def test_memory_search_excludes_knowledge(self, db):
+        db.store("test query", "knowledge content about analysis", doc_type="knowledge")
+        db.store("test query", "memory content from tool execution", doc_type="memory")
 
-        answer_results = db.search(["Ghidra install"], type="other", doc_type="answer")
-        guide_results = db.search(["Ghidra install"], type=None, doc_type="guide")
+        memory_results = db.search(["test content"], doc_type="memory")
+        knowledge_results = db.search(["test content"], doc_type="knowledge")
 
-        # 各自只返回自己的 doc_type
-        assert len(answer_results) > 0, "answer 搜索应有结果"
-        assert len(guide_results) > 0, "guide 搜索应有结果"
-
-    def test_memory_search_excludes_answer(self, db):
-        db.store("test query", "answer content", "other", doc_type="answer")
-        db.store("test query", "memory content from tool execution", "bash", doc_type="memory")
-
-        memory_results = db.search(["test content"], type=None, doc_type="memory")
-        answer_results = db.search(["test content"], type="other", doc_type="answer")
-
-        # memory 搜索不返回 answer 的数据
+        # memory 搜索不返回 knowledge 的数据
         for r in memory_results:
             assert r["answer"] == "memory content from tool execution"
-        for r in answer_results:
-            assert r["answer"] == "answer content"
+        for r in knowledge_results:
+            assert r["answer"] == "knowledge content about analysis"
 
 
-class TestDbGuideCodeFilters:
-    """验证 guide_type/code_lang 过滤。"""
+class TestDbLangFilter:
+    """验证 lang 过滤。"""
 
-    def test_guide_type_filter(self, db):
-        db.store("setup", "Install with apt-get", "other", doc_type="guide", guide_type="install")
-        db.store("setup", "Configure in /etc/app.conf", "other", doc_type="guide", guide_type="configure")
+    def test_lang_filter(self, db):
+        db.store("hash", "hashlib.sha256(data).hexdigest()", doc_type="knowledge", lang="python")
+        db.store("hash", "echo -n 'data' | sha256sum", doc_type="knowledge", lang="bash")
 
-        install_results = db.search(["setup"], type=None, doc_type="guide", guide_type="install")
-        configure_results = db.search(["setup"], type=None, doc_type="guide", guide_type="configure")
-
-        # 各自只返回对应 guide_type 的数据
-        for r in install_results:
-            assert "apt-get" in r["answer"]
-        for r in configure_results:
-            assert "/etc/app.conf" in r["answer"]
-
-    def test_code_lang_filter(self, db):
-        db.store("hash", "hashlib.sha256(data).hexdigest()", "code", doc_type="code", code_lang="python")
-        db.store("hash", "echo -n 'data' | sha256sum", "code", doc_type="code", code_lang="bash")
-
-        python_results = db.search(["hash"], type=None, doc_type="code", code_lang="python")
-        bash_results = db.search(["hash"], type=None, doc_type="code", code_lang="bash")
+        python_results = db.search(["hash"], doc_type="knowledge", lang="python")
+        bash_results = db.search(["hash"], doc_type="knowledge", lang="bash")
 
         for r in python_results:
             assert "hashlib" in r["answer"]
         for r in bash_results:
             assert "sha256sum" in r["answer"]
 
+    def test_no_lang_filter_returns_all(self, db):
+        db.store("hash", "hashlib.sha256(data).hexdigest()", doc_type="knowledge", lang="python")
+        db.store("hash", "echo -n 'data' | sha256sum", doc_type="knowledge", lang="bash")
+
+        all_results = db.search(["hash"], doc_type="knowledge")
+        # 不过滤时应返回两种语言的结果
+        assert len(all_results) >= 2
+
 
 class TestDbMultiQuery:
     """验证多 query 合并去重。"""
 
     def test_multiple_queries_merged(self, db):
-        db.store("vuln", "SQL injection vulnerability in login form", "vulnerability")
+        db.store("vuln", "SQL injection vulnerability in login form")
 
         # 两个不同 query 搜同一条记录
         results = db.search(
             ["SQL injection login", "vulnerability in authentication form"],
-            type="vulnerability",
         )
         # 同一条记录不应重复出现
         ids = [r["id"] for r in results]
         assert len(ids) == len(set(ids)), "多 query 结果应去重"
 
     def test_cross_query_highest_score(self, db):
-        db.store("crypto", "RSA encryption with weak prime generation", "vulnerability")
+        db.store("crypto", "RSA encryption with weak prime generation")
 
         results = db.search(
             ["RSA encryption", "weak prime factorization"],
-            type="vulnerability",
         )
         if results:
             # 应取跨 query 的最高分
@@ -288,8 +268,10 @@ class TestDbMigration:
             cols = {row[1] for row in db._conn.execute("PRAGMA table_info(answers)").fetchall()}
             assert "guide_type" in cols
             assert "code_lang" in cols
+            assert "flow_id" in cols
 
-            results = db.search(["buffer overflow"], type="other")
+            # 验证迁移后旧数据仍保留且可搜到（显式传 doc_type="answer" 搜旧数据）
+            results = db.search(["buffer overflow"], doc_type="answer")
             assert len(results) > 0, "旧数据应保留且可搜到"
             db.close()
 
@@ -298,10 +280,10 @@ class TestDbMigration:
             from db import MemoryDB
             db_path = Path(tmp) / "test.db"
             db1 = MemoryDB(db_path, embedder)
-            db1.store("test", "content", "other")
+            db1.store("test", "content")
             db1.close()
             db2 = MemoryDB(db_path, embedder)
-            results = db2.search(["content"], type="other")
+            results = db2.search(["content"])
             assert len(results) > 0, "重新打开后数据应保留"
             db2.close()
 
@@ -311,96 +293,79 @@ class TestDbMigration:
 # ═════════════════════════════════════════════════════════
 
 
+@pytest.fixture(autouse=True, scope="class")
+def mock_server_ready():
+    """跳过 lazy 加载等待：设置 _ready Event 让 _ensure_ready() 立即返回。"""
+    import server
+    server._ready.set()
+    yield
+    server._ready.clear()
+
+
 class TestServerToolsDirect:
-    """直接调用 server.py 的工具函数（非 AST），验证完整链路。"""
+    """验证 server.py 工具函数的参数验证和工具存在性。
 
-    def test_store_answer_anonymizes_ip(self):
-        """store_answer 存入的数据应不含原始 IP。"""
-        from server import store_answer
-        result = json.loads(store_answer(
-            question="connect to server",
-            answer="Server at 192.168.1.50 with password=admin123",
-            type="other",
-        ))
-        assert result["stored"] is True
+    完整的 store+search 端到端测试在 Step 7 端到端验证中执行（需加载 BGE-M3）。
+    """
 
-        # 搜索验证存储的数据已匿名化
-        from server import search_answer, _db
-        # 直接查 DB 验证
-        row = _db._conn.execute("SELECT question, answer FROM answers WHERE id = ?", (result["id"],)).fetchone()
-        assert "<IP>" in row[1], f"存储的 answer 应匿名化 IP，实际: {row[1]}"
-        assert "<CREDENTIAL>" in row[1], f"存储的 answer 应匿名化 password，实际: {row[1]}"
-
-    def test_store_guide_anonymizes(self):
-        from server import store_guide, _db
-        result = json.loads(store_guide(
-            guide="Connect to 10.0.0.5 and run nmap",
-            question="network scan guide",
-            type="pentest",
-        ))
-        assert result["stored"] is True
-        row = _db._conn.execute("SELECT answer FROM answers WHERE id = ?", (result["id"],)).fetchone()
-        assert "<IP>" in row[0]
-
-    def test_store_code_anonymizes(self):
-        from server import store_code, _db
-        result = json.loads(store_code(
-            code="requests.get('http://admin@api.sk-secret123.com')",
-            question="API call",
-            lang="python",
-            explanation="Calls API at 192.168.1.1",
-            description="API request",
-        ))
-        assert result["stored"] is True
-        row = _db._conn.execute("SELECT answer FROM answers WHERE id = ?", (result["id"],)).fetchone()
-        assert "<IP>" in row[0] or "<API_KEY>" in row[0] or "<DOMAIN>" in row[0]
-
-    def test_search_answer_returns_json(self):
-        from server import search_answer
-        result = json.loads(search_answer(questions=["test"], type="other"))
-        assert "results" in result
-        assert "count" in result
-
-    def test_search_guide_invalid_type(self):
-        from server import search_guide
-        result = json.loads(search_guide(questions=["test"], type="invalid_type"))
-        assert "error" in result
-
-    def test_search_code_returns_json(self):
-        from server import search_code
-        result = json.loads(search_code(questions=["hash"], lang="python"))
-        assert "results" in result
-
-    def test_store_answer_empty_rejected(self):
-        from server import store_answer
-        result = json.loads(store_answer(question="", answer="", type="other"))
-        assert result["stored"] is False
-
-    def test_store_guide_invalid_type_rejected(self):
-        from server import store_guide
-        result = json.loads(store_guide(guide="test", question="test", type="invalid"))
-        assert result["stored"] is False
-
-    def test_search_in_memory_returns_json(self):
-        from server import search_in_memory
-        result = json.loads(search_in_memory(questions=["test"]))
-        assert "results" in result
-        assert "count" in result
-
-    def test_all_7_tools_exist(self):
+    def test_all_3_tools_exist(self):
         import server
-        for name in ["search_answer", "store_answer", "search_guide", "store_guide",
-                      "search_code", "store_code", "search_in_memory"]:
+        for name in ["search_knowledge", "store_knowledge", "search_in_memory"]:
             assert hasattr(server, name), f"缺少工具 {name}"
 
+    def test_no_old_tools_exist(self):
+        import server
+        for name in ["search_answer", "store_answer", "search_guide", "store_guide",
+                      "search_code", "store_code"]:
+            assert not hasattr(server, name), f"旧工具 {name} 应已删除"
 
-class TestServerEnumAlignment:
-    """验证枚举与 PentAGI 一致。"""
+    def test_store_knowledge_empty_rejected(self):
+        import asyncio
+        from server import store_knowledge
+        result = json.loads(asyncio.run(store_knowledge(question="", content="")))
+        assert result["stored"] is False
 
-    def test_guide_types(self):
-        from server import VALID_GUIDE_TYPES
-        assert set(VALID_GUIDE_TYPES) == {"install", "configure", "use", "pentest", "development", "other"}
+    def test_search_knowledge_empty_rejected(self):
+        import asyncio
+        from server import search_knowledge
+        result = json.loads(asyncio.run(search_knowledge(questions=[])))
+        assert "error" in result
 
-    def test_answer_types(self):
-        from server import VALID_ANSWER_TYPES
-        assert set(VALID_ANSWER_TYPES) == {"guide", "vulnerability", "code", "tool", "other"}
+    def test_search_in_memory_empty_rejected(self):
+        import asyncio
+        from server import search_in_memory
+        result = json.loads(asyncio.run(search_in_memory(questions=[])))
+        assert "error" in result
+
+    def test_store_knowledge_anonymizes(self):
+        """验证 store_knowledge 内部调用了 anonymize（mock DB，不需要加载 BGE-M3）。
+
+        如果有人删了 store_knowledge 里的 anonymize() 调用，这个测试会失败。
+        """
+        import asyncio
+        from unittest.mock import MagicMock
+        from server import store_knowledge
+        import server
+
+        mock_db = MagicMock()
+        mock_db.store.return_value = 42
+        old_db = server._state.get("db")
+        server._state["db"] = mock_db
+
+        try:
+            result = json.loads(asyncio.run(store_knowledge(
+                question="connect to 192.168.1.50",
+                content="Server at 10.0.0.5 with password=admin123",
+            )))
+            assert result["stored"] is True
+
+            # 验证传给 db.store 的是匿名化后的内容（db.store 用位置参数：question, content）
+            call_args = mock_db.store.call_args
+            stored_question = call_args.args[0]
+            stored_content = call_args.args[1]
+            assert "192.168.1.50" not in stored_question, "question 应被匿名化"
+            assert "10.0.0.5" not in stored_content, "content IP 应被匿名化"
+            assert "admin123" not in stored_content, "content password 应被匿名化"
+            assert "<IP>" in stored_question
+        finally:
+            server._state["db"] = old_db

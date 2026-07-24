@@ -1,27 +1,27 @@
 """基于 SQLite + sqlite-vec 的向量存储（knowledge MCP server 后端）。
 
 双表设计：
-  - answers（普通 SQLite 表）：id, question, answer, type, doc_type, guide_type, code_lang, created_at
+  - answers（普通 SQLite 表）：id, question, answer(content), doc_type, lang, flow_id, created_at
   - answer_vectors（vec0 虚拟表）：rowid <-> answers.id，embedding float[1024]
 
-doc_type 区分四种知识类型（与 PentAGI 一致）：
-  - "answer"：答案知识库（searcher 用 search_answer 查 / store_answer 写）
-  - "guide"：指南知识库（searcher 用 search_guide 查 / store_guide 写）
-  - "code"：代码片段库（searcher 用 search_code 查 / store_code 写）
-  - "memory"：执行记忆库（memorist 用 search_in_memory 查；写入由框架自动完成）
+doc_type 区分两种类型：
+  - "knowledge"：知识库（search_knowledge 查 / store_knowledge 写；合并原 answer/guide/code）
+  - "memory"：执行记忆库（search_in_memory 查；写入由 memory_writer_daemon 自动完成）
 
-Embedding 目标：embed content（answer/guide/code 文本），不是 question。
-  对齐 PentAGI：documentloaders.NewText(anonymizedAnswer).Load() → embed 内容文本。
+Embedding 目标：embed content（answer 列存储的文本），不是 question。
   question 存在 answers 表但不 embed——作为元数据供展示。
 
 Embedding 模型：BAAI/bge-m3（1024 维，归一化输出，多语言）。
 距离度量：cosine（sqlite-vec 返回 1 - cosine_similarity）。
 
-分数阈值（对齐 PentAGI 的 0.2）：
+分数阈值：
   - score < 0.2 的结果被过滤（不返回）
   - >= 0.75：强匹配，可直接引用
   - 0.50-0.75：中等匹配，使用前需校验
   - 0.20-0.50：弱匹配，仅供参考
+
+向后兼容：旧列 type/guide_type/code_lang 仍保留在 schema 中（INDEX_SQL 建索引），
+但新数据不再使用它们的有意义值（type 写 doc_type 值，guide_type 写空字符串，code_lang 写 lang 值）。
 """
 import sqlite3
 import sqlite_vec
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS answers (
     question TEXT NOT NULL,
     answer TEXT NOT NULL,
     type TEXT NOT NULL,
-    doc_type TEXT NOT NULL DEFAULT 'answer',
+    doc_type TEXT NOT NULL DEFAULT 'knowledge',
     guide_type TEXT NOT NULL DEFAULT '',
     code_lang TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
@@ -52,9 +52,7 @@ CREATE TABLE IF NOT EXISTS answers (
 """
 
 INDEX_SQL = """
-CREATE INDEX IF NOT EXISTS idx_answers_type ON answers(type);
 CREATE INDEX IF NOT EXISTS idx_answers_doc_type ON answers(doc_type);
-CREATE INDEX IF NOT EXISTS idx_answers_guide_type ON answers(guide_type);
 CREATE INDEX IF NOT EXISTS idx_answers_code_lang ON answers(code_lang);
 """
 
@@ -118,25 +116,23 @@ class MemoryDB:
     def store(
         self,
         question: str,
-        answer: str,
-        type: str,
-        doc_type: str = "answer",
-        guide_type: str = "",
-        code_lang: str = "",
+        content: str,
+        doc_type: str = "knowledge",
+        lang: str = "",
         flow_id: str | None = None,
     ) -> int:
         """插入一行及其 content 的 embedding。
 
-        embed 目标是 answer（content 文本），不是 question。
-        对齐 PentAGI：embed 内容文本，question 存表不 embed。
-        flow_id 仅 memory 类型用（按任务隔离）；answer/guide/code 为 None（全局共享）。
+        embed 目标是 content（answer 列存储的文本），不是 question。
+        flow_id 仅 memory 类型用（按任务隔离）；knowledge 为 None（全局共享）。
         """
-        embedding = self._embed(answer)
+        embedding = self._embed(content)
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO answers(question, answer, type, doc_type, guide_type, code_lang, flow_id, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (question, answer, type, doc_type, guide_type, code_lang, flow_id, time.time()),
+                # 旧列兼容：type 写 doc_type 值，guide_type 写空字符串，code_lang 写 lang 值
+                (question, content, doc_type, doc_type, "", lang, flow_id, time.time()),
             )
             row_id = cur.lastrowid
             self._conn.execute(
@@ -149,14 +145,12 @@ class MemoryDB:
     def search(
         self,
         questions: list[str],
-        type: str | None = None,
-        doc_type: str = "answer",
-        guide_type: str = "",
-        code_lang: str = "",
+        doc_type: str = "knowledge",
+        lang: str = "",
         top_k: int = DEFAULT_TOP_K,
         flow_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """对每个查询：按 cosine 找最近的，按 doc_type + type/guide_type/code_lang/flow_id 过滤，再合并。
+        """对每个查询：按 cosine 找最近的，按 doc_type + lang/flow_id 过滤，再合并。
 
         score < SCORE_THRESHOLD 的结果被过滤（不返回）。
         flow_id 仅 doc_type=memory 且非 None 时生效（按任务隔离）；其他 doc_type 忽略 flow_id。
@@ -195,15 +189,9 @@ class MemoryDB:
             conditions = [f"id IN ({placeholders})", "doc_type = ?"]
             params: list[Any] = [*ids, doc_type]
 
-            if type is not None:
-                conditions.append("type = ?")
-                params.append(type)
-            if guide_type:
-                conditions.append("guide_type = ?")
-                params.append(guide_type)
-            if code_lang:
+            if lang:
                 conditions.append("code_lang = ?")
-                params.append(code_lang)
+                params.append(lang)
             # flow_id 过滤：仅 doc_type=memory 且 flow_id 非 None 时生效（按任务隔离）
             if doc_type == "memory" and flow_id is not None:
                 conditions.append("flow_id = ?")
@@ -211,18 +199,17 @@ class MemoryDB:
 
             where_clause = " AND ".join(conditions)
             rows = self._conn.execute(
-                f"SELECT id, question, answer, type FROM answers WHERE {where_clause}",
+                f"SELECT id, question, answer FROM answers WHERE {where_clause}",
                 params,
             ).fetchall()
 
             results = []
-            for row_id, question, answer, ans_type in rows:
+            for row_id, question, answer in rows:
                 entry = seen[row_id]
                 results.append({
                     "id": int(row_id),
                     "question": question,
                     "answer": answer,
-                    "type": ans_type,
                     "score": round(entry["score"], 4),
                 })
 

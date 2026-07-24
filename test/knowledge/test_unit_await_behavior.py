@@ -7,7 +7,7 @@
 测试场景：
   1. spawn server 进程
   2. stdio 握手（<10s，不含模型加载）
-  3. 握手完成后立即调用 search_answer（T=0+）
+  3. 握手完成后立即调用 search_knowledge（T=0+）
   4. 工具调用应：
      - 不立即返回（说明在等待）
      - 等到模型加载完后正常返回结果（说明等待成功）
@@ -49,7 +49,7 @@ async def _handshake_and_call(tool_args: dict, call_immediately: bool = True) ->
 
             # 立即调用工具
             call_start = time.time()
-            result = await session.call_tool("search_answer", tool_args)
+            result = await session.call_tool("search_knowledge", tool_args)
             call_time = time.time() - call_start
 
             # 提取文本
@@ -69,7 +69,7 @@ class TestAwaitDuringLoading(unittest.IsolatedAsyncioTestCase):
     async def test_handshake_is_fast(self):
         """契约 1：握手快（不含模型加载）。改造前 ~15s；改造后 <10s。"""
         # 用一个轻调用确认握手 + server 可响应
-        res = await _handshake_and_call({"questions": ["q"], "type": "other"})
+        res = await _handshake_and_call({"questions": ["q"]})
         print(f"\n  握手耗时: {res['handshake_time']:.2f}s")
         self.assertLess(res["handshake_time"], 10.0,
                         f"握手 {res['handshake_time']:.2f}s 应 <10s（lazy 加载生效）")
@@ -83,7 +83,7 @@ class TestAwaitDuringLoading(unittest.IsolatedAsyncioTestCase):
         - 调用耗时 > 3s（说明在等待——若不等待会立即返回错误）
         - 工具返回成功（说明等待后正常执行）
         """
-        res = await _handshake_and_call({"questions": ["frida"], "type": "tool"})
+        res = await _handshake_and_call({"questions": ["frida"]})
         print(f"\n  握手: {res['handshake_time']:.2f}s, 工具调用: {res['call_time']:.2f}s")
         print(f"  返回文本: {res['text'][:200]}")
 
@@ -109,13 +109,13 @@ class TestAwaitDuringLoading(unittest.IsolatedAsyncioTestCase):
 
                 # 首次调用（会等待模型加载）
                 t0 = time.time()
-                r1 = await session.call_tool("search_answer", {"questions": ["q1"], "type": "other"})
+                r1 = await session.call_tool("search_knowledge", {"questions": ["q1"]})
                 first_time = time.time() - t0
                 print(f"\n  首次调用: {first_time:.2f}s（含模型加载）")
 
                 # 第二次调用（_ready 已 set，应立即返回）
                 t0 = time.time()
-                r2 = await session.call_tool("search_answer", {"questions": ["q2"], "type": "other"})
+                r2 = await session.call_tool("search_knowledge", {"questions": ["q2"]})
                 second_time = time.time() - t0
                 print(f"  第二次调用: {second_time:.3f}s（_ready 已 set）")
 
