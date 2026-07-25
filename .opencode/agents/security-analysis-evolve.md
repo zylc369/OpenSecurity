@@ -536,6 +536,7 @@ Plugin hooks:
 |----------|---------|
 | `$SHARED_DIR/knowledge-base/knowledge-writing-guide.md` | 沉淀知识到任何知识库文件之前 |
 | `$AGENT_DIR/knowledge-base/knowledge-sourcing-guide.md` | 搜索下载 writeup 素材时（Phase 0 入口 C） |
+| `$AGENT_DIR/knowledge-base/knowledge-seeding-guide.md` | 将 .md 知识库提炼到 knowledge MCP 向量数据库时（含质量验证框架） |
 | `$SHARED_DIR/knowledge-base/opencode-plugin-api.md` | 查看 Hook 签名、input/output 类型 |
 | `$SHARED_DIR/knowledge-base/opencode-plugin-hooks-lifecycle.md` | 理解 Hook 执行时序、awaited vs fire-and-forget、常见陷阱 |
 | `$SHARED_DIR/knowledge-base/opencode-plugin-development-guide.md` | 从零创建插件、最小模板、状态管理模式 |
