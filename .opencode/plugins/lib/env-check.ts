@@ -8,7 +8,11 @@
  */
 import { join } from "path";
 import type { ProcessResult } from "./spawn";
-import { SHARED_DIR, AGENT_SECURITY_COORDINATOR, OPENCODE_ROOT } from "./constants";
+import {
+  SHARED_DIR,
+  AGENT_SECURITY_COORDINATOR,
+  OPENCODE_ROOT,
+} from "./constants";
 import { runProcess } from "./spawn";
 import { debugLog } from "./logging";
 import { ctx } from "./context";
@@ -56,18 +60,24 @@ export function interpretDetectEnvResult(
   if (r.error) {
     return {
       ready: false,
-      message: `[环境检测失败] 无法执行 detect_env（${agent}）：${r.error.message}` +
+      message:
+        `[环境检测失败] 无法执行 detect_env（${agent}）：${r.error.message}` +
         (stderrTail ? `\n检测日志（最后 300 字符）:\n${stderrTail}` : ""),
     };
   }
-  let result: { success?: boolean; install_guide?: string; optional_warnings?: string[] };
+  let result: {
+    success?: boolean;
+    install_guide?: string;
+    optional_warnings?: string[];
+  };
   try {
     result = JSON.parse(r.stdout);
   } catch (e) {
     const msg = (e as Error)?.message ?? String(e);
     return {
       ready: false,
-      message: `[环境检测失败] detect_env 输出非合法 JSON（${agent}）：${msg}` +
+      message:
+        `[环境检测失败] detect_env 输出非合法 JSON（${agent}）：${msg}` +
         (stderrTail ? `\n检测日志:\n${stderrTail}` : ""),
     };
   }
@@ -83,7 +93,9 @@ export function interpretDetectEnvResult(
   // optional_warnings（Docker/Neo4j/ZHIPU 缺失）不注入 system prompt —
   // events MCP 有降级机制，用户在实际使用时自然会发现。
   // 警告保留在 JSON 的 optional_warnings 字段 + debugLog 供排查。
-  const warnings = Array.isArray(result.optional_warnings) ? result.optional_warnings : [];
+  const warnings = Array.isArray(result.optional_warnings)
+    ? result.optional_warnings
+    : [];
   if (warnings.length > 0) {
     debugLog(`optional_warnings (不阻塞): ${warnings.join("; ")}`, undefined);
   }
@@ -91,20 +103,25 @@ export function interpretDetectEnvResult(
 }
 
 /**
- * 环境检测：调 detect_env.py --check-preinstall，只检测不装包（8 秒内完成）。
+ * 环境检测：调 detect_env.py --check-preinstall，只检测不装包。
  * Coordinator 传 "all" 检测所有子 agent 依赖的并集。
  * 纯函数——永远 resolve，不 reject。
+ *
+ * @param timeout 超时毫秒数。
+ *                预热路径应传入更大值（如 30000ms），因为多个 agent 并行
+ *                detect_env 会产生 I/O 竞争（angr/sage 等大型包的 find_spec）。
  */
 export async function runDetectEnv(
   agent: string,
   pythonCmd: string,
   sessionID: string,
+  timeout = 15000,
 ): Promise<EnvironmentCheckResult> {
   const detectEnv = join(SHARED_DIR, "scripts", "detect_env.py");
   const taskDir = ctx.sessionManager.getTaskDir(sessionID);
   const args = [detectEnv, ...buildDetectEnvArgs(agent, taskDir)];
   const childEnv: Record<string, string> = { OPENCODE_ROOT };
-  const r = await runProcess(pythonCmd, args, { timeout: 8000, env: childEnv });
+  const r = await runProcess(pythonCmd, args, { timeout, env: childEnv });
 
   const stderrTail = (r.stderr || "").trim().slice(-300);
   debugLog(

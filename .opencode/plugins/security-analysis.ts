@@ -1,9 +1,4 @@
-import {
-  writeFileSync,
-  readFileSync,
-  statSync,
-  existsSync,
-} from "fs";
+import { writeFileSync, readFileSync, statSync, existsSync } from "fs";
 import { join, dirname, delimiter } from "path";
 import { tmpdir } from "os";
 import * as yaml from "js-yaml";
@@ -36,7 +31,12 @@ import { ctx } from "./lib/context";
 import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
 import TaskSessionPersistence from "./lib/task-session-persistence";
-import { getPythonCmd, getInstallHint, getIdatPath, getCompilerName } from "./lib/venv";
+import {
+  getPythonCmd,
+  getInstallHint,
+  getIdatPath,
+  getCompilerName,
+} from "./lib/venv";
 import {
   hasBuwaiExtensionId,
   loadSnippet,
@@ -230,7 +230,9 @@ function preheatEnvCheck(agent: string): Promise<EnvironmentCheckResult> {
   if (!pythonCmd) {
     return Promise.resolve({ ready: false, message: getInstallHint() });
   }
-  return runDetectEnv(agent, pythonCmd, "preheat").catch((e) => ({
+  // 预热用 15s 超时（并行 6 个 detect_env 过程会竞争磁盘 I/O，
+  // angr/sage 等大型包的 find_spec 在冷缓存时可能超过 8s）
+  return runDetectEnv(agent, pythonCmd, "preheat", 30000).catch((e) => ({
     ready: false,
     message: `[预热异常] ${agent}: ${(e as Error)?.message ?? String(e)}`,
   }));
@@ -710,11 +712,11 @@ function ensureMemoryDaemon(): void {
 
 // 白名单：只有有信息价值的工具结果才存入 memory（对齐 PentAGI allowedStoringInMemoryTools）
 const MEMORY_ALLOWED_TOOLS = new Set([
-  "bash",       // 命令输出有技术价值（对应 PentAGI Terminal）
-  "read",       // 文件内容可能有价值（对应 PentAGI File）
-  "websearch",  // 外部搜索结果（对应 PentAGI Google/DuckDuckGo）
-  "webfetch",   // 外部资料获取
-  "task",       // 子 agent 返回的精炼结果（对应 PentAGI Search/Coder/Pentester/Advice）
+  "bash", // 命令输出有技术价值（对应 PentAGI Terminal）
+  "read", // 文件内容可能有价值（对应 PentAGI File）
+  "websearch", // 外部搜索结果（对应 PentAGI Google/DuckDuckGo）
+  "webfetch", // 外部资料获取
+  "task", // 子 agent 返回的精炼结果（对应 PentAGI Search/Coder/Pentester/Advice）
 ]);
 
 function fireAndForgetMemory(
@@ -813,7 +815,10 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   // 启动时立即并行检测所有领域 agent + Coordinator 的环境。
   // chat.message 命中 Promise cache 时直接 await（已完成则零开销）。
   // venv 未就绪时 preheatEnvCheck 返回 {ready: false}，不 spawn。
-  const preheatAgents = [...SECURITY_ANALYSIS_AGENTS, AGENT_SECURITY_COORDINATOR];
+  const preheatAgents = [
+    ...SECURITY_ANALYSIS_AGENTS,
+    AGENT_SECURITY_COORDINATOR,
+  ];
   for (const agent of preheatAgents) {
     envCheckPromises.set(agent, preheatEnvCheck(agent));
   }
@@ -1243,7 +1248,10 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         toolStartTimes.delete(input.callID);
         // 从工具参数提取 message（对齐 PentAGI executor.go:510 getMessage）
         const toolArgs = input.args as Record<string, unknown> | undefined;
-        const toolMessage = typeof toolArgs?.message === "string" ? toolArgs.message.trim().slice(0, 80) : "";
+        const toolMessage =
+          typeof toolArgs?.message === "string"
+            ? toolArgs.message.trim().slice(0, 80)
+            : "";
         recordTimeline(sid, {
           timestamp: Date.now(),
           type: "tool.after",
@@ -1265,7 +1273,12 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           );
 
           // 写入 knowledge 向量库 memory（对齐 PentAGI executor.go:519 storeToolResult）
-          fireAndForgetMemory(toolName, input.args, output.output || "", session.flowId);
+          fireAndForgetMemory(
+            toolName,
+            input.args,
+            output.output || "",
+            session.flowId,
+          );
         }
 
         debugLog(`tool.execute.after: tool=${toolName}`, sid);
