@@ -13,7 +13,12 @@
 """
 import asyncio
 import logging
+import sys
+from pathlib import Path
 from typing import Any
+
+# embed_client.py 在 mcp-servers/（上级目录），需加入 path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 
@@ -25,22 +30,18 @@ logger = logging.getLogger(__name__)
 class BgeRerankerClient(CrossEncoderClient):
     """使用 bge-reranker-v2-m3 本地模型实现 CrossEncoderClient 接口。
 
-    模型延迟加载（首次 rank 调用时加载，约 3 秒），避免启动时阻塞。
-    加载后常驻内存（~2GB），后续调用无加载开销。
+    通过 HttpEmbedClient 调用 embed_server（单进程共享模型）。
+    embed_server 是硬依赖——不可用时 HttpEmbedClient 抛 RuntimeError。
     """
 
     def __init__(self):
-        self._model: Any = None
+        from embed_client import HttpEmbedClient
+
+        self._model = HttpEmbedClient()
 
     @property
     def model(self):
-        """延迟加载 bge-reranker-v2-m3 模型。"""
-        if self._model is None:
-            from sentence_transformers import CrossEncoder
-
-            logger.info("加载 bge-reranker-v2-m3 模型（首次调用，约 3 秒）...")
-            self._model = CrossEncoder("BAAI/bge-reranker-v2-m3", max_length=512)
-            logger.info("bge-reranker-v2-m3 加载完成")
+        """返回 HttpEmbedClient（duck-type 兼容 CrossEncoder.predict()）。"""
         return self._model
 
     async def rank(

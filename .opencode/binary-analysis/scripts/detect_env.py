@@ -286,7 +286,10 @@ PYTHON_PACKAGES: list[Dependency] = [
                description="MCP 协议库，knowledge/events MCP server 依赖"),
     Dependency(name="sentence_transformers", kind="python", pip_name="sentence-transformers", preinstall=True,
                agents=["all"],
-               description="嵌入模型库，knowledge MCP 向量搜索依赖（BGE-M3 嵌入）"),
+               description="嵌入模型库，embed_server 加载 BGE-M3 模型依赖"),
+    Dependency(name="psutil", kind="python", pip_name="psutil", preinstall=True,
+               agents=["all"],
+               description="进程/内存监控库，embed_server 和诊断工具依赖"),
     Dependency(name="sqlite_vec", kind="python", pip_name="sqlite-vec", preinstall=True,
                agents=["all"],
                description="SQLite 向量扩展，knowledge MCP 向量存储依赖"),
@@ -776,6 +779,9 @@ def _run_install():
         else:
             _log(f"[!] MCP/{name}: 缺少 {', '.join(info.get('missing', []))}")
 
+    # 启动 embed_server（在所有 pip 包安装完成后）
+    _ensure_embed_server_infra()
+
     _log("[+] 安装完成")
     _log("[*] === 验证安装结果 ===")
     import subprocess as sp_verify
@@ -1099,6 +1105,59 @@ def _check_image_exists(image_name):
         return "unknown"
 
 
+# ── embed_server 检测/启动（与 Docker/Neo4j 并列的基础设施）──────────
+
+EMBED_SERVER_PORT = int(os.environ.get("EMBED_SERVER_PORT", "9776"))
+
+
+def _check_embed_server():
+    """检测 embed_server 是否运行（只读，不启动）。
+    返回 (running: bool, message: str)。
+    """
+    import urllib.request
+    try:
+        req = urllib.request.urlopen(
+            f"http://127.0.0.1:{EMBED_SERVER_PORT}/health", timeout=2
+        )
+        if req.status == 200:
+            return True, "embed_server 已运行"
+    except Exception:
+        pass
+    return False, "embed_server 未运行"
+
+
+def _ensure_embed_server():
+    """启动 embed_server（install 子命令用，有副作用）。
+    已运行则跳过；未运行则后台 spawn。
+    """
+    running, _ = _check_embed_server()
+    if running:
+        return True
+
+    opencode_root = _get_opencode_root()
+    script = os.path.join(opencode_root, "mcp-servers", "embed_server.py")
+    if not os.path.isfile(script):
+        return False
+
+    import subprocess as sp
+    try:
+        sp.Popen(
+            [_get_venv_python(), script],
+            stdout=sp.DEVNULL,
+            stderr=sp.DEVNULL,
+        )
+        # 等 health check（模型加载 ~3s，给 30s 余量）
+        import time
+        for _ in range(30):
+            time.sleep(1)
+            running, _ = _check_embed_server()
+            if running:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _check_mcp_deps_fast():
     """快速检测 MCP 依赖状态（check-preinstall 用，不启动任何东西）。
 
@@ -1168,6 +1227,15 @@ def _check_mcp_deps_fast():
                     else:
                         # 镜像未下载 → docker pull 需要几分钟，不应该自动恢复
                         result["_neo4j"] = {"available": False, "auto_recoverable": False, "message": f"容器 {container_name} 不存在且 {NEO4J_IMAGE} 镜像未下载，请运行 install.sh"}
+
+    # 4. embed_server 检测（informational，不影响 ready 判定）
+    # embed_server 不可用时 MCP 自动回退到本地加载，不阻塞 agent 运行
+    embed_ok, embed_msg = _check_embed_server()
+    result["_embed_server"] = {
+        "available": embed_ok,
+        "auto_recoverable": True,  # plugin.setup 启动时自动 spawn
+        "message": embed_msg,
+    }
 
     return result
 
@@ -1242,7 +1310,19 @@ def _ensure_mcp_infra():
         return {"_neo4j": {"available": False, "message": f"Docker 异常: {e}"}}
 
 
+def _ensure_embed_server_infra():
+    """启动 embed_server（install 子命令用，有副作用）。
 
+    在 Docker/Neo4j 基础设施就绪后调用。
+    embed_server 是 HTTP 服务，加载 BGE-M3 供所有 MCP 进程共享。
+    """
+    embed_ok, _ = _check_embed_server()
+    if not embed_ok:
+        _log("[*] 启动 embed_server...")
+        if _ensure_embed_server():
+            _log("[+] embed_server 已启动")
+        else:
+            _log("[!] embed_server 启动失败（MCP 将回退到本地加载）")
 
 def main():
     _ensure_ai_env_template()

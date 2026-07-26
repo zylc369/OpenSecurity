@@ -14,7 +14,11 @@
 """
 import asyncio
 import os
+import sys
 from pathlib import Path
+
+# embed_client.py 在 mcp-servers/（上级目录），需加入 path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 from graphiti_core.embedder.client import EmbedderClient
@@ -142,21 +146,22 @@ class BgeM3Embedder(EmbedderClient):
     替代 OpenAI embedding API——零成本、无网络依赖。
     输出 1024 维向量，与 graphiti-core 默认 EMBEDDING_DIM=1024 一致。
 
+    通过 HttpEmbedClient 调用 embed_server（单进程共享模型）。
+    embed_server 是硬依赖——不可用时 HttpEmbedClient 抛 RuntimeError。
+
     create 方法是 async（graphiti-core 的 EntityNode.generate_name_embedding
-    调 await embedder.create()）。同步的 model.encode 用 asyncio.to_thread 包装。
+    调 await embedder.create()）。同步的 encode 用 asyncio.to_thread 包装。
     """
 
     def __init__(self):
-        self._model = None
+        from embed_client import HttpEmbedClient
+
+        self._model = HttpEmbedClient()
         self._embedding_dim = 1024
 
     @property
     def model(self):
-        """延迟加载 BGE-M3 模型（首次调用时加载，约 10 秒）。"""
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
-
-            self._model = SentenceTransformer("BAAI/bge-m3")
+        """返回 HttpEmbedClient（duck-type 兼容 SentenceTransformer.encode()）。"""
         return self._model
 
     async def create(self, input_data) -> list[float]:

@@ -122,3 +122,8 @@ export const VENV_PYTHON_CANDIDATES = [
 // ─── 时间线 ────────────────────────────────────────────────────
 
 export const MAX_TIMELINE_BUFFER = 50;
+
+// ─── embed_server ──────────────────────────────────────────────
+
+/** ServiceRegistry 中 embed_server 的服务名 */
+export const EMBED_SERVER_SERVICE = "embed_server";

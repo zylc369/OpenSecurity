@@ -1,9 +1,10 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { SessionDataManager } from "./session-manager";
+import { ServiceRegistry } from "./service-registry";
 
 /**
  * 全局上下文：统一管理 Plugin 级全局状态。
- * 所有模块通过 ctx 访问 client、directory、sessionManager，
+ * 所有模块通过 ctx 访问 client、directory、sessionManager、services，
  * 避免全局变量散落在各模块。
  *
  * 字段使用 !: （确定赋值断言）：声明时暂不赋值，由 init() 在 Plugin 函数启动时赋值。
@@ -13,6 +14,7 @@ class PluginContext {
   client!: OpencodeClient;
   directory!: string;
   sessionManager!: SessionDataManager;
+  services!: ServiceRegistry;
 
   /** Plugin 函数启动时调用，必须在任何 hook 触发之前完成 */
   init(
@@ -23,6 +25,7 @@ class PluginContext {
     this.client = client;
     this.directory = directory;
     this.sessionManager = sessionManager;
+    this.services = new ServiceRegistry();
   }
 }
 

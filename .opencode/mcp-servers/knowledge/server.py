@@ -23,6 +23,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))  # mcp-servers/（embed_client.py 所在）
 from anonymizer import anonymize  # noqa: E402
 from db import MemoryDB, DEFAULT_TOP_K  # noqa: E402
 
@@ -44,9 +45,9 @@ def _load_blocking() -> None:
     任何异常存入 _init_error 列表，工具调用时检查并抛出（不 hang）。
     """
     try:
-        print(f"[knowledge-mcp] loading embedder {MODEL_NAME}...", file=sys.stderr)
-        from sentence_transformers import SentenceTransformer
-        embedder = SentenceTransformer(MODEL_NAME)
+        print(f"[knowledge-mcp] connecting to embed server...", file=sys.stderr)
+        from embed_client import HttpEmbedClient
+        embedder = HttpEmbedClient(model_name=MODEL_NAME)
         db = MemoryDB(DB_PATH, embedder)
         _state["embedder"] = embedder
         _state["db"] = db
