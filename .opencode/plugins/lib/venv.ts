@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "child_process";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { VENV_PYTHON_CANDIDATES, OPENCODE_ROOT } from "./constants";
 import { debugLog } from "./logging";
@@ -68,20 +68,33 @@ export function getInstallHint(): string {
 
 // ─── .ai_env 读取 ──────────────────────────────────────────────
 
+// mtime 缓存：文件未修改时直接返回上次解析结果，避免每次重读 + 重解析。
+// 对齐 readAgentDescription() 的缓存模式。
+let aiEnvCache: { env: Record<string, string>; mtime: number } | null = null;
+
 /**
  * 读取 .ai_env 配置文件（KEY=VALUE 格式），解析为对象。
  * 忽略空行和 # 注释行。
  * 文件不存在或读取失败时返回空对象。
+ * 带 mtime 缓存——文件未修改时返回缓存值（参考 readAgentDescription 的模式）。
  * 注意：本函数只读 .ai_env 文件本身，不合并系统 env（与 detect_env.py 的 _load_ai_env 行为一致——
  *       detect_env.py 用 setdefault 让系统 env 优先，但 Plugin TS 侧不需要这个优先级，
  *       因为 shell.env 注入时系统 env 已在 process.env 中可直接取）。
  */
 export function readAiEnv(): Record<string, string> {
-  const result: Record<string, string> = {};
   const aiEnvPath = join(OPENCODE_ROOT, ".ai_env");
   try {
-    if (!existsSync(aiEnvPath)) return result;
+    if (!existsSync(aiEnvPath)) {
+      // 文件不存在时清空缓存，避免用户删除文件后还返回旧数据。
+      if (aiEnvCache) aiEnvCache = null;
+      return {};
+    }
+    const stat = statSync(aiEnvPath);
+    if (aiEnvCache && aiEnvCache.mtime === stat.mtimeMs) {
+      return aiEnvCache.env;
+    }
     const content = readFileSync(aiEnvPath, "utf-8");
+    const result: Record<string, string> = {};
     for (const line of content.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) continue;
@@ -91,10 +104,13 @@ export function readAiEnv(): Record<string, string> {
       const value = trimmed.slice(eqIdx + 1).trim();
       if (key) result[key] = value;
     }
+    aiEnvCache = { env: result, mtime: stat.mtimeMs };
+    return result;
   } catch (e) {
     debugLog(`readAiEnv: 读取 ${aiEnvPath} 失败: ${(e as Error)?.message}`);
+    // 读取异常时优先返回上次缓存，避免一次失败清空所有调用方。
+    return aiEnvCache?.env ?? {};
   }
-  return result;
 }
 
 // ─── IDA Pro idat 路径（惰性缓存） ────────────────────────────

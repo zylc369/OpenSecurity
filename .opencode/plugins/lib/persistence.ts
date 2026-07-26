@@ -5,11 +5,13 @@ import {
   RESUME_COOLDOWN_MAX_MS,
   ABORTED_ERROR_NAME,
   AGENT_SECURITY_ANALYSIS_EVOLVE,
+  ENV_KEY_RESUME_ANALYSIS,
 } from "./constants";
 import { ctx } from "./context";
 import { debugLog } from "./logging";
 import { SessionData } from "./session-manager";
 import StringUtils from "./string-utils";
+import { readAiEnv } from "./venv";
 
 // ─── 完成标记（动态生成 + 精确匹配）──────────────────────────────
 //
@@ -206,6 +208,21 @@ async function sendResume(session: SessionData): Promise<void> {
 
 export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
   try {
+    // 全局开关：默认启用；仅当值严格为 "0" 或 tolower 后 "false" 才禁用。
+    // 放在最前面（requireSecurityAgent 之前）——禁用时零开销，不查 session。
+    // 未找到 / "1" / "true" / 任何其他值 → 启用，保持向后兼容。
+    const enabledRaw = readAiEnv()[ENV_KEY_RESUME_ANALYSIS];
+    if (
+      enabledRaw !== undefined &&
+      (enabledRaw === "0" || enabledRaw.toLowerCase() === "false")
+    ) {
+      debugLog(
+        `session.idle: 跳过恢复 — 开关已禁用 (${ENV_KEY_RESUME_ANALYSIS}=${enabledRaw}) sessionID=${sessionID}`,
+        sessionID,
+      );
+      return;
+    }
+
     const session = ctx.sessionManager.requireSecurityAgent(
       "session.idle",
       sessionID,

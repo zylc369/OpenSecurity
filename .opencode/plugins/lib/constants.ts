@@ -103,6 +103,10 @@ export const RESUME_COOLDOWN_STEP_MS = 1000; // 冷却起始值和递增步长�
 export const RESUME_COOLDOWN_MAX_MS = 10 * 1000; // 冷却上限（10秒）
 export const ABORTED_ERROR_NAME = "MessageAbortedError";
 
+// .ai_env 中控制 maybeResumeAnalysis 开关的变量名。
+// 取值规则：未找到/非 0 非 false 的任意值 → 启用；值为 "0" 或 tolower 后 "false" → 禁用。
+export const ENV_KEY_RESUME_ANALYSIS = "RESUME_ANALYSIS_ENABLED";
+
 // ─── venv ──────────────────────────────────────────────────────
 
 export const VENV_DIR = join(DATA_DIR, ".venv");
