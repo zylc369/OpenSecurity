@@ -1291,10 +1291,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         );
 
         // ── 获取 session（先试 SECURITY_AGENTS，再试 searcher/memorist subagent）──
-        const session = ctx.sessionManager.requireRegisteredAgent(
-          "system.transform",
-          sessionID,
-        );
+        const session = ctx.sessionManager.get(sessionID);
         if (!session) {
           debugLog(
             `[WARN] system.transform: 跳过 — 非注册 agent, sessionID=${sessionID}`,
@@ -1392,10 +1389,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           `shell.env: 触发 sessionID=${sessionID} cwd=${input.cwd} callID=${input.callID ?? "无"}`,
           sessionID,
         );
-        const session = ctx.sessionManager.requireRegisteredAgent(
-          "shell.env",
-          sessionID,
-        );
+        const session = ctx.sessionManager.get(sessionID);
         if (!session) {
           debugLog(
             `shell.env: 跳过 — 非注册 agent sessionID=${sessionID}`,

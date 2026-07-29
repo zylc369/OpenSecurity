@@ -229,7 +229,7 @@ export class SessionDataManager {
     hookName: string,
     sessionID?: string,
   ): SessionData | null {
-    return this.requireAgent(
+    return this.requireAgentWithMatchFunc(
       hookName,
       (session) => {
         return session.isRegisteredAgent();
@@ -243,7 +243,7 @@ export class SessionDataManager {
     hookName: string,
     sessionID?: string,
   ): SessionData | null {
-    return this.requireAgent(
+    return this.requireAgentWithMatchFunc(
       hookName,
       (session) => {
         return session.isSecurityAgent();
@@ -252,7 +252,7 @@ export class SessionDataManager {
     );
   }
 
-  private requireAgent(
+  private requireAgentWithMatchFunc(
     hookName: string,
     matchFunc: (session: SessionData) => boolean,
     sessionID?: string,
