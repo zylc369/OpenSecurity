@@ -61,7 +61,8 @@ def test_header_brand_and_buttons(rendered):
     """顶栏：品牌 + 硬件按钮 + 就绪度 + 一键安装。"""
     page, _ = rendered
     header_text = page.locator("header").inner_text()
-    assert "OpenSecurity 控制台" in header_text
+    # 品牌为双行排版（OpenSecurity / 控制台 分行）
+    assert "OpenSecurity" in header_text and "控制台" in header_text
     assert "硬件" in header_text
     assert "环境就绪" in header_text
 
@@ -184,15 +185,13 @@ def test_config_path_exists_badge(rendered):
 
 
 def test_install_button_disabled_readable(rendered):
-    """disabled 一键安装按钮在深色顶栏上文字可读（color ≠ 背景色）。"""
+    """disabled 一键安装按钮可读（浅色顶栏：深色系文字 + 非零不透明度）。"""
     page, _ = rendered
     btn = page.locator("header button:has-text('一键安装')").first
-    style = btn.evaluate(
-        "el => ({ color: getComputedStyle(el).color, bg: getComputedStyle(el).backgroundColor })"
-    )
-    # 显式样式：白 45% 文字 / 白 8% 底——字符串不同即非 AntD 隐身默认值
-    assert style["color"].startswith("rgba(255, 255, 255"), f"文字色应显式浅色: {style}"
-    assert style["bg"].startswith("rgba(255, 255, 255"), f"背景应半透明白: {style}"
+    color = btn.evaluate("el => getComputedStyle(el).color")
+    # 主题墨色 #1d1d1f 的 disabled 态 = rgba(29,29,31,0.25)；老默认是 rgba(0,0,0,0.25)
+    assert color.startswith(("rgba(0, 0, 0", "rgba(29, 29, 31")), f"应为深色系文字: {color}"
+    assert "0.25)" in color or "0.88)" in color, f"透明度异常: {color}"
 
 
 def test_readiness_popover_within_viewport(rendered):
@@ -282,6 +281,51 @@ def test_hardware_popover(rendered):
     pop.locator("button:has(.anticon-reload)").click()
     page.wait_for_timeout(1200)
     assert len(reqs) >= 1, "点击 Popover 内刷新按钮应重新请求 /api/hardware"
+
+
+# ─── 迭代 7（2026-08-15 顶栏/锚点行现代化重构）────────────
+
+
+def test_header_full_bleed_and_alignment(rendered):
+    """顶栏通栏（body margin 已 reset）+ 品牌图标与文字块精确居中。"""
+    page, _ = rendered
+    info = page.evaluate(
+        """() => {
+            const header = document.querySelector('header');
+            const hb = header.getBoundingClientRect();
+            // 品牌圆角图标容器（34×34 圆角 9px 渐变块）
+            const iconBox = [...header.querySelectorAll('div')].find(d => {
+                const r = d.getBoundingClientRect();
+                return Math.round(r.width) === 34 && Math.round(r.height) === 34;
+            });
+            const spans = [...header.querySelectorAll('span')];
+            const title = spans.find(s => s.textContent === 'OpenSecurity');
+            const sub = spans.find(s => s.textContent === '控制台');
+            if (!iconBox || !title || !sub) return null;
+            const ib = iconBox.getBoundingClientRect();
+            const tb = title.getBoundingClientRect();
+            const sb = sub.getBoundingClientRect();
+            const textTop = Math.min(tb.y, sb.y);
+            const textBot = Math.max(tb.y + tb.height, sb.y + sb.height);
+            return {
+                fullBleed: hb.x === 0 && Math.round(hb.width) === window.innerWidth,
+                deltaCenter: Math.abs((ib.y + ib.height / 2) - (textTop + textBot) / 2),
+            };
+        }"""
+    )
+    assert info, "顶栏品牌元素未找到"
+    assert info["fullBleed"], f"顶栏应通栏（x=0, w=innerWidth），实际偏移 {info.get('fullBleed')}"
+    assert info["deltaCenter"] < 1.5, f"图标与文字块中心偏差 {info['deltaCenter']:.2f}px（应 <1.5）"
+
+
+def test_modern_header_not_dark_default(rendered):
+    """顶栏不再是 AntD 默认深蓝（#001529）——应为浅色毛玻璃。"""
+    page, _ = rendered
+    bg = page.locator("header").evaluate("el => getComputedStyle(el).backgroundColor")
+    # rgba(255,255,255,0.78) 序列化后应为 rgba 白色系；#001529 = rgb(0,21,41)
+    assert "(255, 255, 255" in bg, f"顶栏应为浅色毛玻璃，实际背景 {bg}"
+    blur = page.locator("header").evaluate("el => getComputedStyle(el).backdropFilter")
+    assert "blur" in (blur or ""), f"顶栏应有毛玻璃 backdropFilter，实际 {blur!r}"
 
 
 # ─── 迭代 5（2026-08-15 布局细节）─────────────────────────
