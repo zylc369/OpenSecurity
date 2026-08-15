@@ -10,10 +10,10 @@
 import React, { useCallback, useMemo, useState } from "react";
 import {
   Layout, Anchor, Card, Typography, Space, Tag, Button, Popover, Descriptions, Badge,
-  Row, Col, App as AntApp, Divider,
+  Row, Col, App as AntApp, Divider, Tooltip,
 } from "antd";
 import {
-  SafetyCertificateOutlined, ThunderboltOutlined, DesktopOutlined,
+  SafetyCertificateOutlined, ThunderboltOutlined, DesktopOutlined, ReloadOutlined,
 } from "@ant-design/icons";
 import DockerSection from "./sections/DockerSection";
 import ModelsSection from "./sections/ModelsSection";
@@ -22,6 +22,8 @@ import ToolsSection from "./sections/ToolsSection";
 import ConfigSection from "./sections/ConfigSection";
 import InstallOrchestrator, { InstallTask } from "./sections/InstallOrchestrator";
 import { useScan, useModels, useSystem, useHardware, useRequiredStatus } from "./hooks";
+import { useReadiness } from "./hooks/useReadiness";
+import { CATEGORIES, type CategoryKey } from "./constants/categories";
 import { api } from "./api/client";
 import type { ModelAsset } from "./types";
 
@@ -59,22 +61,6 @@ async function downloadModelAsync(modelId: string): Promise<string> {
   throw new Error(`下载 ${modelId} 超时`);
 }
 
-/** 明细行：分类名 X/Y（缺失时列名称） */
-const BreakdownRow: React.FC<{
-  label: string; ok: number; total: number; missingNames: string[];
-}> = ({ label, ok, total, missingNames }) => (
-  <Descriptions.Item label={label}>
-    <Space size={6} wrap>
-      <span>{ok}/{total}</span>
-      {missingNames.length > 0 && (
-        <Typography.Text type="danger" style={{ fontSize: 12 }}>
-          缺: {missingNames.join("、")}
-        </Typography.Text>
-      )}
-    </Space>
-  </Descriptions.Item>
-);
-
 const App: React.FC = () => {
   const { message } = AntApp.useApp();
   const scan = useScan();
@@ -93,15 +79,15 @@ const App: React.FC = () => {
     required.refresh();
   }, [scan, models, required]);
 
-  // ─── 缺失统计（全维度，环境就绪的对账基础）───
-  const toolsAll = useMemo(
-    () => Object.values(scan.data?.agents ?? {}).flat(),
-    [scan.data]);
+  // ─── 缺失对象（安装编排用；计数展示一律走 readiness 单一源）───
   const toolsMissing = useMemo(
-    () => toolsAll.filter((t) => !t.available && !t.skipped), [toolsAll]);
+    () => Object.values(scan.data?.agents ?? {}).flat()
+      .filter((t) => !t.available && !t.skipped),
+    [scan.data]);
 
-  const pyPkgs = useMemo(() => scan.data?.global.python_packages ?? [], [scan.data]);
-  const pyMissing = useMemo(() => pyPkgs.filter((p) => !p.available), [pyPkgs]);
+  const pyMissing = useMemo(
+    () => (scan.data?.global.python_packages ?? []).filter((p) => !p.available),
+    [scan.data]);
 
   const dockerMissing = useMemo(
     () => scan.data?.global.docker.images.filter((i) => !i.pulled) ?? [],
@@ -111,25 +97,10 @@ const App: React.FC = () => {
     () => (models.data?.models ?? []).filter((m) => !m.cached),
     [models.data]);
 
-  const configMissing = useMemo(
-    () => Object.entries(required.data ?? {}).filter(([, r]) => !r.ok),
-    [required.data]);
-
-  // ─── 环境就绪（悬浮可追溯）───
-  const breakdown = useMemo(() => {
-    const cats = [
-      { label: "外部工具", ok: toolsAll.length - toolsMissing.length, total: toolsAll.length, names: toolsMissing.map((t) => t.name) },
-      { label: "Python 包", ok: pyPkgs.length - pyMissing.length, total: pyPkgs.length, names: pyMissing.map((p) => p.pip_name) },
-      { label: "Docker 镜像", ok: (scan.data?.global.docker.images.length ?? 0) - dockerMissing.length, total: scan.data?.global.docker.images.length ?? 0, names: dockerMissing.map((i) => i.name) },
-      { label: "模型", ok: (models.data?.models.length ?? 0) - modelMissing.length, total: models.data?.models.length ?? 0, names: modelMissing.map((m) => m.display) },
-      { label: "必要配置", ok: Object.keys(required.data ?? {}).length - configMissing.length, total: Object.keys(required.data ?? {}).length, names: configMissing.map(([k]) => k) },
-    ];
-    return {
-      cats,
-      ok: cats.reduce((n, c) => n + c.ok, 0),
-      total: cats.reduce((n, c) => n + c.total, 0),
-    };
-  }, [toolsAll, toolsMissing, pyPkgs, pyMissing, scan.data, dockerMissing, models.data, modelMissing, required.data, configMissing]);
+  // ─── 环境就绪（单一计算源：Popover/顶栏/卡片 Tag/锚点徽标全从这里取）───
+  const readiness = useReadiness(scan.data, models.data, required.data);
+  const catStat = (key: CategoryKey) =>
+    readiness.cats.find((c) => c.key === key)!;
 
   // ─── 可自动安装项（一键安装的真实范围）───
   const pipInstallable = useMemo(
@@ -211,11 +182,14 @@ const App: React.FC = () => {
   };
 
   // ─── 硬件 Popover ───
+  // CPU 频率 <1GHz 视为伪值不显示（Apple Silicon 上 psutil 返回 4MHz → "0GHz"）
+  const cpuFreqGHz = hardware.data?.cpu.frequency_mhz
+    ? hardware.data.cpu.frequency_mhz / 1000 : 0;
   const hwContent = hardware.data ? (
-    <Descriptions size="small" column={1} style={{ minWidth: 300 }}>
+    <Descriptions size="small" column={1} style={{ minWidth: "auto", maxWidth: 260 }}>
       <Descriptions.Item label="CPU">
         {hardware.data.cpu.physical_cores} 核 {hardware.data.cpu.logical_cores} 线程
-        {hardware.data.cpu.frequency_mhz ? ` · ${Math.round(hardware.data.cpu.frequency_mhz / 1000)}GHz` : ""}
+        {cpuFreqGHz >= 1 ? ` · ${Math.round(cpuFreqGHz)}GHz` : ""}
       </Descriptions.Item>
       <Descriptions.Item label="内存">
         {hardware.data.memory.total_gb}GB（可用 {hardware.data.memory.available_gb}GB）
@@ -229,13 +203,21 @@ const App: React.FC = () => {
     </Descriptions>
   ) : (<Typography.Text type="secondary">加载中…</Typography.Text>);
 
-  const anchorItems = [
-    { key: "docker", href: "#section-docker", title: <Space size={4}>Docker{dockerMissing.length > 0 && <Tag color="warning" style={{ marginInlineEnd: 0 }}>{dockerMissing.length}</Tag>}</Space> },
-    { key: "models", href: "#section-models", title: <Space size={4}>模型{modelMissing.length > 0 && <Tag color="warning" style={{ marginInlineEnd: 0 }}>{modelMissing.length}</Tag>}</Space> },
-    { key: "deps", href: "#section-deps", title: <Space size={4}>Python 依赖{pyMissing.length > 0 && <Tag color="warning" style={{ marginInlineEnd: 0 }}>{pyMissing.length}</Tag>}</Space> },
-    { key: "tools", href: "#section-tools", title: <Space size={4}>外部工具{toolsMissing.length > 0 && <Tag color="warning" style={{ marginInlineEnd: 0 }}>{[...new Set(toolsMissing.map((t) => t.name))].length}</Tag>}</Space> },
-    { key: "config", href: "#section-config", title: <Space size={4}>配置{configMissing.length > 0 && <Tag color="warning" style={{ marginInlineEnd: 0 }}>{configMissing.length}</Tag>}</Space> },
-  ];
+  const anchorItems = CATEGORIES.map((c) => {
+    const st = catStat(c.key);
+    return {
+      key: c.key,
+      href: `#section-${c.key}`,
+      title: (
+        <Space size={4}>
+          {c.title}
+          {st.missingNames.length > 0 && (
+            <Tag color="warning" style={{ marginInlineEnd: 0 }}>{st.missingNames.length}</Tag>
+          )}
+        </Space>
+      ),
+    };
+  });
 
   const cardProps = { size: "small" as const, style: { height: "100%" } };
 
@@ -252,30 +234,54 @@ const App: React.FC = () => {
           <Typography.Title level={5} style={{ color: "#fff", margin: 0 }}>
             OpenSecurity 控制台
           </Typography.Title>
-          <Popover content={hwContent} title="硬件信息" placement="bottomRight" trigger="click">
+          <Popover
+            content={hwContent}
+            title={(
+              /* 标题右侧内联刷新按钮（硬件信息默认只拉一次，此处可强制重拉） */
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <span>硬件信息</span>
+                <Tooltip title="重新检测硬件">
+                  <Button type="text" size="small" icon={<ReloadOutlined />}
+                    loading={hardware.loading}
+                    onClick={() => hardware.refresh()} />
+                </Tooltip>
+              </div>
+            )}
+            placement="bottomRight" trigger="click"
+            overlayStyle={{ maxWidth: "calc(100vw - 24px)" }}
+          >
             <Button size="small" ghost icon={<DesktopOutlined />}>硬件</Button>
           </Popover>
         </Space>
         <Space size={14}>
           <Popover
-            title={`环境就绪 ${breakdown.ok}/${breakdown.total}（按分类）`}
+            title={`环境就绪 ${readiness.ok}/${readiness.total}（按分类）`}
             content={(
-              <Descriptions size="small" column={1} style={{ minWidth: "auto", maxWidth: 340 }}>
-                {breakdown.cats.map((c) => (
-                  <BreakdownRow key={c.label} label={c.label} ok={c.ok} total={c.total} missingNames={c.names} />
+              /* 直接内联 Descriptions.Item——自定义组件包裹会被 AntD 解析丢弃（内容区不渲染） */
+              <Descriptions size="small" column={1} style={{ maxWidth: 340 }}>
+                {readiness.cats.map((c) => (
+                  <Descriptions.Item key={c.key} label={c.title}>
+                    <Space size={6} wrap>
+                      <span>{c.ok}/{c.total} {c.unit}</span>
+                      {c.missingNames.length > 0 && (
+                        <Typography.Text type="danger" style={{ fontSize: 12 }}>
+                          缺: {c.missingNames.join("、")}
+                        </Typography.Text>
+                      )}
+                    </Space>
+                  </Descriptions.Item>
                 ))}
               </Descriptions>
             )}
             placement="bottomRight"
             /* 钳制到视口内，防右溢出 */
             overlayStyle={{ maxWidth: "calc(100vw - 24px)" }}
-            styles={{ body: { paddingRight: 12 } }}
           >
             <Badge
-              status={breakdown.total > 0 && breakdown.ok === breakdown.total ? "success" : "warning"}
+              status={readiness.total > 0 && readiness.ok === readiness.total ? "success" : "warning"}
               text={
                 <Typography.Text style={{ color: "rgba(255,255,255,0.85)", fontSize: 13 }}>
-                  环境就绪 {breakdown.ok}/{breakdown.total}
+                  环境就绪 {readiness.ok}/{readiness.total}
                 </Typography.Text>
               }
             />
@@ -307,19 +313,29 @@ const App: React.FC = () => {
       </Header>
 
       <Content style={{ padding: "12px 20px 48px", maxWidth: 1600, margin: "0 auto", width: "100%" }}>
-        <Anchor
-          offsetTop={52} direction="horizontal" items={anchorItems}
-          style={{ background: "#fff", padding: "8px 12px", borderRadius: 6, marginBottom: 12 }}
-        />
+        {/* 锚点行：左导航 + 右刷新（刷新全部数据源：scan/models/required） */}
+        <div style={{ display: "flex", alignItems: "center", background: "#fff", padding: "6px 12px", borderRadius: 6, marginBottom: 12, gap: 8 }}>
+          <Anchor
+            offsetTop={52} direction="horizontal" items={anchorItems}
+            style={{ flex: 1, minWidth: 0, background: "transparent" }}
+          />
+          <Tooltip title="重新扫描全部（Docker / 模型 / Python 依赖 / 外部工具 / 配置）">
+            <Button
+              size="small" icon={<ReloadOutlined />}
+              loading={scan.loading || models.loading}
+              onClick={() => refreshAll()}
+            />
+          </Tooltip>
+        </div>
         <Row gutter={[12, 12]}>
           <Col xs={24} xl={12} id="section-docker">
             <Card
               {...cardProps}
               title={
                 <Space size={8}>
-                  Docker
+                  {catStat("docker").title}
                   <Tag style={{ marginInlineEnd: 0 }}>
-                    {scan.data ? `${scan.data.global.docker.images.length - dockerMissing.length}/${scan.data.global.docker.images.length} 镜像` : "…"}
+                    {scan.data ? `${catStat("docker").ok}/${catStat("docker").total} ${catStat("docker").unit}` : "…"}
                   </Tag>
                 </Space>
               }
@@ -339,9 +355,9 @@ const App: React.FC = () => {
               {...cardProps}
               title={
                 <Space size={8}>
-                  模型
+                  {catStat("models").title}
                   <Tag style={{ marginInlineEnd: 0 }}>
-                    {models.data ? `${models.data.models.length - modelMissing.length}/${models.data.models.length} 就绪` : "…"}
+                    {models.data ? `${catStat("models").ok}/${catStat("models").total} ${catStat("models").unit}` : "…"}
                   </Tag>
                 </Space>
               }
@@ -370,9 +386,9 @@ const App: React.FC = () => {
               {...cardProps}
               title={
                 <Space size={8}>
-                  Python 依赖
+                  {catStat("deps").title}
                   <Tag style={{ marginInlineEnd: 0 }}>
-                    {pyPkgs.length > 0 ? `${pyPkgs.length - pyMissing.length}/${pyPkgs.length} 已装` : "…"}
+                    {scan.data ? `${catStat("deps").ok}/${catStat("deps").total} ${catStat("deps").unit}` : "…"}
                   </Tag>
                 </Space>
               }
@@ -384,7 +400,7 @@ const App: React.FC = () => {
               )}
             >
               <PythonDepsSection
-                packages={pyPkgs.length > 0 || !scan.loading ? pyPkgs : undefined}
+                packages={scan.loading && catStat("deps").total === 0 ? undefined : (scan.data?.global.python_packages ?? [])}
                 venvPath={system.data?.venv_path}
                 onRefresh={() => scan.refresh()}
               />
@@ -396,11 +412,9 @@ const App: React.FC = () => {
               {...cardProps}
               title={
                 <Space size={8}>
-                  外部工具
+                  {catStat("tools").title}
                   <Tag style={{ marginInlineEnd: 0 }}>
-                    {toolsAll.length > 0
-                      ? `${toolsAll.length - toolsMissing.length}/${toolsAll.length} 可用（不可 pip，见安装提示）`
-                      : "…"}
+                    {scan.data ? `${catStat("tools").ok}/${catStat("tools").total} ${catStat("tools").unit}（不可 pip）` : "…"}
                   </Tag>
                 </Space>
               }
@@ -413,10 +427,10 @@ const App: React.FC = () => {
             <Card
               title={
                 <Space size={8}>
-                  配置
-                  {configMissing.length === 0
-                    ? <Tag color="success" style={{ marginInlineEnd: 0 }}>完整</Tag>
-                    : <Tag color="error" style={{ marginInlineEnd: 0 }}>缺 {configMissing.length} 项必要配置</Tag>}
+                  {catStat("config").title}
+                  {catStat("config").ok === catStat("config").total && catStat("config").total > 0
+                    ? <Tag color="success" style={{ marginInlineEnd: 0 }}>{catStat("config").ok}/{catStat("config").total} {catStat("config").unit}</Tag>
+                    : <Tag color="error" style={{ marginInlineEnd: 0 }}>{catStat("config").ok}/{catStat("config").total} · 缺 {catStat("config").missingNames.join("、")}</Tag>}
                 </Space>
               }
             >

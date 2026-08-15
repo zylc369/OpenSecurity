@@ -119,13 +119,31 @@ def test_tools_section_separated(rendered):
 
 
 def test_readiness_hover_breakdown(rendered):
-    """环境就绪悬浮：显示分类明细（对账数据）。"""
+    """环境就绪悬浮：每类显示 X/Y + 单位 + 缺失项（对账数据），且用词与卡片标题一致。"""
     page, _ = rendered
     page.locator("header .ant-badge").hover()
     page.wait_for_timeout(600)
-    popover_text = page.locator(".ant-popover").inner_text()
-    for cat in ["外部工具", "Python 包", "Docker 镜像", "模型", "必要配置"]:
+    popover_text = page.locator(".ant-popover:not(.ant-popover-hidden)").first.inner_text()
+
+    # 每类必须有 X/Y 数字（曾因自定义组件包 Descriptions.Item 导致内容区不渲染）
+    import re
+    for cat, unit in [("Docker", "镜像"), ("模型", "就绪"), ("Python 依赖", "已装"),
+                      ("外部工具", "可用"), ("配置", "完整")]:
         assert cat in popover_text, f"就绪度明细缺少分类: {cat}"
+        assert re.search(rf"{cat}\n\d+/\d+ {unit}", popover_text), (
+            f"{cat} 行应含 X/Y {unit}，实际:\n{popover_text}"
+        )
+    # 用词与卡片标题一字不差（收口验证）
+    for key, title in [("docker", "Docker"), ("models", "模型"), ("deps", "Python 依赖"),
+                       ("tools", "外部工具"), ("config", "配置")]:
+        card_title = page.locator(f"#section-{key} .ant-card-head-title").inner_text().strip()
+        assert card_title.startswith(title), f"卡片 {key} 标题 {card_title!r} 与常量 {title!r} 不一致"
+
+    # 总数对账：Popover 标题的总数 = Σ 各类 total（缺失时）
+    m = re.search(r"环境就绪 (\d+)/(\d+)", popover_text)
+    assert m, "Popover 标题应含 环境就绪 X/Y"
+    totals = [int(g[1]) for g in re.findall(r"(\d+)/(\d+) (?:镜像|就绪|已装|可用|完整)", popover_text)]
+    assert sum(totals) == int(m.group(2)), "总数应等于各类之和（对账闭合）"
 
 
 def test_config_section_password_masked(rendered):
@@ -231,3 +249,36 @@ def test_config_grid_two_columns(rendered):
         }"""
     )
     assert len(xs) >= 2, f"配置表单仍单列: x 坐标 {xs}"
+
+
+def test_anchor_refresh_button(rendered):
+    """锚点行刷新按钮：存在且点击触发全量重扫（/api/scan 重新请求）。"""
+    page, _ = rendered
+    # 硬件 Popover 未打开时（懒渲染），页面上的 reload 按钮即锚点行那个
+    btn = page.locator("button:has(.anticon-reload)")
+    assert btn.count() == 1, f"锚点行应有 1 个刷新按钮，实际 {btn.count()}"
+
+    requests: list[str] = []
+    page.on("request", lambda r: requests.append(r.url) if "/api/scan" in r.url else None)
+    btn.first.click()
+    page.wait_for_timeout(2500)
+    assert len(requests) >= 1, "点击刷新后应重新请求 /api/scan"
+
+
+def test_hardware_popover(rendered):
+    """硬件 Popover：宽度紧凑（≤360px）+ 标题旁刷新按钮生效 + 无 0GHz 伪值。"""
+    page, _ = rendered
+    page.locator("header button:has-text('硬件')").click()
+    page.wait_for_timeout(600)
+    pop = page.locator(".ant-popover:not(.ant-popover-hidden)").first
+    text = pop.inner_text()
+    box = pop.bounding_box()
+    assert box["width"] <= 360, f"硬件 Popover 应紧凑（≤360px），实际 {box['width']:.0f}px"
+    assert "0GHz" not in text, "不应显示伪值 0GHz（Apple Silicon psutil 返回 4MHz）"
+    assert "Apple" in text or "GPU" in text
+
+    reqs: list[str] = []
+    page.on("request", lambda r: reqs.append(r.url) if "/api/hardware" in r.url else None)
+    pop.locator("button:has(.anticon-reload)").click()
+    page.wait_for_timeout(1200)
+    assert len(reqs) >= 1, "点击 Popover 内刷新按钮应重新请求 /api/hardware"

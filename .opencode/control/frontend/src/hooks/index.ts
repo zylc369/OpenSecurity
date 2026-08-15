@@ -10,24 +10,30 @@ import type {
   SystemInfo, ModelsResponse, ConfigMetaMap,
 } from "../types";
 
-/** 硬件信息（启动时拉一次，硬件不变） */
+/** 硬件信息（默认拉一次；Popover 内刷新按钮可强制重拉，如插了内存/外置 GPU 后） */
 export function useHardware(): {
   data: HardwareInfo | null;
   loading: boolean;
   error: string | null;
+  refresh: () => void;
 } {
   const [data, setData] = useState<HardwareInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const refresh = useCallback(() => {
+    setLoading(true);
     api.getHardware()
       .then((d) => { setData(d); setError(null); })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
 
-  return { data, loading, error };
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  return { data, loading, error, refresh };
 }
 
 /** 必要配置状态（用于 banner） */
