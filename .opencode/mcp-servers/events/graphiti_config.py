@@ -4,7 +4,7 @@
 通过 tool use 机制实现服务端强制结构化输出，无需应用层补丁。
 
 模型可通过 .ai_env 环境变量切换：
-  DEEPSEEK_MODEL=deepseek-v4-pro       （核心提取模型，可改为 deepseek-v4-flash 省钱）
+  DEEPSEEK_MODEL=deepseek-v4-flash     （核心提取模型；需要更强提取质量可改 deepseek-v4-pro）
   DEEPSEEK_SMALL_MODEL=deepseek-v4-flash（时间戳推断模型）
 
 实体类型（CUSTOM_ENTITY_TYPES）：
@@ -121,7 +121,7 @@ def create_graphiti():
     if not api_key:
         return None, "DEEPSEEK_API_KEY 未配置（请在 .opencode/.ai_env 中设置）"
 
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
     small_model = os.environ.get("DEEPSEEK_SMALL_MODEL", "deepseek-v4-flash")
 
     llm_config = LLMConfig(

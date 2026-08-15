@@ -315,8 +315,8 @@ def test_tools_hint_truncated_with_tooltip(rendered):
 def test_config_deepseek_grouped_half_width(rendered):
     """DeepSeek 密钥与模型名：同一行（组内横排）+ 整组占 50% 宽。
 
-    标记语义：每项自带 必要(红)/可选(灰) 标签——"DeepSeek 模型名"标可选
-    是准确的（不配置默认 deepseek-v4-pro，graphiti_config.py 有默认值）。
+    标记语义：密钥标'必要'（红）；模型名标'可选'且悬浮显示默认值
+    （默认值来自后端 /api/config/meta 的 default_value，单一数据源）。
     """
     page, _ = rendered
     cfg = page.locator("#section-config")
@@ -325,6 +325,14 @@ def test_config_deepseek_grouped_half_width(rendered):
     label_text = ds_item.first.locator(".ant-form-item-label").inner_text()
     assert "必要" in label_text, "密钥应标'必要'"
     assert "可选" in label_text, "模型名应标'可选'"
+
+    # 可选标记悬浮 → 显示默认值（后端收口数据）
+    ds_item.first.locator(".ant-tag:has-text('可选')").hover()
+    page.wait_for_timeout(400)
+    tip = page.locator(".ant-tooltip:not(.ant-tooltip-hidden):has-text('此项可不配置')")
+    assert tip.count() >= 1, "悬浮可选标记应显示说明"
+    assert "deepseek-v4-flash" in tip.first.inner_text(), "说明应含默认值"
+
     container = cfg.locator(".ant-row").first.bounding_box()
     box = ds_item.first.bounding_box()
     assert box and container

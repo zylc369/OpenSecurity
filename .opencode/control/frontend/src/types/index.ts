@@ -211,6 +211,8 @@ export interface ConfigMetaItem {
   type: ConfigFieldType;
   hint: string;
   required: boolean;
+  /** 不配置时后端消费方使用的默认值（空串 = 无默认，必须配置） */
+  default_value: string;
 }
 
 export type ConfigMetaMap = Record<string, ConfigMetaItem>;

@@ -74,6 +74,7 @@ class ConfigField:
     hint: str = ""                          # 字段说明 / 获取地址
     required: bool = True                   # 是否必要（缺失时 banner 提醒）
     validator: Callable[[str], tuple[bool, str]] | None = None  # 校验函数
+    default_value: str = ""                 # 后端消费方的默认值（不配置时的行为，收口回传前端）
 
 REQUIRED_CONFIGS: list[ConfigField] = [
     ConfigField(
@@ -99,8 +100,9 @@ EXTRA_CONFIG_META: list[ConfigField] = [
         key="DEEPSEEK_MODEL",
         label="DeepSeek 模型名",
         type="text",
-        hint="不配置默认 deepseek-v4-pro（events MCP 提取模型；省钱可改 deepseek-v4-flash）",
+        hint="不配置默认 deepseek-v4-flash（events MCP 提取模型；需要更强提取质量可改 deepseek-v4-pro）",
         required=False,
+        default_value="deepseek-v4-flash",
     ),
     ConfigField(
         key="CONTROL_FRONTEND_DEV",

@@ -11,9 +11,9 @@
  */
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  Form, Input, Select, Button, Tag, Space, Typography, App as AntApp, Alert, Row, Col,
+  Form, Input, Select, Button, Tag, Space, Typography, App as AntApp, Alert, Row, Col, Tooltip,
 } from "antd";
-import { SaveOutlined } from "@ant-design/icons";
+import { SaveOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import type { ConfigMap, FsCheckResult } from "../types";
 import { api } from "../api/client";
 import { useAllConfig, useConfigMeta } from "../hooks";
@@ -122,9 +122,28 @@ const ConfigSection: React.FC = () => {
                     return (
                       <span key={key}>
                         {m.label}
-                        {m.required
-                          ? <Tag color="red" style={{ marginInlineStart: 4 }}>必要</Tag>
-                          : <Tag style={{ marginInlineStart: 4 }}>可选</Tag>}
+                        {m.required ? (
+                          <Tag color="red" style={{ marginInlineStart: 4 }}>必要</Tag>
+                        ) : (
+                          /* 可选说明悬浮：为什么可选 + 默认值（来自后端 meta，单一数据源） */
+                          <Tooltip
+                            title={
+                              <div style={{ maxWidth: 280 }}>
+                                <div>此项可不配置。</div>
+                                <div>
+                                  不配置时默认使用：
+                                  <Typography.Text code style={{ color: "#fff" }}>
+                                    {m.default_value || "（无默认值，建议配置）"}
+                                  </Typography.Text>
+                                </div>
+                              </div>
+                            }
+                          >
+                            <Tag style={{ marginInlineStart: 4, cursor: "help" }}>
+                              可选 <QuestionCircleOutlined />
+                            </Tag>
+                          </Tooltip>
+                        )}
                       </span>
                     );
                   })}

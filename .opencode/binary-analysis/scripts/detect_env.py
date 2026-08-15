@@ -240,7 +240,7 @@ IDA_PRO_HOME=
 # DeepSeek API Key（events MCP 实体提取用，https://platform.deepseek.com 申请）
 DEEPSEEK_API_KEY=
 # events MCP 模型配置（可选，按需修改）
-# DEEPSEEK_MODEL=deepseek-v4-pro        # 核心提取模型（费用吃不消时改成 deepseek-v4-flash）
+# DEEPSEEK_MODEL=deepseek-v4-flash      # 核心提取模型（需要更强提取质量改成 deepseek-v4-pro）
 # DEEPSEEK_SMALL_MODEL=deepseek-v4-flash # 时间戳推断模型
 """
 

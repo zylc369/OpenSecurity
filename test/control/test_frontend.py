@@ -133,13 +133,16 @@ def test_api_fs_check(control_server):
 
 
 def test_api_config_meta(control_server):
-    """GET /api/config/meta：必要键带 password/path 类型。"""
+    """GET /api/config/meta：必要键带 password/path 类型 + 默认值回传。"""
     r = httpx.get(f"http://127.0.0.1:{control_server}/api/config/meta", timeout=5)
     assert r.status_code == 200
     d = r.json()
     assert d["DEEPSEEK_API_KEY"]["type"] == "password"
     assert d["IDA_PRO_HOME"]["type"] == "path"
     assert d["DEEPSEEK_API_KEY"]["required"] is True
+    # 可选项默认值收口回传（消费方 graphiti_config.py 的默认值）
+    assert d["DEEPSEEK_MODEL"]["required"] is False
+    assert d["DEEPSEEK_MODEL"]["default_value"] == "deepseek-v4-flash"
 
 
 def test_api_pippable_list(control_server):

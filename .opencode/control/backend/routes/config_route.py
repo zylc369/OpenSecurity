@@ -44,11 +44,12 @@ async def get_config_meta() -> dict[str, dict]:
             "type": field.type,
             "hint": field.hint,
             "required": field.required,
+            "default_value": field.default_value,  # 不配置时后端使用的默认值
         }
     # .ai_env 中存在但无元数据的键 → text 兜底（保证 meta 覆盖全部键）
     for key in config_store.read_all():
         if key not in meta:
-            meta[key] = {"label": key, "type": "text", "hint": "", "required": False}
+            meta[key] = {"label": key, "type": "text", "hint": "", "required": False, "default_value": ""}
     return meta
 
 
