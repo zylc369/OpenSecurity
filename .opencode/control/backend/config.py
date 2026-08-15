@@ -91,6 +91,33 @@ REQUIRED_CONFIGS: list[ConfigField] = [
     ),
 ]
 
+# 非 REQUIRED_CONFIGS 键的元数据（.ai_env 中存在但不在必要清单里的配置）。
+# /api/config/meta 对 REQUIRED_CONFIGS 与本表取并集；两边都没有的键按
+# {"type": "text", "required": false, "label": key} 兜底。
+EXTRA_CONFIG_META: list[ConfigField] = [
+    ConfigField(
+        key="DEEPSEEK_MODEL",
+        label="DeepSeek 模型名",
+        type="text",
+        hint="如 deepseek-chat / deepseek-reasoner",
+        required=False,
+    ),
+    ConfigField(
+        key="CONTROL_FRONTEND_DEV",
+        label="前端开发模式",
+        type="bool",
+        hint="1=vite dev(5173)，0/删除=发布态(dist/)。改后需重启控制台生效",
+        required=False,
+    ),
+    ConfigField(
+        key="RESUME_ANALYSIS_ENABLED",
+        label="分析续传开关",
+        type="bool",
+        hint="1=会话压缩后自动注入分析状态续传提示",
+        required=False,
+    ),
+]
+
 
 def _init_validators():
     """延迟绑定 validator（避免循环 import）。

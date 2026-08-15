@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -35,6 +36,11 @@ OPENCODE_ROOT = Path(os.environ.get("OPENCODE_ROOT", WORKSPACE_ROOT / ".opencode
 os.environ["DATA_DIR"] = str(TEST_DATA_DIR)
 os.environ["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
 os.environ["OPENSECURITY_VENV_DIR"] = str(REAL_VENV_DIR)
+# CONTROL_PORT 随机高位（隔离铁律）：bind 候选与孤儿探测范围整体避开生产实例（9776）。
+# 否则沙箱实例的 probe_live_control 会"收编"生产控制台（端口文件指向生产 PID），
+# cleanup_state 再按端口文件 kill 时误杀生产（真实事故：21845 被 SIGTERM）。
+# bun_env 与直接 spawn 均继承本进程环境，一处设置全覆盖。
+os.environ["CONTROL_PORT"] = str(random.randint(41000, 49000))
 
 
 # ─── 测试框架（与 test_control.py 一致）─────────────────

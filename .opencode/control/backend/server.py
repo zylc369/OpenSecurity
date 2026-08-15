@@ -62,7 +62,7 @@ def create_app() -> FastAPI:
         )
 
     # 路由
-    from routes import embed, health, config_route, deps, docker, scan, install, hardware
+    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system
     app.include_router(embed.router)
     app.include_router(health.router)
     app.include_router(config_route.router)
@@ -71,6 +71,9 @@ def create_app() -> FastAPI:
     app.include_router(scan.router)
     app.include_router(install.router)
     app.include_router(hardware.router)
+    app.include_router(fs.router)
+    app.include_router(models.router)
+    app.include_router(system.router)
 
     # 前端静态文件（开发态跳过，发布态挂载 dist/）
     _mount_frontend(app)

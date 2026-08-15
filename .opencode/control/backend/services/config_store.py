@@ -77,11 +77,13 @@ def write(updates: dict[str, str]) -> dict[str, str]:
     """批量更新配置（保留原有注释 + 其他未改动的字段）。
 
     Args:
-        updates: 要更新的 key-value 字典
+        updates: 要更新的 key-value 字典。value 统一 strip()
+        （空格不可见，路径/密钥尾部空格是低级但难排查的问题——服务端兜底 trim）。
 
     Returns:
         更新后的完整配置。
     """
+    updates = {k: v.strip() if isinstance(v, str) else v for k, v in updates.items()}
     configs, raw_lines = _read_with_comments()
     configs.update(updates)
 

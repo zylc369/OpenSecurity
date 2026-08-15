@@ -73,38 +73,28 @@ class Scanner:
             agent_task = loop.run_in_executor(executor, tools_detector.scan_all)
             docker_task = loop.run_in_executor(executor, docker_manager.scan_global)
             config_task = loop.run_in_executor(executor, config_store.required_status)
+            pydeps_task = loop.run_in_executor(executor, tools_detector.scan_python_packages)
 
             agents = await agent_task
             docker = await docker_task
             configs = await config_task
+            python_packages = await pydeps_task
 
         return ScanResult(
             agents=agents,
             global_={
                 "docker": docker,
                 "required_configs": configs,
+                "python_packages": python_packages,
                 "models": await self._scan_models(),
             },
             timestamp=time.time(),
         )
 
     async def _scan_models(self) -> list[dict]:
-        """扫描模型加载状态（BGE-M3 + Reranker）。"""
-        from services import model_loader
-        return [
-            {
-                "name": "BGE-M3",
-                "type": "embedder",
-                "loaded": model_loader.is_models_ready(),
-            },
-            {
-                "name": "BGE-Reranker-v2-m3",
-                "type": "reranker",
-                # reranker 是懒加载，没有公开的就绪状态。
-                # 简化处理：和 embedder 一致（实际首次 /rerank 调用时加载）
-                "loaded": model_loader.is_models_ready(),
-            },
-        ]
+        """模型状态（收口：数据源 = services/model_assets.py，与 /api/models 同源）。"""
+        from services import model_assets
+        return model_assets.get_model_assets()
 
 
 # 模块级单例

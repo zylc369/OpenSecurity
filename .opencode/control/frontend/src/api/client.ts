@@ -12,6 +12,7 @@ import axios, { AxiosInstance } from "axios";
 import type {
   HardwareInfo, ConfigMap, RequiredStatusMap, ToolStatus, AgentTools,
   DockerScanGlobal, ScanResult, InstallResult,
+  SystemInfo, ModelsResponse, FsCheckResult, ConfigMetaMap,
 } from "../types";
 
 const instance: AxiosInstance = axios.create({
@@ -78,8 +79,44 @@ export const api = {
   },
 
   // ─── /api/install ───────────────────────────────────────
+  async getPippable(): Promise<{ packages: string[] }> {
+    const r = await instance.get<{ packages: string[] }>("/api/install");
+    return r.data;
+  },
+
   async install(packageName: string): Promise<InstallResult> {
     const r = await instance.post<InstallResult>("/api/install", { package: packageName });
+    return r.data;
+  },
+
+  // ─── /api/system ────────────────────────────────────────
+  async getSystem(): Promise<SystemInfo> {
+    const r = await instance.get<SystemInfo>("/api/system");
+    return r.data;
+  },
+
+  // ─── /api/models ────────────────────────────────────────
+  async getModels(): Promise<ModelsResponse> {
+    const r = await instance.get<ModelsResponse>("/api/models");
+    return r.data;
+  },
+
+  async downloadModel(modelId: string): Promise<{ ok: boolean; model_id: string }> {
+    const r = await instance.post(`/api/models/${encodeURIComponent(modelId)}/download`);
+    return r.data;
+  },
+
+  // ─── /api/fs/check ──────────────────────────────────────
+  async fsCheck(path: string): Promise<FsCheckResult> {
+    const r = await instance.get<FsCheckResult>("/api/fs/check", {
+      params: { path },
+    });
+    return r.data;
+  },
+
+  // ─── /api/config/meta ───────────────────────────────────
+  async getConfigMeta(): Promise<ConfigMetaMap> {
+    const r = await instance.get<ConfigMetaMap>("/api/config/meta");
     return r.data;
   },
 

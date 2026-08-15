@@ -28,6 +28,30 @@ async def get_all_configs() -> dict[str, str]:
     return config_store.read_all()
 
 
+@router.get("/meta")
+async def get_config_meta() -> dict[str, dict]:
+    """配置项元数据（前端差异化渲染的驱动数据）。
+
+    数据源：REQUIRED_CONFIGS ∪ EXTRA_CONFIG_META ∪ .ai_env 实际键。
+    type 枚举: password（密文+眼睛）/ path（存在性徽标）/ text / bool。
+    """
+    from config import REQUIRED_CONFIGS, EXTRA_CONFIG_META
+
+    meta: dict[str, dict] = {}
+    for field in [*REQUIRED_CONFIGS, *EXTRA_CONFIG_META]:
+        meta[field.key] = {
+            "label": field.label,
+            "type": field.type,
+            "hint": field.hint,
+            "required": field.required,
+        }
+    # .ai_env 中存在但无元数据的键 → text 兜底（保证 meta 覆盖全部键）
+    for key in config_store.read_all():
+        if key not in meta:
+            meta[key] = {"label": key, "type": "text", "hint": "", "required": False}
+    return meta
+
+
 @router.get("/required-status")
 async def get_required_status() -> dict[str, dict]:
     """获取必要配置完整性（前端 banner 用）。"""

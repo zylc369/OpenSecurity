@@ -37,6 +37,9 @@ OPENCODE_ROOT = Path(os.environ.get("OPENCODE_ROOT", ""))
 os.environ["DATA_DIR"] = str(TEST_DATA_DIR)
 if OPENCODE_ROOT.exists():
     os.environ["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
+# CONTROL_PORT 随机高位：隔离 bind 候选与孤儿探测范围，避免沙箱 spawn 收编/干扰
+# 生产控制台（9776）。test_e2e_port_exhausted 动态读 get_port_candidates，自洽。
+os.environ.setdefault("CONTROL_PORT", str(__import__("random").randint(41000, 49000)))
 
 
 # ─── 测试框架（极简）──────────────────────────────────────
@@ -170,10 +173,12 @@ def test_lock_release_on_sigkill():
 @test("port_manager.bind_port_with_fallback: bind 端口成功")
 def test_bind_port():
     from services.port_manager import bind_port_with_fallback
+    from config import get_port_candidates
     port, sock = bind_port_with_fallback()
     try:
-        assert_true(port >= 9776, f"端口应该 >= 9776，实际 {port}")
-        assert_true(port <= 9776 + 10, f"端口应该 <= 9786，实际 {port}")
+        # 断言落在当前候选列表内（CONTROL_PORT env 可重定向起始端口，不再硬编码 9776 段）
+        assert_true(port in get_port_candidates(),
+                    f"端口 {port} 应在候选列表 {get_port_candidates()} 内")
     finally:
         sock.close()
 

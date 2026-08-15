@@ -13,27 +13,32 @@ import sys
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from services.tools_detector import pip_installable_packages
+
 router = APIRouter(prefix="/api/install", tags=["install"])
 
 
 # 用户可一键安装的可选包白名单。
-# 注意：这不是 detect_env.py PYTHON_PACKAGES 的同步镜像——
-# PYTHON_PACKAGES 是 install.sh 必装的基础包（venv 创建时装），
-# 本白名单是用户在控制台按需补装的包。
-# 如需新增包，仅在此处添加即可（无需改其他文件）。
+# 白名单 = 可选包（本表）∪ venv 必装 Python 包（tools_detector.PYTHON_PACKAGES，
+# 单一数据源——加包只需在 tools_detector.py 的清单里加，此处自动放行）。
+# 如需新增纯可选包，仅在此处添加即可。
 PIPPABLE_PACKAGES = {
-    "frida", "frida-tools",
-    "angr", "triton", "z3-solver",
-    "playwright",
+    "frida-tools",
     "pyautogui", "pillow", "pyperclip",
     "httpx", "beautifulsoup4", "lxml", "html2text",
     "sympy", "gmpy2",
     "sse-starlette",  # 控制台自身
-}
+} | pip_installable_packages()
 
 
 class InstallRequest(BaseModel):
     package: str          # pip 包名
+
+
+@router.get("")
+async def list_pippable() -> dict:
+    """可一键安装的包白名单（前端据此显示行级安装按钮，避免两端硬编码漂移）。"""
+    return {"packages": sorted(PIPPABLE_PACKAGES)}
 
 
 @router.post("")

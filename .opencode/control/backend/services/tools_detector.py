@@ -220,7 +220,90 @@ def scan_agent(agent_name: str) -> list[dict]:
         scan_tool(tool)
         for tool in EXTERNAL_TOOLS
         if agent_name in tool.agents and _platform_matches(tool)
-    ]
+]
+
+
+# ─── Python 包清单（迁移自 detect_env.py PYTHON_PACKAGES 的检测侧）─────────
+# detect_env.py 是安装器（install.sh 跑，venv 未建时用），控制台是状态检测方。
+# 两份清单需同步维护（加包时两边都加；install.sh 的安装入口只有 detect_env）。
+# 注意 pip_name 才是 install.py 白名单的数据源（排除 conda 安装器特例）。
+
+
+@dataclass
+class PyPkgField:
+    """Python 包元数据。"""
+    name: str                     # import 名（mcp / sentence_transformers / ...）
+    pip_name: str                 # pip 安装名（sentence-transformers / ...）
+    agents: list[str]             # 使用方（["all"] = 全部）
+    description: str = ""
+    required: bool = True
+    platforms: list[str] = field(default_factory=list)  # 空=全平台
+    installer: str = "pip"        # pip / conda（conda 的不走 pip 白名单）
+
+
+PYTHON_PACKAGES: list[PyPkgField] = [
+    PyPkgField(name="mcp", pip_name="mcp", agents=["all"],
+               description="MCP 协议库，knowledge/events MCP server 依赖"),
+    PyPkgField(name="sentence_transformers", pip_name="sentence-transformers", agents=["all"],
+               description="嵌入模型库，加载 BGE-M3 模型依赖"),
+    PyPkgField(name="psutil", pip_name="psutil", agents=["all"],
+               description="进程/内存监控库"),
+    PyPkgField(name="fastapi", pip_name="fastapi", agents=["all"],
+               description="控制台 Web 框架"),
+    PyPkgField(name="portalocker", pip_name="portalocker", agents=["all"],
+               description="控制台跨平台文件锁"),
+    PyPkgField(name="sse_starlette", pip_name="sse-starlette", agents=["all"],
+               description="控制台 SSE 推送（docker pull 进度）"),
+    PyPkgField(name="sqlite_vec", pip_name="sqlite-vec", agents=["all"],
+               description="SQLite 向量扩展，knowledge MCP 向量存储依赖"),
+    PyPkgField(name="graphiti_core", pip_name="graphiti-core", agents=["all"],
+               description="Graphiti 时序知识图谱库，events MCP server 依赖"),
+    PyPkgField(name="httpx", pip_name="httpx", agents=["all"],
+               description="HTTP 客户端库，MCP/控制台测试依赖"),
+    PyPkgField(name="angr", pip_name="angr",
+               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
+               description="二进制分析/符号执行框架"),
+    PyPkgField(name="triton", pip_name="triton-library", platforms=["linux", "win32"],
+               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
+               description="动态二进制分析框架（符号执行/污点分析）"),
+    PyPkgField(name="z3", pip_name="z3-solver",
+               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis", "ai-security-analysis"],
+               description="Z3 定理证明器（约束求解）"),
+    PyPkgField(name="capstone", pip_name="capstone",
+               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
+               description="多架构反汇编框架"),
+    PyPkgField(name="unicorn", pip_name="unicorn",
+               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis", "ai-security-analysis"],
+               description="多架构 CPU 模拟器（Shellcode 测试）"),
+    PyPkgField(name="gmpy2", pip_name="gmpy2",
+               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis", "ai-security-analysis"],
+               description="高精度算术库（大整数/模幂/素性检测）"),
+    PyPkgField(name="frida", pip_name="frida",
+               agents=["binary-analysis", "mobile-analysis"],
+               description="动态插桩工具包（Hook/内存读写）"),
+    PyPkgField(name="PIL", pip_name="Pillow",
+               agents=["binary-analysis", "mobile-analysis"],
+               description="图像处理库（GUI 截图）"),
+    PyPkgField(name="pyautogui", pip_name="pyautogui", agents=["binary-analysis"],
+               description="GUI 自动化（鼠标/键盘模拟）"),
+    PyPkgField(name="pyperclip", pip_name="pyperclip", agents=["all"],
+               description="跨平台剪贴板操作"),
+    PyPkgField(name="playwright", pip_name="playwright", agents=["all"],
+               description="无头浏览器自动化框架"),
+    PyPkgField(name="markdownify", pip_name="markdownify", agents=["all"],
+               description="HTML 转 Markdown"),
+    PyPkgField(name="requests", pip_name="requests", agents=["all"],
+               description="HTTP 客户端库"),
+    PyPkgField(name="bs4", pip_name="beautifulsoup4", agents=["all"],
+               description="HTML/XML 解析库（BeautifulSoup4）"),
+    PyPkgField(name="lxml", pip_name="lxml", agents=["all"],
+               description="高性能 XML/HTML 解析器"),
+    PyPkgField(name="sympy", pip_name="sympy", agents=["all"],
+               description="符号数学库（CRT/数论构造）"),
+    PyPkgField(name="sage", pip_name="sagemath-standard", installer="conda",
+               required=False, agents=["crypto-analysis"],
+               description="数学软件系统（格归约/椭圆曲线）—— conda 安装，不可 pip"),
+]
 
 
 def scan_all() -> dict[str, list[dict]]:
@@ -235,3 +318,59 @@ def scan_all() -> dict[str, list[dict]]:
         all_agents.update(tool.agents)
 
     return {agent: scan_agent(agent) for agent in sorted(all_agents)}
+
+
+# ─── Python 包检测 ────────────────────────────────────────
+
+
+def scan_python_packages() -> list[dict]:
+    """检测 venv 内 Python 包安装状态。
+
+    控制台进程就跑在 venv 里，importlib.metadata 直接查当前环境。
+    sage（conda 安装器）用 import 探测兜底（pip metadata 可能没有）。
+    """
+    import importlib.metadata
+    import importlib.util
+
+    result = []
+    for pkg in PYTHON_PACKAGES:
+        if not _platform_matches_pkg(pkg):
+            continue
+        version: str | None = None
+        try:
+            version = importlib.metadata.version(pkg.pip_name)
+        except importlib.metadata.PackageNotFoundError:
+            # pip 名与 distribution 名不一致的特例（sage）→ import 探测
+            if importlib.util.find_spec(pkg.name) is not None:
+                try:
+                    version = importlib.metadata.version(pkg.name)
+                except importlib.metadata.PackageNotFoundError:
+                    version = ""
+        result.append({
+            "name": pkg.name,
+            "pip_name": pkg.pip_name,
+            "kind": "python",
+            "description": pkg.description,
+            "required": pkg.required,
+            "installer": pkg.installer,       # pip / conda
+            "agents": pkg.agents,
+            "available": version is not None,
+            "version": version,
+        })
+    return result
+
+
+def pip_installable_packages() -> set[str]:
+    """可经 pip 安装的包名集合（install.py 白名单数据源）。
+
+    排除：conda 安装器特例（sage）、当前平台不适用的包。
+    """
+    return {
+        pkg.pip_name
+        for pkg in PYTHON_PACKAGES
+        if pkg.installer == "pip" and _platform_matches_pkg(pkg)
+    }
+
+
+def _platform_matches_pkg(pkg: PyPkgField) -> bool:
+    return not pkg.platforms or sys.platform in pkg.platforms
