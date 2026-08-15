@@ -1,16 +1,17 @@
 /**
- * 配置分区：meta 驱动的差异化表单。
+ * 配置分区：meta 驱动的差异化表单（响应式 2 列网格）。
  *
  *   password → Input.Password（自带小眼睛，默认密文）
- *   path     → Input + 实时存在性徽标（防抖调 /api/fs/check，绿"存在"/红"不存在"）
+ *   path     → Input + 实时存在性徽标（防抖 400ms 调 /api/fs/check）
  *   bool     → Select(1/0)
  *   text     → Input
  *
+ * 布局：≥992px 双列网格（屏占比优先），窄屏单列。
  * 保存前 trim（服务端 write 也兜底 trim，双保险）。
  */
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  Form, Input, Select, Button, Tag, Space, Typography, App as AntApp, Alert,
+  Form, Input, Select, Button, Tag, Space, Typography, App as AntApp, Alert, Row, Col,
 } from "antd";
 import { SaveOutlined } from "@ant-design/icons";
 import type { ConfigMap, FsCheckResult } from "../types";
@@ -85,63 +86,62 @@ const ConfigSection: React.FC = () => {
   if (loading || !meta.data) return <Typography.Text type="secondary">加载中…</Typography.Text>;
 
   return (
-    <Form layout="vertical" component="div" style={{ maxWidth: 760 }}>
+    <Form layout="vertical" component="div">
       {requiredMissing.length > 0 && (
         <Alert
           type="warning" showIcon style={{ marginBottom: 16 }}
           message={`必要配置缺失：${requiredMissing.join("、")}`}
         />
       )}
-      {sortedKeys.map((key) => {
-        const m = meta.data![key];
-        const v = values[key] ?? "";
-        return (
-          <Form.Item
-            key={key}
-            style={{ marginBottom: 14 }}
-            label={
-              <Space size={6}>
-                <span>{m.label}</span>
-                {m.required && <Tag color="red" style={{ marginInlineEnd: 0 }}>必要</Tag>}
-                <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>({key})</Typography.Text>
-              </Space>
-            }
-            extra={m.hint ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>{m.hint}</Typography.Text> : undefined}
-          >
-            {m.type === "password" && (
-              <Input.Password
-                value={v} placeholder="输入密钥（默认隐藏）" autoComplete="new-password"
-                onChange={(e) => setValues((s) => ({ ...s, [key]: e.target.value }))}
-                style={{ maxWidth: 560 }}
-              />
-            )}
-            {m.type === "path" && (
-              <Space.Compact style={{ maxWidth: 560, width: "100%" }}>
-                <Input
-                  value={v} placeholder="绝对路径（支持 ~）"
-                  onChange={(e) => setValues((s) => ({ ...s, [key]: e.target.value }))}
-                  suffix={<PathCheckBadge path={v} />}
-                />
-              </Space.Compact>
-            )}
-            {m.type === "bool" && (
-              <Select
-                value={v === "" ? undefined : v} placeholder="未设置" allowClear
-                style={{ width: 160 }}
-                options={[{ value: "1", label: "开 (1)" }, { value: "0", label: "关 (0)" }]}
-                onChange={(nv) => setValues((s) => ({ ...s, [key]: nv ?? "" }))}
-              />
-            )}
-            {m.type === "text" && (
-              <Input
-                value={v}
-                onChange={(e) => setValues((s) => ({ ...s, [key]: e.target.value }))}
-                style={{ maxWidth: 560 }}
-              />
-            )}
-          </Form.Item>
-        );
-      })}
+      <Row gutter={[16, 0]}>
+        {sortedKeys.map((key) => {
+          const m = meta.data![key];
+          const v = values[key] ?? "";
+          return (
+            <Col xs={24} lg={12} key={key}>
+              <Form.Item
+                style={{ marginBottom: 14 }}
+                label={
+                  <Space size={6}>
+                    <span>{m.label}</span>
+                    {m.required && <Tag color="red" style={{ marginInlineEnd: 0 }}>必要</Tag>}
+                    <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>({key})</Typography.Text>
+                  </Space>
+                }
+                extra={m.hint ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>{m.hint}</Typography.Text> : undefined}
+              >
+                {m.type === "password" && (
+                  <Input.Password
+                    value={v} placeholder="输入密钥（默认隐藏）" autoComplete="new-password"
+                    onChange={(e) => setValues((s) => ({ ...s, [key]: e.target.value }))}
+                  />
+                )}
+                {m.type === "path" && (
+                  <Input
+                    value={v} placeholder="绝对路径（支持 ~）"
+                    onChange={(e) => setValues((s) => ({ ...s, [key]: e.target.value }))}
+                    suffix={<PathCheckBadge path={v} />}
+                  />
+                )}
+                {m.type === "bool" && (
+                  <Select
+                    value={v === "" ? undefined : v} placeholder="未设置" allowClear
+                    style={{ width: 160 }}
+                    options={[{ value: "1", label: "开 (1)" }, { value: "0", label: "关 (0)" }]}
+                    onChange={(nv) => setValues((s) => ({ ...s, [key]: nv ?? "" }))}
+                  />
+                )}
+                {m.type === "text" && (
+                  <Input
+                    value={v}
+                    onChange={(e) => setValues((s) => ({ ...s, [key]: e.target.value }))}
+                  />
+                )}
+              </Form.Item>
+            </Col>
+          );
+        })}
+      </Row>
       <Button type="primary" icon={<SaveOutlined />} loading={saving} disabled={!dirty}
         onClick={doSave}>
         保存{dirty ? "（有未保存修改）" : ""}

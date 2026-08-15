@@ -7,6 +7,7 @@
 import React from "react";
 import { Table, Tag, Typography, Space, Collapse } from "antd";
 import type { AgentTools, ToolStatus } from "../types";
+import EllipsisCell from "../components/EllipsisCell";
 
 const AGENT_TITLE: Record<string, string> = {
   "binary-analysis": "二进制逆向",
@@ -26,7 +27,7 @@ const ToolsSection: React.FC<Props> = ({ agents }) => {
 
   const columns = [
     { title: "工具", dataIndex: "name", width: 120 },
-    { title: "说明", dataIndex: "description", ellipsis: true },
+    { title: "说明", dataIndex: "description", render: (v: string) => <EllipsisCell text={v} /> },
     {
       title: "状态", dataIndex: "available", width: 76,
       render: (v: boolean, r: ToolStatus) =>
@@ -36,10 +37,10 @@ const ToolsSection: React.FC<Props> = ({ agents }) => {
     },
     { title: "版本", dataIndex: "version", width: 90, render: (v: string | null) => v?.slice(0, 12) ?? "—" },
     {
-      title: "安装提示", ellipsis: true,
+      title: "安装提示",
       render: (_: unknown, r: ToolStatus) =>
         !r.available && !r.skipped && r.install_hint ? (
-          <Typography.Text type="warning" style={{ fontSize: 12 }}>{r.install_hint.split("\n")[0]}</Typography.Text>
+          <EllipsisCell type="warning" text={r.install_hint.replace(/\n/g, " · ")} />
         ) : (
           <Typography.Text type="secondary">—</Typography.Text>
         ),

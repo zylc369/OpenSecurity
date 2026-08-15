@@ -260,13 +260,16 @@ const App: React.FC = () => {
           <Popover
             title={`环境就绪 ${breakdown.ok}/${breakdown.total}（按分类）`}
             content={(
-              <Descriptions size="small" column={1} style={{ minWidth: 320 }}>
+              <Descriptions size="small" column={1} style={{ minWidth: "auto", maxWidth: 340 }}>
                 {breakdown.cats.map((c) => (
                   <BreakdownRow key={c.label} label={c.label} ok={c.ok} total={c.total} missingNames={c.names} />
                 ))}
               </Descriptions>
             )}
             placement="bottomRight"
+            /* 钳制到视口内，防右溢出 */
+            overlayStyle={{ maxWidth: "calc(100vw - 24px)" }}
+            styles={{ body: { paddingRight: 12 } }}
           >
             <Badge
               status={breakdown.total > 0 && breakdown.ok === breakdown.total ? "success" : "warning"}
@@ -278,15 +281,25 @@ const App: React.FC = () => {
             />
           </Popover>
           {installableCount > 0 ? (
-            <Popover content={installPopover} title="一键安装范围" placement="bottomLeft">
+            <Popover content={installPopover} title="一键安装范围" placement="bottomRight"
+              overlayStyle={{ maxWidth: "calc(100vw - 24px)" }}>
               <Button type="primary" size="small" icon={<ThunderboltOutlined />}
                 onClick={() => openOrchestrator("all")}>
                 一键安装（{installableCount}）
               </Button>
             </Popover>
           ) : (
-            <Button size="small" icon={<ThunderboltOutlined />} disabled
-              title="没有可自动安装的缺失项">
+            /* 深色顶栏上 AntD 默认按钮 disabled 态 = 半透明深底+深灰字，完全隐身。
+               显式指定浅色文字/边框/半透明白底保证可读。 */
+            <Button
+              size="small" icon={<ThunderboltOutlined />} disabled
+              title="没有可自动安装的缺失项（缺失项均需手动，见环境就绪明细）"
+              style={{
+                color: "rgba(255,255,255,0.45)",
+                background: "rgba(255,255,255,0.08)",
+                borderColor: "rgba(255,255,255,0.22)",
+              }}
+            >
               一键安装
             </Button>
           )}

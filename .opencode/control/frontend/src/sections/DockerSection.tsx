@@ -8,6 +8,7 @@ import { Table, Tag, Button, Space, Progress, Typography, App as AntApp } from "
 import { PlayCircleOutlined, PauseCircleOutlined, CloudDownloadOutlined } from "@ant-design/icons";
 import type { DockerScanGlobal, KnownContainer, KnownImage } from "../types";
 import { api } from "../api/client";
+import EllipsisCell from "../components/EllipsisCell";
 
 const STATUS_COLOR: Record<string, string> = {
   running: "green",
@@ -82,7 +83,7 @@ const DockerSection: React.FC<Props> = ({ docker, onRefresh }) => {
   const containerCols = [
     { title: "容器", dataIndex: "name", width: 160 },
     { title: "镜像", dataIndex: "image" },
-    { title: "说明", dataIndex: "description", ellipsis: true },
+    { title: "说明", dataIndex: "description", render: (v: string) => <EllipsisCell text={v} /> },
     {
       title: "状态", dataIndex: "status", width: 100,
       render: (s: string) => <Tag color={STATUS_COLOR[s]}>{STATUS_TEXT[s]}</Tag>,
@@ -103,7 +104,7 @@ const DockerSection: React.FC<Props> = ({ docker, onRefresh }) => {
 
   const imageCols = [
     { title: "镜像", dataIndex: "name", width: 260 },
-    { title: "说明", dataIndex: "description", ellipsis: true },
+    { title: "说明", dataIndex: "description", render: (v: string) => <EllipsisCell text={v} /> },
     { title: "大小", dataIndex: "size_hint", width: 100 },
     {
       title: "状态", dataIndex: "pulled", width: 90,

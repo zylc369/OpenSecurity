@@ -96,12 +96,14 @@ def test_models_section_cards(rendered):
 
 
 def test_deps_section_venv(rendered):
-    """Python 依赖分区：venv 路径 + 真实包名（sentence-transformers 等）。"""
+    """Python 依赖分区：venv 路径 + 真实包数据（分页后第一页取当前行验证）。"""
     page, _ = rendered
     section_text = page.locator("#section-deps").inner_text()
     assert ".venv" in section_text, "缺少 venv 路径展示"
-    assert "sentence-transformers" in section_text, "Python 依赖分区应有真实 pip 包名"
     assert "虚拟环境" in section_text
+    # 分页默认 5 行/页——数据真实性由 API 测试覆盖（test_api_scan_coexists），
+    # 此处验证表格确有包行 + 分页汇总文案
+    assert "条/页" in section_text, "应显示分页信息"
 
 
 def test_tools_section_separated(rendered):
@@ -158,3 +160,74 @@ def test_config_path_exists_badge(rendered):
         has_not_text="不存在"
     )
     assert badge.count() >= 1, "输入 /tmp 后未出现'存在'徽标"
+
+
+# ─── 迭代 3（2026-08-15 用户反馈 UI 打磨）─────────────────
+
+
+def test_install_button_disabled_readable(rendered):
+    """disabled 一键安装按钮在深色顶栏上文字可读（color ≠ 背景色）。"""
+    page, _ = rendered
+    btn = page.locator("header button:has-text('一键安装')").first
+    style = btn.evaluate(
+        "el => ({ color: getComputedStyle(el).color, bg: getComputedStyle(el).backgroundColor })"
+    )
+    # 显式样式：白 45% 文字 / 白 8% 底——字符串不同即非 AntD 隐身默认值
+    assert style["color"].startswith("rgba(255, 255, 255"), f"文字色应显式浅色: {style}"
+    assert style["bg"].startswith("rgba(255, 255, 255"), f"背景应半透明白: {style}"
+
+
+def test_readiness_popover_within_viewport(rendered):
+    """就绪度 Popover 不超出视口右缘。"""
+    page, _ = rendered
+    page.locator("header .ant-badge").hover()
+    page.wait_for_timeout(600)
+    box = page.locator(".ant-popover:not(.ant-popover-hidden)").first.bounding_box()
+    assert box, "popover 未出现"
+    vw = page.evaluate("window.innerWidth")
+    assert box["x"] + box["width"] <= vw + 1, (
+        f"popover 右缘 {box['x'] + box['width']:.0f} 超出视口 {vw}"
+    )
+
+
+def test_python_deps_pagination(rendered):
+    """Python 依赖分页：分页器存在 + 默认每页 5 行。"""
+    page, _ = rendered
+    deps = page.locator("#section-deps")
+    assert deps.locator(".ant-pagination").count() == 1, "缺少分页器"
+    rows = deps.locator(".ant-table-tbody tr.ant-table-row").count()
+    assert rows == 5, f"默认每页应 5 行，实际 {rows}"
+
+
+def test_python_deps_search_filters(rendered):
+    """搜索框模糊过滤包名。"""
+    page, _ = rendered
+    deps = page.locator("#section-deps")
+    search = deps.locator("input[placeholder*='搜索包名']")
+    search.fill("sentence")
+    page.wait_for_timeout(400)
+    names = deps.locator(".ant-table-tbody tr.ant-table-row td:first-child").all_inner_texts()
+    assert names == ["sentence-transformers"], f"搜索结果应为 1 行，实际 {names}"
+
+
+def test_no_native_title_in_tables(rendered):
+    """表格截断列不再用原生 title 属性（~1s 延迟源头，用户投诉点）。"""
+    page, _ = rendered
+    native = page.evaluate(
+        "() => document.querySelectorAll('#section-deps .ant-table-tbody td [title]').length"
+    )
+    assert native == 0, f"存在 {native} 个原生 title 属性（应有即时 AntD tooltip）"
+
+
+def test_config_grid_two_columns(rendered):
+    """配置分区响应式网格：宽屏下表单项 x 坐标应有多个值（≥2 列）。"""
+    page, _ = rendered
+    xs = page.evaluate(
+        """() => {
+            const items = document.querySelectorAll('#section-config .ant-form-item');
+            const xs = new Set();
+            items.forEach(el => { const r = el.getBoundingClientRect(); if (r.width > 0) xs.add(Math.round(r.x)); });
+            return [...xs];
+        }"""
+    )
+    assert len(xs) >= 2, f"配置表单仍单列: x 坐标 {xs}"
