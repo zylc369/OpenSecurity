@@ -21,12 +21,14 @@ function findOpenCodeRoot(startDir: string): string {
 export const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 // OPENCODE_ROOT 支持环境变量覆盖（bun -e / 测试场景下 import.meta.url 不准）。
 // 默认通过 findOpenCodeRoot 从 PLUGIN_DIR 向上查找。
-export const OPENCODE_ROOT = process.env.OPENCODE_ROOT || findOpenCodeRoot(PLUGIN_DIR);
+export const OPENCODE_ROOT =
+  process.env.OPENCODE_ROOT || findOpenCodeRoot(PLUGIN_DIR);
 
 // DATA_DIR 支持环境变量覆盖（与控制台 config.py 对等）。
 // 默认 ~/bw-security-analysis（生产环境用户路径）。
 // 测试可通过 DATA_DIR=/tmp/xxx 隔离。
-export const DATA_DIR = process.env.DATA_DIR || join(homedir(), "bw-security-analysis");
+export const DATA_DIR =
+  process.env.DATA_DIR || join(homedir(), "bw-security-analysis");
 export const WORKSPACE_DIR = join(DATA_DIR, "workspace");
 export const TASK_SESSIONS_DIR = join(WORKSPACE_DIR, ".task_sessions");
 
@@ -67,10 +69,14 @@ export const SECURITY_AGENTS = [
 
 export const BASIC_GENERAL_AGENTS = [AGENT_SEARCHER, AGENT_MEMORIST];
 
+// evolve 从注册名单摘除（知识双轨分离设计）：
+// - 摘除后 evolve 的工具执行/LLM 响应不再写 events/memory（isRegisteredAgent 链拦截）
+// - 但不从 SECURITY_AGENTS 拿掉：那边承担日志、timeline、父链查找等可观测性职责
+// - evolve 的环境注入不受影响（system.transform 用 sessionManager.get，无名单门控）
 export const ALL_REGISTERED_AGENTS = [
   ...BASIC_GENERAL_AGENTS,
   ...SECURITY_AGENTS,
-];
+].filter((agent) => agent !== AGENT_SECURITY_ANALYSIS_EVOLVE);
 
 // 所有参与跨 agent 委派的 agent。插件会向每个成员的系统提示词中注入
 // 一个"可委派 Agent"区块（从每个 agent 的 .md frontmatter description 中收集）。
@@ -115,7 +121,8 @@ export const ENV_KEY_RESUME_ANALYSIS = "RESUME_ANALYSIS_ENABLED";
 // ─── venv ──────────────────────────────────────────────────────
 
 // venv 与 DATA_DIR 解耦：测试用沙箱 DATA_DIR 时仍可指向真实 venv（省 1GB+ 依赖安装）。
-export const VENV_DIR = process.env.OPENSECURITY_VENV_DIR || join(DATA_DIR, ".venv");
+export const VENV_DIR =
+  process.env.OPENSECURITY_VENV_DIR || join(DATA_DIR, ".venv");
 
 export const VENV_PYTHON_CANDIDATES = [
   join(VENV_DIR, "python.exe"), // conda env Windows 根目录
@@ -134,7 +141,12 @@ export const MAX_TIMELINE_BUFFER = 50;
 // 控制台架构改造后，embed_server 融合到控制台。下述常量收口所有控制台相关命名。
 
 /** 控制台后端 server.py 路径 */
-export const CONTROL_SCRIPT = join(OPENCODE_ROOT, "control", "backend", "server.py");
+export const CONTROL_SCRIPT = join(
+  OPENCODE_ROOT,
+  "control",
+  "backend",
+  "server.py",
+);
 
 /** 控制台端口文件路径（与控制台后端 config.py 的 PORT_FILE 一致） */
 export const CONTROL_PORT_FILE = join(DATA_DIR, ".opencode-control.port");

@@ -10,6 +10,20 @@ permission:
   read:
     "~/Downloads/**/*.env": allow
     "~/Downloads/**/*.env.*": allow
+  # MCP 工具禁用（设计：知识双轨分离）：
+  # - 静态知识 = MD 知识库（本 agent 维护，领域 agent 按需 Read 消费）
+  # - 动态知识 = 向量记忆库（领域 agent 分析实践中 store_knowledge 增量写入，
+  #   见 agents-rules/knowledge-management.md）
+  # 本 agent 两个环节都不参与：
+  # - events 工具强制 group_id 限定当前任务 Flow，查不到被复盘任务的数据
+  #   （复盘数据源 = 任务目录 + progress.md）
+  # - 不做 seeding（MD→向量库批量提炼已废弃：双写有一致性问题，静态 MD
+  #   由领域 agent prompt 内建索引直接 Read，不经向量化）
+  # deny + "*" 会把工具从 LLM 工具列表完全移除（省 schema token + 注意力）。
+  "events_*":
+    "*": deny
+  "knowledge_*":
+    "*": deny
 ---
 
 > 进化就要敢想敢干，先判断是不是正确的事情，正确的事情就要做，复杂度只用来判断什么阶段做、分几期做！
@@ -536,7 +550,6 @@ Plugin hooks:
 |----------|---------|
 | `$SHARED_DIR/knowledge-base/knowledge-writing-guide.md` | 沉淀知识到任何知识库文件之前 |
 | `$AGENT_DIR/knowledge-base/knowledge-sourcing-guide.md` | 搜索下载 writeup 素材时（Phase 0 入口 C） |
-| `$AGENT_DIR/knowledge-base/knowledge-seeding-guide.md` | 将 .md 知识库提炼到 knowledge MCP 向量数据库时（含质量验证框架） |
 | `$SHARED_DIR/knowledge-base/opencode-plugin-api.md` | 查看 Hook 签名、input/output 类型 |
 | `$SHARED_DIR/knowledge-base/opencode-plugin-hooks-lifecycle.md` | 理解 Hook 执行时序、awaited vs fire-and-forget、常见陷阱 |
 | `$SHARED_DIR/knowledge-base/opencode-plugin-development-guide.md` | 从零创建插件、最小模板、状态管理模式 |

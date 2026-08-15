@@ -6,7 +6,6 @@ import {
   unlinkSync,
 } from "fs";
 import { join, dirname, delimiter } from "path";
-import { existsSync } from "fs";
 import { tmpdir } from "os";
 import * as yaml from "js-yaml";
 import type { Plugin } from "@opencode-ai/plugin";
@@ -41,10 +40,7 @@ import { debugLog } from "./lib/logging";
 import TaskSessionPersistence from "./lib/task-session-persistence";
 import { getPythonCmd, getInstallHint, getCompilerName } from "./lib/venv";
 import { startControl } from "./lib/control-manager";
-import {
-  getAllConfig,
-  getCachedConfig,
-} from "./lib/control-config";
+import { getAllConfig, getCachedConfig } from "./lib/control-config";
 
 /** 从缓存读配置值（同步，不触发 HTTP）。如果缓存为空返回 null。 */
 function getCachedConfigValue(key: string): string | null {
@@ -627,11 +623,15 @@ function ensureWriterDaemon(): void {
  * 失败只记日志，不影响 agent 运行。
  */
 function fireAndForgetEvent(
+  session: SessionData,
   name: string,
   body: string,
   source: string,
   groupId: string,
 ): void {
+  if (!session.isRegisteredAgent()) {
+    return;
+  }
   ensureWriterDaemon();
 
   const event =
@@ -741,7 +741,7 @@ function ensureMemoryDaemon(): void {
       debugLog(`memory daemon: ${data.toString().trim()}`);
     });
 
-    memoryDaemon.on("exit", (code) => {
+    memoryDaemon.on("exit", (code: number | null) => {
       debugLog(`memory daemon: exited code=${code}`);
       memoryDaemon = null;
       memoryDaemonReady = false;
@@ -776,11 +776,15 @@ const MEMORY_ALLOWED_TOOLS = new Set([
 ]);
 
 function fireAndForgetMemory(
+  session: SessionData,
   toolName: string,
   args: unknown,
   output: string,
   flowId: string,
 ): void {
+  if (!session.isRegisteredAgent()) {
+    return;
+  }
   // 白名单检查（对齐 PentAGI allowedStoringInMemoryTools）
   if (!MEMORY_ALLOWED_TOOLS.has(toolName)) {
     return;
@@ -1364,6 +1368,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           const agentName = session.agentName;
           const body = `Tool: ${toolName}\nArguments: ${JSON.stringify(input.args).slice(0, 2000)}\nInvoked by: ${agentName} Agent\nStatus: success\nResult: ${(output.output || "").slice(0, 2000)}\nContext: Session ${sid}`;
           fireAndForgetEvent(
+            session,
             `${toolName} execution`,
             body,
             `${agentName} tool execution`,
@@ -1372,6 +1377,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
 
           // 写入 knowledge 向量库 memory（对齐 PentAGI executor.go:519 storeToolResult）
           fireAndForgetMemory(
+            session,
             toolName,
             input.args,
             output.output || "",
@@ -1402,6 +1408,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
 
         const body = `Agent: ${agentName}\nResponse: ${text.slice(0, 4000)}\nContext: Session ${sid}`;
         fireAndForgetEvent(
+          session,
           `${agentName} agent response`,
           body,
           `${agentName} response`,
@@ -1451,7 +1458,12 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
 
             flushTimeline(sessionID);
             ctx.sessionManager.delete(sessionID);
-            removeTaskSession(sessionID);
+            // 必须删持久化映射文件：sessionManager.delete 只清内存 Map，
+            // 残留文件会在插件重启时被 createFromAPI 复活成脏 session。
+            // 注意：removeTaskSession 是 static 方法，必须经类调用——
+            // 历史版本裸调 removeTaskSession(...) 无导入，ReferenceError 被
+            // catch 吞掉，持久化文件实际从未删除过（静默失败）
+            TaskSessionPersistence.removeTaskSession(sessionID);
 
             // 清理 graphiti 事件数据（fire-and-forget，失败只记日志）
             if (flowId) {
@@ -1547,9 +1559,12 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           }
         }
       } catch (e) {
+        // Event 是 33 个变体的 union，只有 session.created 的 properties 有 info
+        // （其余是 directory/sessionID 等）——直取 .info 类型不合法，统一 cast 后取
+        const props = input.event.properties as Record<string, any>;
         debugLog(
           `event: 意外异常 event=${JSON.stringify(input.event)} err=${(e as Error)?.message}`,
-          input.event.properties?.info?.id,
+          props?.info?.id ?? props?.sessionID,
         );
       }
     },

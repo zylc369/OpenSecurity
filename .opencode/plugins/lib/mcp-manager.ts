@@ -1,6 +1,6 @@
 import { join } from "path";
 import { existsSync } from "fs";
-import type { OpencodeClient } from "./session-manager";
+import type { OpencodeClient } from "@opencode-ai/sdk";
 import { OPENCODE_ROOT, DATA_DIR } from "./constants";
 import { getPythonCmd } from "./venv";
 import { getControlPort } from "./control-manager";
@@ -84,7 +84,10 @@ export class McpManager {
           config: {
             type: "local" as const,
             command: [venvPython, script],
-            env: mcpEnv,
+            // 字段名必须是 environment（opencode 运行时读 mcp.environment）。
+            // 历史上误写 env 被静默丢弃 → DATA_DIR 从未注入 MCP 子进程，
+            // 生产靠默认值巧合可用，测试沙箱 DATA_DIR 则泄漏到生产端口文件
+            environment: mcpEnv,
             enabled: true,
             timeout,
           },
