@@ -4,7 +4,7 @@
  * 数据：App 的 useScan 统一拉取（global.docker），本组件不重复请求。
  */
 import React, { useState } from "react";
-import { Table, Tag, Button, Space, Progress, Typography, App as AntApp } from "antd";
+import { Table, Tag, Button, Space, Progress, Typography, App as AntApp, Popconfirm } from "antd";
 import { PlayCircleOutlined, PauseCircleOutlined, CloudDownloadOutlined } from "@ant-design/icons";
 import type { DockerScanGlobal, KnownContainer, KnownImage } from "../types";
 import { api } from "../api/client";
@@ -92,8 +92,17 @@ const DockerSection: React.FC<Props> = ({ docker, onRefresh }) => {
       title: "操作", width: 100,
       render: (_: unknown, r: KnownContainer) =>
         r.status === "running" ? (
-          <Button size="small" icon={<PauseCircleOutlined />}
-            onClick={() => doContainerAction(r.name, "stop")}>停止</Button>
+          /* 停止是破坏性操作（图数据库下线）——二次确认防误点 */
+          <Popconfirm
+            title="停止容器"
+            description={`确定停止 ${r.name} 吗？（相关功能将不可用）`}
+            okText="停止"
+            okButtonProps={{ danger: true }}
+            cancelText="取消"
+            onConfirm={() => doContainerAction(r.name, "stop")}
+          >
+            <Button size="small" icon={<PauseCircleOutlined />} danger>停止</Button>
+          </Popconfirm>
         ) : (
           <Button size="small" type="primary" ghost icon={<PlayCircleOutlined />}
             disabled={r.status === "not_exists"}

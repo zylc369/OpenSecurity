@@ -99,7 +99,7 @@ EXTRA_CONFIG_META: list[ConfigField] = [
         key="DEEPSEEK_MODEL",
         label="DeepSeek 模型名",
         type="text",
-        hint="如 deepseek-chat / deepseek-reasoner",
+        hint="不配置默认 deepseek-v4-pro（events MCP 提取模型；省钱可改 deepseek-v4-flash）",
         required=False,
     ),
     ConfigField(

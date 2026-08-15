@@ -26,8 +26,9 @@ const ToolsSection: React.FC<Props> = ({ agents }) => {
   if (!agents) return <Typography.Text type="secondary">加载中…</Typography.Text>;
 
   const columns = [
-    { title: "工具", dataIndex: "name", width: 120 },
-    { title: "说明", dataIndex: "description", render: (v: string) => <EllipsisCell text={v} /> },
+    { title: "工具", dataIndex: "name", width: 110 },
+    { title: "说明", dataIndex: "description", width: 150,
+      render: (v: string) => <EllipsisCell text={v} /> },
     {
       title: "状态", dataIndex: "available", width: 76,
       render: (v: boolean, r: ToolStatus) =>
@@ -40,7 +41,7 @@ const ToolsSection: React.FC<Props> = ({ agents }) => {
       title: "安装提示",
       render: (_: unknown, r: ToolStatus) =>
         !r.available && !r.skipped && r.install_hint ? (
-          <EllipsisCell type="warning" text={r.install_hint.replace(/\n/g, " · ")} />
+          <EllipsisCell type="warning" maxWidth={240} text={r.install_hint.replace(/\n/g, " · ")} />
         ) : (
           <Typography.Text type="secondary">—</Typography.Text>
         ),

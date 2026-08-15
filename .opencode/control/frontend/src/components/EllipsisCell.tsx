@@ -12,15 +12,17 @@ interface Props {
   text: string | null | undefined;
   /** 文字颜色语义（警示提示用 warning 色） */
   type?: "secondary" | "warning";
+  /** 单行最大宽度（px）——超出截断。表格自动列宽不定，需调用方显式约束 */
+  maxWidth?: number;
 }
 
-const EllipsisCell: React.FC<Props> = ({ text, type = "secondary" }) => {
+const EllipsisCell: React.FC<Props> = ({ text, type = "secondary", maxWidth }) => {
   const content = text ?? "—";
   return (
     <Typography.Text
       type={type}
       ellipsis={{ tooltip: { title: content, mouseEnterDelay: 0, mouseLeaveDelay: 0 } }}
-      style={{ fontSize: 12, maxWidth: "100%" }}
+      style={{ fontSize: 12, maxWidth: maxWidth ? `${maxWidth}px` : "100%", display: "inline-block", verticalAlign: "bottom" }}
     >
       {content}
     </Typography.Text>

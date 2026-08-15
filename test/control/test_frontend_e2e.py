@@ -282,3 +282,76 @@ def test_hardware_popover(rendered):
     pop.locator("button:has(.anticon-reload)").click()
     page.wait_for_timeout(1200)
     assert len(reqs) >= 1, "点击 Popover 内刷新按钮应重新请求 /api/hardware"
+
+
+# ─── 迭代 5（2026-08-15 布局细节）─────────────────────────
+
+
+def test_model_disk_label(rendered):
+    """模型卡磁盘占用文案：'磁盘 X.XXGB'（替代含混的'已缓存'）。"""
+    page, _ = rendered
+    text = page.locator("#section-models").inner_text()
+    assert "磁盘 4.27GB" in text and "磁盘 2.14GB" in text, "应显示'磁盘 X.XXGB'"
+    assert "已缓存" not in text, "'已缓存'文案应清除"
+
+
+def test_tools_hint_truncated_with_tooltip(rendered):
+    """外部工具安装提示超长截断 + 悬浮即时显示全文。"""
+    page, _ = rendered
+    page.locator("#section-tools .ant-collapse-item").filter(has_text="二进制逆向").first.click()
+    page.wait_for_timeout(400)
+    hint_cell = page.locator("#section-tools .ant-table-tbody tr:has-text('GoReSym') td").nth(4)
+    truncated = hint_cell.evaluate(
+        "el => { const t = el.querySelector('.ant-typography') || el; return t.scrollWidth > t.clientWidth + 1; }"
+    )
+    assert truncated, "GoReSym 安装提示应被截断（超长 URL）"
+    hint_cell.hover()
+    page.wait_for_timeout(150)
+    tip = page.locator(".ant-tooltip:visible")
+    assert tip.count() >= 1, "悬浮 150ms 内应显示完整提示"
+    assert "mandiant" in tip.first.inner_text()
+
+
+def test_config_deepseek_grouped_half_width(rendered):
+    """DeepSeek 密钥与模型名：同一行（组内横排）+ 整组占 50% 宽。
+
+    标记语义：每项自带 必要(红)/可选(灰) 标签——"DeepSeek 模型名"标可选
+    是准确的（不配置默认 deepseek-v4-pro，graphiti_config.py 有默认值）。
+    """
+    page, _ = rendered
+    cfg = page.locator("#section-config")
+    ds_item = cfg.locator(".ant-form-item").filter(has_text="DeepSeek")
+    assert ds_item.count() >= 1, "应有 DeepSeek 配置组"
+    label_text = ds_item.first.locator(".ant-form-item-label").inner_text()
+    assert "必要" in label_text, "密钥应标'必要'"
+    assert "可选" in label_text, "模型名应标'可选'"
+    container = cfg.locator(".ant-row").first.bounding_box()
+    box = ds_item.first.bounding_box()
+    assert box and container
+    assert abs(box["width"] / container["width"] - 0.5) < 0.08, (
+        f"组宽应约 50%，实际 {box['width'] / container['width'] * 100:.0f}%"
+    )
+    inputs = ds_item.first.locator("input")
+    ys = [inputs.nth(i).bounding_box()["y"] for i in range(inputs.count())]
+    assert len(ys) == 2 and max(ys) - min(ys) < 10, (
+        f"密钥与模型名应同行横排，实际 y 坐标 {ys}"
+    )
+
+
+def test_docker_stop_confirm(rendered):
+    """容器停止按钮：二次确认（防误点破坏图数据库）。"""
+    page, _ = rendered
+    stop_btn = page.locator("#section-docker button:has-text('停止')")
+    if stop_btn.count() == 0:
+        pytest.skip("当前无运行中容器")
+    stop_btn.first.click()
+    page.wait_for_timeout(500)
+    confirm = page.locator(".ant-popover:not(.ant-popover-hidden):has-text('确定停止')")
+    assert confirm.count() >= 1, "点击停止应弹出二次确认框"
+    assert "确定停止" in confirm.first.inner_text()
+    # 取消路径（AntD 中文按钮渲染为"取 消"带空格；关闭后节点保留 hidden class——
+    # 断言"无可见确认框"而非"节点不存在"）
+    confirm.first.locator("button").filter(has_text="取").first.click()
+    page.wait_for_timeout(800)
+    visible = page.locator(".ant-popover:not(.ant-popover-hidden):has-text('确定停止')")
+    assert visible.count() == 0, "取消后确认框应关闭（不可见）"

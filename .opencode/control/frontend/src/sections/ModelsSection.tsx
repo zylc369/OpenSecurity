@@ -27,9 +27,9 @@ const ModelCard: React.FC<{ m: ModelAsset; onDownload: (id: string) => void }> =
             {m.type === "embedder" ? "向量化" : "重排序"}
           </Tag>
           {m.cached ? (
-            <Tag icon={<CheckCircleOutlined />} color="success">已缓存 {m.size_gb}GB</Tag>
+            <Tag icon={<CheckCircleOutlined />} color="success">磁盘 {m.size_gb}GB</Tag>
           ) : (
-            <Tag color="warning">未缓存</Tag>
+            <Tag color="warning">未下载</Tag>
           )}
           {m.loaded && <Tag color="processing">已加载</Tag>}
         </Space>

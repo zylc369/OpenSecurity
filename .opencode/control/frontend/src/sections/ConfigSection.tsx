@@ -75,12 +75,28 @@ const ConfigSection: React.FC = () => {
     }
   };
 
-  const sortedKeys = useMemo(() => {
+  /** 分组规则：语义相关的配置共享一格（占 50% 宽），格内纵向排列 */
+  const CONFIG_GROUPS: string[][] = [
+    ["DEEPSEEK_API_KEY", "DEEPSEEK_MODEL"],  // DeepSeek 密钥 + 模型名是一套凭据
+  ];
+
+  const sortedGroups = useMemo(() => {
     if (!meta.data) return [];
-    // 必要的在前，按 label 排序
-    return Object.entries(meta.data)
+    const keys = Object.entries(meta.data)
       .sort((a, b) => Number(b[1].required) - Number(a[1].required) || a[1].label.localeCompare(b[1].label))
       .map(([k]) => k);
+    // 分组：组内保持 keys 顺序，未分组键各占一格
+    const grouped: string[][] = [];
+    const consumed = new Set<string>();
+    for (const group of CONFIG_GROUPS) {
+      const present = group.filter((k) => keys.includes(k));
+      if (present.length > 1) {
+        grouped.push(present);
+        present.forEach((k) => consumed.add(k));
+      }
+    }
+    for (const k of keys) if (!consumed.has(k)) grouped.push([k]);
+    return grouped;
   }, [meta.data]);
 
   if (loading || !meta.data) return <Typography.Text type="secondary">加载中…</Typography.Text>;
@@ -94,53 +110,80 @@ const ConfigSection: React.FC = () => {
         />
       )}
       <Row gutter={[16, 0]}>
-        {sortedKeys.map((key) => {
-          const m = meta.data![key];
-          const v = values[key] ?? "";
-          return (
-            <Col xs={24} lg={12} key={key}>
-              <Form.Item
-                style={{ marginBottom: 14 }}
-                label={
-                  <Space size={6}>
-                    <span>{m.label}</span>
-                    {m.required && <Tag color="red" style={{ marginInlineEnd: 0 }}>必要</Tag>}
-                    <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>({key})</Typography.Text>
-                  </Space>
-                }
-                extra={m.hint ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>{m.hint}</Typography.Text> : undefined}
-              >
-                {m.type === "password" && (
-                  <Input.Password
-                    value={v} placeholder="输入密钥（默认隐藏）" autoComplete="new-password"
-                    onChange={(e) => setValues((s) => ({ ...s, [key]: e.target.value }))}
-                  />
-                )}
-                {m.type === "path" && (
-                  <Input
-                    value={v} placeholder="绝对路径（支持 ~）"
-                    onChange={(e) => setValues((s) => ({ ...s, [key]: e.target.value }))}
-                    suffix={<PathCheckBadge path={v} />}
-                  />
-                )}
-                {m.type === "bool" && (
-                  <Select
-                    value={v === "" ? undefined : v} placeholder="未设置" allowClear
-                    style={{ width: 160 }}
-                    options={[{ value: "1", label: "开 (1)" }, { value: "0", label: "关 (0)" }]}
-                    onChange={(nv) => setValues((s) => ({ ...s, [key]: nv ?? "" }))}
-                  />
-                )}
-                {m.type === "text" && (
-                  <Input
-                    value={v}
-                    onChange={(e) => setValues((s) => ({ ...s, [key]: e.target.value }))}
-                  />
-                )}
-              </Form.Item>
-            </Col>
-          );
-        })}
+        {sortedGroups.map((group) => (
+          /* 一组语义相关配置共享一行（lg=12 即 50% 宽），组内横排（密钥主项弹性 + 附属项定宽） */
+          <Col xs={24} lg={12} key={group.join("+")}>
+            <Form.Item
+              style={{ marginBottom: 14 }}
+              label={
+                <Space size={8}>
+                  {group.map((key) => {
+                    const m = meta.data![key];
+                    return (
+                      <span key={key}>
+                        {m.label}
+                        {m.required
+                          ? <Tag color="red" style={{ marginInlineStart: 4 }}>必要</Tag>
+                          : <Tag style={{ marginInlineStart: 4 }}>可选</Tag>}
+                      </span>
+                    );
+                  })}
+                </Space>
+              }
+            >
+              <Space.Compact style={{ width: "100%" }}>
+                {group.map((key) => {
+                  const m = meta.data![key];
+                  const v = values[key] ?? "";
+                  const isMain = m.type === "password" || m.type === "path";
+                  return (
+                    <React.Fragment key={key}>
+                      {m.type === "password" && (
+                        <Input.Password
+                          value={v} placeholder={group.length > 1 ? "密钥（默认隐藏）" : "输入密钥（默认隐藏）"}
+                          autoComplete="new-password"
+                          style={{ flex: isMain && group.length > 1 ? 1 : undefined }}
+                          onChange={(e) => setValues((s) => ({ ...s, [key]: e.target.value }))}
+                        />
+                      )}
+                      {m.type === "path" && (
+                        <Input
+                          value={v} placeholder="绝对路径（支持 ~）"
+                          style={{ flex: isMain && group.length > 1 ? 1 : undefined }}
+                          onChange={(e) => setValues((s) => ({ ...s, [key]: e.target.value }))}
+                          suffix={<PathCheckBadge path={v} />}
+                        />
+                      )}
+                      {m.type === "bool" && (
+                        <Select
+                          value={v === "" ? undefined : v} placeholder="未设置" allowClear
+                          style={{ width: 120 }}
+                          options={[{ value: "1", label: "开 (1)" }, { value: "0", label: "关 (0)" }]}
+                          onChange={(nv) => setValues((s) => ({ ...s, [key]: nv ?? "" }))}
+                        />
+                      )}
+                      {m.type === "text" && (
+                        /* 组内非主 text 项定宽 180，防 100% 默认宽挤占主项；主项 flex:1 占余宽 */
+                        <Input
+                          value={v} placeholder={m.label}
+                          style={group.length > 1 && !isMain
+                            ? { width: 180, flexShrink: 0 }
+                            : { flex: 1 }}
+                          onChange={(e) => setValues((s) => ({ ...s, [key]: e.target.value }))}
+                        />
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </Space.Compact>
+              {group.some((key) => meta.data![key].hint) && (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {group.map((key) => meta.data![key].hint).filter(Boolean).join("；")}
+                </Typography.Text>
+              )}
+            </Form.Item>
+          </Col>
+        ))}
       </Row>
       <Button type="primary" icon={<SaveOutlined />} loading={saving} disabled={!dirty}
         onClick={doSave}>
