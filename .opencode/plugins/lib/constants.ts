@@ -19,9 +19,14 @@ function findOpenCodeRoot(startDir: string): string {
 }
 
 export const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
-export const OPENCODE_ROOT = findOpenCodeRoot(PLUGIN_DIR);
+// OPENCODE_ROOT 支持环境变量覆盖（bun -e / 测试场景下 import.meta.url 不准）。
+// 默认通过 findOpenCodeRoot 从 PLUGIN_DIR 向上查找。
+export const OPENCODE_ROOT = process.env.OPENCODE_ROOT || findOpenCodeRoot(PLUGIN_DIR);
 
-export const DATA_DIR = join(homedir(), "bw-security-analysis");
+// DATA_DIR 支持环境变量覆盖（与控制台 config.py 对等）。
+// 默认 ~/bw-security-analysis（生产环境用户路径）。
+// 测试可通过 DATA_DIR=/tmp/xxx 隔离。
+export const DATA_DIR = process.env.DATA_DIR || join(homedir(), "bw-security-analysis");
 export const WORKSPACE_DIR = join(DATA_DIR, "workspace");
 export const TASK_SESSIONS_DIR = join(WORKSPACE_DIR, ".task_sessions");
 
@@ -109,7 +114,8 @@ export const ENV_KEY_RESUME_ANALYSIS = "RESUME_ANALYSIS_ENABLED";
 
 // ─── venv ──────────────────────────────────────────────────────
 
-export const VENV_DIR = join(DATA_DIR, ".venv");
+// venv 与 DATA_DIR 解耦：测试用沙箱 DATA_DIR 时仍可指向真实 venv（省 1GB+ 依赖安装）。
+export const VENV_DIR = process.env.OPENSECURITY_VENV_DIR || join(DATA_DIR, ".venv");
 
 export const VENV_PYTHON_CANDIDATES = [
   join(VENV_DIR, "python.exe"), // conda env Windows 根目录
@@ -123,7 +129,33 @@ export const VENV_PYTHON_CANDIDATES = [
 
 export const MAX_TIMELINE_BUFFER = 50;
 
-// ─── embed_server ──────────────────────────────────────────────
+// ─── 控制台（opencode-control）──────────────────────────────────
+//
+// 控制台架构改造后，embed_server 融合到控制台。下述常量收口所有控制台相关命名。
 
-/** ServiceRegistry 中 embed_server 的服务名 */
-export const EMBED_SERVER_SERVICE = "embed_server";
+/** 控制台后端 server.py 路径 */
+export const CONTROL_SCRIPT = join(OPENCODE_ROOT, "control", "backend", "server.py");
+
+/** 控制台端口文件路径（与控制台后端 config.py 的 PORT_FILE 一致） */
+export const CONTROL_PORT_FILE = join(DATA_DIR, ".opencode-control.port");
+
+/** 控制台 users 文件路径（与控制台后端 config.py 的 USERS_FILE 一致） */
+export const CONTROL_USERS_FILE = join(DATA_DIR, ".opencode-control.users");
+
+/** Plugin spawn 控制台后，通过此环境变量把端口传给 MCP server（embed_client.py 读） */
+export const ENV_CONTROL_PORT = "OPENCODE_CONTROL_PORT";
+
+/** ServiceRegistry 中控制台启动状态的服务名（控制台 spawn + /health 200） */
+export const CONTROL_STARTUP_SERVICE = "control_startup";
+
+/** ServiceRegistry 中控制台扫描完成的服务名（第三~五层扫描完成） */
+export const CONTROL_SCAN_SERVICE = "control_scan";
+
+/** 控制台启动超时（毫秒）。包括 spawn + 端口文件出现 + 模型加载（最坏 30s） */
+export const CONTROL_STARTUP_TIMEOUT_MS = 60_000;
+
+/** 控制台扫描超时（毫秒）。Docker 检测 + 工具检测 */
+export const CONTROL_SCAN_TIMEOUT_MS = 90_000;
+
+/** 端口文件等待超时（毫秒）。控制台 spawn 后写端口文件的时间 */
+export const CONTROL_PORT_FILE_WAIT_MS = 5_000;

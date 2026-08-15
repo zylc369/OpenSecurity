@@ -75,7 +75,15 @@ CUSTOM_ENTITY_TYPES = {
 
 
 def load_ai_env() -> None:
-    """读取 .opencode/.ai_env，setdefault 合并到 os.environ。"""
+    """读取 .opencode/.ai_env，setdefault 合并到 os.environ。
+
+    控制台架构改造后的优先级：
+      1. 系统 env（最高，Plugin shell.env hook 注入的 DEEPSEEK_API_KEY 等）
+      2. .ai_env 文件（兜底，仅用于用户直接跑 events MCP 不通过 Plugin 的场景）
+
+    日常运行时 Plugin 已经把 .ai_env 的配置注入到子进程环境变量，
+    此函数 setdefault 不会覆盖已存在的 key，只是兜底。
+    """
     ai_env = Path(__file__).resolve().parents[2] / ".ai_env"  # events/ → mcp-servers/ → .opencode/
     if not ai_env.is_file():
         return

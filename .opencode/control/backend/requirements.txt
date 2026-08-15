@@ -1,0 +1,14 @@
+# OpenSecurity 控制台后端依赖
+#
+# 注意：这些包已加入 detect_env.py 的 PYTHON_PACKAGES（agents=["all"]），
+# install.sh 会自动安装。本文件仅作为控制台依赖的人类可读文档，
+# 开发者也可手动 `pip install -r requirements.txt` 快速补装。
+#
+# 如需新增控制台依赖：
+#   1. 加到本文件
+#   2. 同步加到 detect_env.py PYTHON_PACKAGES（确保 install.sh 覆盖）
+
+fastapi>=0.110.0           # Web 框架（基于 starlette，自动 Pydantic 校验 + OpenAPI 文档）
+portalocker>=2.8.0         # 跨平台文件锁（统一 fcntl/msvcrt 抽象）
+psutil>=5.9.0              # CPU/内存信息采集（已由 embed_server 依赖预装）
+sse-starlette>=1.6.0       # SSE 推送（docker pull 进度，routes/docker.py 用）

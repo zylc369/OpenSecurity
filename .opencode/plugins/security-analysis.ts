@@ -6,6 +6,7 @@ import {
   unlinkSync,
 } from "fs";
 import { join, dirname, delimiter } from "path";
+import { existsSync } from "fs";
 import { tmpdir } from "os";
 import * as yaml from "js-yaml";
 import type { Plugin } from "@opencode-ai/plugin";
@@ -32,18 +33,23 @@ import {
   AGENT_SCRIPT_DIRS,
   SHARED_DIR,
   AGENTS_DIR,
-  EMBED_SERVER_SERVICE,
+  CONTROL_STARTUP_SERVICE,
 } from "./lib/constants";
 import { ctx } from "./lib/context";
 import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
 import TaskSessionPersistence from "./lib/task-session-persistence";
+import { getPythonCmd, getInstallHint, getCompilerName } from "./lib/venv";
+import { startControl } from "./lib/control-manager";
 import {
-  getPythonCmd,
-  getInstallHint,
-  getIdatPath,
-  getCompilerName,
-} from "./lib/venv";
+  getAllConfig,
+  getCachedConfig,
+} from "./lib/control-config";
+
+/** 从缓存读配置值（同步，不触发 HTTP）。如果缓存为空返回 null。 */
+function getCachedConfigValue(key: string): string | null {
+  return getCachedConfig()[key] ?? null;
+}
 import {
   hasBuwaiExtensionId,
   loadSnippet,
@@ -130,9 +136,9 @@ async function buildEnvSection(
     // OPENSECURITY_FLOW_ID：事件库分区标识
     envSection += `- 事件库 Flow ID ($OPENSECURITY_FLOW_ID): ${session.flowId}。标识当前分析任务的事件库分区。主任务和它启动的所有子任务共享同一个 Flow ID——子 agent 写入的事件（工具执行记录、LLM 响应）和父 agent 写入的事件存在同一个分区里，互相可搜索。调用事件库 MCP 的搜索工具时，将此值作为 group_id 参数传入，限定搜索范围到当前任务的事件，避免搜到其他无关任务的数据。\n`;
 
-    // IDA Pro（用 getIdatPath 判断是否配置，不注入完整路径——shell.env 已注入 $IDAT）
-    const idatPath = getIdatPath();
-    if (idatPath) {
+    // IDA Pro：通过控制台配置检测（不直接读 .ai_env）
+    const idaHome = getCachedConfigValue("IDA_PRO_HOME");
+    if (idaHome) {
       envSection += `- IDA Pro: 已配置（用 $IDAT 调用 idat）\n`;
     } else {
       envSection += `- IDA Pro: 未配置\n`;
@@ -215,260 +221,48 @@ async function abortSession(sessionID: string, reason: string): Promise<void> {
 // 工具开始执行时间戳（tool.execute.before → tool.execute.after 配对计算耗时）
 const toolStartTimes = new Map<string, number>();
 
-// ─── embed_server 启动管理 ──────────────────────────────────
+// ─── 控制台启动管理 ──────────────────────────────────
 //
-// embed_server 的生命周期：spawn → 写端口文件 → 加载模型 → /health 200
-// chat.message 通过 ctx.services.waitFor(EMBED_SERVER_SERVICE) 等待就绪。
-
-/** embed_server 子进程引用（模块级，exit handler 用） */
-let embedProc: any = null;
-
-/** 端口文件路径 */
-const EMBED_PORT_FILE = join(DATA_DIR, ".embed_server_port");
+// 控制台架构改造后，原 embed_server 启动逻辑迁移到 control-manager.ts。
+// control-manager 负责：
+//   1. 启动时检查现有控制台（端口文件 + PID + 端口连通）
+//   2. 复用 or spawn 新控制台（detached:true + unref）
+//   3. 加自己 PID 到 users 文件
+//   4. 注册 process.on("exit") 退出时减引用 + 必要时 SIGTERM 控制台
+//
+// ServiceRegistry 中 CONTROL_STARTUP_SERVICE 在 setup() 里 resolve（成功 or 失败），
+// chat.message 通过 waitFor(CONTROL_STARTUP_SERVICE) 等待。
 
 /**
- * 启动 embed_server：注册到 ServiceRegistry → spawn → 轮询 health → resolve。
- * 脚本不存在或 Python 未就绪时直接 resolve("failed")。
+ * 启动控制台并 resolve 到 ServiceRegistry。
+ * 失败（venv 缺失、脚本不存在、spawn 失败、超时）→ resolve failed。
  */
-function startEmbedServer(): void {
-  const embedScript = join(OPENCODE_ROOT, "mcp-servers", "embed_server.py");
-  const embedPython = getPythonCmd();
-
-  if (!existsSync(embedScript)) {
-    debugLog(`embed_server: 脚本不存在 ${embedScript}`);
-    ctx.services.resolve(
-      EMBED_SERVER_SERVICE,
-      "failed",
-      `embed_server.py 脚本不存在: ${embedScript}`,
-    );
-    return;
-  }
-  if (!embedPython) {
-    debugLog(`embed_server: Python 未就绪`);
-    ctx.services.resolve(EMBED_SERVER_SERVICE, "failed", "Python 未就绪");
-    return;
-  }
-
+async function startControlService(): Promise<void> {
   try {
-    // child_process.spawn 是异步的（非 spawnSync），不会阻塞事件循环。
-    // spawn 立即返回 ChildProcess 对象，子进程在后台运行，通过事件回调通信。
-    // 不用 Bun.spawn（runProcess）是因为 runProcess 设计为"跑完拿结果"（await proc.exited），
-    // 而 embed_server 是长期运行的 HTTP 服务，不会自行退出。
-    const { spawn: spawnProc } = require("child_process");
-
-    // embedPython 是绝对路径（如 .../venv/bin/python 或 .../Scripts/python.exe），
-    // 绝对路径在 Windows 上不需要 shell: true。
-    embedProc = spawnProc(embedPython, [embedScript], {
-      // stdin/stdout/stderr 全部丢弃——embed_server 的日志不需要 Plugin 读取。
-      // "ignore" 在 Unix 映射到 /dev/null，Windows 映射到 NUL。
-      stdio: ["ignore", "ignore", "ignore"],
-      // false = 子进程留在父进程的进程组中，跟随 opencode 生命周期。
-      // opencode 退出时 process.on("exit") 里 kill embedProc。
-      detached: false,
-      // 继承 opencode 的全部环境变量，追加两个：
-      //   HF_HUB_OFFLINE: 禁止 SentenceTransformer 联网检查模型更新（避免网络不通卡 120s）
-      //   DATA_DIR: embed_server.py 用它定位端口文件写入位置（$DATA_DIR/.embed_server_port）
-      env: { ...process.env, HF_HUB_OFFLINE: "1", DATA_DIR: DATA_DIR },
-    });
-
-    // error 事件只在进程启动失败时触发（如可执行文件不存在、权限不足）。
-    // 进程启动成功后运行中的崩溃不会触发 error，而是触发 exit（code≠0）。
-    embedProc.on("error", (e: Error) => {
-      debugLog(`embed_server spawn 失败: ${e.message}`);
-      // pending 检查防止重复 resolve：pollEmbedServerHealth 可能已经先 resolve 了
-      if (ctx.services.get(EMBED_SERVER_SERVICE)?.status === "pending") {
-        ctx.services.resolve(
-          EMBED_SERVER_SERVICE,
-          "failed",
-          `spawn 失败: ${e.message}`,
-        );
-      }
-    });
-
-    // exit 事件在进程退出时触发。code=0 正常退出，非 0 异常，null=被信号杀死。
-    embedProc.on("exit", (code: number | null) => {
-      debugLog(`embed_server exited code=${code}`);
-      // 只在"非正常退出 + 还在 pending"时 resolve failed：
-      // 如果 embed_server 已成功运行很久（status 已是 success），被 kill 退出时不应标记为 failed。
-      if (
-        code !== 0 &&
-        ctx.services.get(EMBED_SERVER_SERVICE)?.status === "pending"
-      ) {
-        ctx.services.resolve(
-          EMBED_SERVER_SERVICE,
-          "failed",
-          `embed_server 进程退出 code=${code}`,
-        );
-      }
-    });
-    debugLog(`embed_server 已 spawn pid=${embedProc.pid}`);
-
-    // 轮询健康检查（等端口文件 + /health 200）
-    pollEmbedServerHealth(EMBED_PORT_FILE, 60000)
-      .then((port) => {
-        process.env.EMBED_SERVER_PORT = port; // 供后续 shell.env 注入（MCP 进程通过端口文件发现）
-        ctx.services.resolve(EMBED_SERVER_SERVICE, "success", undefined, {
-          port,
-          pid: embedProc?.pid,
-        });
-        debugLog(`embed_server 就绪 port=${port}`);
-      })
-      .catch((e) => {
-        ctx.services.resolve(EMBED_SERVER_SERVICE, "failed", e.message);
-        debugLog(`embed_server 健康检查失败: ${e.message}`);
+    const result = await startControl();
+    if (result) {
+      ctx.services.resolve(CONTROL_STARTUP_SERVICE, "success", undefined, {
+        port: result.port,
+        pid: result.pid,
       });
+      debugLog(`control_service 就绪 port=${result.port} pid=${result.pid}`);
+    } else {
+      ctx.services.resolve(
+        CONTROL_STARTUP_SERVICE,
+        "failed",
+        "startControl 返回 null（venv 未就绪 / 控制台脚本不存在 / spawn 失败 / 端口文件超时）",
+      );
+      debugLog(`control_service 启动失败：startControl 返回 null`);
+    }
   } catch (e) {
-    debugLog(`embed_server spawn 异常: ${(e as Error)?.message}`);
     ctx.services.resolve(
-      EMBED_SERVER_SERVICE,
+      CONTROL_STARTUP_SERVICE,
       "failed",
-      `spawn 异常: ${(e as Error)?.message}`,
+      `startControl 异常: ${(e as Error)?.message}`,
     );
+    debugLog(`control_service 异常: ${(e as Error)?.message}`);
   }
 }
-
-/**
- * 轮询 embed_server 健康检查（异步，不阻塞事件循环）。
- *
- * 两阶段：
- * 1. 等端口文件出现（最多 5 秒）：embed_server.py 启动后先绑定 socket 再写端口文件，
- *    文件出现意味着 HTTP 服务即将开始接受请求。如果 5 秒内没出现说明进程启动失败。
- *    读取时校验端口文件中的 PID 是否存活——如果是残留文件（进程已死），删除后继续等。
- * 2. 轮询 /health（总超时 60s）：
- *    - 200 = embedder 加载完成，可以接受推理请求
- *    - 503 = embedder 还在加载中（BGE-M3 加载 ~6-30s，取决于磁盘速度）
- *    - 连不上 = uvicorn 还没开始监听（socket 已绑定但 server 循环还没跑起来）
- *
- * 每次 /health 请求有独立的 3s 超时（AbortSignal.timeout），防止 fetch 挂死。
- * 轮询间隔 2 秒——足够给模型加载时间，又不会太频繁浪费请求。
- */
-async function pollEmbedServerHealth(
-  portFile: string,
-  timeoutMs: number,
-): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  debugLog(
-    `pollEmbedServerHealth: 开始轮询 portFile=${portFile} timeout=${timeoutMs}ms`,
-  );
-
-  // 阶段 1: 等端口文件出现。
-  // embed_server.py 在 bind_available_port() 成功后立即写端口文件（模型加载之前）。
-  // 所以端口文件出现 = HTTP 服务即将就绪，但不代表模型已加载。
-  const portDeadline = Date.now() + 5000;
-  let port: string | null = null;
-  let phase1Attempt = 0;
-  while (Date.now() < portDeadline) {
-    phase1Attempt++;
-    try {
-      const content = readFileSync(portFile, "utf-8").trim();
-      const lines = content.split("\n");
-      const portStr = lines[0];
-      // 校验：第一行必须是纯数字（端口号）
-      if (!/^\d+$/.test(portStr)) {
-        debugLog(
-          `pollEmbedServerHealth: 端口文件内容无效（第 ${phase1Attempt} 次）: ${content.slice(0, 50)}`,
-        );
-        continue;
-      }
-
-      // PID 存活校验：第二行是 embed_server 的 PID。
-      // 如果 PID 已死 → 端口文件是上次运行残留的 → 删除并继续等新文件。
-      // process.kill(pid, 0) 不发送信号，只检测进程是否存在；不存在则抛异常。
-      // 跨平台：Unix 用 kill(pid,0)，Windows 用 OpenProcess，Node.js 自动处理。
-      const filePid = lines.length > 1 ? parseInt(lines[1], 10) : NaN;
-      if (!isNaN(filePid)) {
-        try {
-          process.kill(filePid, 0); // 不抛异常 = 进程活着
-        } catch {
-          // PID 已死 → 残留文件，删除后继续等新的
-          debugLog(
-            `pollEmbedServerHealth: 端口文件残留（PID ${filePid} 已死），删除后继续等`,
-          );
-          try {
-            unlinkSync(portFile);
-          } catch {}
-          continue;
-        }
-      }
-
-      port = portStr;
-      debugLog(
-        `pollEmbedServerHealth: 端口文件有效 port=${port} pid=${filePid}（第 ${phase1Attempt} 次读取）`,
-      );
-      break;
-    } catch {
-      // 文件不存在
-      if (phase1Attempt === 1) {
-        debugLog(`pollEmbedServerHealth: 端口文件不存在，等待中...`);
-      }
-    }
-    // 每秒查一次，await 让出事件循环（不阻塞其他 hook）
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  if (!port) {
-    debugLog(
-      `pollEmbedServerHealth: 端口文件 5 秒内未出现（尝试了 ${phase1Attempt} 次）`,
-    );
-    throw new Error("embed_server 端口文件 5 秒内未出现");
-  }
-
-  // 阶段 2: 轮询 /health 直到 200 或超时。
-  debugLog(
-    `pollEmbedServerHealth: 进入 /health 轮询 port=${port} 剩余超时=${Math.floor((deadline - Date.now()) / 1000)}s`,
-  );
-  let healthAttempt = 0;
-  while (Date.now() < deadline) {
-    healthAttempt++;
-    try {
-      // AbortSignal.timeout(3000): 单次请求 3 秒超时。
-      // 如果 embed_server 的 uvicorn 还没开始监听，fetch 会连接失败或超时。
-      const resp = await fetch(`http://127.0.0.1:${port}/health`, {
-        signal: AbortSignal.timeout(3000),
-      });
-      if (resp.status === 200) {
-        debugLog(
-          `pollEmbedServerHealth: /health 返回 200（第 ${healthAttempt} 次轮询），embedder 就绪`,
-        );
-        return port;
-      }
-      // 503 → embedder 还在加载，继续等
-      debugLog(
-        `pollEmbedServerHealth: /health 返回 ${resp.status}（第 ${healthAttempt} 次轮询），模型加载中...`,
-      );
-    } catch (e) {
-      // 连不上 → uvicorn 可能还没开始监听，继续等
-      const reason =
-        (e as Error)?.name === "TimeoutError"
-          ? "请求超时（3s）"
-          : (e as Error)?.message?.slice(0, 80) || String(e).slice(0, 80);
-      debugLog(
-        `pollEmbedServerHealth: /health 请求失败（第 ${healthAttempt} 次轮询）: ${reason}`,
-      );
-    }
-    // 每 2 秒查一次
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  debugLog(
-    `pollEmbedServerHealth: /health 轮询超时（尝试了 ${healthAttempt} 次，${timeoutMs / 1000}s）`,
-  );
-  throw new Error(`embed_server 健康检查超时 (${timeoutMs / 1000}s)`);
-}
-
-// opencode 退出时 kill embed_server + 清理端口文件。
-// Unix: SIGTERM → uvicorn 优雅关闭（刷新日志、关闭连接）。
-// Windows: 没有 SIGTERM，Node.js 翻译为 TerminateProcess（硬 kill）。
-//   embed_server 无状态（不写文件、不维护连接池），硬 kill 不丢数据，可接受。
-// 端口文件清理是兜底——pollEmbedServerHealth 的 PID 校验（阶段 1）是主防线。
-//   opencode 崩溃时 exit handler 来不及执行，端口文件会残留，
-//   但下次启动时 PID 校验会检测到残留并删除。
-process.on("exit", () => {
-  try {
-    if (embedProc) embedProc.kill("SIGTERM");
-  } catch {}
-  try {
-    unlinkSync(EMBED_PORT_FILE);
-  } catch {}
-});
 
 // ─── 环境检测：并行预热 + Promise cache ────────────────────────
 //
@@ -1073,11 +867,11 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     debugLog(`[McpManager] registerAll 失败: ${e?.message ?? e}`);
   });
 
-  // ── 启动 embed_server（注册到 ServiceRegistry，chat.message 统一等待）──
-  // embed_server 是普通 HTTP 服务（非 MCP），加载 BGE-M3 供所有 MCP 进程共享。
+  // ── 启动控制台（注册到 ServiceRegistry，chat.message 统一等待）──
+  // 控制台是 embed_server 的超集（含 embed/rerank + 资源管理 + 配置管理）。
   // 不可用时不降级——chat.message 检测到 failed 后当环境检测失败处理。
-  ctx.services.register(EMBED_SERVER_SERVICE);
-  startEmbedServer();
+  ctx.services.register(CONTROL_STARTUP_SERVICE);
+  startControlService();
 
   // ── 并行预热环境检测（fire-and-forget）──
   // 启动时立即并行检测所有领域 agent + Coordinator 的环境。
@@ -1136,22 +930,32 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           sessionID,
         );
 
-        // ★ 统一初始化等待：embed_server + 环境检测 ★
-        // 1. 等待 embed_server 就绪（成功或失败）
-        const embedStatus = await ctx.services.waitFor(EMBED_SERVER_SERVICE);
-        if (embedStatus.status === "failed") {
+        // ★ 统一初始化等待：控制台 + 环境检测 ★
+        // 1. 等待控制台启动（成功或失败）
+        const controlStatus = await ctx.services.waitFor(
+          CONTROL_STARTUP_SERVICE,
+        );
+        if (controlStatus.status === "failed") {
           debugLog(
-            `chat.message: embed_server 启动失败 agent=${agent} error=${embedStatus.error}`,
+            `chat.message: 控制台启动失败 agent=${agent} error=${controlStatus.error}`,
             sessionID,
           );
+          // 拿控制台端口（如果能拿到，提示控制台地址；拿不到，提示跑 install.sh）
+          const port = controlStatus.metadata?.port;
+          const errorMsg = port
+            ? `控制台部分功能不可用：${controlStatus.error}\n\n控制台地址：http://localhost:${port}`
+            : `控制台启动失败：${controlStatus.error}`;
           await reportErrorAndAbort(
             ctx.client,
             sessionID,
             sessionData,
-            `embed_server 启动失败: ${embedStatus.error}`,
+            errorMsg,
           );
           return;
         }
+
+        // 控制台启动成功后，预拉配置（供 shell.env hook 用）
+        await getAllConfig();
 
         // 2. 环境检测（三分支）：
         //   1. 命中预热 cache（领域 agent + Coordinator）→ await Promise，失败时重新 set 异步重试
@@ -1433,10 +1237,25 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         // OPENSECURITY_FLOW_ID（事件库分区标识，agent 调搜索工具时作为 group_id 传入）
         output.env.OPENSECURITY_FLOW_ID = session.flowId;
 
-        // IDAT（从 getIdatPath 获取，惰性缓存，读 .ai_env 的 IDA_PRO_HOME 拼接 + 校验）
-        const idatPath = getIdatPath();
-        if (idatPath) {
-          output.env.IDAT = idatPath;
+        // IDAT：从控制台配置拿 IDA_PRO_HOME，拼接 idat 路径
+        // 配置读取收口到 control-config（不直接读 .ai_env）
+        const idaHome = getCachedConfigValue("IDA_PRO_HOME");
+        if (idaHome) {
+          const exe = process.platform === "win32" ? "idat.exe" : "idat";
+          const idatPath = join(idaHome, exe);
+          if (existsSync(idatPath)) {
+            output.env.IDAT = idatPath;
+            output.env.IDA_PRO_HOME = idaHome; // 部分 IDA 工具链需要这个变量
+          }
+        }
+
+        // DEEPSEEK_API_KEY 和其他配置：通过 shell.env 注入到 agent 子进程
+        const allConfigs = getCachedConfig();
+        for (const [key, value] of Object.entries(allConfigs)) {
+          // 不覆盖系统已有的环境变量（让用户 shell export 优先）
+          if (!(key in output.env) && !key.startsWith("CONTROL_")) {
+            output.env[key] = value;
+          }
         }
 
         debugLog(

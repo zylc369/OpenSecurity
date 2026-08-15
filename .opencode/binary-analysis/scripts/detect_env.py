@@ -38,9 +38,10 @@ from typing import Literal
 CACHE_DIR = os.path.expanduser("~/bw-security-analysis")
 VENV_DIR = os.path.join(CACHE_DIR, ".venv")
 
-# events MCP Docker 基础设施配置（与 events/server.py 的 _NEO4J_* 常量保持一致）
-NEO4J_IMAGE = "neo4j:5"
-NEO4J_CONTAINER_NAME = "neo4j-events"
+# 注：events MCP Docker 基础设施（NEO4J_IMAGE、NEO4J_CONTAINER_NAME、Docker 检测）
+# 已迁移到控制台 services/docker_manager.py。
+# 注：EXTERNAL_TOOLS（IDA Pro、apktool、jadx 等）已迁移到控制台 services/tools_detector.py。
+# 注：embed_server 检测/启动已迁移到控制台 server.py。
 
 
 def _find_conda():
@@ -259,8 +260,11 @@ def _ensure_ai_env_template() -> None:
 
 def _load_ai_env() -> None:
     """读取 .ai_env（KEY=VALUE），用 setdefault 合并进 os.environ。
-    系统 env 优先级高于 .ai_env（setdefault 不覆盖已存在的 key）。
-    忽略空行和 # 注释行。"""
+
+    注意：本函数在控制台架构改造后仅供 _run_install 内部使用（install.sh 调用路径）。
+    check-preinstall 子命令不再依赖 .ai_env（IDA_PRO_HOME / DEEPSEEK_API_KEY 等检测
+    已迁移到控制台 config_store）。
+    """
     if not os.path.isfile(AI_ENV_FILE):
         return
     try:
@@ -290,6 +294,16 @@ PYTHON_PACKAGES: list[Dependency] = [
     Dependency(name="psutil", kind="python", pip_name="psutil", preinstall=True,
                agents=["all"],
                description="进程/内存监控库，embed_server 和诊断工具依赖"),
+    # 控制台后端依赖（opencode-control，所有 agent 共用）
+    Dependency(name="fastapi", kind="python", pip_name="fastapi", preinstall=True,
+               agents=["all"],
+               description="控制台 Web 框架（embed_server 超集 + 资源管理 + 配置管理）"),
+    Dependency(name="portalocker", kind="python", pip_name="portalocker", preinstall=True,
+               agents=["all"],
+               description="控制台跨平台文件锁（统一 fcntl/msvcrt 抽象）"),
+    Dependency(name="sse_starlette", kind="python", pip_name="sse-starlette", preinstall=True,
+               agents=["all"],
+               description="控制台 SSE 推送（docker pull 进度）"),
     Dependency(name="sqlite_vec", kind="python", pip_name="sqlite-vec", preinstall=True,
                agents=["all"],
                description="SQLite 向量扩展，knowledge MCP 向量存储依赖"),
@@ -357,82 +371,6 @@ PYTHON_PACKAGES: list[Dependency] = [
 ]
 
 
-EXTERNAL_TOOLS: list[Dependency] = [
-    Dependency(
-        name="ida_pro", kind="tool", preinstall=True,
-        agents=["binary-analysis", "mobile-analysis", "crypto-analysis", "web-analysis"], required=True,
-        description="反汇编/反编译平台（付费）",
-        env_var="IDA_PRO_HOME",
-        executable="idat",
-        install_hint=(
-            "IDA Pro 未检测到。解决方式：\n"
-            "  1. 在 .opencode/.ai_env 设置 IDA_PRO_HOME（IDA Pro 安装目录）：\n"
-            "     IDA_PRO_HOME=/Applications/IDA Professional 9.1.app/Contents/MacOS\n"
-            "  2. 或设置系统环境变量 IDA_PRO_HOME（shell export，优先级高于 .ai_env）"
-        ),
-    ),
-    Dependency(
-        name="apktool", kind="tool", preinstall=True,
-        agents=["mobile-analysis"], required=True,
-        version_cmd=["--version"],
-        description="APK 解包+反汇编工具",
-        install_hint="apktool 未找到。安装: brew install apktool (macOS) / 参考 https://ibotpeaches.github.io/Apktool/install/",
-        platform_install_hint={
-            "darwin": "brew install apktool",
-            "linux":  "sudo apt install apktool 或从 https://ibotpeaches.github.io/Apktool/install/ 下载",
-            "win32": "从 https://ibotpeaches.github.io/Apktool/install/ 下载（需要 Java）",
-        },
-    ),
-    Dependency(
-        name="jadx", kind="tool", preinstall=True,
-        agents=["mobile-analysis"], required=True,
-        version_cmd=["--version"],
-        description="DEX→Java 反编译器",
-        install_hint="jadx 未找到。安装: brew install jadx (macOS) / 参考 https://github.com/skylot/jadx",
-        platform_install_hint={
-            "darwin": "brew install jadx",
-            "linux":  "从 https://github.com/skylot/jadx/releases 下载最新 release zip",
-            "win32": "从 https://github.com/skylot/jadx/releases 下载最新 release zip",
-        },
-    ),
-    Dependency(
-        name="adb", kind="tool", preinstall=True,
-        agents=["mobile-analysis"], required=True,
-        version_cmd=["version"],
-        description="Android Debug Bridge",
-        install_hint="adb 未找到。安装: brew install --cask android-platform-tools (macOS) / 参考 https://developer.android.com/tools/adb",
-        platform_install_hint={
-            "darwin": "brew install --cask android-platform-tools",
-            "linux":  "sudo apt install adb",
-            "win32": "从 https://developer.android.com/tools/releases/platform-tools 下载",
-        },
-    ),
-    Dependency(
-        name="otool", kind="tool", preinstall=True,
-        agents=["mobile-analysis"], required=False,
-        description="Mach-O 文件查看器（macOS 自带）",
-        install_hint="otool 未找到（macOS 自带，非 macOS 无需配置）",
-        platforms=["darwin"],
-    ),
-    Dependency(
-        name="ldid", kind="tool", preinstall=True,
-        agents=["mobile-analysis"], required=False,
-        description="iOS 伪签名工具",
-        install_hint="ldid 未找到。安装: brew install ldid (macOS)",
-        platforms=["darwin"],
-    ),
-    Dependency(
-        name="GoReSym", kind="tool", preinstall=True,
-        agents=["binary-analysis", "crypto-analysis"], required=False,
-        description="Go 符号恢复工具",
-        install_hint="GoReSym 未找到。参考 https://github.com/mandiant/GoReSym",
-        platform_install_hint={
-            "darwin": "从 https://github.com/mandiant/GoReSym/releases 下载 darwin 版本",
-            "linux":  "从 https://github.com/mandiant/GoReSym/releases 下载 linux 版本",
-            "win32": "从 https://github.com/mandiant/GoReSym/releases 下载 windows 版本",
-        },
-    ),
-]
 
 
 def _detect_compiler():
@@ -619,64 +557,14 @@ def _post_install_playwright():
 
 
 
-def _resolve_tool(dep: Dependency) -> tuple[str, bool]:
-    """统一的工具路径解析，由 dep 字段驱动。
-    有 env_var: 读环境变量（系统 env > .ai_env，_load_ai_env 已 setdefault 合并）指向的目录，
-                拼接 dep.executable（如 ida_pro 拼 idat）
-    无 env_var: 靠 PATH which（apktool/jadx 等）
-    返回 (resolved_path, found)。"""
-    if dep.env_var:
-        home = os.environ.get(dep.env_var, "")
-        if home:
-            exe = dep.executable  # env_var 模式由 dep.executable 提供可执行名（如 ida_pro="idat"）
-            if os.name == "nt" and exe and not exe.endswith(".exe"):
-                exe += ".exe"
-            cand = os.path.join(home, exe)
-            if exe and os.path.isfile(cand):
-                return (cand, True)
-        return ("", False)
-    resolved = shutil.which(dep.name)
-    if resolved:
-        return (resolved, True)
-    return (dep.name, False)
-
-
-def _detect_ida_pro():
-    """检测 IDA Pro。路径来自 IDA_PRO_HOME 环境变量（系统 env > .ai_env）。
-    返回 idat_path（供 Plugin 拼 $IDAT）。"""
-    ida_dep = next((d for d in EXTERNAL_TOOLS if d.name == "ida_pro"), None)
-    if not ida_dep:
-        return {"available": False, "path": None, "idat_path": None}
-    resolved, found = _resolve_tool(ida_dep)
-    if found:
-        return {"available": True, "path": os.path.dirname(resolved), "idat_path": resolved}
-    return {"available": False, "path": None, "idat_path": None}
-
-
-def _get_tool_version(resolved_path, version_cmd):
-    """执行 version_cmd 获取版本字符串。version_cmd 为空列表时返回 None。"""
-    if not version_cmd:
-        return None
-    try:
-        r = subprocess.run([resolved_path] + version_cmd, capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            return (r.stdout.strip() or r.stderr.strip()).split("\n")[0] or None
-    except subprocess.TimeoutExpired as e:
-        _warn(f"{resolved_path} 版本检测超时", exc=e)
-    except OSError as e:
-        _warn(f"{resolved_path} 版本检测异常", exc=e)
-    return None
 
 
 
 
-def _get_platform_install_hint(dep: Dependency) -> str:
-    """返回当前 OS 的安装描述。优先 platform_install_hint[sys.platform]，降级到 install_hint。"""
-    if dep.platform_install_hint:
-        hint = dep.platform_install_hint.get(sys.platform)
-        if hint:
-            return hint
-    return dep.install_hint or f"{dep.name} 未安装，请参考官方文档"
+
+
+
+
 
 
 def _platform_matches(dep: Dependency) -> bool:
@@ -740,50 +628,15 @@ def _run_install():
     if not _post_install_playwright():
         _install_fail("Playwright Chromium 安装失败")
 
-    # 3. 外部工具（全量检测，缺失打印安装建议）
-    _log("[*] === 检测外部工具 ===")
-    for dep in EXTERNAL_TOOLS:
-        if not _platform_matches(dep):
-            continue
-        resolved, found = _resolve_tool(dep)
-        if found:
-            ver = _get_tool_version(resolved, dep.version_cmd) or "已安装"
-            _log(f"[+] {dep.name}: {ver}")
-        else:
-            hint = _get_platform_install_hint(dep)
-            _log(f"[!] {dep.name}: 未安装")
-            print(f"  → {hint}")
-
-    # 4. events MCP 基础设施（DEEPSEEK_API_KEY 门控）
-    _log("[*] === events MCP 基础设施 ===")
-    # 单独检测 DEEPSEEK_API_KEY（_ensure_mcp_infra 只负责 Docker/容器）
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    deepseek = {"available": bool(deepseek_key.strip())}
-    mcp_servers = _ensure_mcp_infra()
-    neo4j = mcp_servers.get("_neo4j", {})
-
-    if not deepseek.get("available"):
-        print("[!] DEEPSEEK_API_KEY 未配置。")
-        print("  events MCP 的实体提取功能将不可用（无法写入新事件，已有事件仍可搜索）。")
-        print("  请在 .opencode/.ai_env 中设置 DEEPSEEK_API_KEY=<your-key>")
-    elif not neo4j.get("available"):
-        print(f"[!] {neo4j.get('message', 'Neo4j 不可用')}")
-    else:
-        _log(f"[+] {neo4j.get('message', 'Neo4j 运行中')}")
-
-    for name, info in mcp_servers.items():
-        if name.startswith("_"):
-            continue
-        if info.get("available"):
-            _log(f"[+] MCP/{name}: 依赖齐全")
-        else:
-            _log(f"[!] MCP/{name}: 缺少 {', '.join(info.get('missing', []))}")
-
-    # 启动 embed_server（在所有 pip 包安装完成后）
-    _ensure_embed_server_infra()
+    # 3. 外部工具 / events MCP / embed_server 检测已迁移到控制台
+    # 用户跑完 install.sh 后启动 opencode，控制台会显示工具/Docker/模型 完整状态。
+    # 控制台访问地址：http://localhost:9776
+    _log("[*] === 后续检查 ===")
+    _log("[*] 外部工具（IDA Pro、apktool 等）、Docker 镜像、events MCP 状态")
+    _log("[*] 请启动 opencode 后访问控制台查看：http://localhost:9776")
 
     _log("[+] 安装完成")
-    _log("[*] === 验证安装结果 ===")
+    _log("[*] === 验证安装结果（仅第二层 Python 包 + 编译器） ===")
     import subprocess as sp_verify
     verify = sp_verify.run(
         [sys.executable, os.path.abspath(__file__), "check-preinstall", "all"],
@@ -791,7 +644,8 @@ def _run_install():
     if verify.returncode != 0:
         _log("[!] 部分依赖未就绪（见上方输出），请按提示手动配置。")
     else:
-        _log("[+] 全部检测通过！")
+        _log("[+] 第二层检测全部通过！")
+        _log("[*] 第三~五层（外部工具、Docker、配置）请在控制台查看。")
 
 
 def _build_install_guide():
@@ -819,11 +673,15 @@ def _check_preinstall(agent):
 
     agent="all" 时不按 agent 过滤（Coordinator 用）。
 
-    检测顺序：Python 包 → 编译器 → IDA Pro → 外部工具 → MCP 依赖（信息性）。
-    任何必需依赖缺失 → 立即返回 {success: False, install_guide: ...}，不继续检测。
-    全部通过 → 收集完整 data 写入 env_cache.json → 返回 {success: True, data: ...}。
+    改造后检测范围（只查第二层）：
+      Python 包 → 编译器
 
-    MCP 依赖（Neo4j/DEEPSEEK_API_KEY/MCP 包）是信息性的，不触发 fail-fast。
+    外部工具（IDA Pro、apktool）、Docker 镜像、配置（DEEPSEEK_API_KEY）等
+    已迁移到控制台（services/tools_detector.py、docker_manager.py、config_store.py）。
+    控制台提供更友好的 GUI + 一键修复，不再走 fail-fast 文字流。
+
+    任何必需依赖缺失 → 立即返回 {success: False, install_guide: ...}。
+    全部通过 → 返回 {success: True, data: ...}。
     """
     import importlib.util
     import importlib.metadata
@@ -864,469 +722,44 @@ def _check_preinstall(agent):
             if not _detect_playwright_browser():
                 return _fail("playwright chromium")
 
-    # --- 2. 编译器（fail-fast）---
+    # --- 2. 编译器（fail-fast，pip 安装 C 扩展需要）---
     compiler = _detect_compiler()
     if not compiler["available"]:
         return _fail("compiler")
-
-    # --- 3. IDA Pro（fail-fast，按 agent 过滤）---
-    ida_pro = _detect_ida_pro()
-    if not ida_pro["available"]:
-        ida_dep = next((d for d in EXTERNAL_TOOLS if d.name == "ida_pro"), None)
-        if ida_dep and ida_dep.required and _agent_matches(ida_dep):
-            return _fail("ida_pro")
-
-    # --- 4. 外部工具（fail-fast，按 agent + platform 过滤）---
-    tools = {}
-    for dep in EXTERNAL_TOOLS:
-        if dep.name == "ida_pro":
-            continue
-        if not _platform_matches(dep):
-            continue
-        resolved, found = _resolve_tool(dep)
-        if found:
-            version = _get_tool_version(resolved, dep.version_cmd)
-            tools[dep.name] = {"available": True, "version": version,
-                               "description": dep.description, "resolved_path": resolved}
-        else:
-            tools[dep.name] = {"available": False, "version": None,
-                               "description": dep.description, "resolved_path": None}
-            if dep.required and _agent_matches(dep):
-                return _fail(dep.name)
-
-    # --- 5. events MCP 基础设施（DEEPSEEK_API_KEY 门控）---
-    # DEEPSEEK_API_KEY 未配置 → 不阻塞（stderr 日志），跳过 Docker/容器检测。
-    # DEEPSEEK_API_KEY 已配置 → Docker/容器不可用 → fail-fast。
-    # _check_mcp_deps_fast 仅检测不启动（启动职责在 events/server.py lifespan 内）
-    mcp_servers = _check_mcp_deps_fast()
-    optional_warnings = []
-
-    deepseek = mcp_servers.get("_deepseek_api_key", {})
-    neo4j = mcp_servers.get("_neo4j", {})
-    if not deepseek.get("available"):
-        # DEEPSEEK_API_KEY 未配置 → 不阻塞
-        _log(f"[!] deepseek_api_key: {deepseek.get('message', '未配置')}")
-    elif not neo4j.get("available"):
-        # neo4j 不可用时区分：events lifespan 能自动恢复的 vs 需要用户安装的
-        if neo4j.get("auto_recoverable"):
-            # Docker daemon 未运行 / 容器停止/不存在 → events MCP lifespan 会自动启动，不阻塞
-            _log(f"[!] neo4j: {neo4j.get('message')}（不阻塞，events MCP lifespan 会自动恢复）")
-        else:
-            # Docker 未安装 / 未声明 requires_docker → 需要用户手动处理，fail-fast
-            return _fail(f"neo4j: {neo4j.get('message', '不可用')}")
 
     # --- 全部必需依赖通过 → 组装 data ---
     data = {
         "compiler": compiler,
         "packages": packages,
-        "ida_pro": ida_pro,
-        "tools": tools,
-        "mcp_servers": mcp_servers,
     }
     result: dict = {"success": True, "data": data, "errors": []}
-    if optional_warnings:
-        result["optional_warnings"] = optional_warnings
     return result
 
 
-def _ensure_docker_running(timeout=90):
-    """确保 Docker daemon 运行；未运行则尝试自动启动。
-
-    用 shutil.which("docker") 判断是否安装（不依赖硬编码安装路径）。
-    macOS: open -a Docker；Linux: systemctl/service；Windows: 启动 Docker Desktop。
-    返回 (running, message)。running=True 表示 daemon 已就绪可执行 docker 命令。
-    """
-    import subprocess as sp
-    import time
-
-    # docker CLI 不在 PATH = 未安装（通用判断，不依赖硬编码安装路径）
-    if not shutil.which("docker"):
-        return False, "未从 PATH 检测到 docker 命令，判定 Docker 未安装（events MCP 需要 Docker 运行 Neo4j）"
-
-    def _daemon_up():
-        try:
-            sp.run(["docker", "info"], capture_output=True, timeout=10, check=True, text=True)
-            return True
-        except (sp.CalledProcessError, sp.TimeoutExpired):
-            return False
-
-    # 1. 已运行？
-    if _daemon_up():
-        return True, "Docker 已运行"
-
-    # 2. 按平台自动启动 daemon（直接尝试，失败由 except 捕获；不预检安装路径）
-    system = platform.system()
-    try:
-        if system == "Darwin":
-            sp.run(["open", "-a", "Docker"], check=True)
-            _log("[*] 正在启动 Docker Desktop（open -a Docker）...")
-        elif system == "Linux":
-            if shutil.which("systemctl"):
-                sp.run(["systemctl", "start", "docker"])
-            elif shutil.which("service"):
-                sp.run(["service", "docker", "start"])
-            else:
-                return False, "Docker 未运行且无法自动启动（请手动启动 dockerd）"
-            _log("[*] 正在启动 Docker...")
-        elif system == "Windows":
-            # 从 docker CLI 实际位置推断 Docker Desktop.exe（不硬编码安装路径）
-            # 标准布局：…/Docker/Docker/resources/bin/docker.exe → 上三级即 …/Docker/Docker
-            dd_exe = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(shutil.which("docker")))),
-                "Docker Desktop.exe",
-            )
-            sp.run(["powershell", "-NoProfile", "-Command", f"Start-Process '{dd_exe}'"])
-            _log("[*] 正在启动 Docker Desktop（Windows）...")
-        else:
-            return False, f"不支持的系统: {system}（请手动启动 Docker）"
-    except Exception as e:
-        return False, f"自动启动 Docker 失败（{system}）：{e}"
-
-    # 3. 轮询等待 daemon 就绪
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        time.sleep(3)
-        if _daemon_up():
-            _log("[+] Docker daemon 已就绪")
-            return True, "Docker 已自动启动"
-    return False, f"Docker 启动超时（等待 {timeout}s 未就绪，请手动启动 Docker）"
 
 
-def _pull_image_with_progress(image, timeout=600):
-    """docker pull 并实时把进度转发到 _log，避免长时间无反馈。
-
-    docker pull 非 TTY（管道）模式输出行式日志（每层状态一行），逐行转发给用户。
-    镜像已是最新则秒过（输出 'Image is up to date'）；首次下载时实时显示各层进度。
-    """
-    import subprocess as sp
-    _log(f"[*] docker pull {image}（首次需下载镜像，请耐心等待）...")
-    proc = sp.Popen(
-        ["docker", "pull", image],
-        stdout=sp.PIPE, stderr=sp.STDOUT, text=True, bufsize=1,
-    )
-    try:
-        for line in proc.stdout:
-            line = line.rstrip()
-            if line:
-                _log(f"    {line}")
-        proc.wait(timeout=timeout)
-    except sp.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        raise
-    if proc.returncode != 0:
-        raise sp.CalledProcessError(proc.returncode, ["docker", "pull", image])
-    _log(f"[+] {image} 镜像就绪")
 
 
-def _load_mcp_metadata():
-    """从 mcp-servers/<name>/pyproject.toml 读 MCP server 元数据。
-
-    返回 {server_name: {script, packages, requires_docker}} 字典。
-    解析失败时打印 stderr 日志（不降级到硬编码）。
-    """
-    import tomllib  # Python 3.11+ 内置
-
-    opencode_root = _get_opencode_root()
-    result = {}
-    for server_name in ["knowledge", "events"]:
-        toml_path = os.path.join(opencode_root, "mcp-servers", server_name, "pyproject.toml")
-        if not os.path.exists(toml_path):
-            _warn(f"_load_mcp_metadata: {toml_path} 不存在")
-            continue
-        try:
-            with open(toml_path, "rb") as f:
-                data = tomllib.load(f)
-            tool_cfg = data.get("tool", {}).get("opensecurity", {})
-            result[server_name] = {
-                "script": os.path.join(opencode_root, "mcp-servers", server_name, "server.py"),
-                "packages": tool_cfg.get("import_names", []),
-                "requires_docker": tool_cfg.get("requires_docker"),
-            }
-        except Exception as e:
-            _warn(f"_load_mcp_metadata: 解析 {toml_path} 失败: {e}", exc=e)
-    return result
 
 
-def _check_docker_binary_and_daemon():
-    """检测 Docker 二进制存在 + daemon 运行状态（不启动，仅检测）。
-
-    返回 {installed: bool, daemon_running: bool}。
-    """
-    import subprocess as sp
-    # 1. docker --version（检查二进制存在，不连 daemon）
-    try:
-        sp.run(["docker", "--version"], capture_output=True, timeout=3, check=True)
-    except (FileNotFoundError, sp.TimeoutExpired, sp.CalledProcessError):
-        return {"installed": False, "daemon_running": False}
-    # 2. docker info（检查 daemon 运行，不启动）
-    try:
-        sp.run(["docker", "info"], capture_output=True, timeout=3, check=True)
-        return {"installed": True, "daemon_running": True}
-    except (sp.TimeoutExpired, sp.CalledProcessError):
-        return {"installed": True, "daemon_running": False}
 
 
-def _check_container_status(container_name):
-    """检测容器状态（不启动）。
-
-    返回 'running' / 'stopped' / 'not_exists' / 'unknown'。
-    """
-    import subprocess as sp
-    try:
-        # 1. docker ps（运行中的容器）
-        r = sp.run(["docker", "ps", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
-                   capture_output=True, timeout=5, text=True)
-        if r.stdout.strip() == container_name:
-            return "running"
-        # 2. docker ps -a（所有容器，含停止的）
-        r = sp.run(["docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
-                   capture_output=True, timeout=5, text=True)
-        if r.stdout.strip() == container_name:
-            return "stopped"
-        return "not_exists"
-    except (sp.TimeoutExpired, sp.CalledProcessError, FileNotFoundError):
-        return "unknown"
 
 
-def _check_image_exists(image_name):
-    """检测 Docker 镜像是否已下载（不启动，不下载）。
-
-    返回 True/False/None（None = 检测失败）。
-    """
-    import subprocess as sp
-    try:
-        r = sp.run(["docker", "images", image_name, "--format", "{{.Repository}}"],
-                   capture_output=True, timeout=5, text=True)
-        return r.stdout.strip() != ""
-    except (sp.TimeoutExpired, sp.CalledProcessError, FileNotFoundError):
-        return None
-    except (sp.TimeoutExpired, sp.CalledProcessError, FileNotFoundError):
-        return "unknown"
 
 
-# ── embed_server 检测/启动（与 Docker/Neo4j 并列的基础设施）──────────
-
-EMBED_SERVER_PORT = int(os.environ.get("EMBED_SERVER_PORT", "9776"))
 
 
-def _check_embed_server():
-    """检测 embed_server 是否运行（只读，不启动）。
-    返回 (running: bool, message: str)。
-    """
-    import urllib.request
-    try:
-        req = urllib.request.urlopen(
-            f"http://127.0.0.1:{EMBED_SERVER_PORT}/health", timeout=2
-        )
-        if req.status == 200:
-            return True, "embed_server 已运行"
-    except Exception:
-        pass
-    return False, "embed_server 未运行"
 
 
-def _ensure_embed_server():
-    """启动 embed_server（install 子命令用，有副作用）。
-    已运行则跳过；未运行则后台 spawn。
-    """
-    running, _ = _check_embed_server()
-    if running:
-        return True
-
-    opencode_root = _get_opencode_root()
-    script = os.path.join(opencode_root, "mcp-servers", "embed_server.py")
-    if not os.path.isfile(script):
-        return False
-
-    import subprocess as sp
-    try:
-        sp.Popen(
-            [_get_venv_python(), script],
-            stdout=sp.DEVNULL,
-            stderr=sp.DEVNULL,
-        )
-        # 等 health check（模型加载 ~3s，给 30s 余量）
-        import time
-        for _ in range(30):
-            time.sleep(1)
-            running, _ = _check_embed_server()
-            if running:
-                return True
-        return False
-    except Exception:
-        return False
 
 
-def _check_mcp_deps_fast():
-    """快速检测 MCP 依赖状态（check-preinstall 用，不启动任何东西）。
-
-    替代旧 _detect_mcp_deps 在 check-preinstall 路径上的职责。
-    所有检测都是只读的（无副作用），<5s 完成。
-
-    返回 {server_name: {...}, "_neo4j": {...}, "_deepseek_api_key": {...}}。
-    """
-    metadata = _load_mcp_metadata()
-    result = {}
-
-    for name, cfg in metadata.items():
-        # 1. Python 包检测（__import__）
-        missing = []
-        for pkg in cfg["packages"]:
-            try:
-                __import__(pkg)
-            except ImportError:
-                missing.append(pkg)
-        result[name] = {
-            "available": len(missing) == 0,
-            "missing": missing,
-            "script": cfg["script"],
-        }
-
-    # 2. DEEPSEEK_API_KEY 检测（门控 Docker/容器检测）
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    deepseek_ok = bool(deepseek_key.strip())
-    result["_deepseek_api_key"] = {
-        "available": deepseek_ok,
-        "message": "已配置" if deepseek_ok else "未配置（请在 .opencode/.ai_env 中设置 DEEPSEEK_API_KEY）",
-    }
-
-    # 3. Docker + 容器检测（仅在 DEEPSEEK 已配置时）
-    if not deepseek_ok:
-        result["_neo4j"] = {
-            "available": False,
-            "auto_recoverable": False,
-            "message": "DEEPSEEK_API_KEY 未配置，跳过 Docker/Neo4j 检测",
-        }
-    else:
-        events_cfg = metadata.get("events", {})
-        container_name = events_cfg.get("requires_docker")
-        if not container_name:
-            result["_neo4j"] = {"available": False, "auto_recoverable": False, "message": "events MCP 未声明 requires_docker"}
-        else:
-            docker_status = _check_docker_binary_and_daemon()
-            if not docker_status["installed"]:
-                # Docker 未安装 → 需要用户手动安装，events lifespan 无法自动恢复
-                result["_neo4j"] = {"available": False, "auto_recoverable": False, "message": "Docker 未安装"}
-            elif not docker_status["daemon_running"]:
-                # Docker daemon 未运行 → events lifespan 会自动启动 daemon
-                result["_neo4j"] = {"available": False, "auto_recoverable": True, "message": "Docker daemon 未运行（events MCP lifespan 会自动启动）"}
-            else:
-                container_status = _check_container_status(container_name)
-                if container_status == "running":
-                    result["_neo4j"] = {"available": True, "auto_recoverable": True, "message": "Neo4j 容器已在运行"}
-                elif container_status == "stopped":
-                    # 容器已停止 → events lifespan 会自动 docker start
-                    result["_neo4j"] = {"available": False, "auto_recoverable": True, "message": f"容器 {container_name} 已停止（events MCP lifespan 会自动启动）"}
-                else:
-                    # 容器不存在 → 检查镜像是否已下载
-                    image_ok = _check_image_exists(NEO4J_IMAGE)
-                    if image_ok:
-                        # 镜像已下载 → events lifespan docker run 很快，可自动恢复
-                        result["_neo4j"] = {"available": False, "auto_recoverable": True, "message": f"容器 {container_name} 不存在（events MCP lifespan 会自动创建）"}
-                    else:
-                        # 镜像未下载 → docker pull 需要几分钟，不应该自动恢复
-                        result["_neo4j"] = {"available": False, "auto_recoverable": False, "message": f"容器 {container_name} 不存在且 {NEO4J_IMAGE} 镜像未下载，请运行 install.sh"}
-
-    # 4. embed_server 检测（informational，不影响 ready 判定）
-    # embed_server 不可用时 MCP 自动回退到本地加载，不阻塞 agent 运行
-    embed_ok, embed_msg = _check_embed_server()
-    result["_embed_server"] = {
-        "available": embed_ok,
-        "auto_recoverable": True,  # plugin.setup 启动时自动 spawn
-        "message": embed_msg,
-    }
-
-    return result
 
 
-def _ensure_mcp_infra():
-    """启动 MCP 基础设施（install 子命令用，有副作用）。
-
-    职责：
-    - 启动 Docker daemon（如果未运行，调 _ensure_docker_running）
-    - 启动声明的容器（如果停止）
-    - 创建容器（如果不存在）
-
-    check-preinstall 路径不调用此函数。
-    """
-    import subprocess as sp
-
-    metadata = _load_mcp_metadata()
-    events_cfg = metadata.get("events", {})
-    container_name = events_cfg.get("requires_docker")
-
-    if not container_name:
-        return {"_neo4j": {"available": False, "message": "events MCP 未声明 requires_docker"}}
-
-    # 1. 确保 Docker daemon 运行（_ensure_docker_running 已存在，含自动启动）
-    try:
-        _docker_ok, _docker_msg = _ensure_docker_running()
-        if not _docker_ok:
-            return {"_neo4j": {"available": False, "message": _docker_msg}}
-    except Exception as e:
-        return {"_neo4j": {"available": False, "message": f"Docker 启动失败: {e}"}}
-
-    # 2. 容器已在运行？
-    try:
-        ps_result = sp.run(
-            ["docker", "ps", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
-            capture_output=True, timeout=10, text=True,
-        )
-        if ps_result.stdout.strip() == container_name:
-            _log(f"[+] {container_name} 容器已在运行")
-            return {"_neo4j": {"available": True, "message": f"{container_name} 容器已在运行"}}
-
-        # 3. 容器存在但停止？→ docker start
-        psa_result = sp.run(
-            ["docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
-            capture_output=True, timeout=10, text=True,
-        )
-        if psa_result.stdout.strip() == container_name:
-            sp.run(["docker", "start", container_name],
-                   capture_output=True, timeout=30, check=True, text=True)
-            _log(f"[+] {container_name} 容器已启动（原已存在但停止）")
-            return {"_neo4j": {"available": True, "message": f"{container_name} 容器已启动"}}
-
-        # 4. 容器不存在 → 创建+启动
-        data_dir = os.path.join(os.path.expanduser("~"), "bw-security-analysis", "db", "events")
-        os.makedirs(data_dir, exist_ok=True)
-        _pull_image_with_progress(NEO4J_IMAGE)
-        sp.run(
-            ["docker", "run", "-d", f"--name={container_name}",
-             "-p", "7474:7474", "-p", "7687:7687",
-             "-e", "NEO4J_AUTH=neo4j/neo4j_password",
-             "-v", f"{data_dir}:/data", NEO4J_IMAGE],
-            capture_output=True, timeout=60, text=True, check=True,
-        )
-        _log(f"[+] {container_name} 容器已创建并启动，数据目录: {data_dir}")
-        return {"_neo4j": {"available": True, "message": f"{container_name} 容器已创建并启动"}}
-
-    except sp.CalledProcessError as e:
-        return {"_neo4j": {"available": False, "message": f"Docker 命令失败: {e}"}}
-    except sp.TimeoutExpired:
-        return {"_neo4j": {"available": False, "message": "Docker 操作超时"}}
-    except Exception as e:
-        return {"_neo4j": {"available": False, "message": f"Docker 异常: {e}"}}
-
-
-def _ensure_embed_server_infra():
-    """启动 embed_server（install 子命令用，有副作用）。
-
-    在 Docker/Neo4j 基础设施就绪后调用。
-    embed_server 是 HTTP 服务，加载 BGE-M3 供所有 MCP 进程共享。
-    """
-    embed_ok, _ = _check_embed_server()
-    if not embed_ok:
-        _log("[*] 启动 embed_server...")
-        if _ensure_embed_server():
-            _log("[+] embed_server 已启动")
-        else:
-            _log("[!] embed_server 启动失败（MCP 将回退到本地加载）")
 
 def main():
-    _ensure_ai_env_template()
-    _load_ai_env()
+    # 注意：_ensure_ai_env_template + _load_ai_env 只在 install 子命令内调用，
+    # check-preinstall 不需要（第二层检测不依赖 .ai_env 配置）。
     parser = argparse.ArgumentParser(
         description="安全分析环境检测与安装",
         usage="detect_env.py <command> [options]\n\n"
@@ -1347,6 +780,9 @@ def main():
     args = parser.parse_args()
 
     if args.command == "install":
+        # install 流程：先确保 .ai_env 模板存在 + 加载到 os.environ（供 pip 安装日志等使用）
+        _ensure_ai_env_template()
+        _load_ai_env()
         _run_install()
         return
 

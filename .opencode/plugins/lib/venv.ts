@@ -1,8 +1,22 @@
 import { execFileSync, spawnSync } from "child_process";
-import { existsSync, readFileSync, statSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { join } from "path";
 import { VENV_PYTHON_CANDIDATES, OPENCODE_ROOT } from "./constants";
 import { debugLog } from "./logging";
+
+// ─── venv Python 查找（control-manager.ts 也调用此函数）─────────
+
+/** 查找 venv Python（不创建，仅检测存在性 + 可执行性校验）。 */
+export function findVenvPython(): string | null {
+  for (const candidate of VENV_PYTHON_CANDIDATES) {
+    if (!existsSync(candidate)) continue;
+    if (verifyPython(candidate)) {
+      return candidate;
+    }
+    debugLog(`findVenvPython: ${candidate} exists but failed verification`);
+  }
+  return null;
+}
 
 // 惰性缓存的 Python 命令路径
 let cachedPythonCmd: string | null = null;
@@ -19,18 +33,6 @@ function verifyPython(pathOrCmd: string): boolean {
   } catch {
     return false;
   }
-}
-
-// 检查 venv Python 是否存在（不创建，conda/venv 创建由 detect_env.py install 负责）
-function findVenvPython(): string | null {
-  for (const candidate of VENV_PYTHON_CANDIDATES) {
-    if (!existsSync(candidate)) continue;
-    if (verifyPython(candidate)) {
-      return candidate;
-    }
-    debugLog(`findVenvPython: ${candidate} exists but failed verification`);
-  }
-  return null;
 }
 
 /**
@@ -66,87 +68,9 @@ export function getInstallHint(): string {
   );
 }
 
-// ─── .ai_env 读取 ──────────────────────────────────────────────
-
-// mtime 缓存：文件未修改时直接返回上次解析结果，避免每次重读 + 重解析。
-// 对齐 readAgentDescription() 的缓存模式。
-let aiEnvCache: { env: Record<string, string>; mtime: number } | null = null;
-
-/**
- * 读取 .ai_env 配置文件（KEY=VALUE 格式），解析为对象。
- * 忽略空行和 # 注释行。
- * 文件不存在或读取失败时返回空对象。
- * 带 mtime 缓存——文件未修改时返回缓存值（参考 readAgentDescription 的模式）。
- * 注意：本函数只读 .ai_env 文件本身，不合并系统 env（与 detect_env.py 的 _load_ai_env 行为一致——
- *       detect_env.py 用 setdefault 让系统 env 优先，但 Plugin TS 侧不需要这个优先级，
- *       因为 shell.env 注入时系统 env 已在 process.env 中可直接取）。
- */
-export function readAiEnv(): Record<string, string> {
-  const aiEnvPath = join(OPENCODE_ROOT, ".ai_env");
-  try {
-    if (!existsSync(aiEnvPath)) {
-      // 文件不存在时清空缓存，避免用户删除文件后还返回旧数据。
-      if (aiEnvCache) aiEnvCache = null;
-      return {};
-    }
-    const stat = statSync(aiEnvPath);
-    if (aiEnvCache && aiEnvCache.mtime === stat.mtimeMs) {
-      return aiEnvCache.env;
-    }
-    const content = readFileSync(aiEnvPath, "utf-8");
-    const result: Record<string, string> = {};
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eqIdx = trimmed.indexOf("=");
-      if (eqIdx <= 0) continue;
-      const key = trimmed.slice(0, eqIdx).trim();
-      const value = trimmed.slice(eqIdx + 1).trim();
-      if (key) result[key] = value;
-    }
-    aiEnvCache = { env: result, mtime: stat.mtimeMs };
-    return result;
-  } catch (e) {
-    debugLog(`readAiEnv: 读取 ${aiEnvPath} 失败: ${(e as Error)?.message}`);
-    // 读取异常时优先返回上次缓存，避免一次失败清空所有调用方。
-    return aiEnvCache?.env ?? {};
-  }
-}
-
-// ─── IDA Pro idat 路径（惰性缓存） ────────────────────────────
-
-let cachedIdatPath: string | null = null;
-
-/**
- * 获取 IDA Pro 的 idat 可执行文件路径（惰性初始化 + 缓存）。
- * 从 .ai_env 的 IDA_PRO_HOME 读取，拼接 idat（Windows 加 .exe），校验文件存在。
- * 返回 null 表示 IDA Pro 未配置或路径无效。
- * 对齐 getPythonCmd() 的缓存模式。
- */
-export function getIdatPath(): string | null {
-  if (cachedIdatPath) return cachedIdatPath;
-
-  const aiEnv = readAiEnv();
-  const idaHome = aiEnv.IDA_PRO_HOME;
-  if (!idaHome) {
-    debugLog(`getIdatPath: IDA_PRO_HOME 未配置`);
-    cachedIdatPath = null;
-    return null;
-  }
-
-  const exe = process.platform === "win32" ? "idat.exe" : "idat";
-  const idatPath = join(idaHome, exe);
-  if (existsSync(idatPath)) {
-    debugLog(`getIdatPath: 找到 idat at ${idatPath}`);
-    cachedIdatPath = idatPath;
-  } else {
-    debugLog(`getIdatPath: ${idatPath} 不存在（IDA_PRO_HOME=${idaHome}）`);
-    cachedIdatPath = null;
-  }
-  return cachedIdatPath;
-}
-
 // ─── 编译器名（惰性缓存） ─────────────────────────────────────
+// readAiEnv / getIdatPath 已删除——配置读取收口到 control-config.ts。
+// 调用方应改用 getConfig("IDA_PRO_HOME") / getAllConfig() 拿配置。
 
 let cachedCompilerName: string | null = null;
 
@@ -156,7 +80,6 @@ let cachedCompilerName: string | null = null;
  * 返回编译器名（Unix: "clang"/"gcc"/"cc"；Windows: "clang.exe"/"gcc.exe"/"cl.exe"）或 null（未找到）。
  * 仅做 PATH 检测，不涉及 Windows MSVC/vcvarsall 复杂逻辑
  * （那部分由 detect_env.py fail-fast 覆盖）。
- * 对齐 getPythonCmd() 的缓存模式。
  */
 export function getCompilerName(): string | null {
   if (cachedCompilerName) return cachedCompilerName;

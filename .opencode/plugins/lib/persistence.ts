@@ -11,7 +11,7 @@ import { ctx } from "./context";
 import { debugLog } from "./logging";
 import { SessionData } from "./session-manager";
 import StringUtils from "./string-utils";
-import { readAiEnv } from "./venv";
+import { getAllConfig } from "./control-config";
 
 // ─── 完成标记（动态生成 + 精确匹配）──────────────────────────────
 //
@@ -211,7 +211,9 @@ export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
     // 全局开关：默认启用；仅当值严格为 "0" 或 tolower 后 "false" 才禁用。
     // 放在最前面（requireSecurityAgent 之前）——禁用时零开销，不查 session。
     // 未找到 / "1" / "true" / 任何其他值 → 启用，保持向后兼容。
-    const enabledRaw = readAiEnv()[ENV_KEY_RESUME_ANALYSIS];
+    // 配置读取收口到 control-config（HTTP /api/config + 缓存）
+    const allConfigs = await getAllConfig();
+    const enabledRaw = allConfigs[ENV_KEY_RESUME_ANALYSIS];
     if (
       enabledRaw !== undefined &&
       (enabledRaw === "0" || enabledRaw.toLowerCase() === "false")

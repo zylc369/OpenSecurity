@@ -162,37 +162,27 @@ def _ensure_neo4j_container_blocking() -> None:
     print(f"[events-mcp] 容器已创建并启动，数据目录: {_NEO4J_DATA_DIR}", file=sys.stderr)
 
 
-def _wait_embed_server_ready(timeout: int = 60) -> bool:
-    """轮询 embed_server /health，等 embedder 加载完成（503 → 200）。
+def _wait_control_ready(timeout: int = 60) -> bool:
+    """轮询控制台 /health，等 embedder 加载完成（503 → 200）。
 
-    端口发现优先级：环境变量 > 端口文件 > 默认 9776。
-    MCP 进程在 Plugin 设置 EMBED_SERVER_PORT 之前就 spawn 了，所以环境变量可能不存在，
-    需要从端口文件读取（与 embed_client._read_port 同逻辑）。
+    端口发现收口到 control_url.py（读端口文件，事实来源）。
+    每次循环重新解析端口——覆盖控制台启动期间换端口的场景。
+    控制台不可用时直接返回 False（不降级，让调用方报错）。
     """
     import time
     import httpx as _httpx
-    from pathlib import Path
+    from control_url import resolve_control
 
-    # 端口发现（与 embed_client._read_port 同逻辑）
-    data_dir = os.environ.get("DATA_DIR", str(Path.home() / "bw-security-analysis"))
-    port_file = Path(data_dir) / ".embed_server_port"
-
-    port = os.environ.get("EMBED_SERVER_PORT", "9776")
-    url = f"http://127.0.0.1:{port}/health"
     deadline = time.time() + timeout
+    url = None
 
     while time.time() < deadline:
-        # 每次循环都尝试从端口文件更新端口（处理动态端口场景）
-        if port_file.exists():
-            try:
-                file_port = port_file.read_text().strip().split("\n")[0]
-                if file_port.isdigit():
-                    new_url = f"http://127.0.0.1:{file_port}/health"
-                    if new_url != url:
-                        url = new_url
-            except (ValueError, IndexError):
-                pass
-
+        # 每次循环重新解析端口（端口文件是新控制台启动时覆写的事实来源）
+        addr = resolve_control()
+        if addr is None:
+            time.sleep(2)
+            continue
+        url = f"{addr.url}/health"
         try:
             r = _httpx.get(url, timeout=3)
             if r.status_code == 200:
@@ -219,19 +209,19 @@ def _preload_models_blocking() -> None:
         _ensure_docker_daemon_blocking()
         print("[events-mcp] 确保 neo4j-events 容器运行...", file=sys.stderr)
         _ensure_neo4j_container_blocking()
-        print("[events-mcp] 等待 embed_server 就绪...", file=sys.stderr)
+        print("[events-mcp] 等待控制台就绪...", file=sys.stderr)
         embed_timeout = 60
-        if not _wait_embed_server_ready(timeout=embed_timeout):
-            _init_error.append(RuntimeError(f"embed_server 启动超时（{embed_timeout}s）"))
+        if not _wait_control_ready(timeout=embed_timeout):
+            _init_error.append(RuntimeError(f"控制台启动超时（{embed_timeout}s）"))
             return
-        print("[events-mcp] embed_server 就绪", file=sys.stderr)
+        print("[events-mcp] 控制台就绪", file=sys.stderr)
         from graphiti_config import create_graphiti
         graphiti, err = create_graphiti()
         if err:
             _init_error.append(RuntimeError(err))
             return
         _state["graphiti"] = graphiti
-        print("[events-mcp] 全部就绪（Docker + 容器 + embed_server）", file=sys.stderr)
+        print("[events-mcp] 全部就绪（Docker + 容器 + 控制台）", file=sys.stderr)
     except Exception as e:
         _init_error.append(e)
         print(f"[events-mcp] 初始化失败: {e}", file=sys.stderr)

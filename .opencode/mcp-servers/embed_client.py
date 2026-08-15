@@ -3,36 +3,19 @@
 duck-type 兼容 SentenceTransformer.encode() 和 CrossEncoder.predict()。
 消费方（graphiti_config.py、reranker.py、knowledge/server.py）代码零改动。
 
-embed_server 是硬依赖——不可用时直接抛异常，不降级到本地加载。
-"""
-import os
-import time
-from pathlib import Path
+端口发现收口到 control_url.py（读端口文件，事实来源）。
+控制台不可用时直接抛异常，不降级到本地加载。
 
+控制台重启换端口的自愈机制：
+  请求失败 → 清掉 base_url 缓存 → 下次请求重新走 control_url.resolve_control()
+  （端口文件已被新控制台覆写，拿到新端口自动恢复，opencode 无需重启）
+"""
 import httpx
 import numpy as np
 
+from control_url import resolve_control
+
 EMBED_MODEL = "BAAI/bge-m3"
-
-
-def _read_port() -> int:
-    """读取 embed_server 端口。优先级：环境变量 > 端口文件 > 默认 9776。"""
-    # 1. 环境变量（由 TS Plugin shell.env hook 注入 bash 环境，或后续 spawn 的子进程继承）
-    port = os.environ.get("EMBED_SERVER_PORT")
-    if port:
-        return int(port)
-    # 2. 端口文件（首次请求时读，最多等 5 秒）
-    data_dir = os.environ.get("DATA_DIR", str(Path.home() / "bw-security-analysis"))
-    port_file = Path(data_dir) / ".embed_server_port"
-    for _ in range(5):
-        if port_file.exists():
-            try:
-                return int(port_file.read_text().strip().split("\n")[0])
-            except (ValueError, IndexError):
-                pass
-        time.sleep(1)
-    # 3. 默认值（最后手段）
-    return 9776
 
 
 class HttpEmbedClient:
@@ -50,21 +33,29 @@ class HttpEmbedClient:
 
     @property
     def base_url(self) -> str:
-        """延迟构建 base_url，首次访问时读端口。"""
+        """延迟构建 base_url；失败清缓存后可重新解析（换端口自愈）。"""
         if self._base_url is None:
-            port = _read_port()
-            self._base_url = f"http://127.0.0.1:{port}"
+            addr = resolve_control()
+            if addr is None:
+                raise RuntimeError("控制台地址未知（无环境变量、端口文件不存在）")
+            self._base_url = addr.url
         return self._base_url
 
     def _try_http(self, endpoint, payload):
-        """发送 HTTP 请求。失败返回 None，由 encode/predict 层抛异常。"""
+        """发送 HTTP 请求。失败返回 None 并清 base_url 缓存（供下次重解析）。"""
+        # 先在 try 外解析 base_url——端口未知时直接抛"端口未知"，
+        # 不进入下面的 except 被吞成误导性的"请求失败"。
+        base = self.base_url
         client = self._client_first if self._first_request else self._client_normal
         try:
-            resp = client.post(f"{self.base_url}{endpoint}", json=payload)
+            resp = client.post(f"{base}{endpoint}", json=payload)
             resp.raise_for_status()
             self._first_request = False
             return resp.json()
-        except Exception as e:
+        except Exception:
+            # 清缓存：下次请求重新解析端口。
+            # 覆盖控制台重启换端口场景（旧地址连不上 → 端口文件已是新端口）。
+            self._base_url = None
             return None
 
     def encode(self, inputs, convert_to_numpy=True, **kwargs):
@@ -80,7 +71,7 @@ class HttpEmbedClient:
             inputs = [inputs]
         data = self._try_http("/embed", {"inputs": inputs})
         if data is None:
-            raise RuntimeError("embed_server /embed 请求失败")
+            raise RuntimeError("控制台 /embed 请求失败")
         arr = np.array(data)
         return arr[0] if is_single else arr
 
@@ -96,5 +87,5 @@ class HttpEmbedClient:
         texts = [p[1] for p in pairs]
         data = self._try_http("/rerank", {"query": query, "texts": texts})
         if data is None:
-            raise RuntimeError("embed_server /rerank 请求失败")
+            raise RuntimeError("控制台 /rerank 请求失败")
         return np.array(data)
