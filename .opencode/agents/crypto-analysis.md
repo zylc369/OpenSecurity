@@ -8,6 +8,7 @@ permission:
   external_directory:
     ~/bw-security-analysis/**: allow
     ~/Downloads/**: allow
+    /tmp/**: allow
 ---
 
 ## 角色
