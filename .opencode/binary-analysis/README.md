@@ -21,7 +21,6 @@
 │   ├── registry.json    # 沉淀脚本注册表（仅 idat 脚本）
 │   ├── initial_analysis.py  # 初始分析流水线
 │   ├── debug_dump.py        # 调试器 dump 脚本（PE/ELF）
-│   ├── detect_env.py        # 环境检测（纯 Python，不走 idat）
 │   └── gui_verify.py        # GUI 自动化验证（纯 Python，不走 idat）
 ├── knowledge-base/  # 知识库（按需加载，减少上下文占用）
 │   ├── analysis-planning.md
@@ -32,8 +31,7 @@
 │   ├── unicorn-templates.md     # Unicorn 模拟执行脚本模板
 │   ├── frida-hook-templates.md  # Frida Hook 脚本模板
 │   └── ...
-├── environment-setup.md   # 环境搭建指南
-└── context-persistence.md # 上下文持久化方案文档
+└── ...
 ```
 
 ## 调用方式

@@ -175,7 +175,7 @@ export interface DownloadState {
 export interface ModelAsset {
   id: string;
   repo_id: string;
-  type: string;           // embedder / reranker
+  type: string;           // embedder / reranker / ocr
   display: string;
   purpose: string;
   min_free_gb: number;

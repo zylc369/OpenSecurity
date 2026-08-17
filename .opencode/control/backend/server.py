@@ -46,6 +46,10 @@ def create_app() -> FastAPI:
     from config import _init_validators
     _init_validators()
 
+    # 首次运行创建 .ai_env 带注释模板（配置收口：config_store 是唯一读写方）
+    from services import config_store
+    config_store.ensure_template()
+
     app = FastAPI(
         title="OpenSecurity Control",
         docs_url="/api/docs",
@@ -62,11 +66,12 @@ def create_app() -> FastAPI:
         )
 
     # 路由
-    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system
+    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr
     app.include_router(embed.router)
     app.include_router(health.router)
     app.include_router(config_route.router)
     app.include_router(deps.router)
+    app.include_router(ocr.router)
     app.include_router(docker.router)
     app.include_router(scan.router)
     app.include_router(install.router)
@@ -77,6 +82,23 @@ def create_app() -> FastAPI:
 
     # 前端静态文件（开发态跳过，发布态挂载 dist/）
     _mount_frontend(app)
+
+    # 依赖快照预热：启动事件 fire-and-forget，与模型加载并行。
+    # plugin 首个 /api/deps 请求到达时（spawn 后 0.3~1.1s）快照大概率已就绪。
+    # 冷启动首扫含 JVM/磁盘冷缓存，预热正好吸收。失败静默（请求路径会正常构建）。
+    from routes.deps import warm_deps_snapshot
+
+    @app.on_event("startup")
+    async def _warm_deps_snapshot() -> None:
+        import asyncio
+        asyncio.get_running_loop().run_in_executor(None, warm_deps_snapshot)
+
+    # 开发态自动拉起 vite dev server（此前依赖手动启动，控制台重启后
+    # 前端 404）。幂等：vite 已运行则跳过；拉起失败由 dev 提示页指路。
+    from config import is_dev_mode as _is_dev
+    if _is_dev():
+        from services.vite_dev import start_vite_dev
+        start_vite_dev()
 
     return app
 
@@ -89,7 +111,8 @@ def _mount_frontend(app: FastAPI) -> None:
         async def dev_hint():
             return {
                 "mode": "dev",
-                "hint": "前端开发模式（CONTROL_FRONTEND_DEV=1）。请访问 http://localhost:5173",
+                "hint": "前端开发模式（CONTROL_FRONTEND_DEV=1）。vite dev server 由控制台自动拉起",
+                "url": "http://localhost:5173",
             }
         return
 

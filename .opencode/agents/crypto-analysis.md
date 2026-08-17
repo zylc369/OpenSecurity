@@ -74,8 +74,6 @@ permission:
 | 求出明文非 flag | 检查 byte order / 是否多步加密 / 回溯参数识别 |
 | sage 调用报 ImportError | 装坏了，重装：`~/bw-security-analysis/.venv/bin/pip install --force-reinstall sagemath-standard` |
 
-> 注：sage 是否已装由 **plugin 在 chat.message 检查**（`detect_env check-preinstall`）——缺失时直接拦截整个 crypto-analysis 并提示安装，agent 运行时 sage 已就绪，无需自行处理"sage 没装"。
-
 {{buwai-rule:execution-discipline}}
 
 ---
@@ -88,7 +86,6 @@ permission:
 2. **SageMath 优先** — 代数/格/数论用 sage 最简；大整数用 gmpy2；少自己写底层算法
 3. **参数即线索** — 题目给的每个参数（e 的大小、hint 形式、比特长度）都暗示攻击方向
 4. **假设必须验证** — 推断 p/q 或明文后必须实际解密验证（`m = pow(c, d, n)` 计算 + i2b 转 bytes + 检查 flag 格式）。如果 sage/python 计算报错或返回 None=脚本有 bug（修脚本），不是推断错误；计算成功但结果非 flag 格式=推断可能错误或需要回溯
-5. **sage 就绪由 plugin 保证** — chat.message 门已拦截 sage 缺失的情况；agent 运行时 sage 可用，遇到 ImportError 是装坏的边缘情况
 
 ---
 
@@ -101,8 +98,6 @@ permission:
 | `sage` | 格规约/代数/数论/离散对数 | `sage script.sage` |
 | `$PYTHON_CMD` + gmpy2 | 大整数/RSA 基本运算 | `python -c "import gmpy2..."` |
 | sympy | 符号计算/方程 | `python -c "from sympy..."` |
-
-> SageMath 的就绪检查由 plugin 在 chat.message 自动完成（`detect_env check-preinstall crypto-analysis`），缺失会拦截整个 agent 并给安装命令。装一次即永久可用。
 
 ---
 

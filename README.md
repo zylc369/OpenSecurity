@@ -53,7 +53,7 @@ OpenSecurity 让 LLM 端到端地完成一次安全分析：拿到目标文件�
 | IDA Pro | 7.6+ | 二进制逆向必需（仅 `binary-analysis` / `mobile-analysis` 需要） |
 | C/C++ 编译器 | 任意 | 计算密集型任务用（macOS: clang / Linux: gcc / Windows: VS Build Tools） |
 
-移动端 / Web / AI 安全分析还需对应工具（Frida、apktool、jadx、Playwright……），首次运行时 `detect_env.py` 会自动检测并给出安装指引。
+移动端 / Web / AI 安全分析还需对应工具（Frida、apktool、jadx、Playwright……）。每条消息发送前插件经控制台自动检测环境（Python 包 / 外部工具 / 编译器 / Docker / 模型五分类），缺必需依赖时拦截对话并给出控制台链接，在控制台一键安装。
 
 ### 安装
 
@@ -77,14 +77,17 @@ ln -s "$(pwd)/.opencode" ~/.config/opencode
 
 ### 配置 IDA Pro
 
-IDA Pro 路径通过 `IDA_PRO_HOME` 环境变量指定（IDA Pro 安装目录）。detect_env.py 每次运行检查 `$OPENCODE_ROOT/.ai_env`，文件不存在时创建模板，填入 IDA 安装目录即可：
+IDA Pro 路径通过 `IDA_PRO_HOME` 指定（IDA Pro 安装目录）。两种方式任选：
+
+- 打开控制台（首次对话后自动启动），在配置页填写 `IDA_PRO_HOME`
+- 或编辑 `$OPENCODE_ROOT/.ai_env`（控制台首次启动时创建带注释的模板）：
 
 ```ini
 # $OPENCODE_ROOT/.ai_env
 IDA_PRO_HOME=<IDA Pro 安装目录>
 ```
 
-也可设置系统环境变量 `IDA_PRO_HOME`（优先级高于 .ai_env）。detect_env.py 自动检测 IDA Pro、编译器、Python 包及外部工具，结果写入 `~/bw-security-analysis/env_cache.json`。
+配置后插件的 shell 环境会注入 `$IDAT`（idat 完整路径），agent 直接调用。环境状态（IDA / 编译器 / Python 包 / 外部工具）在控制台首页一屏可见。
 
 ### 第一次分析
 
@@ -117,7 +120,6 @@ Agent 会自主完成：信息收集 → 分析规划 → 工具执行 → 结�
 | [项目深度介绍](docs/项目介绍/open-security-介绍.md) | 完整的设计理念、架构详解、反直觉决策 |
 | [如何添加新 Agent](docs/contributing/add-new-agent.md) | 扩展平台支持新的安全分析领域 |
 | [Roadmap](docs/ROADMAP.md) | 项目路线图与待办方向 |
-| [环境搭建详解](https://github.com/zylc369/OpenSecurity/blob/main/.opencode/binary-analysis/environment-setup.md) | 各平台工具链安装指南 |
 | [Plugin 开发实战](https://github.com/zylc369/OpenSecurity/blob/main/.opencode/binary-analysis/knowledge-base/opencode-plugin-development-guide.md) | OpenCode Plugin 工程实践 |
 | [IDAPython 编码规范](https://github.com/zylc369/OpenSecurity/blob/main/.opencode/binary-analysis/knowledge-base/idapython-conventions.md) | 工具脚本开发规范 |
 | [ai-dialogue 工具](docs/项目介绍/ai-dialogue.md) | 通用 AI 对话工具 — 通过 opencode serve 与目标模型对话 |

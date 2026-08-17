@@ -1,6 +1,6 @@
 # OpenSecurity 一键安装 (Windows / PowerShell)
 # 用法: powershell -ExecutionPolicy Bypass -File .opencode\install.ps1
-# 逻辑全在 detect_env.py install（跨平台），此脚本只负责找到 Python 并启动它。
+# 逻辑全在 detect_py_deps.py install（跨平台），此脚本只负责找到 Python 并启动它。
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -20,6 +20,12 @@ if (-not $Python) {
     exit 1
 }
 
-$Script = Join-Path $ScriptDir "binary-analysis\scripts\detect_env.py"
+# 本脚本不接收参数（安装内容固定：全部必需依赖）
+if ($args.Count -gt 0) {
+    Write-Host "错误：install.ps1 不接收参数。" -ForegroundColor Red
+    exit 1
+}
+
+$Script = Join-Path $ScriptDir "control\backend\services\detect_py_deps.py"
 & $Python $Script install
 exit $LASTEXITCODE

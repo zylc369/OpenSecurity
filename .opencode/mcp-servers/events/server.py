@@ -57,7 +57,7 @@ def _ensure_docker_daemon_blocking(timeout: int = 90) -> None:
     3. 若未运行 → 启动 daemon（open -a Docker / systemctl start docker）
     4. 轮询 docker info（最多 timeout 秒）
 
-    Note: 与 detect_env.py 的 _ensure_docker_running 同源（跨模块独立维护）。
+    Note: Docker daemon 启动逻辑（本模块独立维护）。
     """
     # 1. 检查二进制
     try:
@@ -103,7 +103,7 @@ def _ensure_docker_daemon_blocking(timeout: int = 90) -> None:
 def _pull_image_with_progress(image: str, timeout: int = 600) -> None:
     """docker pull 并把进度打印到 stderr（避免长时间无反馈）。
 
-    Note: 与 detect_env.py 的 _pull_image_with_progress 同源（跨模块独立维护）。
+    Note: 镜像拉取进度逻辑（本模块独立维护）。
     """
     print(f"[events-mcp] docker pull {image}（首次需下载镜像，请耐心等待）...", file=sys.stderr)
     proc = sp.Popen(
@@ -127,7 +127,7 @@ def _pull_image_with_progress(image: str, timeout: int = 600) -> None:
 def _ensure_neo4j_container_blocking() -> None:
     """确保 neo4j-events 容器运行（不存在则创建）。
 
-    Note: 与 detect_env.py 的 _ensure_mcp_infra 容器启动逻辑同源（跨模块独立维护）。
+    Note: 容器启动逻辑（本模块独立维护）。
     """
     # 1. 容器已运行？
     r = sp.run(

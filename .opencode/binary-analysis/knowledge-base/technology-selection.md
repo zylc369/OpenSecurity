@@ -47,14 +47,17 @@
 
 ### Windows (MSVC)
 
-使用 `detect_env.py` 检测到的 `vcvarsall.bat` 路径：
+先用 vswhere 定位 Visual Studio 并拼出 vcvarsall.bat 路径（vswhere 随 VS 安装，通常在 PATH；不可用时按 `C:\Program Files (x86)\Microsoft Visual Studio\<版本>\<edition>` 目录探测）：
 
 ```bash
-# 32 位目标（常见于逆向目标）
-cmd /c "call "<vcvarsall_path>" x86 >nul 2>&1 && cl /O2 /Fe:<output.exe> <source.c>"
+VS_PATH=$(vswhere -latest -property installationPath)
+VCVARSALL="$VS_PATH\\VC\\Auxiliary\\Build\\vcvarsall.bat"
+```
 
-# 64 位目标
-cmd /c "call "<vcvarsall_path>" x64 >nul 2>&1 && cl /O2 /Fe:<output.exe> <source.c>"
+编译（32 位目标常见于逆向，64 位同理换 x64）：
+
+```bash
+cmd /c "call \"$VCVARSALL\" x86 >nul 2>&1 && cl /O2 /Fe:<output.exe> <source.c>"
 ```
 
 ### Linux

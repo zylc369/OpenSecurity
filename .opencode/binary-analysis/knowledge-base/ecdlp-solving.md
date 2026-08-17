@@ -528,7 +528,7 @@ result = subprocess.run(["./solver", "8"], capture_output=True, text=True, timeo
 4. **并行化决策**（在 C 单线程验证后）
    - 单线程 C 跑 1000 步计时
    - 如果预估总耗时 > 5 分钟 → 改用并行 DP 版本
-   - 线程数 = min(CPU 核心数, 曲线位数/8)（从 `detect_env.py` 或 `os.cpu_count()` 获取）
+   - 线程数 = min(CPU 核心数, 曲线位数/8)（从 `os.cpu_count()` 获取）
    - 预期加速: ~50x（8 线程 vs 单线程）
    - C 多线程 DP 版本编译+调试 ~60 分钟
 

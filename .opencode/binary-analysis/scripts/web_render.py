@@ -24,7 +24,7 @@ def render_page(url, fmt="markdown", screenshot=None, screenshot_full_page=False
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        return {"success": False, "error": "playwright 未安装。请运行 detect_env.py 安装依赖"}
+        return {"success": False, "error": "playwright 未安装"}
 
     if not url.startswith(("http://", "https://")):
         return {"success": False, "error": "URL 必须以 http:// 或 https:// 开头"}

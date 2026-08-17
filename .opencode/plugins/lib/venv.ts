@@ -37,7 +37,7 @@ function verifyPython(pathOrCmd: string): boolean {
 
 /**
  * 获取 Python 命令路径（惰性初始化 + 缓存）。
- * 只检查 venv 是否存在，不创建。venv 创建由 detect_env.py install 负责。
+ * 只检查 venv 是否存在，不创建。venv 创建由 detect_py_deps.py install 子命令负责。
  * 返回 null 表示 venv 不存在，调用方应提示用户运行安装脚本。
  */
 export function getPythonCmd(): string | null {
@@ -79,7 +79,7 @@ let cachedCompilerName: string | null = null;
  * 候选顺序：clang → gcc → cc（Unix）或 clang → gcc → cl（Windows）。
  * 返回编译器名（Unix: "clang"/"gcc"/"cc"；Windows: "clang.exe"/"gcc.exe"/"cl.exe"）或 null（未找到）。
  * 仅做 PATH 检测，不涉及 Windows MSVC/vcvarsall 复杂逻辑
- * （那部分由 detect_env.py fail-fast 覆盖）。
+ * （那部分由控制台 /api/deps 检测覆盖）。
  */
 export function getCompilerName(): string | null {
   if (cachedCompilerName) return cachedCompilerName;

@@ -76,7 +76,14 @@ IDA_OPERATION=<操作> IDA_OUTPUT="$TASK_DIR/result.json" [其他参数] \
 IDA_OPERATION=batch IDA_BATCH_FILE="$TASK_DIR/ops.json" IDA_OUTPUT="$TASK_DIR/result.json" \
   "$IDAT" -A -S"$SHARED_DIR/update.py" -L"$TASK_DIR/idat.log" "<目标文件>"
 
-# 初始分析流水线（首次分析时首选）
+# ── 参数传递机制：为什么用环境变量而不是命令行参数 ──
+# 1. -S"script.py --arg val" 的参数只能经 idc.ARGV 获取（sys.argv 拿不到，实测），
+#    且外层引号已被 -S 占据——$TASK_DIR 含空格时内层无法再加引号，bash/PowerShell 转义各不相同
+# 2. 环境变量的值不经过 shell 二次解析，路径含空格/特殊字符天然安全，双平台行为一致
+# 3. IDA_OUTPUT 等变量只被脚本读取（_base.env_str），idat 本身只认 -L（日志路径）
+
+# 初始分析流水线（首次分析时首选；binary/mobile 共用——目标可为 PE/Mach-O/.so/.dylib）
+# initial.json = 脚本写的结构化数据（各字段自带 description 自解释）；initial.log = idat 运行日志（失败诊断用）
 IDA_OUTPUT="$TASK_DIR/initial.json" \
   "$IDAT" -A -S"$SHARED_DIR/scripts/initial_analysis.py" -L"$TASK_DIR/initial.log" "<目标文件>"
 

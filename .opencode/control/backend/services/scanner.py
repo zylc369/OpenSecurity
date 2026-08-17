@@ -16,16 +16,29 @@ from __future__ import annotations
 import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
-from services import tools_detector, docker_manager, config_store
+from services import config_store, detect_py_deps, detect_tools, docker_manager
+from services.detect_py_deps import PyPkgStatus
+from services.detect_tools import ToolStatus
+from services.docker_manager import DockerGlobal
+from services.model_assets import ModelAssetStatus
+
+
+@dataclass
+class GlobalResources:
+    """全局资源（docker + 配置 + Python 包 + 模型）。"""
+    docker: DockerGlobal = field(default_factory=DockerGlobal.unavailable)
+    required_configs: list = field(default_factory=list)   # config_store.required_status 返回
+    python_packages: list[PyPkgStatus] = field(default_factory=list)
+    models: list[ModelAssetStatus] = field(default_factory=list)
 
 
 @dataclass
 class ScanResult:
     """全量扫描结果。"""
-    agents: dict[str, list[dict]] = field(default_factory=dict)  # {agent_name: [tool_status]}
-    global_: dict = field(default_factory=dict)                  # 全局资源（docker + configs）
+    agents: dict[str, list[ToolStatus]] = field(default_factory=dict)
+    global_: GlobalResources = field(default_factory=GlobalResources)
     timestamp: float = 0
 
 
@@ -70,10 +83,10 @@ class Scanner:
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=8) as executor:
             # 并行扫描所有 agent + 全局
-            agent_task = loop.run_in_executor(executor, tools_detector.scan_all)
+            agent_task = loop.run_in_executor(executor, detect_tools.scan_all)
             docker_task = loop.run_in_executor(executor, docker_manager.scan_global)
             config_task = loop.run_in_executor(executor, config_store.required_status)
-            pydeps_task = loop.run_in_executor(executor, tools_detector.scan_python_packages)
+            pydeps_task = loop.run_in_executor(executor, detect_py_deps.scan)
 
             agents = await agent_task
             docker = await docker_task
@@ -82,16 +95,16 @@ class Scanner:
 
         return ScanResult(
             agents=agents,
-            global_={
-                "docker": docker,
-                "required_configs": configs,
-                "python_packages": python_packages,
-                "models": await self._scan_models(),
-            },
+            global_=GlobalResources(
+                docker=docker,
+                required_configs=configs,
+                python_packages=python_packages,
+                models=await self._scan_models(),
+            ),
             timestamp=time.time(),
         )
 
-    async def _scan_models(self) -> list[dict]:
+    async def _scan_models(self) -> list[ModelAssetStatus]:
         """模型状态（收口：数据源 = services/model_assets.py，与 /api/models 同源）。"""
         from services import model_assets
         return model_assets.get_model_assets()

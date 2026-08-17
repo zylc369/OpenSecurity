@@ -278,9 +278,9 @@ def test_required_status():
     from config import _init_validators
     _init_validators()
     from services.config_store import required_status
-    status = required_status()
-    assert_true("DEEPSEEK_API_KEY" in status, "应有 DEEPSEEK_API_KEY")
-    assert_true("IDA_PRO_HOME" in status, "应有 IDA_PRO_HOME")
+    keys = {c.key for c in required_status()}
+    assert_true("DEEPSEEK_API_KEY" in keys, "应有 DEEPSEEK_API_KEY")
+    assert_true("IDA_PRO_HOME" in keys, "应有 IDA_PRO_HOME")
 
 
 @test("config_store.validate_ida_pro_home: 存在路径")
@@ -302,23 +302,23 @@ def test_validate_ida_pro_home_invalid():
     assert_true("不存在" in msg, f"错误信息应该包含'不存在': {msg}")
 
 
-# ============ tools_detector 测试 ============
+# ============ detect_tools 测试 ============
 
-@test("tools_detector.scan_agent: mobile-analysis 工具")
+@test("detect_tools.scan_agent: mobile-analysis 工具")
 def test_scan_mobile():
     from config import _init_validators
     _init_validators()
-    from services.tools_detector import scan_agent
+    from services.detect_tools import scan_agent
     tools = scan_agent("mobile-analysis")
     assert_true(len(tools) > 0, "应该有工具")
-    names = [t["name"] for t in tools]
+    names = [t.name for t in tools]
     assert_true("apktool" in names, "应该包含 apktool")
     assert_true("ida_pro" in names, "应该包含 ida_pro")
 
 
-@test("tools_detector.scan_all: 所有 agent")
+@test("detect_tools.scan_all: 所有 agent")
 def test_scan_all():
-    from services.tools_detector import scan_all
+    from services.detect_tools import scan_all
     all_tools = scan_all()
     assert_true("binary-analysis" in all_tools, "应有 binary-analysis")
     assert_true("mobile-analysis" in all_tools, "应有 mobile-analysis")
@@ -330,17 +330,17 @@ def test_scan_all():
 def test_docker_status():
     from services.docker_manager import check_status
     status = check_status()
-    assert_true("installed" in status, "应该返回 installed 字段")
-    assert_true("daemon_running" in status, "应该返回 daemon_running 字段")
+    assert_true(isinstance(status.installed, bool), "应该返回 installed 字段")
+    assert_true(isinstance(status.daemon_running, bool), "应该返回 daemon_running 字段")
 
 
 @test("docker_manager.scan_global: 返回完整结构")
 def test_docker_scan_global():
     from services.docker_manager import scan_global
     result = scan_global()
-    assert_true("docker" in result, "应有 docker 字段")
-    assert_true("containers" in result, "应有 containers 字段")
-    assert_true("images" in result, "应有 images 字段")
+    assert_true(result.docker.installed, "应有 docker 字段")
+    assert_true(isinstance(result.containers, list), "应有 containers 字段")
+    assert_true(isinstance(result.images, list), "应有 images 字段")
 
 
 # ============ scanner 测试 ============
@@ -353,9 +353,9 @@ def test_scanner_full():
     from services.scanner import get_scanner
     result = asyncio.run(get_scanner().scan_all(force_refresh=True))
     assert_true(len(result.agents) > 0, "应该有 agent 数据")
-    assert_true("docker" in result.global_, "应该有 docker 数据")
-    assert_true("required_configs" in result.global_, "应该有 configs 数据")
-    assert_true("models" in result.global_, "应该有 models 数据")
+    assert_true(result.global_.docker is not None, "应该有 docker 数据")
+    assert_true(result.global_.required_configs is not None, "应该有 configs 数据")
+    assert_true(result.global_.models is not None, "应该有 models 数据")
 
 
 @test("scanner.scan_all: 缓存命中（无 force_refresh 时返回缓存）")
@@ -678,26 +678,26 @@ def test_config_multi_keys():
         (OPENCODE_ROOT / ".ai_env").write_text(original)
 
 
-@test("tools_detector: otool 平台过滤（非 macOS skipped）")
+@test("detect_tools: otool 平台过滤（非 macOS skipped）")
 def test_tool_platform_filter():
     import sys as _sys
-    from services.tools_detector import scan_tool, EXTERNAL_TOOLS
+    from services.detect_tools import scan_tool, EXTERNAL_TOOLS
     otool = next((t for t in EXTERNAL_TOOLS if t.name == "otool"), None)
     if otool is None: return
     result = scan_tool(otool)
     if _sys.platform == "darwin":
-        assert_false(result.get("skipped", False), "macOS otool 不应 skipped")
+        assert_false(result.skipped, "macOS otool 不应 skipped")
     else:
-        assert_true(result.get("skipped", False), "非 macOS otool 应 skipped")
+        assert_true(result.skipped, "非 macOS otool 应 skipped")
 
 
-@test("tools_detector: GoReSym required=False（可选）")
+@test("detect_tools: GoReSym required=False（可选）")
 def test_tool_optional():
-    from services.tools_detector import scan_tool, EXTERNAL_TOOLS
+    from services.detect_tools import scan_tool, EXTERNAL_TOOLS
     gosym = next((t for t in EXTERNAL_TOOLS if t.name == "GoReSym"), None)
     if gosym is None: return
     result = scan_tool(gosym)
-    assert_false(result["required"], "GoReSym 应 required=False")
+    assert_false(result.required, "GoReSym 应 required=False")
 
 
 @test("E2E: 端口耗尽 exit code 3（模拟）")
@@ -824,7 +824,7 @@ def test_e2e_config_delete():
         cp.stop()
 
 
-@test("E2E: /api/deps/{agent} 不存在 agent → 空列表")
+@test("E2E: /api/deps/{agent} 不存在 agent → 工具空 + summary 就绪")
 def test_e2e_deps_unknown():
     cp = ControlProcess()
     try:
@@ -832,7 +832,13 @@ def test_e2e_deps_unknown():
         import httpx
         r = httpx.get(f"http://127.0.0.1:{cp.port}/api/deps/non-existent", timeout=5)
         assert_eq(r.status_code, 200)
-        assert_eq(len(r.json()), 0)
+        d = r.json()
+        # 新契约：响应是聚合对象（summary/python/tools/compiler/shared_infra）
+        # 未知 agent 无归属工具 → tools 空；all 级 Python 包仍命中；
+        # 共享底座非归属 → 不参与判定 → summary.ready 反映 all 级包状态
+        assert_eq(len(d["tools"]), 0, "未知 agent 的外部工具应为空")
+        assert "summary" in d and "console_url" in d["summary"], "summary 应含 console_url"
+        assert isinstance(d["summary"]["required_missing"], list), "summary 应含 required_missing"
     finally:
         cp.stop()
 
@@ -912,5 +918,27 @@ def main():
     return 0 if failed == 0 else 1
 
 
+@test("config_store.ensure_template: 无则创建/有则保留（幂等）")
+def test_config_store_ensure_template():
+    import tempfile
+    from services import config_store
+
+    with tempfile.TemporaryDirectory() as td:
+        fake = Path(td) / ".ai_env"
+        orig = config_store._ai_env_path
+        config_store._ai_env_path = lambda: fake
+        try:
+            assert_true(config_store.ensure_template(), "首次应创建并返回 True")
+            assert_true(fake.exists(), "模板文件应存在")
+            content = fake.read_text(encoding="utf-8")
+            assert "IDA_PRO_HOME=" in content and "DEEPSEEK_API_KEY=" in content
+            fake.write_text("USER_CUSTOM=value\n", encoding="utf-8")
+            assert_false(config_store.ensure_template(), "已存在应返回 False")
+            assert fake.read_text(encoding="utf-8") == "USER_CUSTOM=value\n", "用户内容不得被覆盖"
+        finally:
+            config_store._ai_env_path = orig
+
+
 if __name__ == "__main__":
     sys.exit(main())
+

@@ -79,11 +79,6 @@ export const api = {
   },
 
   // ─── /api/install ───────────────────────────────────────
-  async getPippable(): Promise<{ packages: string[] }> {
-    const r = await instance.get<{ packages: string[] }>("/api/install");
-    return r.data;
-  },
-
   async install(packageName: string): Promise<InstallResult> {
     const r = await instance.post<InstallResult>("/api/install", { package: packageName });
     return r.data;

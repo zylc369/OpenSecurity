@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from fastapi import APIRouter, HTTPException
 
 from services import model_assets
@@ -15,7 +17,7 @@ router = APIRouter(prefix="/api/models", tags=["models"])
 async def list_models() -> dict:
     """全部模型资产状态（缓存/硬件评估/下载进度）。"""
     return {
-        "models": model_assets.get_model_assets(),
+        "models": [asdict(m) for m in model_assets.get_model_assets()],
         "hf_endpoint": model_assets._hf_endpoint(),
     }
 

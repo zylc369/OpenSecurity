@@ -146,15 +146,8 @@ const App: React.FC = () => {
   const catStat = (key: CategoryKey) =>
     readiness.cats.find((c) => c.key === key)!;
 
-  // ─── 可自动安装项（一键安装的真实范围）───
-  const pipInstallable = useMemo(
-    () => pyMissing.filter((p) => p.installer === "pip"),
-    [pyMissing],
-  );
-  const pipManual = useMemo(
-    () => pyMissing.filter((p) => p.installer !== "pip"),
-    [pyMissing],
-  );
+  // ─── 可自动安装项（唯一清单全量可装；installer 只决定服务端执行 pip 还是 conda）───
+  const pipInstallable = useMemo(() => pyMissing, [pyMissing]);
   const modelBlocked = useMemo(
     () => modelMissing.filter((m) => !m.hardware.ok),
     [modelMissing],
@@ -190,7 +183,6 @@ const App: React.FC = () => {
           )}
         </ul>
         {(toolsMissing.length > 0 ||
-          pipManual.length > 0 ||
           modelBlocked.length > 0) && (
           <>
             <Divider style={{ margin: "6px 0" }} />
@@ -203,9 +195,6 @@ const App: React.FC = () => {
                   外部工具：
                   {[...new Set(toolsMissing.map((t) => t.name))].join("、")}
                 </li>
-              )}
-              {pipManual.length > 0 && (
-                <li>conda 包：{pipManual.map((p) => p.pip_name).join("、")}</li>
               )}
               {modelBlocked.length > 0 && (
                 <li>
@@ -225,7 +214,6 @@ const App: React.FC = () => {
     modelMissing,
     modelBlocked,
     toolsMissing,
-    pipManual,
   ]);
 
   // ─── 任务构建 ───
@@ -649,6 +637,11 @@ const App: React.FC = () => {
                       });
                     })
                 }
+                onRelease={() => {
+                  fetch("/api/ocr/release", { method: "POST" })
+                    .then(() => models.refresh())
+                    .catch(() => models.refresh());
+                }}
               />
             </Card>
           </Col>

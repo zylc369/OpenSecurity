@@ -7,7 +7,10 @@ from __future__ import annotations
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
+from dataclasses import asdict
+
 from services import docker_manager
+from routes.deps import invalidate_deps_snapshot
 
 router = APIRouter(prefix="/api/docker", tags=["docker"])
 
@@ -15,7 +18,7 @@ router = APIRouter(prefix="/api/docker", tags=["docker"])
 @router.get("/status")
 async def get_status() -> dict:
     """Docker daemon + 已知容器 + 已知镜像状态。"""
-    return docker_manager.scan_global()
+    return asdict(docker_manager.scan_global())
 
 
 @router.get("/containers")
@@ -28,6 +31,8 @@ async def list_containers(all_: bool = True) -> list[dict]:
 async def start_container(name: str) -> dict:
     """启动容器。"""
     success, message = docker_manager.start_container(name)
+    if success:
+        invalidate_deps_snapshot()  # 容器状态变化 → 快照失效
     return {"success": success, "message": message}
 
 
@@ -35,6 +40,8 @@ async def start_container(name: str) -> dict:
 async def stop_container(name: str) -> dict:
     """停止容器。"""
     success, message = docker_manager.stop_container(name)
+    if success:
+        invalidate_deps_snapshot()  # 容器状态变化 → 快照失效
     return {"success": success, "message": message}
 
 

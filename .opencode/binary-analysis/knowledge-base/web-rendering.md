@@ -107,6 +107,3 @@ A: 某些 SPA 页面需要用户交互才能加载内容。尝试 `--wait-select
 
 **Q: 渲染超时？**
 A: 默认超时 30 秒，复杂页面可能需要更长。使用 `--timeout 60` 增加等待时间。最大 120 秒。
-
-**Q: playwright 未安装？**
-A: 运行 `$PYTHON_CMD "$SHARED_DIR/scripts/detect_env.py" install` 自动安装 playwright 和 Chromium 浏览器。

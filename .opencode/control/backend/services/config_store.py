@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from config import OPENCODE_ROOT, REQUIRED_CONFIGS
@@ -19,6 +20,40 @@ from services.process_lock import atomic_write
 def _ai_env_path() -> Path:
     """返回 .ai_env 路径。"""
     return Path(OPENCODE_ROOT) / ".ai_env"
+
+
+_TEMPLATE = """\
+# bw-security-analysis 环境变量配置
+# 填完保存即可（控制台配置页读取；也可直接在控制台配置页设置，无需手编此文件）
+
+# IDA Pro 安装目录（该目录下需有 idat 可执行文件）
+# macOS: /Applications/IDA Professional 9.1.app/Contents/MacOS
+# Linux: /opt/ida-9.0
+# Windows: C:\\Program Files\\IDA Pro 9.0
+IDA_PRO_HOME=
+
+# DeepSeek API Key（events MCP 实体提取用，https://platform.deepseek.com 申请）
+DEEPSEEK_API_KEY=
+# events MCP 模型配置（可选，按需修改）
+# DEEPSEEK_MODEL=deepseek-v4-flash      # 核心提取模型（需要更强提取质量改成 deepseek-v4-pro）
+# DEEPSEEK_SMALL_MODEL=deepseek-v4-flash # 时间戳推断模型
+"""
+
+
+def ensure_template() -> bool:
+    """首次运行时创建带注释的 .ai_env 模板（server.py 启动期调用一次）。
+
+    Returns:
+        True = 本次创建；False = 已存在（不重写，保留用户内容）或创建失败。
+    """
+    path = _ai_env_path()
+    if path.exists():
+        return False
+    try:
+        atomic_write(path, _TEMPLATE)
+        return True
+    except OSError:
+        return False
 
 
 def _parse(content: str) -> dict[str, str]:
@@ -138,17 +173,20 @@ def delete(key: str) -> dict[str, str]:
     return configs
 
 
-def required_status() -> dict[str, dict]:
-    """返回必要配置的完整性状态（前端 banner 用）。
+@dataclass(frozen=True)
+class ConfigStatusView:
+    """单个必要配置的完整性状态（前端 banner 用）。"""
+    key: str
+    label: str
+    ok: bool
+    hint: str
+    error: str
 
-    Returns:
-        {
-            "DEEPSEEK_API_KEY": {"label": "...", "ok": true, "hint": "..."},
-            ...
-        }
-    """
+
+def required_status() -> list[ConfigStatusView]:
+    """返回必要配置的完整性状态列表。"""
     configs = read_all()
-    result = {}
+    result: list[ConfigStatusView] = []
     for field in REQUIRED_CONFIGS:
         value = configs.get(field.key, "")
         ok = bool(value)
@@ -157,12 +195,10 @@ def required_status() -> dict[str, dict]:
         if ok and field.validator:
             v_ok, validator_msg = field.validator(value)
             ok = v_ok
-        result[field.key] = {
-            "label": field.label,
-            "ok": ok,
-            "hint": field.hint,
-            "error": validator_msg if not ok and validator_msg else "",
-        }
+        result.append(ConfigStatusView(
+            key=field.key, label=field.label, ok=ok, hint=field.hint,
+            error=validator_msg if not ok and validator_msg else "",
+        ))
     return result
 
 

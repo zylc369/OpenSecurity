@@ -27,8 +27,6 @@ import {
   SECURITY_AGENTS,
   SECURITY_ANALYSIS_AGENTS,
   AGENTS_WITH_DELEGATION_RULES,
-  AGENT_SEARCHER,
-  AGENT_MEMORIST,
   AGENT_SCRIPT_DIRS,
   SHARED_DIR,
   AGENTS_DIR,
@@ -53,7 +51,10 @@ import {
 } from "./lib/snippet";
 import { maybeResumeAnalysis } from "./lib/persistence";
 import { recordTimeline, flushTimeline } from "./lib/timeline";
-import { runDetectEnv, type EnvironmentCheckResult } from "./lib/env-check";
+import {
+  checkDepsViaControl,
+  type EnvironmentCheckResult,
+} from "./lib/env-check";
 import { McpManager } from "./lib/mcp-manager";
 
 // 根据 agent 名获取脚本目录；不在映射表中时返回 undefined
@@ -269,22 +270,18 @@ const envCheckPromises = new Map<string, Promise<EnvironmentCheckResult>>();
 
 /**
  * 单个 agent 的环境检测（封装为 Promise，供并行预热 + chat.message 复用）。
- * - venv 未就绪 → 返回 {ready: false, message: 安装提示}
- * - venv 就绪 → spawn detect_env.py check-preinstall <agent>
+ * 两层（checkDepsViaControl 内部串联，缺一不可）：
+ *   第一层 CLI：venv 缺失或必需包缺失 → install.sh 提示（此时控制台起不来）
+ *   第二层 API：控制台 /api/deps 五分类 → 有问题给 console_url 引导
+ * - venv 未就绪 → 返回 {ready: false, message: 安装提示}（venv 自举层）
  * - 任何异常 → catch 后返回 {ready: false, message: 异常信息}
- *
- * sessionID 传 "preheat"：预热时无真实 session，runDetectEnv 的 getTaskDir 返回 null，
- * buildDetectEnvArgs 不加 --output，detect_env.py 不写 taskDir/env.json。
- * .ai_env 文件不存在时由 detect_env.py 的 _ensure_ai_env_template 自动创建带注释模板。
  */
 function preheatEnvCheck(agent: string): Promise<EnvironmentCheckResult> {
   const pythonCmd = getPythonCmd();
   if (!pythonCmd) {
     return Promise.resolve({ ready: false, message: getInstallHint() });
   }
-  // 预热用 15s 超时（并行 6 个 detect_env 过程会竞争磁盘 I/O，
-  // angr/sage 等大型包的 find_spec 在冷缓存时可能超过 8s）
-  return runDetectEnv(agent, pythonCmd, "preheat", 30000).catch((e) => ({
+  return checkDepsViaControl(agent, "preheat", pythonCmd).catch((e) => ({
     ready: false,
     message: `[预热异常] ${agent}: ${(e as Error)?.message ?? String(e)}`,
   }));
@@ -863,7 +860,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   // mcp.add 又依赖同一个 Effect runtime → 死锁（实测 60s+ 卡住，无 McpManager 日志）。
   // vendor project/bootstrap.ts 也用 Effect.forkDetach 让 init() 是 fire-and-forget。
   //
-  // 时序保障：knowledge MCP 已改为 lifespan lazy 加载，握手从 15s 降到 ~5s；
+  // 时序保障：knowledge/events MCP 均 lifespan lazy 加载（握手 ~5s）；
   // fire-and-forget 后 ~7s 内 MCP 工具就可调用（实测）。
   // 错误隔离：mcp-manager.ts:registerOne 已 try/catch 单 server 失败。
   const mcpManager = new McpManager(client);
@@ -878,13 +875,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   startControlService();
 
   // ── 并行预热环境检测（fire-and-forget）──
-  // 启动时立即并行检测所有领域 agent + Coordinator 的环境。
-  // chat.message 命中 Promise cache 时直接 await（已完成则零开销）。
-  // venv 未就绪时 preheatEnvCheck 返回 {ready: false}，不 spawn。
-  const preheatAgents = [
-    ...SECURITY_ANALYSIS_AGENTS,
-    AGENT_SECURITY_COORDINATOR,
-  ];
+  const preheatAgents = [...SECURITY_ANALYSIS_AGENTS];
   for (const agent of preheatAgents) {
     envCheckPromises.set(agent, preheatEnvCheck(agent));
   }
@@ -961,38 +952,18 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         // 控制台启动成功后，预拉配置（供 shell.env hook 用）
         await getAllConfig();
 
-        // 2. 环境检测（三分支）：
-        //   1. 命中预热 cache（领域 agent + Coordinator）→ await Promise，失败时重新 set 异步重试
-        //   2. evolve/searcher/memorist → 只查 venv，不跑 runDetectEnv（它们的工作不依赖领域专用包）
-        //   3. 其他未识别 agent → 跳过
-        // 不 ready → 存错误信息到 sessionData + 终止（不 throw，不调 session.prompt）
+        // 2. 环境检测
         let envCheck: EnvironmentCheckResult | null = null;
 
         if (envCheckPromises.has(agent)) {
-          // 分支 1: 命中预热 cache
+          // 分支 1: 命中预热 cache（检测走控制台 /api/deps，判定在服务端）
           envCheck = await envCheckPromises.get(agent)!;
           if (!envCheck.ready) {
             // 失败时重新 set 异步 preheat（fire-and-forget），让用户修复后下次有机会重试
             envCheckPromises.set(agent, preheatEnvCheck(agent));
           }
-        } else if (
-          agent === AGENT_SECURITY_ANALYSIS_EVOLVE ||
-          agent === AGENT_SEARCHER ||
-          agent === AGENT_MEMORIST
-        ) {
-          // 分支 2: evolve/searcher/memorist → 只查 venv
-          const pythonCmd = getPythonCmd();
-          if (!pythonCmd) {
-            envCheck = { ready: false, message: getInstallHint() };
-          } else {
-            envCheck = null; // venv 就绪，无需检测
-            debugLog(
-              `chat.message: ${agent} 跳过 runDetectEnv（轻量路径，只查 venv）`,
-              sessionID,
-            );
-          }
         }
-        // 分支 3: 其他 agent → envCheck 保持 null，跳过环境检测
+        // 其他 agent → envCheck 保持 null，跳过环境检测
 
         if (envCheck && !envCheck.ready) {
           debugLog(

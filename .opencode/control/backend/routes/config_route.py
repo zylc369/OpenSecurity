@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services import config_store
+from routes.deps import invalidate_deps_snapshot
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -55,8 +56,9 @@ async def get_config_meta() -> dict[str, dict]:
 
 @router.get("/required-status")
 async def get_required_status() -> dict[str, dict]:
-    """获取必要配置完整性（前端 banner 用）。"""
-    return config_store.required_status()
+    """获取必要配置完整性（前端 banner 用，keyed dict 契约）。"""
+    from dataclasses import asdict
+    return {c.key: asdict(c) for c in config_store.required_status()}
 
 
 @router.get("/{key}")
@@ -71,16 +73,22 @@ async def get_config(key: str) -> dict[str, str]:
 @router.put("")
 async def update_configs(req: ConfigUpdate) -> dict[str, str]:
     """批量更新配置。"""
-    return config_store.write(req.configs)
+    result = config_store.write(req.configs)
+    invalidate_deps_snapshot()  # IDA_PRO_HOME 等影响工具检测项
+    return result
 
 
 @router.put("/{key}")
 async def update_config(key: str, req: SingleConfigUpdate) -> dict[str, str]:
     """更新单个配置。"""
-    return config_store.write_one(key, req.value)
+    result = config_store.write_one(key, req.value)
+    invalidate_deps_snapshot()
+    return result
 
 
 @router.delete("/{key}")
 async def delete_config(key: str) -> dict[str, str]:
     """删除单个配置。"""
-    return config_store.delete(key)
+    result = config_store.delete(key)
+    invalidate_deps_snapshot()
+    return result

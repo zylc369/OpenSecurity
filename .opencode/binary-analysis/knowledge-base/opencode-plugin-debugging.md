@@ -28,14 +28,14 @@ node --check .opencode/plugins/security-analysis.ts
 
 **验证 system.transform 是否生效**:
 
-1. 确保 `~/bw-security-analysis/env_cache.json` 存在（detect_env.py check-preinstall all 生成）
+1. 环境信息由 system.transform 每轮注入（plugin 启动即生效，无需任何前置文件）
 2. 切换到 BinaryAnalysis Agent（Tab 键）
 3. 让 Agent "描述一下当前的环境信息"
 4. 如果 Agent 能说出 IDA 路径、脚本目录、编译器信息 → `system.transform` 正常
 5. 如果 Agent 说"未看到环境信息" → `system.transform` 未生效
 
 **可能原因**:
-- `env_cache.json` 不存在 → 运行 `detect_env.py check-preinstall all` 生成
+- 环境变量缺失 → 查 plugin 日志中 system.transform 段；IDA_PRO_HOME 存于 $OPENCODE_ROOT/.ai_env
 - Plugin 文件不在 `.opencode/plugins/` 目录
 - Plugin 导出名称不是默认导出（应为 `export const SecurityAnalysisPlugin = ...`）
 
@@ -75,19 +75,15 @@ node --check .opencode/plugins/security-analysis.ts
 ### 问题: 环境信息未注入
 
 ```
-1. env_cache.json 是否存在？
-   → ~/bw-security-analysis/env_cache.json
-   → Windows: C:\Users\<用户名>\bw-security-analysis\env_cache.json
-   → 不存在则运行: $PYTHON_CMD "$SHARED_DIR/scripts/detect_env.py" check-preinstall all
+1. 控制台是否运行？
+   → 端口文件 ~/bw-security-analysis/.opencode-control.port 首行即端口
+   → curl http://127.0.0.1:<端口>/health 应返回 200
 
 2. IDA_PRO_HOME 是否配置？
-   → 检查 $OPENCODE_ROOT/.ai_env 含 IDA_PRO_HOME=<路径>
-   → 或系统环境变量 IDA_PRO_HOME
+   → grep '^IDA_PRO_HOME=' $OPENCODE_ROOT/.ai_env
+   → 配置后 shell.env 才会注入 $IDAT
 
-3. env_cache.json 是否含 ida_pro.idat_path？
-   → 同目录下，运行 detect_env.py 生成
-
-4. output.system 是否正确使用？
+3. output.system 是否正确使用？
    → 必须用 output.system.push(text)，不能是 output.system = text
 ```
 
@@ -144,7 +140,7 @@ oh-my-openagent 使用 `src/shared/logger.ts` 写日志，包含 hook 创建、�
 
 ### 场景 2: 环境信息测试
 
-1. 确认 `~/bw-security-analysis/env_cache.json` 存在（detect_env.py check-preinstall all 生成）
+1. 确认控制台健康（curl http://127.0.0.1:<端口>/health → 200）
 2. 切换到 BinaryAnalysis Agent
 3. 问"当前环境有哪些工具？"
 4. 验证：Agent 应列出 capstone、unicorn、gmpy2 等信息
@@ -162,7 +158,7 @@ oh-my-openagent 使用 `src/shared/logger.ts` 写日志，包含 hook 创建、�
 | 问题 | 原因 | 解决 |
 |------|------|------|
 | Plugin 语法检查通过但不生效 | 导出名称不匹配 | 确认 `export const SecurityAnalysisPlugin` |
-| 环境信息为空 | env_cache.json 不存在 | 运行 `detect_env.py check-preinstall all` 生成 |
+| 环境信息为空 | 控制台未启动或 IDA_PRO_HOME 未配置 | 控制台健康检查 + 配置页设置 IDA_PRO_HOME |
 | 压缩后环境信息/分析状态丢失 | compacting 未注入或 justCompacted 未触发 system.transform 重注入 | 检查 output.context.push() + session.justCompacted 标识 |
 | Agent 未在 Tab 列表中显示 | frontmatter 格式错误 | 检查 YAML --- 分隔符 |
 | Agent 加载但不读知识库 | prompt 中引用路径错误 | 确认使用 `$SHARED_DIR/knowledge-base/` |

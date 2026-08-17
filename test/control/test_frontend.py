@@ -145,10 +145,11 @@ def test_api_config_meta(control_server):
     assert d["DEEPSEEK_MODEL"]["default_value"] == "deepseek-v4-flash"
 
 
-def test_api_pippable_list(control_server):
-    """GET /api/install：白名单列表（前端行级安装按钮数据源）。"""
+def test_api_install_get_removed_and_post_guard(control_server):
+    """GET /api/install 已删除（白名单=唯一清单，前端数据源即依赖页自身）；
+    POST 白名单外包名 400 拒绝。"""
     r = httpx.get(f"http://127.0.0.1:{control_server}/api/install", timeout=5)
-    assert r.status_code == 200
-    pkgs = r.json()["packages"]
-    assert isinstance(pkgs, list) and len(pkgs) > 0
-    assert "frida" in pkgs
+    assert r.status_code == 404
+    bad = httpx.post(f"http://127.0.0.1:{control_server}/api/install",
+                     json={"package": "evil-pkg"}, timeout=5)
+    assert bad.status_code == 400

@@ -7,8 +7,8 @@ import { getControlPort } from "./control-manager";
 import { debugLog } from "./logging";
 
 // MCP server 定义：name → (server.py 路径, timeout)
-// 依赖声明在 mcp-servers/<name>/pyproject.toml 的 [tool.opensecurity].import_names
-// 这里不重复检测——server.py 启动失败时错误从 stderr 捕获
+// 依赖安装收口在 detect_py_deps.py 唯一清单（server 由 venv python 直跑）
+// 这里不检测依赖——server.py 启动失败时错误从 stderr 捕获
 const MCP_SERVERS = [
   {
     name: "knowledge",
@@ -19,6 +19,11 @@ const MCP_SERVERS = [
     name: "events",
     script: join(OPENCODE_ROOT, "mcp-servers", "events", "server.py"),
     timeout: 120000,
+  },
+  {
+    name: "ocr",
+    script: join(OPENCODE_ROOT, "mcp-servers", "ocr", "server.py"),
+    timeout: 60000, // 薄壳（模型在控制台），握手快；acquire 在 lifespan 内含首载余量
   },
 ] as const;
 

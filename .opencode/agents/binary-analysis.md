@@ -58,20 +58,17 @@ permission:
 bash:
 ```bash
 IDA_OUTPUT="$TASK_DIR/initial.json" \
-IDA_ENV_JSON="$HOME/bw-security-analysis/env_cache.json" \
-  "$IDAT" -A -S"$AGENT_DIR/scripts/initial_analysis.py" -L"$TASK_DIR/initial.log" "<目标文件>"
+  "$IDAT" -A -S"$SHARED_DIR/scripts/initial_analysis.py" -L"$TASK_DIR/initial.log" "<目标文件>"
 ```
 
 PowerShell:
 ```powershell
 $env:IDA_OUTPUT="$TASK_DIR\initial.json"
-$env:IDA_ENV_JSON="$HOME\bw-security-analysis\env_cache.json"
-& "$IDAT" -A "-S$AGENT_DIR\scripts\initial_analysis.py" "-L$TASK_DIR\initial.log" "<目标文件>"
+& "$IDAT" -A "-S$SHARED_DIR\scripts\initial_analysis.py" "-L$TASK_DIR\initial.log" "<目标文件>"
 Remove-Item Env:\IDA_OUTPUT
-Remove-Item Env:\IDA_ENV_JSON
 ```
 
-读取输出 JSON，获取：segments、entry_points、imports、strings、packer_detect、scene 分类。
+读取 `$TASK_DIR/initial.json`（数据；各字段自带 description 说明用途与场景判断用法）与 `$TASK_DIR/initial.log`（idat 运行日志，失败时诊断用）。**场景判断由你完成**：根据导入表（内核 API/GUI API/密码学符号）、字符串特征（算法名/常量/错误提示）、packer_detect 结论，判断目标属于哪个场景（加壳/密码学/GUI/内核驱动/普通），据此进入阶段 B 对应方案模板。
 
 **调用前必须执行预检查**（文件存在性 + 数据库锁检测），具体脚本见 `knowledge-base/templates.md`。
 
@@ -210,12 +207,6 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 ### 沉淀脚本
 
 检查 `$AGENT_DIR/scripts/registry.json`。调用方式和参数模板见 `knowledge-base/templates.md`。
-
-### 环境检测脚本
-
-```bash
-$PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" check-preinstall all --output "$TASK_DIR/env.json"
-```
 
 ### GUI 自动化工具
 

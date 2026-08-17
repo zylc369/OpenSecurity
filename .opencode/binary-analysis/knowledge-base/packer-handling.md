@@ -242,7 +242,7 @@ $PYTHON_CMD "$SHARED_DIR/scripts/frida_unpack.py" <目标二进制> -o "$TASK_DI
    ```
    **注意**：此处用 `initial_analysis.py` 而非 `query.py`，以便一次性获取解壳后的完整信息
 2. 读取输出 JSON，获取解壳后的场景分类
-3. 根据新的 scene_tags 进入对应的分析方案（`analysis-planning.md`）
+3. 根据解壳后的信号（imports/strings/packer_detect）重新判断场景，进入对应分析方案（判断表见 `analysis-planning.md`）
 4. 脱壳机/dump 脚本保留在 `$TASK_DIR/`
 
 ## 禁止操作（加壳版本上）

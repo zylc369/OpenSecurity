@@ -1,9 +1,6 @@
 """Docker 操作收口模块。
 
-迁移自 detect_env.py（_check_docker_binary_and_daemon / _check_container_status /
-_check_image_exists）和 events/server.py（_pull_image_with_progress / _ensure_neo4j_container_blocking）。
-
-其他模块禁止直接 subprocess 调 docker CLI（grep 唯一性）。
+其他模块禁止直接 subprocess 调 docker CLI（grep 唯一性，本模块是 Docker 操作的唯一入口）。
 
 控制台管理的容器/镜像清单在 KNOWN_CONTAINERS / KNOWN_IMAGES 常量中，
 后续增加新容器/镜像只改这里，不需要改业务代码。
@@ -13,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import AsyncIterator
 
 
@@ -63,6 +60,56 @@ KNOWN_IMAGES: list[KnownImage] = [
 # ─── Docker CLI 封装 ─────────────────────────────────────
 
 
+@dataclass
+class DockerRuntime:
+    """Docker 整体运行状态。"""
+    installed: bool
+    daemon_running: bool
+
+    @classmethod
+    def check(cls) -> "DockerRuntime":
+        installed = is_docker_installed()
+        return cls(installed=installed,
+                   daemon_running=is_daemon_running() if installed else False)
+
+
+@dataclass
+class ContainerItem:
+    """受管容器状态。"""
+    name: str
+    image: str
+    description: str
+    status: str               # running / exited / missing / ...
+    auto_start: bool
+
+
+@dataclass
+class ImageItem:
+    """受管镜像状态。"""
+    name: str
+    description: str
+    size_hint: str
+    pulled: bool
+
+
+@dataclass
+class DockerGlobal:
+    """Docker 全局扫描结果（容器 + 镜像）。"""
+    docker: DockerRuntime
+    containers: list[ContainerItem] = field(default_factory=list)
+    images: list[ImageItem] = field(default_factory=list)
+
+    @classmethod
+    def unavailable(cls) -> "DockerGlobal":
+        """Docker 未安装/daemon 未运行时的降级结果。"""
+        return cls(docker=DockerRuntime(installed=False, daemon_running=False))
+
+    @property
+    def operational(self) -> bool:
+        """Docker 已安装且 daemon 运行（可查容器/镜像）。"""
+        return self.docker.installed and self.docker.daemon_running
+
+
 def _run_docker(args: list[str], timeout: int = 10) -> subprocess.CompletedProcess:
     """执行 docker 命令，返回 CompletedProcess。失败抛 CalledProcessError。"""
     return subprocess.run(
@@ -85,12 +132,9 @@ def is_daemon_running() -> bool:
         return False
 
 
-def check_status() -> dict:
-    """返回 Docker 整体状态。"""
-    return {
-        "installed": is_docker_installed(),
-        "daemon_running": is_daemon_running() if is_docker_installed() else False,
-    }
+def check_status() -> DockerRuntime:
+    """返回 Docker 整体运行状态。"""
+    return DockerRuntime.check()
 
 
 # ─── 容器操作 ─────────────────────────────────────────────
@@ -234,39 +278,24 @@ async def pull_image_stream(name: str) -> AsyncIterator[str]:
 # ─── 扫描协调（供 scanner.py 调用）───────────────────────
 
 
-def scan_global() -> dict:
-    """扫描 Docker 全局状态（容器 + 镜像），供 scanner.py 调用。"""
-    docker_ok = check_status()
-    if not docker_ok["installed"]:
-        return {
-            "docker": {"installed": False, "daemon_running": False},
-            "containers": [],
-            "images": [],
-        }
+def scan_global() -> DockerGlobal:
+    """扫描 Docker 全局状态（容器 + 镜像），供 scanner.py / deps 快照调用。"""
+    runtime = DockerRuntime.check()
+    if not runtime.installed:
+        return DockerGlobal.unavailable()
 
-    containers = []
-    for spec in KNOWN_CONTAINERS:
-        status = get_container_status(spec.name)
-        containers.append({
-            "name": spec.name,
-            "image": spec.image,
-            "description": spec.description,
-            "status": status,
-            "auto_start": spec.auto_start,
-        })
-
-    images = []
-    for spec in KNOWN_IMAGES:
-        exists = image_exists(spec.name)
-        images.append({
-            "name": spec.name,
-            "description": spec.description,
-            "size_hint": spec.size_hint,
-            "pulled": bool(exists),
-        })
-
-    return {
-        "docker": docker_ok,
-        "containers": containers,
-        "images": images,
-    }
+    containers = [
+        ContainerItem(
+            name=spec.name, image=spec.image, description=spec.description,
+            status=get_container_status(spec.name), auto_start=spec.auto_start,
+        )
+        for spec in KNOWN_CONTAINERS
+    ]
+    images = [
+        ImageItem(
+            name=spec.name, description=spec.description,
+            size_hint=spec.size_hint, pulled=bool(image_exists(spec.name)),
+        )
+        for spec in KNOWN_IMAGES
+    ]
+    return DockerGlobal(docker=runtime, containers=containers, images=images)

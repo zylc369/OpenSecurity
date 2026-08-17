@@ -16,6 +16,51 @@ from dataclasses import dataclass
 
 import psutil
 
+from config import DATA_DIR
+
+@dataclass(frozen=True)
+class ModelCacheState:
+    """模型缓存查询结果。"""
+    cached: bool
+    path: str | None             # 缓存路径或状态说明（如 mlx-env 缺失提示）
+    size_gb: float
+
+
+@dataclass(frozen=True)
+class HardwareAssessment:
+    """硬件适配评估。ok=False 时 reasons 说明缺什么。"""
+    ok: bool
+    reasons: tuple[str, ...]
+    notes: tuple[str, ...]
+    available_gb: float
+
+
+@dataclass(frozen=True)
+class DownloadView:
+    """下载状态视图（前端展示）。"""
+    status: str                  # idle / downloading / done / error
+    progress: float              # 0~1
+    error: str
+
+
+@dataclass(frozen=True)
+class ModelAssetStatus:
+    """模型资产状态（/api/models 与 deps 快照的数据单元）。"""
+    id: str
+    repo_id: str
+    type: str                    # embedder / reranker / ocr
+    display: str
+    purpose: str
+    min_free_gb: float
+    disk_gb: float
+    cached: bool
+    cache_path: str | None
+    size_gb: float
+    loaded: bool
+    hardware: HardwareAssessment
+    download: DownloadView
+
+
 # ─── 模型清单（唯一维护点）────────────────────────────────
 # min_free_gb: 加载该模型所需的最小可用内存（GB，粗粒度门槛）
 # disk_gb:     权重磁盘占用的参考值（GB，进度估算用）
@@ -25,11 +70,14 @@ import psutil
 class ModelAsset:
     id: str
     repo_id: str
-    type: str            # embedder / reranker
+    type: str            # embedder / reranker / ocr
     display: str
     purpose: str
     min_free_gb: float
     disk_gb: float
+    # ocr 平台差异：mac(apple silicon)=MLX/HF；win/linux=Ollama。
+    # 空 = 全平台 HF 下载（embedder/reranker）
+    ollama_model: str = ""
 
 
 MODELS: list[ModelAsset] = [
@@ -51,6 +99,16 @@ MODELS: list[ModelAsset] = [
         min_free_gb=4.0,
         disk_gb=2.2,
     ),
+    ModelAsset(
+        id="glm-ocr",
+        repo_id="mlx-community/GLM-OCR-4bit",
+        type="ocr",
+        display="GLM-OCR (0.9B)",
+        purpose="本地图像文字识别（ocr MCP 后端；mac=MLX / 其他=Ollama）",
+        min_free_gb=4.0,
+        disk_gb=1.2,
+        ollama_model="glm-ocr",
+    ),
 ]
 
 # ─── 下载状态管理（进程内全局，线程安全）─────────────────────
@@ -64,6 +122,23 @@ class DownloadState:
 _states: dict[str, DownloadState] = {m.id: DownloadState() for m in MODELS}
 _lock = threading.Lock()
 
+# 下载完成/失败时的变更回调（deps 快照失效等消费方注册；service 不 import routes）
+_change_callbacks: list = []
+
+
+def add_change_callback(fn) -> None:
+    """注册变更回调（下载完成时调用，参数 model_id）。幂等注册。"""
+    if fn not in _change_callbacks:
+        _change_callbacks.append(fn)
+
+
+def _notify_change(model_id: str) -> None:
+    for fn in list(_change_callbacks):
+        try:
+            fn(model_id)
+        except Exception:
+            pass  # 回调异常不干扰下载流程
+
 
 def _hf_endpoint() -> str:
     """HF 端点：环境变量 > .ai_env > 官方默认。"""
@@ -72,57 +147,91 @@ def _hf_endpoint() -> str:
     return val.strip() or "https://huggingface.co"
 
 
-def _is_cached(repo_id: str) -> tuple[bool, str | None, float]:
-    """查询缓存状态。返回 (cached, cache_path, size_gb)。"""
+def _is_cached(repo_id: str) -> ModelCacheState:
+    """查询 HF 缓存状态。"""
     try:
         from huggingface_hub import scan_cache_dir
         info = scan_cache_dir()
         for repo in info.repos:
             if repo.repo_id == repo_id:
-                return True, str(repo.repo_path), round(repo.size_on_disk / 1024**3, 2)
+                return ModelCacheState(True, str(repo.repo_path),
+                                       round(repo.size_on_disk / 1024**3, 2))
     except Exception:
         pass
-    return False, None, 0.0
+    return ModelCacheState(False, None, 0.0)
 
 
-def _hardware_assessment(model: ModelAsset) -> dict:
+def _ocr_cache_state(model: ModelAsset) -> ModelCacheState:
+    """OCR 模型缓存状态（平台分支）。
+
+    mac(apple silicon): mlx-env Python 存在 + HF 缓存快照 → cached
+    其他平台:          Ollama /api/tags 有 glm-ocr → cached
+    """
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        mlx_py = os.path.join(DATA_DIR, "mlx-env", "bin", "python")
+        hf = _is_cached(model.repo_id)
+        if hf.cached and os.path.isfile(mlx_py):
+            return hf
+        if hf.cached and not os.path.isfile(mlx_py):
+            return ModelCacheState(False, "模型已缓存但 mlx-env 缺失（下载按钮会补装环境）", hf.size_gb)
+        return ModelCacheState(False, None, 0.0)
+    # win/linux/intel-mac → Ollama
+    try:
+        import httpx
+        r = httpx.get("http://127.0.0.1:11434/api/tags", timeout=3.0)
+        names = [m.get("name", "") for m in r.json().get("models", [])]
+        hit = next((m for m in names if m.split(":")[0] == model.ollama_model), None)
+        if hit:
+            return ModelCacheState(True, f"ollama:{hit}", 2.2)
+        return ModelCacheState(False, None, 0.0)
+    except (httpx.HTTPError, ValueError):
+        return ModelCacheState(False, None, 0.0)
+
+
+def _ocr_loaded_state() -> bool:
+    """OCR 模型当前是否在内存（引用计数服务的运行状态）。"""
+    try:
+        from services import ocr_service
+        return ocr_service.status().state == "ready"
+    except Exception:
+        return False
+
+
+def _hardware_assessment(model: ModelAsset) -> HardwareAssessment:
     """硬件适配评估。ok=False 时 reasons 说明缺什么。"""
     reasons: list[str] = []
     avail = round(psutil.virtual_memory().available / 1024**3, 1)
     if avail < model.min_free_gb:
         reasons.append(f"可用内存 {avail}GB 低于加载所需 {model.min_free_gb}GB（关闭占内存的应用后重试）")
-    notes = []
+    notes: list[str] = []
     if platform.system() == "Darwin" and platform.machine() == "arm64":
         notes.append("Apple Silicon · Metal 加速可用")
-    return {"ok": not reasons, "reasons": reasons, "notes": notes, "available_gb": avail}
+    return HardwareAssessment(ok=not reasons, reasons=tuple(reasons),
+                              notes=tuple(notes), available_gb=avail)
 
 
-def get_model_assets() -> list[dict]:
-    """全部模型资产状态（/api/models 与 /api/scan.models 的数据源）。"""
+def get_model_assets() -> list[ModelAssetStatus]:
+    """全部模型资产状态（/api/models 与 deps 快照的数据源）。"""
     from services import model_loader
     ready = model_loader.is_models_ready()
 
-    result = []
+    result: list[ModelAssetStatus] = []
     for m in MODELS:
-        cached, cache_path, size_gb = _is_cached(m.repo_id)
+        if m.type == "ocr":
+            cache = _ocr_cache_state(m)
+            loaded = _ocr_loaded_state()
+        else:
+            cache = _is_cached(m.repo_id)
+            loaded = ready
         with _lock:
             st = _states[m.id]
-            download = {"status": st.status, "progress": st.progress, "error": st.error}
-        result.append({
-            "id": m.id,
-            "repo_id": m.repo_id,
-            "type": m.type,
-            "display": m.display,
-            "purpose": m.purpose,
-            "min_free_gb": m.min_free_gb,
-            "disk_gb": m.disk_gb,
-            "cached": cached,
-            "cache_path": cache_path,
-            "size_gb": size_gb,
-            "loaded": ready,          # embedder/reranker 同源就绪标志（B 方案）
-            "hardware": _hardware_assessment(m),
-            "download": download,
-        })
+            download = DownloadView(status=st.status, progress=st.progress, error=st.error)
+        result.append(ModelAssetStatus(
+            id=m.id, repo_id=m.repo_id, type=m.type, display=m.display,
+            purpose=m.purpose, min_free_gb=m.min_free_gb, disk_gb=m.disk_gb,
+            cached=cache.cached, cache_path=cache.path, size_gb=cache.size_gb,
+            loaded=loaded, hardware=_hardware_assessment(m), download=download,
+        ))
     return result
 
 
@@ -155,6 +264,12 @@ def start_download(model_id: str) -> bool:
         _states[model.id].progress = 0.0
         _states[model.id].error = ""
 
+    if model.type == "ocr":
+        threading.Thread(
+            target=_ocr_download_worker, args=(model,), daemon=True, name=f"model-dl-{model.id}"
+        ).start()
+        return True
+
     threading.Thread(
         target=_download_worker, args=(model,), daemon=True, name=f"model-dl-{model.id}"
     ).start()
@@ -162,6 +277,83 @@ def start_download(model_id: str) -> bool:
         target=_progress_poller, args=(model,), daemon=True, name=f"model-dl-progress-{model.id}"
     ).start()
     return True
+
+
+def _ocr_download_worker(model: ModelAsset) -> None:
+    """OCR 模型下载（平台分支）。
+
+    mac(apple silicon):
+      1. 确保 mlx-env（venv + pip install mlx-vlm==0.6.13，幂等）
+      2. HF snapshot_download 拉模型权重
+    其他平台: ollama pull glm-ocr（Ollama 未安装/未运行则报错提示）
+    """
+    import subprocess
+    import sys
+
+    def _fail(msg: str):
+        with _lock:
+            _states[model.id].status = "error"
+            _states[model.id].error = msg
+
+    def _done():
+        with _lock:
+            _states[model.id].status = "done"
+            _states[model.id].progress = 1.0
+        _notify_change(model.id)
+
+    try:
+        if platform.system() == "Darwin" and platform.machine() == "arm64":
+            # 1. mlx-env 幂等确保
+            mlx_env = os.path.join(DATA_DIR, "mlx-env")
+            mlx_py = os.path.join(mlx_env, "bin", "python")
+            if not os.path.isfile(mlx_py):
+                r = subprocess.run(
+                    [sys.executable, "-m", "venv", mlx_env],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if r.returncode != 0:
+                    return _fail(f"创建 mlx-env 失败: {r.stderr[-200:]}")
+                r = subprocess.run(
+                    [mlx_py, "-m", "pip", "install", "-q", "mlx-vlm==0.6.13"],
+                    capture_output=True, text=True, timeout=1800,
+                )
+                if r.returncode != 0:
+                    return _fail(f"安装 mlx-vlm 失败: {r.stderr[-200:]}")
+            # 2. 模型权重（复用 _download_worker 的子进程下载机制：offline 标志剥离）
+            endpoint = _hf_endpoint()
+            env = {
+                k: v for k, v in os.environ.items()
+                if k not in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+            }
+            env["HF_ENDPOINT"] = endpoint
+            script = (
+                "from huggingface_hub import snapshot_download; "
+                f"snapshot_download(repo_id={model.repo_id!r}, endpoint={endpoint!r})"
+            )
+            r = subprocess.run(
+                [sys.executable, "-c", script],
+                env=env, capture_output=True, text=True, timeout=7200,
+            )
+            if r.returncode == 0:
+                _done()
+            else:
+                _fail(r.stderr.strip()[-400:] or f"退出码 {r.returncode}")
+        else:
+            r = subprocess.run(
+                ["ollama", "pull", model.ollama_model],
+                capture_output=True, text=True, timeout=7200,
+            )
+            if r.returncode == 0:
+                _done()
+            else:
+                _fail(
+                    (r.stderr.strip()[-300:] or f"退出码 {r.returncode}")
+                    + "（需先安装并运行 Ollama：https://ollama.com）"
+                )
+    except subprocess.TimeoutExpired:
+        _fail("下载超时")
+    except OSError as e:
+        _fail(f"执行异常: {e}")
 
 
 def _download_worker(model: ModelAsset) -> None:

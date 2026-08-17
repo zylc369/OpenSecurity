@@ -53,7 +53,7 @@ Key design decision: **the LLM never operates GUIs directly**. All IDA operation
 | IDA Pro | 7.6+ | Required for binary reverse engineering (only `binary-analysis` / `mobile-analysis`) |
 | C/C++ compiler | any | For compute-intensive tasks (macOS: clang / Linux: gcc / Windows: VS Build Tools) |
 
-Mobile / Web / AI security analysis also require domain-specific tools (Frida, apktool, jadx, Playwright...). `detect_env.py` auto-detects them on first run and provides installation guidance.
+Mobile / Web / AI security analysis also require domain-specific tools (Frida, apktool, jadx, Playwright...). Before each message, the plugin checks the environment via the control backend (Python packages / external tools / compiler / Docker / models), blocking the conversation with a console link when required dependencies are missing — install them with one click in the console.
 
 ### Installation
 
@@ -77,14 +77,17 @@ ln -s "$(pwd)/.opencode" ~/.config/opencode
 
 ### Configure IDA Pro
 
-IDA Pro path is specified via the `IDA_PRO_HOME` environment variable (IDA Pro install directory). detect_env.py checks `$OPENCODE_ROOT/.ai_env` on each run, creating a template if absent; fill in the IDA install directory:
+IDA Pro path is specified via `IDA_PRO_HOME` (IDA Pro install directory). Either:
+
+- Open the console (auto-started after the first message) and set `IDA_PRO_HOME` on the config page
+- Or edit `$OPENCODE_ROOT/.ai_env` (a commented template is created on first console start):
 
 ```ini
 # $OPENCODE_ROOT/.ai_env
 IDA_PRO_HOME=<IDA Pro install directory>
 ```
 
-You can also set the system environment variable `IDA_PRO_HOME` (takes precedence over .ai_env). detect_env.py auto-detects IDA Pro, compiler, Python packages, and external tools, writing results to `~/bw-security-analysis/env_cache.json`.
+Once configured, the plugin injects `$IDAT` (full idat path) into the agent shell. Environment status (IDA / compiler / Python packages / external tools) is visible on the console dashboard.
 
 ### Your First Analysis
 
@@ -117,7 +120,6 @@ The agent autonomously completes: information gathering → analysis planning �
 | [Project Deep Dive](docs/项目介绍/open-security-介绍.md) | Design philosophy, architecture details, counterintuitive decisions |
 | [Adding a New Agent](docs/contributing/add-new-agent.md) | Extending the platform with new security domains |
 | [Roadmap](docs/ROADMAP.en.md) | Project roadmap and future directions |
-| [Environment Setup](https://github.com/zylc369/OpenSecurity/blob/main/.opencode/binary-analysis/environment-setup.md) | Toolchain installation guide per platform |
 | [Plugin Development](https://github.com/zylc369/OpenSecurity/blob/main/.opencode/binary-analysis/knowledge-base/opencode-plugin-development-guide.md) | OpenCode Plugin engineering practices |
 | [IDAPython Conventions](https://github.com/zylc369/OpenSecurity/blob/main/.opencode/binary-analysis/knowledge-base/idapython-conventions.md) | Tool script coding standards |
 

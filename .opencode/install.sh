@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # OpenSecurity 一键安装 (macOS / Linux)
 # 用法: bash .opencode/install.sh
-# 逻辑全在 detect_env.py install（跨平台），此脚本只负责找到 Python 并启动它。
+# 逻辑全在 detect_py_deps.py install（跨平台），此脚本只负责找到 Python 并启动它。
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,4 +20,10 @@ if [[ -z "$PYTHON" ]]; then
     exit 1
 fi
 
-exec "$PYTHON" "${SCRIPT_DIR}/binary-analysis/scripts/detect_env.py" install
+# 本脚本不接收参数（安装内容固定：全部必需依赖）
+if [[ $# -gt 0 ]]; then
+    echo "错误：install.sh 不接收参数（收到: $*）。" >&2
+    exit 1
+fi
+
+exec "$PYTHON" "${SCRIPT_DIR}/control/backend/services/detect_py_deps.py" install

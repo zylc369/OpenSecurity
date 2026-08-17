@@ -130,7 +130,9 @@ permission:
 |------|------|
 | `$SHARED_DIR/query.py` | IDA 数据库查询（反编译、反汇编、xrefs 等） |
 | `$SHARED_DIR/update.py` | IDA 数据库更新（重命名、注释） |
-| `$SHARED_DIR/scripts/initial_analysis.py` | 初始分析流水线 |
+| `$SHARED_DIR/scripts/initial_analysis.py` | 初始分析流水线（信息收集，各输出字段自带 description 说明用途与场景判断信号） |
+
+**.so 分析的标准起手**：先跑 `initial_analysis.py`（命令模板见 `$SHARED_DIR/knowledge-base/templates.md`），读输出的 description 判断场景（JNI 导出/arm64 无符号/加壳等），再按 `$SHARED_DIR/knowledge-base/analysis-planning.md` 的对应模板规划分析。
 
 > IDA 脚本的完整用法参考 `$SHARED_DIR/knowledge-base/templates.md`。
 
