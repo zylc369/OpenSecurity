@@ -1,17 +1,19 @@
 /**
- * 模型分区：模型资产卡（缓存状态/路径/硬件适配/下载；OCR 卡含运行状态/停止）。
+ * 模型分区：模型资产矩形块（按类型分组，组内每行两个）。
  *
  * 数据：App 的 useModels 统一拉取传入（下载中时 App 层轮询）。
  * OCR 的 loaded = 控制台 OCR 服务 state==="ready"（后端 get_model_assets 计算）。
+ *
+ * 布局：全局两列网格（类型由块上彩色 Tag 标识）；块内长文本（路径/用途/硬件说明）
+ * 截断显示，悬浮显示全量（Typography ellipsis tooltip）。
  */
 import React from "react";
-import { Card, Tag, Button, Progress, Typography, Space, Descriptions, Alert } from "antd";
+import { Card, Tag, Button, Progress, Typography, Space, Alert, Row, Col } from "antd";
 import { CloudDownloadOutlined, CheckCircleOutlined, PoweroffOutlined } from "@ant-design/icons";
 import type { ModelAsset } from "../types";
 
 interface Props {
   models: ModelAsset[] | undefined;
-  hfCacheDir: string | undefined;
   onDownload: (id: string) => void;
   onRelease: () => void;   // OCR 强制释放（停止按钮）
 }
@@ -22,69 +24,74 @@ const TYPE_META: Record<string, { color: string; label: string }> = {
   ocr: { color: "geekblue", label: "OCR" },
 };
 
-const ModelCard: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; onRelease: () => void }> = ({ m, onDownload, onRelease }) => {
+const ellipsis = { tooltip: true } as const;
+
+const ModelBlock: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; onRelease: () => void }> = ({ m, onDownload, onRelease }) => {
   const hw = m.hardware;
   const dl = m.download;
   const typeMeta = TYPE_META[m.type] ?? { color: "default", label: m.type };
 
   return (
-    <Card size="small" style={{ marginBottom: 0 }}>
-      <Space direction="vertical" size={8} style={{ width: "100%" }}>
-        <Space wrap>
-          <Typography.Text strong style={{ fontSize: 14 }}>{m.display}</Typography.Text>
-          <Tag color={typeMeta.color}>{typeMeta.label}</Tag>
+    <Card size="small" style={{ height: "100%" }} bodyStyle={{ padding: "10px 12px" }}>
+      <Space direction="vertical" size={6} style={{ width: "100%" }}>
+        {/* 标题行：名称（截断+悬浮全量）+ 类型/状态 Tag */}
+        <Space size={6} style={{ width: "100%" }}>
+          <Typography.Text strong ellipsis={ellipsis} style={{ fontSize: 13, maxWidth: 130 }}>
+            {m.display}
+          </Typography.Text>
+          <Tag color={typeMeta.color} style={{ marginInlineEnd: 0 }}>{typeMeta.label}</Tag>
           {m.cached ? (
-            <Tag icon={<CheckCircleOutlined />} color="success">磁盘 {m.size_gb}GB</Tag>
+            <Tag icon={<CheckCircleOutlined />} color="success" style={{ marginInlineEnd: 0 }}>{m.size_gb}GB</Tag>
           ) : (
-            <Tag color="warning">未下载</Tag>
+            <Tag color="warning" style={{ marginInlineEnd: 0 }}>未下载</Tag>
           )}
-          {m.type === "ocr" ? (
-            m.loaded && <Tag color="processing">运行中</Tag>
-          ) : (
-            m.loaded && <Tag color="processing">已加载</Tag>
+          {m.loaded && (
+            <Tag color="processing" style={{ marginInlineEnd: 0 }}>
+              {m.type === "ocr" ? "运行中" : "已加载"}
+            </Tag>
           )}
           {m.type === "ocr" && m.loaded && (
             <Button
-              size="small"
-              icon={<PoweroffOutlined />}
-              onClick={onRelease}
-              title="释放 OCR 模型内存（下次使用自动重载）"
-            >
-              停止
-            </Button>
+              size="small" type="text" danger icon={<PoweroffOutlined />}
+              onClick={onRelease} title="释放 OCR 模型内存（下次使用自动重载）"
+            />
           )}
         </Space>
 
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {m.purpose} · {m.repo_id} · 磁盘参考 {m.disk_gb}GB
+        {/* 用途 + 仓库（截断，悬浮全量） */}
+        <Typography.Text type="secondary" ellipsis={ellipsis} style={{ fontSize: 12 }}>
+          {m.purpose}
+        </Typography.Text>
+        <Typography.Text type="secondary" ellipsis={ellipsis} style={{ fontSize: 12 }}>
+          {m.repo_id} · 参考 {m.disk_gb}GB
         </Typography.Text>
 
+        {/* 缓存路径（截断，悬浮全量；未下载不显示） */}
         {m.cached && m.cache_path && (
-          <Typography.Text code style={{ fontSize: 12 }}>{m.cache_path}</Typography.Text>
+          <Typography.Text code ellipsis={ellipsis} style={{ fontSize: 11, maxWidth: "100%" }}>
+            {m.cache_path}
+          </Typography.Text>
         )}
 
         {/* 硬件适配结论 */}
         {hw.ok ? (
-          <Typography.Text type="success" style={{ fontSize: 12 }}>
-            ✓ 硬件满足（可用内存 {hw.available_gb}GB ≥ 需求 {m.min_free_gb}GB）
+          <Typography.Text type="success" ellipsis={ellipsis} style={{ fontSize: 12 }}>
+            ✓ 硬件满足（可用 {hw.available_gb}GB ≥ 需求 {m.min_free_gb}GB）
             {hw.notes.length > 0 && ` · ${hw.notes.join(" · ")}`}
           </Typography.Text>
         ) : (
-          <Alert
-            type="error" showIcon style={{ padding: "4px 12px" }}
-            message={hw.reasons.join("；")}
-          />
+          <Alert type="error" showIcon style={{ padding: "2px 8px", fontSize: 12 }}
+            message={<Typography.Text ellipsis={ellipsis} style={{ fontSize: 12 }}>{hw.reasons.join("；")}</Typography.Text>} />
         )}
 
-        {/* 下载进度 / 错误 */}
+        {/* 下载进度 / 错误 / 按钮 */}
         {dl.status === "downloading" && (
-          <Progress percent={Math.round(dl.progress * 100)} status="active" size="small"
-            format={(p) => `${p}%`} />
+          <Progress percent={Math.round(dl.progress * 100)} status="active" size="small" format={(p) => `${p}%`} />
         )}
         {dl.status === "error" && (
-          <Alert type="error" showIcon style={{ padding: "4px 12px" }} message={dl.error} />
+          <Alert type="error" showIcon style={{ padding: "2px 8px" }}
+            message={<Typography.Text ellipsis={ellipsis} style={{ fontSize: 12 }}>{dl.error}</Typography.Text>} />
         )}
-
         {!m.cached && dl.status !== "downloading" && (
           <div>
             <Button size="small" type="primary" icon={<CloudDownloadOutlined />}
@@ -100,22 +107,17 @@ const ModelCard: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; onR
   );
 };
 
-const ModelsSection: React.FC<Props> = ({ models, hfCacheDir, onDownload, onRelease }) => {
+const ModelsSection: React.FC<Props> = ({ models, onDownload, onRelease }) => {
   if (!models) return <Typography.Text type="secondary">加载中…</Typography.Text>;
 
   return (
-    <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      {hfCacheDir && (
-        <Descriptions size="small" column={1} style={{ marginBottom: 0 }}>
-          <Descriptions.Item label="缓存目录">
-            <Typography.Text code style={{ fontSize: 12 }}>{hfCacheDir}</Typography.Text>
-          </Descriptions.Item>
-        </Descriptions>
-      )}
+    <Row gutter={[8, 8]}>
       {models.map((m) => (
-        <ModelCard key={m.id} m={m} onDownload={onDownload} onRelease={onRelease} />
+        <Col key={m.id} xs={24} md={12}>
+          <ModelBlock m={m} onDownload={onDownload} onRelease={onRelease} />
+        </Col>
       ))}
-    </Space>
+    </Row>
   );
 };
 

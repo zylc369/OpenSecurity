@@ -30,12 +30,15 @@ import {
   ThunderboltOutlined,
   DesktopOutlined,
   ReloadOutlined,
+  PoweroffOutlined,
 } from "@ant-design/icons";
+import { Popconfirm } from "antd";
 import DockerSection from "./sections/DockerSection";
 import ModelsSection from "./sections/ModelsSection";
 import PythonDepsSection from "./sections/PythonDepsSection";
 import ToolsSection from "./sections/ToolsSection";
 import ConfigSection from "./sections/ConfigSection";
+import ProcessSection from "./sections/ProcessSection";
 import InstallOrchestrator, {
   InstallTask,
 } from "./sections/InstallOrchestrator";
@@ -116,6 +119,53 @@ const App: React.FC = () => {
     models.refresh();
     required.refresh();
   }, [scan, models, required]);
+
+  // ── 控制台自重启（页面按钮；execv 替换进程，前端轮询 boot_token 判定完成）──
+  const [restarting, setRestarting] = useState(false);
+
+  const fetchHealthToken = useCallback(async (): Promise<string | null> => {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 2500);
+      const r = await fetch("/api/health", { signal: ctrl.signal });
+      clearTimeout(t);
+      if (!r.ok && r.status !== 503) return null; // 503 = 实例活着但模型加载中
+      const d = (await r.json()) as { boot_token?: unknown };
+      return typeof d.boot_token === "string" ? d.boot_token : null;
+    } catch {
+      return null; // exec 间隙连接拒绝
+    }
+  }, []);
+
+  const doRestart = useCallback(async () => {
+    if (restarting) return;
+    const before = await fetchHealthToken();
+    try {
+      await api.restartConsole();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    setRestarting(true);
+    const deadline = Date.now() + 120_000;
+    const poll = async () => {
+      if (Date.now() > deadline) {
+        setRestarting(false);
+        message.error("重启超时（120s）——请检查控制台进程状态");
+        return;
+      }
+      const tok = await fetchHealthToken();
+      if (tok != null && tok !== before) {
+        setRestarting(false);
+        message.success("重启完成，新代码已生效");
+        refreshAll();
+        return;
+      }
+      setTimeout(() => void poll(), 2000);
+    };
+    setTimeout(() => void poll(), 3000); // 跳过 exec 延迟窗（1.5s exec + Python 启动）
+  }, [restarting, fetchHealthToken, message, refreshAll]);
+
 
   // ─── 缺失对象（安装编排用；计数展示一律走 readiness 单一源）───
   const toolsMissing = useMemo(
@@ -561,6 +611,24 @@ const App: React.FC = () => {
               onClick={() => refreshAll()}
             />
           </Tooltip>
+          <Popconfirm
+            title="重启控制台？"
+            description="接口断开数秒、模型重载需几十秒；用于让最新代码生效"
+            okText="重启"
+            cancelText="取消"
+            onConfirm={() => void doRestart()}
+            disabled={restarting}
+          >
+            <Tooltip title={restarting ? "重启中…等待新实例就绪" : "重启控制台（让最新代码生效）"}>
+              <Button
+                size="small"
+                type="text"
+                danger={restarting}
+                icon={<PoweroffOutlined spin={restarting} />}
+                disabled={restarting}
+              />
+            </Tooltip>
+          </Popconfirm>
         </div>
         <Row gutter={[12, 12]}>
           <Col xs={24} xl={12} id="section-docker">
@@ -622,7 +690,6 @@ const App: React.FC = () => {
             >
               <ModelsSection
                 models={models.data?.models}
-                hfCacheDir={system.data?.hf_cache_dir}
                 onDownload={(id) =>
                   downloadModelAsync(id)
                     .then(() => {
@@ -723,6 +790,11 @@ const App: React.FC = () => {
             >
               <ConfigSection />
             </Card>
+          </Col>
+
+          {/* 进程清单：运维观测页（非环境就绪分类），自轮询 */}
+          <Col xs={24} id="section-processes" style={{ marginTop: 12 }}>
+            <ProcessSection />
           </Col>
         </Row>
       </Content>

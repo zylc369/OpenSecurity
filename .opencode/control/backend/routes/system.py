@@ -32,3 +32,19 @@ async def get_system_info() -> dict:
         "dev_mode": is_dev_mode(),
         "platform": f"{platform.system()} {platform.machine()}",
     }
+
+
+@router.post("/restart")
+async def restart_console() -> dict:
+    """自重启（页面按钮触发）。
+
+    响应送达约 1.5s 后进程 execv 替换为新代码；前端轮询 /api/health 的
+    boot_token 变化判定重启完成。重复点击返回 in_flight。
+    """
+    from services.restart import console_restarter
+    scheduled = console_restarter.schedule()
+    return {
+        "success": True,
+        "scheduled": scheduled,
+        "message": "重启已调度，新实例就绪前接口短暂不可用（模型重载需几十秒）",
+    }

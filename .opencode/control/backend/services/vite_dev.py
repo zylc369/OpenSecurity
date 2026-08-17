@@ -36,19 +36,26 @@ def _port_alive(port: int) -> bool:
     return False
 
 
-def vite_running() -> bool:
-    """vite dev server 是否已在服务。
+def vite_port() -> int | None:
+    """vite 实际监听端口（未运行返回 None）。
 
-    端口文件指向的端口活 → True；否则扫 vite 默认候选段
-    （防端口文件丢失/滞后导致的误判重复拉起）。
+    端口文件优先，其次探测候选段（防端口文件丢失/滞后导致的误判重复拉起）。
     """
     try:
         port = int(VITE_PORT_FILE.read_text().strip().splitlines()[0])
         if _port_alive(port):
-            return True
+            return port
     except (OSError, ValueError, IndexError):
         pass
-    return any(_port_alive(p) for p in VITE_PROBE_PORTS)
+    for p in VITE_PROBE_PORTS:
+        if _port_alive(p):
+            return p
+    return None
+
+
+def vite_running() -> bool:
+    """vite dev server 是否已在服务（端口判活的唯一实现见 vite_port）。"""
+    return vite_port() is not None
 
 
 def start_vite_dev() -> bool:

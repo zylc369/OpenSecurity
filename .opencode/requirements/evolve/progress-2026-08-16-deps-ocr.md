@@ -239,3 +239,67 @@
 - [x] idapython-conventions："经 _base.env_str/env_int 读取"行话改人话（说明是 _base.py 的环境变量读取工具 + import 写法）
 - [x] mobile-analysis：.so 分析节补"标准起手"指引（initial_analysis → description 判断场景 → analysis-planning 模板），索引补强不复制内容；不抽 agents-rules 片段（会把 IDA 内容注入 searcher/memorist 等所有 agent，污染面大）
 - [x] analysis-planning.md 判断信号表 + 四处"进入信号"行全删——与 initial.json 的 description 重复（上一轮改一半的残留）；信号唯一源=description，文档只留场景→方案模板路由
+
+## 追加整改 25（控制台进程页：受管进程可视化）
+
+- 用户需求：活动监视器里两个 python 进程（3.65GB/1.35GB）查身份后，要求控制台标出后端启动的所有进程，引用计数/访问时间可见
+- [x] 后端 ocr_service：新增 `mlx_pid()`（Popen 句柄优先，孤儿回退 pid 文件+psutil 验活）+ `holders()`（client_id 解析 pid，psutil 取 cmdline 识别持有者身份）+ HolderInfo dataclass
+- [x] vite_dev：抽公共 `vite_port()`（端口文件优先，候选段探测兜底；process_registry 复用，不重复实现）
+- [x] services/process_registry.py：ProcessInfo/ProcessRegistryView dataclass + collect_processes()（console/ocr_mlx/vite 三源汇总，psutil 读 RSS/cmdline）
+- [x] routes/processes.py GET /api/processes + server.py 注册
+- [x] 前端 ProcessSection.tsx（10s 自轮询；引用计数列 tooltip 显示持有者；行展开持有者明细表：PID/存活/最后心跳/命令行）+ types + api + App.tsx 页尾挂载
+- 验证：后端语法全过 / tsc 零错误 / TestClient 端到端（三进程 keys 齐全）/ holders 链路模拟验证 / pytest 59 passed / 集成 5/5（pytest 报 test_integration 2 errors 是框架误收集自研装饰器，直接 python 跑 5/5 通过，原有现象非本次引入）
+- 注意：生产控制台 9776 是旧代码，需重启后 /api/processes 才可用
+
+## 追加整改 26（控制台自重启按钮——用户自助让新代码生效）
+
+- 用户需求：控制台前后端加重启按钮，不再依赖手动 kill
+- [x] services/restart.py：ConsoleRestarter 类（幂等调度锁 + POSIX execv / Windows helper 等待旧 PID 死亡再接管）
+  - 关键陷阱（已解）：exec 不改 PID 的 start_time → 新实例 is_control_running() 会误判"已有实例"exit(2) → exec 前必须 delete_port_file()
+  - MLX 子进程独立进程组不受影响，新实例经 pid 文件孤儿复用
+- [x] routes/system.py POST /api/system/restart；health.py 加 BOOT_TOKEN（exec 下 PID/start_time 均不变，唯 token 必变，前端判定重启完成）+ /api/health 别名（vite dev 代理只转发 /api）
+- [x] 前端：api.restartConsole + 顶栏 Popconfirm 按钮（PoweroffOutlined，重启中 spin+禁用）+ boot_token 轮询（2s 间隔，120s 超时）→ 完成后 refreshAll
+- [x] 测试：test_control.py 新增 2 用例（调度幂等+路由契约 monkeypatch perform / boot_token 形态）；56/56
+- [x] E2E 沙箱：spawn→POST restart→同 PID boot_token 翻转→/api/processes 新实例服务 ✓
+- [x] 生产迁移：SIGTERM 旧实例(14888)→canonical spawner 拉起(50652)→**再用新代码的 restart 端点真机自重启一次**（同 PID 50652 token 3d34f5b4→000a90df）→模型重载完成 200
+- 验证：tsc 零错误 / pytest 56 passed（1 error 为自研 test() 装饰器被误收集，既有现象）/ TS 18/18
+
+## 追加整改 27（进程页内存口径对齐活动监视器）
+
+- 用户反馈：进程页显示 1064MB，活动监视器同 PID 显示 3.62GB，差 3 倍+
+- 根因：口径不同。活动监视器"内存"列 = phys_footprint（含压缩页 + GPU/Metal 映射）；
+  psutil RSS 只算驻留未压缩页。BGE 走 MPS、GLM-OCR 走 MLX——模型权重在 Metal 缓冲区，
+  RSS 完全看不见（footprint 分解实测：console 3034MB 在 IOAccelerator graphics 段）
+- [x] process_registry：新增 `_footprint_mb()`（macOS 调 /usr/bin/footprint 解析 header，
+  ~0.2s/进程）；ProcessInfo 加 memory_footprint_mb 字段；console/ocr_mlx 双口径都填
+- [x] 前端：内存列主显 footprint（缺失回退 RSS），与 RSS 差异 >1MB 时 tooltip 解释两种口径
+- [x] tsc 修一处 `}}` 手误；后端经重启端点生效（dogfood 自重启链路第二次真机验证）
+- 终验：console footprint=3710.0MB (3.62GB) == 活动监视器截图数值 ✓；RSS=1077MB 并存展示
+- 附带验证：OCR 75099 在截图 OCR 识图后被正确释放（孤儿复用→识图→引用清零→30s reaper），全生命周期闭环
+
+## 追加整改 28（引用计数列说明 + vite PID 反查）
+
+- [x] 引用计数列头加问号悬浮（OCR 持有者机制说明：acquire +1/close -1/归零 30s 释放/悬停数字看明细/仅 OCR 行有值）
+- [x] vite PID：spawn 时未记录（独立进程组）→ process_registry 新增 `_pid_on_port()`（lsof -ti :port 反查监听进程；psutil net_connections 在 macOS 无 root 会 AccessDenied 故不用），vite 行补 PID/内存/命令行与 console/ocr 同等展示
+- 验证：tsc 零错误；生产重启后 vite 行 pid=4640（与实际监听进程一致）mem=114MB；重启端点 dogfood 第三轮正常
+
+## 追加整改 29（跨平台补缺 / vite 判活收口 / 模型分区改矩形块网格）
+
+- Q1 进程实现跨平台审计：footprint 有 darwin 守卫（优雅回退 RSS）、restart/ocr 有 win32 分支；缺口 = _pid_on_port 用 lsof（Windows 无）→ 补 psutil.net_connections Windows 分支（该平台无需 admin；macOS 下 psutil 无 root 会 AccessDenied 故仍走 lsof）
+- Q2 vite_running/vite_port 逻辑重复确认 → vite_running 委托 vite_port（判活单一源，删 12 行重复）
+- Q3 模型分区重设计：删顶部缓存目录行（各模型块自带全量路径，悬浮可见）；按类型分组 + 组内两列矩形块；所有长文本（名称/用途/repo/路径/硬件说明）Typography ellipsis 截断 + 悬浮全量
+- 验证：tsc 零错误 / 后端 56/56 / 重启 dogfood 第四轮 / vite HMR 服务新组件
+
+## 追加整改 30（模型分区两列修复）
+
+- 用户反馈：模型块右侧空白，仍一行一个
+- 根因：上一版按"类型分组 + 组内两列"实现，但现状每类型各只有 1 个模型 → 每组独占一行、行内仅一块 → 右半永远空
+- [x] 改全局单一两列网格（分组行删除；类型由块上彩色 Tag 标识）；3 模型 = 第一行两块、第二行一块
+- 验证：tsc 零错误；vite 编译产物确认分组残留 0、md:12 在位
+
+## 追加整改 31（Q&A：mlx_pid 读文件的设计依据 + _pid_on_port 平台策略补强）
+
+- Q1 mlx_pid 读 pid 文件 = 孤儿收养交接协议（设计内，非缺陷）：控制台重启（execv/按钮）后 MLX 子进程独立进程组存活，
+  _adopt_orphan 显式置 _subprocess=None（无 Popen 句柄）→ pid 文件是新旧控制台间唯一的 PID 交接通道；今天 75099（14888 spawn→50652 收养）全程实证
+- Q2 psutil 即成熟库，但端口→PID 的全局连接表在 macOS 无 root 会 AccessDenied（实测）；改进 _pid_on_port：
+  非 darwin 一律 psutil 优先（Windows 免 admin / Linux 经 /proc 同用户免 root），AccessDenied 才 lsof 兜底；macOS 直接 lsof

@@ -939,6 +939,41 @@ def test_config_store_ensure_template():
             config_store._ai_env_path = orig
 
 
+@test("restart: 调度幂等 + 路由契约（不真 exec）")
+def test_restart_schedule_and_route():
+    from services import restart as restart_mod
+    from fastapi.testclient import TestClient
+    from server import create_app
+
+    r = restart_mod.ConsoleRestarter()
+    calls = []
+    r.perform = lambda: calls.append(1)   # 拦截真实 exec
+    assert_true(r.schedule(), "首次调度应返回 True")
+    assert_false(r.schedule(), "重复调度应返回 False（幂等）")
+
+    app = create_app()
+    orig = restart_mod.console_restarter
+    restart_mod.console_restarter = r
+    try:
+        with TestClient(app) as c:
+            resp = c.post("/api/system/restart")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert_true(data["success"], "路由应返回 success")
+            assert_true("message" in data, "路由应带提示消息")
+    finally:
+        restart_mod.console_restarter = orig
+    # schedule 已被 Timer 挂起 → 立即执行 perform 清掉（Timer 0.05s 后也会调，双调用无害）
+    r.perform()
+    assert_true(len(calls) >= 1, "perform 应被调用")
+
+
+@test("health: boot_token 存在且同进程内稳定")
+def test_health_boot_token():
+    from routes.health import BOOT_TOKEN
+    assert_true(len(BOOT_TOKEN) == 8, "boot_token 应为 8 位 hex")
+
+
 if __name__ == "__main__":
     sys.exit(main())
 

@@ -13,6 +13,7 @@ import type {
   HardwareInfo, ConfigMap, RequiredStatusMap, ToolStatus, AgentTools,
   DockerScanGlobal, ScanResult, InstallResult,
   SystemInfo, ModelsResponse, FsCheckResult, ConfigMetaMap,
+  ProcessRegistryView,
 } from "../types";
 
 const instance: AxiosInstance = axios.create({
@@ -35,6 +36,18 @@ export const api = {
   // ─── /api/hardware ──────────────────────────────────────
   async getHardware(): Promise<HardwareInfo> {
     const r = await instance.get<HardwareInfo>("/api/hardware");
+    return r.data;
+  },
+
+  // ─── /api/processes ─────────────────────────────────────
+  async getProcesses(): Promise<ProcessRegistryView> {
+    const r = await instance.get<ProcessRegistryView>("/api/processes");
+    return r.data;
+  },
+
+  // ─── /api/system/restart ────────────────────────────────
+  async restartConsole(): Promise<{ success: boolean; scheduled: boolean; message: string }> {
+    const r = await instance.post("/api/system/restart");
     return r.data;
   },
 

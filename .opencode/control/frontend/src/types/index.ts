@@ -216,3 +216,33 @@ export interface ConfigMetaItem {
 }
 
 export type ConfigMetaMap = Record<string, ConfigMetaItem>;
+
+// ─── /api/processes ───────────────────────────────────────
+
+export interface HolderInfo {
+  pid: number;
+  alive: boolean;
+  last_seen_sec_ago: number | null;
+  cmdline: string;
+}
+
+export interface ProcessInfo {
+  key: string;
+  name: string;
+  pid: number | null;
+  role: string;
+  status: string;
+  memory_mb: number | null;
+  /** 活动监视器同口径（phys_footprint，含压缩页+GPU 映射）；仅 macOS */
+  memory_footprint_mb: number | null;
+  cmdline: string;
+  ref_count: number | null;
+  holders: HolderInfo[];
+  last_active_at: number | null;
+  extra: string;
+}
+
+export interface ProcessRegistryView {
+  generated_at: number;
+  processes: ProcessInfo[];
+}

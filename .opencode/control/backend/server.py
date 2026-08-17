@@ -66,12 +66,13 @@ def create_app() -> FastAPI:
         )
 
     # 路由
-    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr
+    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, processes
     app.include_router(embed.router)
     app.include_router(health.router)
     app.include_router(config_route.router)
     app.include_router(deps.router)
     app.include_router(ocr.router)
+    app.include_router(processes.router)
     app.include_router(docker.router)
     app.include_router(scan.router)
     app.include_router(install.router)

@@ -65,6 +65,15 @@ class OcrStatus:
     model_cached: bool
 
 
+@dataclass
+class HolderInfo:
+    """单个引用持有者（进程页展示）。cmdline 用于人读识别持有者身份。"""
+    pid: int
+    alive: bool
+    last_seen_sec_ago: float | None
+    cmdline: str
+
+
 class OcrService:
     """glm-ocr 推理服务（模块级单例 ocr_service）。
 
@@ -174,6 +183,40 @@ class OcrService:
             model_cached=(self._find_mlx_model() is not None) if self._backend() == "mlx"
                          else self._ollama_available(),
         )
+
+    def mlx_pid(self) -> int | None:
+        """MLX 子进程 PID（运行中才有值；孤儿复用时无 Popen 句柄，读 pid 文件）。"""
+        if self._backend() != "mlx":
+            return None
+        if self._subprocess is not None and self._subprocess.poll() is None:
+            return self._subprocess.pid
+        try:
+            pid = int((Path(DATA_DIR) / ".ocr-mlx.pid").read_text().splitlines()[0])
+        except (OSError, ValueError, IndexError):
+            return None
+        return pid if psutil.pid_exists(pid) else None
+
+    def holders(self) -> list[HolderInfo]:
+        """当前引用持有者明细（进程页展示用）。"""
+        now = time.time()
+        result = []
+        for cid, last_seen in self._clients.items():
+            pid_str = cid.split(":", 1)[0]
+            pid = int(pid_str) if pid_str.isdigit() else 0
+            alive = self._client_alive(cid)
+            cmdline = ""
+            if alive and pid:
+                try:
+                    cmdline = " ".join(psutil.Process(pid).cmdline())
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    cmdline = ""
+            result.append(HolderInfo(
+                pid=pid,
+                alive=alive,
+                last_seen_sec_ago=round(now - last_seen, 1) if last_seen else None,
+                cmdline=cmdline,
+            ))
+        return result
 
     # ─── 后台清理 ─────────────────────────────────────────
 

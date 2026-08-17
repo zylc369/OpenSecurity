@@ -12,8 +12,14 @@ embed_client.py 通过本路由判断控制台是否就绪。
 from __future__ import annotations
 
 import os
+import secrets
 
 from fastapi import APIRouter
+
+# 进程镜像启动令牌：每次进程启动（含 execv 自重启）生成新值。
+# 用途：前端判定"重启已完成"——exec 下 PID 与 process start_time 均不变，
+# 唯有本令牌必变。
+BOOT_TOKEN = secrets.token_hex(4)
 from fastapi.responses import JSONResponse
 
 from services import model_loader
@@ -28,12 +34,14 @@ def _identity() -> dict:
         "service": "opencode-control",
         "pid": os.getpid(),
         "start_time": get_process_start_time(os.getpid()) or 0,
+        "boot_token": BOOT_TOKEN,
     }
 
 
 @router.get("/health")
+@router.get("/api/health")
 async def health() -> JSONResponse:
-    """健康检查。"""
+    """健康检查（/api/health 是前端轮询别名——vite dev 代理只转发 /api 前缀）。"""
     if not model_loader.is_models_ready():
         return JSONResponse(
             {"status": "loading", **_identity()},
