@@ -420,150 +420,143 @@ class ControlProcess:
             USERS_FILE.unlink()
 
 
+# ── E2E 共享控制台进程（模型只加载一次；端口/用户全局文件生命周期由首个启动者管理） ──
+_SHARED_CP: "ControlProcess | None" = None
+
+
+def get_shared_server() -> ControlProcess:
+    """E2E 段共享控制台（懒加载；main() 退出时统一 stop）。
+
+    只读/自清理用例共享同一进程，消灭每例 ~5s 的重复模型加载；
+    需要独占全局状态的用例（端口耗尽）先 stop_shared_server()。
+    """
+    global _SHARED_CP
+    if _SHARED_CP is None:
+        _SHARED_CP = ControlProcess()
+        _SHARED_CP.start()
+    return _SHARED_CP
+
+
+def stop_shared_server() -> None:
+    global _SHARED_CP
+    if _SHARED_CP is not None:
+        _SHARED_CP.stop()
+        _SHARED_CP = None
+
+
 @test("E2E: 控制台启动 + /health + /embed")
 def test_e2e_control_startup():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        # /health
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=10)
-        assert_true(r.status_code in (200, 503), f"/health 应返回 200/503，实际 {r.status_code}")
+    cp = get_shared_server()
+    import httpx
+    # /health
+    r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=10)
+    assert_true(r.status_code in (200, 503), f"/health 应返回 200/503，实际 {r.status_code}")
 
-        # 等模型加载
-        for _ in range(30):
-            r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
-            if r.status_code == 200:
-                break
-            time.sleep(1)
+    # 等模型加载
+    for _ in range(30):
+        r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
+        if r.status_code == 200:
+            break
+        time.sleep(1)
 
-        # /embed
-        r = httpx.post(
-            f"http://127.0.0.1:{cp.port}/embed",
-            json={"inputs": "hello world"},
-            timeout=30,
-        )
-        assert_eq(r.status_code, 200, f"/embed 应返回 200，实际 {r.status_code}")
-        data = r.json()
-        assert_true(len(data) == 1, f"应返回 1 个向量，实际 {len(data)}")
-        assert_eq(len(data[0]), 1024, f"向量维度应 1024，实际 {len(data[0])}")
-    finally:
-        cp.stop()
+    # /embed
+    r = httpx.post(
+        f"http://127.0.0.1:{cp.port}/embed",
+        json={"inputs": "hello world"},
+        timeout=30,
+    )
+    assert_eq(r.status_code, 200, f"/embed 应返回 200，实际 {r.status_code}")
+    data = r.json()
+    assert_true(len(data) == 1, f"应返回 1 个向量，实际 {len(data)}")
+    assert_eq(len(data[0]), 1024, f"向量维度应 1024，实际 {len(data[0])}")
 
 
 @test("E2E: 控制台全局唯一（第二个进程 exit 2）")
 def test_e2e_singleton():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        # 启动第二个控制台
-        env = os.environ.copy()
-        proc2 = subprocess.Popen(
-            [sys.executable, str(BACKEND_DIR / "server.py")],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        )
-        # 等第二个进程退出
-        proc2.wait(timeout=15)
-        assert_eq(proc2.returncode, 2, f"第二个进程应该 exit 2，实际 {proc2.returncode}")
-    finally:
-        cp.stop()
+    # 复用共享控制台作为"第一个进程"（独立起第二个短命进程验证 exit 2）
+    cp = get_shared_server()
+    # 启动第二个控制台
+    env = os.environ.copy()
+    proc2 = subprocess.Popen(
+        [sys.executable, str(BACKEND_DIR / "server.py")],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    # 等第二个进程退出
+    proc2.wait(timeout=15)
+    assert_eq(proc2.returncode, 2, f"第二个进程应该 exit 2，实际 {proc2.returncode}")
 
 
 @test("E2E: GET /api/config 返回配置")
 def test_e2e_get_config():
     if not OPENCODE_ROOT.exists():
         raise AssertionError("OPENCODE_ROOT 未设置")
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/api/config", timeout=5)
-        assert_eq(r.status_code, 200)
-        data = r.json()
-        assert_true("DEEPSEEK_API_KEY" in data, "应有 DEEPSEEK_API_KEY")
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/config", timeout=5)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_true("DEEPSEEK_API_KEY" in data, "应有 DEEPSEEK_API_KEY")
 
 
 @test("E2E: GET /api/config/required-status")
 def test_e2e_required_status():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/api/config/required-status", timeout=5)
-        assert_eq(r.status_code, 200)
-        data = r.json()
-        assert_true("DEEPSEEK_API_KEY" in data, "应有 DEEPSEEK_API_KEY 状态")
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/config/required-status", timeout=5)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_true("DEEPSEEK_API_KEY" in data, "应有 DEEPSEEK_API_KEY 状态")
 
 
 @test("E2E: GET /api/scan 全量扫描")
 def test_e2e_scan():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        # 等模型加载（scanner 会查 model 状态）
-        for _ in range(20):
-            r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
-            if r.status_code == 200:
-                break
-            time.sleep(1)
+    cp = get_shared_server()
+    import httpx
+    # 等模型加载（scanner 会查 model 状态）
+    for _ in range(20):
+        r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
+        if r.status_code == 200:
+            break
+        time.sleep(1)
 
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/api/scan", timeout=30)
-        assert_eq(r.status_code, 200)
-        data = r.json()
-        assert_true("agents" in data, "应有 agents")
-        assert_true("global" in data, "应有 global")
-    finally:
-        cp.stop()
+    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/scan", timeout=30)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_true("agents" in data, "应有 agents")
+    assert_true("global" in data, "应有 global")
 
 
 @test("E2E: GET /api/deps/mobile-analysis")
 def test_e2e_deps():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/api/deps/mobile-analysis", timeout=10)
-        assert_eq(r.status_code, 200)
-        tools = r.json()
-        assert_true(len(tools) > 0, "应有工具列表")
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/deps/mobile-analysis", timeout=10)
+    assert_eq(r.status_code, 200)
+    tools = r.json()
+    assert_true(len(tools) > 0, "应有工具列表")
 
 
 @test("E2E: GET /api/docker/status")
 def test_e2e_docker():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/api/docker/status", timeout=10)
-        assert_eq(r.status_code, 200)
-        data = r.json()
-        assert_true("docker" in data, "应有 docker 字段")
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/docker/status", timeout=10)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_true("docker" in data, "应有 docker 字段")
 
 
 @test("E2E: GET /api/hardware 硬件信息")
 def test_e2e_hardware():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/api/hardware", timeout=10)
-        assert_eq(r.status_code, 200)
-        data = r.json()
-        assert_true("cpu" in data, "应有 cpu")
-        assert_true("memory" in data, "应有 memory")
-        assert_true("os" in data, "应有 os")
-        assert_true("gpu" in data, "应有 gpu")
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/hardware", timeout=10)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_true("cpu" in data, "应有 cpu")
+    assert_true("memory" in data, "应有 memory")
+    assert_true("os" in data, "应有 os")
+    assert_true("gpu" in data, "应有 gpu")
 
 
 @test("E2E: PUT /api/config 写入 + 验证文件")
@@ -572,39 +565,31 @@ def test_e2e_config_write():
         raise AssertionError("OPENCODE_ROOT 未设置")
     ai_env_path = OPENCODE_ROOT / ".ai_env"
     original = ai_env_path.read_text()
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        r = httpx.put(
-            f"http://127.0.0.1:{cp.port}/api/config",
-            json={"configs": {"E2E_TEST_KEY": "e2e_value"}},
-            timeout=5,
-        )
-        assert_eq(r.status_code, 200)
-        # 验证文件实际改变
-        content = ai_env_path.read_text()
-        assert_true("E2E_TEST_KEY=e2e_value" in content, "文件应包含新 key")
-    finally:
-        cp.stop()
-        # 清理 + 还原
-        ai_env_path.write_text(original)
+    cp = get_shared_server()
+    import httpx
+    r = httpx.put(
+        f"http://127.0.0.1:{cp.port}/api/config",
+        json={"configs": {"E2E_TEST_KEY": "e2e_value"}},
+        timeout=5,
+    )
+    assert_eq(r.status_code, 200)
+    # 验证文件实际改变
+    content = ai_env_path.read_text()
+    assert_true("E2E_TEST_KEY=e2e_value" in content, "文件应包含新 key")
+    # 清理 + 还原
+    ai_env_path.write_text(original)
 
 
 @test("E2E: /api/install 白名单外拒绝")
 def test_e2e_install_whitelist():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        r = httpx.post(
-            f"http://127.0.0.1:{cp.port}/api/install",
-            json={"package": "malicious-package-not-in-whitelist"},
-            timeout=5,
-        )
-        assert_eq(r.status_code, 400, "白名单外应返回 400")
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    r = httpx.post(
+        f"http://127.0.0.1:{cp.port}/api/install",
+        json={"package": "malicious-package-not-in-whitelist"},
+        timeout=5,
+    )
+    assert_eq(r.status_code, 400, "白名单外应返回 400")
 
 
 # ============ 边界条件补充测试 ============
@@ -702,6 +687,9 @@ def test_tool_optional():
 
 @test("E2E: 端口耗尽 exit code 3（模拟）")
 def test_e2e_port_exhausted():
+    # 必须占满全部候选端口验证 exit 3——共享控制台占用的端口会 bind 失败导致覆盖不全，
+    # 先停共享（后续用例懒加载会自动重启，代价一次模型加载）
+    stop_shared_server()
     import socket
     from config import get_port_candidates
     sockets = []
@@ -728,136 +716,104 @@ def test_e2e_port_exhausted():
 
 @test("E2E: /embed 空输入 → 400")
 def test_e2e_embed_empty():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        r = httpx.post(f"http://127.0.0.1:{cp.port}/embed", json={}, timeout=10)
-        assert_eq(r.status_code, 400, "空输入应 400")
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    r = httpx.post(f"http://127.0.0.1:{cp.port}/embed", json={}, timeout=10)
+    assert_eq(r.status_code, 400, "空输入应 400")
 
 
 @test("E2E: /embed 批量 list 输入")
 def test_e2e_embed_batch():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        for _ in range(30):
-            r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
-            if r.status_code == 200: break
-            time.sleep(1)
-        r = httpx.post(f"http://127.0.0.1:{cp.port}/embed",
-                       json={"inputs": ["hello", "world", "test"]}, timeout=30)
-        assert_eq(r.status_code, 200)
-        data = r.json()
-        assert_eq(len(data), 3, "应返回 3 个向量")
-        assert_eq(len(data[0]), 1024)
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    for _ in range(30):
+        r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
+        if r.status_code == 200: break
+        time.sleep(1)
+    r = httpx.post(f"http://127.0.0.1:{cp.port}/embed",
+                   json={"inputs": ["hello", "world", "test"]}, timeout=30)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_eq(len(data), 3, "应返回 3 个向量")
+    assert_eq(len(data[0]), 1024)
 
 
 @test("E2E: /embed 字符串单输入")
 def test_e2e_embed_single():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        for _ in range(30):
-            r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
-            if r.status_code == 200: break
-            time.sleep(1)
-        r = httpx.post(f"http://127.0.0.1:{cp.port}/embed",
-                       json={"inputs": "single string"}, timeout=30)
-        assert_eq(r.status_code, 200)
-        data = r.json()
-        assert_eq(len(data), 1)
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    for _ in range(30):
+        r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
+        if r.status_code == 200: break
+        time.sleep(1)
+    r = httpx.post(f"http://127.0.0.1:{cp.port}/embed",
+                   json={"inputs": "single string"}, timeout=30)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_eq(len(data), 1)
 
 
 @test("E2E: /rerank 接口")
 def test_e2e_rerank():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        for _ in range(60):
-            r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
-            if r.status_code == 200: break
-            time.sleep(1)
-        r = httpx.post(f"http://127.0.0.1:{cp.port}/rerank",
-                       json={"query": "hello", "texts": ["world", "test"]}, timeout=60)
-        assert_eq(r.status_code, 200)
-        data = r.json()
-        assert_eq(len(data), 2)
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    for _ in range(60):
+        r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
+        if r.status_code == 200: break
+        time.sleep(1)
+    r = httpx.post(f"http://127.0.0.1:{cp.port}/rerank",
+                   json={"query": "hello", "texts": ["world", "test"]}, timeout=60)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_eq(len(data), 2)
 
 
 @test("E2E: /api/config/{key} 不存在 → 404")
 def test_e2e_config_404():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/api/config/NOT_EXIST_12345", timeout=5)
-        assert_eq(r.status_code, 404)
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/config/NOT_EXIST_12345", timeout=5)
+    assert_eq(r.status_code, 404)
 
 
 @test("E2E: DELETE /api/config/{key}")
 def test_e2e_config_delete():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        httpx.put(f"http://127.0.0.1:{cp.port}/api/config/E2E_DEL",
-                  json={"value": "test"}, timeout=5)
-        r = httpx.delete(f"http://127.0.0.1:{cp.port}/api/config/E2E_DEL", timeout=5)
-        assert_eq(r.status_code, 200)
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/api/config/E2E_DEL", timeout=5)
-        assert_eq(r.status_code, 404, "删后应 404")
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    httpx.put(f"http://127.0.0.1:{cp.port}/api/config/E2E_DEL",
+              json={"value": "test"}, timeout=5)
+    r = httpx.delete(f"http://127.0.0.1:{cp.port}/api/config/E2E_DEL", timeout=5)
+    assert_eq(r.status_code, 200)
+    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/config/E2E_DEL", timeout=5)
+    assert_eq(r.status_code, 404, "删后应 404")
 
 
 @test("E2E: /api/deps/{agent} 不存在 agent → 工具空 + summary 就绪")
 def test_e2e_deps_unknown():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/api/deps/non-existent", timeout=5)
-        assert_eq(r.status_code, 200)
-        d = r.json()
-        # 新契约：响应是聚合对象（summary/python/tools/compiler/shared_infra）
-        # 未知 agent 无归属工具 → tools 空；all 级 Python 包仍命中；
-        # 共享底座非归属 → 不参与判定 → summary.ready 反映 all 级包状态
-        assert_eq(len(d["tools"]), 0, "未知 agent 的外部工具应为空")
-        assert "summary" in d and "console_url" in d["summary"], "summary 应含 console_url"
-        assert isinstance(d["summary"]["required_missing"], list), "summary 应含 required_missing"
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/deps/non-existent", timeout=5)
+    assert_eq(r.status_code, 200)
+    d = r.json()
+    # 新契约：响应是聚合对象（summary/python/tools/compiler/shared_infra）
+    # 未知 agent 无归属工具 → tools 空；all 级 Python 包仍命中；
+    # 共享底座非归属 → 不参与判定 → summary.ready 反映 all 级包状态
+    assert_eq(len(d["tools"]), 0, "未知 agent 的外部工具应为空")
+    assert "summary" in d and "console_url" in d["summary"], "summary 应含 console_url"
+    assert isinstance(d["summary"]["required_missing"], list), "summary 应含 required_missing"
 
 
 @test("E2E: /api/scan 缓存命中（第二次更快）")
 def test_e2e_scan_cache():
-    cp = ControlProcess()
-    try:
-        cp.start()
-        import httpx
-        t1 = time.time()
-        httpx.get(f"http://127.0.0.1:{cp.port}/api/scan?force_refresh=true", timeout=30)
-        dur1 = time.time() - t1
-        t2 = time.time()
-        httpx.get(f"http://127.0.0.1:{cp.port}/api/scan", timeout=30)
-        dur2 = time.time() - t2
-        assert_true(dur2 < dur1, f"缓存应更快：first={dur1:.2f}s cached={dur2:.2f}s")
-    finally:
-        cp.stop()
+    cp = get_shared_server()
+    import httpx
+    t1 = time.time()
+    httpx.get(f"http://127.0.0.1:{cp.port}/api/scan?force_refresh=true", timeout=30)
+    dur1 = time.time() - t1
+    t2 = time.time()
+    httpx.get(f"http://127.0.0.1:{cp.port}/api/scan", timeout=30)
+    dur2 = time.time() - t2
+    assert_true(dur2 < dur1, f"缓存应更快：first={dur1:.2f}s cached={dur2:.2f}s")
 
 
 @test("config.is_dev_mode: 环境变量优先 + 默认 False")
@@ -903,6 +859,9 @@ def main():
     # 逐个运行
     for name, fn in tests:
         fn()
+
+    # 统一收尾共享控制台（无论中途失败与否）
+    stop_shared_server()
 
     # 汇总
     print("\n" + "=" * 60)
@@ -973,6 +932,200 @@ def test_health_boot_token():
     from routes.health import BOOT_TOKEN
     assert_true(len(BOOT_TOKEN) == 8, "boot_token 应为 8 位 hex")
 
+
+@test("knowledge_store: 队列写路径落库 + 非法条目跳过 + 同步方法（fake embedder）")
+def test_knowledge_store_paths():
+    import numpy as np
+    from services.knowledge_store import MemoryEntry, KnowledgeStoreService
+
+    class FakeEmbedder:
+        def encode(self, inputs, **kw):
+            single = isinstance(inputs, str)
+            seq = [inputs] if single else inputs
+            out = np.zeros((len(seq), 1024), dtype=np.float32)
+            return out[0] if single else out
+
+    db_path = TEST_DATA_DIR / "ks_unit" / "knowledge.db"
+    if db_path.exists():
+        db_path.unlink()
+    svc = KnowledgeStoreService(db_path=db_path, embedder_factory=FakeEmbedder)
+    svc.start()
+    assert_true(svc.submit(MemoryEntry(question="bash execution", answer="Tool result...", type="bash", flow_id="flow-1")), "合法条目应入队")
+    assert_true(not svc.submit(MemoryEntry(question="", answer="x", type="bash")), "空 question 应跳过")
+    assert_true(not svc.submit(MemoryEntry(question="q", answer="a", type="")), "空 type 应跳过")
+    svc.stop(timeout=10)
+
+    import sqlite3
+    import sqlite_vec
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    rows = conn.execute("SELECT question, type, flow_id FROM answers").fetchall()
+    assert_true(rows == [("[bash] bash execution", "memory", "flow-1")], f"落库不符: {rows}")
+    assert_true(conn.execute("SELECT count(*) FROM answer_vectors").fetchone()[0] == 1, "向量应 1 行")
+
+
+@test("event_store: entry/delete 写路径 + add_episode 参数完整（fake graphiti）")
+def test_event_store_write_paths():
+    from unittest.mock import AsyncMock, patch
+    from services.event_store import EventEntry, DeleteGroup, EventStoreService
+
+    calls = []
+
+    class FakeGraphiti:
+        driver = object()
+        async def build_indices_and_constraints(self):
+            calls.append("build")
+        async def add_episode(self, **kw):
+            calls.append(("add", kw))
+        async def close(self):
+            calls.append("close")
+
+    svc = EventStoreService(graphiti_factory=lambda: (FakeGraphiti(), None))
+    svc.start()
+    assert_true(svc.submit(EventEntry(name="bash execution", body="b", source="s", group_id="g1", timestamp=1755432000000.0)), "事件应入队")
+    assert_true(svc.submit(DeleteGroup(group_id="g1")), "delete 应入队")
+    assert_true(not svc.submit(DeleteGroup(group_id="")), "空 group_id 应跳过")
+    with patch("graphiti_core.nodes.EntityNode.delete_by_group_id", new=AsyncMock()) as m1, \
+         patch("graphiti_core.nodes.EpisodicNode.delete_by_group_id", new=AsyncMock()) as m2:
+        svc.stop(timeout=15)
+        assert_true(m1.await_count == 1 and m2.await_count == 1, f"delete 调用数 {m1.await_count}/{m2.await_count}")
+
+    adds = [c for c in calls if isinstance(c, tuple)]
+    assert_true(adds and adds[0][0] == "add", f"add_episode 未调用: {calls}")
+    kw = adds[0][1]
+    assert_true(kw["name"] == "bash execution" and kw["group_id"] == "g1", "name/group_id 不符")
+    assert_true(kw["reference_time"].timestamp() == 1755432000.0, "timestamp ms→s 应无损")
+    assert_true("Tool" in kw["entity_types"], "entity_types 缺自定义类型")
+
+
+@test("knowledge/events 路由: 写端点 202 + 搜索端点结构（fake 注入）")
+def test_knowledge_events_routes():
+    import hashlib
+    import numpy as np
+    from fastapi.testclient import TestClient
+    from services import knowledge_store as ks, event_store as es
+
+    class FakeEmbedder:
+        def encode(self, inputs, **kw):
+            single = isinstance(inputs, str)
+            seq = [inputs] if single else inputs
+            def vec(t):
+                h = hashlib.sha256(t.encode()).digest()
+                out = np.frombuffer((h * 32)[:1024], dtype=np.uint8).astype(np.float32)
+                return out / np.linalg.norm(out)
+            out = np.stack([vec(t) for t in seq])
+            return out[0] if single else out
+
+    class FakeGraphiti:
+        driver = object()
+        async def build_indices_and_constraints(self):
+            pass
+        async def add_episode(self, **kw):
+            pass
+        async def close(self):
+            pass
+
+    db_path = TEST_DATA_DIR / "ingest_route" / "knowledge.db"
+    if db_path.exists():
+        db_path.unlink()
+    old_ks, old_es = ks.service_instance(), es.service_instance()
+    ks.set_service(ks.KnowledgeStoreService(db_path=db_path, embedder_factory=FakeEmbedder))
+    es.set_service(es.EventStoreService(graphiti_factory=lambda: (FakeGraphiti(), None)))
+    try:
+        from server import create_app
+        with TestClient(create_app()) as client:
+            r1 = client.post("/api/memory/entry", json={"question": "q", "answer": "a", "type": "bash", "flow_id": "f1"})
+            r2 = client.post("/api/events/entry", json={"name": "n", "body": "b", "source": "s", "group_id": "g", "timestamp": 1755432000000})
+            r3 = client.post("/api/events/delete", json={"group_id": "g"})
+            r4 = client.post("/api/memory/entry", json={"question": "", "answer": "a", "type": "bash"})
+            assert_true((r1.status_code, r2.status_code, r3.status_code) == (202, 202, 202), f"状态码 {(r1.status_code, r2.status_code, r3.status_code)}")
+            assert_true(r1.json() == {"queued": True}, f"合法应 queued:true: {r1.json()}")
+            assert_true(r4.json() == {"queued": False}, f"非法应 queued:false: {r4.json()}")
+            r5 = client.post("/api/knowledge/search", json={"questions": ["q"]})
+            assert_true(r5.status_code == 200 and r5.json()["count"] == 0, f"knowledge/search: {r5.json()}")
+            r6 = client.post("/api/events/time-search", json={"query": "q", "group_id": "g"})
+            assert_true(r6.status_code == 200 and r6.json()["edges"] == [], f"time-search: {r6.json()}")
+    finally:
+        ks.set_service(old_ks)
+        es.set_service(old_es)
+
+
+@test("knowledge_store 同步方法: store 脱敏 + search 命中 + memory flow 隔离（fake embedder）")
+def test_knowledge_store_sync_methods():
+    import hashlib
+    import numpy as np
+    from services.knowledge_store import MemoryEntry, KnowledgeStoreService
+
+    def vec(text):
+        h = hashlib.sha256(text.encode()).digest()
+        out = np.frombuffer((h * 32)[:1024], dtype=np.uint8).astype(np.float32)
+        return out / np.linalg.norm(out)
+
+    class FakeEmbedder:
+        def encode(self, inputs, **kw):
+            single = isinstance(inputs, str)
+            seq = [inputs] if single else inputs
+            out = np.stack([vec(t) for t in seq])
+            return out[0] if single else out
+
+    db_path = TEST_DATA_DIR / "ks_sync" / "knowledge.db"
+    if db_path.exists():
+        db_path.unlink()
+    svc = KnowledgeStoreService(db_path=db_path, embedder_factory=FakeEmbedder)
+
+    r = svc.store_knowledge("如何扫描 192.168.1.1 端口", "nmap -sS 10.0.0.1")
+    assert_true(r["stored"] is True, f"store 失败: {r}")
+    r = svc.search_knowledge(["如何扫描端口"])
+    assert_true(r["count"] == 1 and "<IP>" in r["results"][0]["answer"], f"脱敏失效: {r}")
+
+    svc.start()
+    svc.submit(MemoryEntry(question="bash execution", answer="out", type="bash", flow_id="flow-A"))
+    svc.stop(timeout=10)
+    r = svc.search_memory(["执行过什么"], flow_id="flow-A")
+    assert_true(r["count"] == 1 and r["results"][0]["question"].startswith("[bash]"), f"memory 检索: {r}")
+    r = svc.search_memory(["执行过什么"], flow_id="flow-B")
+    assert_true(r["count"] == 0, "flow 隔离失效")
+    assert_true(svc.search_knowledge([])["count"] == 0, "空 questions 应 count=0")
+    assert_true(svc.store_knowledge("", "")["stored"] is False, "空 question/content 应 stored=false")
+
+
+@test("event_store 搜索: time filter + min_mentions 过滤 + 异常重置（fake graphiti）")
+def test_event_store_search_paths():
+    import asyncio
+    from types import SimpleNamespace as NS
+    from datetime import datetime
+    from services.event_store import EventStoreService
+
+    def mk():
+        n1 = NS(name="nmap", uuid="n1", labels=["Tool"], summary="s",
+                created_at=datetime(2026, 8, 17), attributes={"mention_count": 3})
+        n2 = NS(name="CVE-1", uuid="n2", labels=["Vuln"], summary=None, created_at=None, attributes={})
+        return NS(edges=[], nodes=[n1, n2], episodes=[],
+                  edge_reranker_scores=[], node_reranker_scores=[0.8, 0.7], episode_reranker_scores=[])
+
+    searched = {}
+
+    class FakeGraphiti:
+        driver = object()
+        async def build_indices_and_constraints(self): pass
+        async def close(self): pass
+        async def search_(self, **kw):
+            searched.update(kw)
+            return mk()
+
+    svc = EventStoreService(graphiti_factory=lambda: (FakeGraphiti(), None))
+
+    async def run():
+        p = await svc.search_time("查工具", "g1", time_start="2026-01-01T00:00:00Z")
+        assert_true(p["nodes"][0]["name"] == "nmap", "time_search 节点")
+        assert_true(searched.get("search_filter") is not None, "time filter 未构建")
+        p = await svc.search_entities("q", "g1", node_labels=["Tool"], min_mentions=2)
+        assert_true([n["name"] for n in p["nodes"]] == ["nmap"], "min_mentions 过滤")
+        assert_true(p["node_scores"] == [0.8], "过滤后 scores 对齐")
+
+    asyncio.run(run())
+    svc.stop(timeout=10)
 
 if __name__ == "__main__":
     sys.exit(main())

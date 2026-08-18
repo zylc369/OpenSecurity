@@ -303,3 +303,101 @@
   _adopt_orphan 显式置 _subprocess=None（无 Popen 句柄）→ pid 文件是新旧控制台间唯一的 PID 交接通道；今天 75099（14888 spawn→50652 收养）全程实证
 - Q2 psutil 即成熟库，但端口→PID 的全局连接表在 macOS 无 root 会 AccessDenied（实测）；改进 _pid_on_port：
   非 darwin 一律 psutil 优先（Windows 免 admin / Linux 经 /proc 同用户免 root），AccessDenied 才 lsof 兜底；macOS 直接 lsof
+
+## 追加整改 32（用户重启后全链路真机复验）
+
+- 用户操作：通过重启按钮重启了控制台（boot_token 706de69f）——第一次用户侧按钮重启，链路正常
+- [x] 全链路真机复验（生产 50652）：
+  - /api/processes 三行数据齐（console footprint=3703MB≈截图 3.62GB / vite pid=4640 经 lsof 分支 / OCR stopped）
+  - OCR 完整闭环：acquire spawn（42558，有句柄路径，ref=1 holder 明细含命令行）→ 新 client 复用（无句柄→pid 文件路径，ref 正确）→ close（ref=0）→ 30s reaper 自动释放（stopped）——mlx_pid 两条路径 + 引用计数 + holders 全部实证
+
+## 追加整改 33（plugin 写入收口到控制台，进行中）
+- 需求文档: requirements/evolve/2026-08-17-plugin-writers-to-console.md
+- [x] 步骤 1 memory_writer.py: MemoryEntry + MemoryWriterService（线程+队列+惰性 MemoryDB）；
+      fake 注入验证落库（question 前缀/type/flow_id/向量行全对、非法条目跳过）；
+      踩坑记录: fake encode 必须处理 str 输入返回 1D（SentenceTransformer 语义）；查询 vec0 表需 sqlite_vec.load
+
+## 追加整改 33 完成（plugin 写入收口到控制台）
+
+- 需求: requirements/evolve/2026-08-17-plugin-writers-to-console.md（7 步全部完成）
+- [x] 控制台新增: services/memory_writer.py（线程+队列+MemoryDB）、services/event_writer.py（专用线程+独立事件循环+Graphiti）、
+      routes/ingest.py（POST /api/memory/entry、/api/events/entry、/api/events/delete，入队即返 202）
+- [x] plugin 改造: 删 daemon 管理全套 ~250 行（spawn/READY/暂存/背压/exit handler）；
+      新增 postToControl（readControlPortFile 实时读端口 + fetch + AbortSignal.timeout(5s)）；
+      fireAndForgetEvent/fireAndForgetMemory/deleteGraphitiEvents 语义不变（白名单/isRegisteredAgent/格式化文本保留）
+- [x] 删除: write_event_daemon.py、memory_writer_daemon.py；db.py 注释更新；全仓 grep 零残留
+- [x] 验证: 单测 59/59（+3 新例）、集成 5/5、bun 加载 OK、E2E 三链路真机（memory 2 行落库+真 embed 范数 1.0；
+      events add → DeepSeek 提取 3 实体入 Neo4j；delete → 清零）；生产两轮重启（token 1ed0fe94 → 8209303f）
+- 审计修复: sys.path insert(0)→append（曾遮蔽 backend server.py）；stop→start 可重用（清残留哨兵）；
+  fetch 超时；memory/event 连接泄漏（重建前 close 旧连接）；墓碑注释清理
+- 已知边界: 当前 opencode 会话的 plugin 仍是旧代码（旧 daemon 脚本已删 → existsSync 安全降级只记日志，不崩），
+  用户重启 opencode 后新 postToControl 生效
+
+## 追加整改 34 完成（knowledge/events 按 ocr 标杆终态收口）
+
+- 需求: requirements/evolve/2026-08-17-mcp-ocr-standard-consolidation.md（11 步全部完成）
+- [x] 移库 5 个: db.py→knowledge_db.py（embedder Protocol 化）、anonymizer.py、graphiti_config.py（.ai_env 路径修正+embed 直连 model_loader）、
+      llm_client.py、reranker.py（直连 model_loader.get_reranker）
+- [x] 新服务: knowledge_store.py（单 MemoryDB+队列写+3 同步方法）、event_store.py（单 Graphiti+专用线程/独立事件循环+读者线程喂单+
+      跨循环桥 run_coroutine_threadsafe+5 搜索+Docker 惰性 ensure）；删除 memory_writer.py/event_writer.py
+- [x] docker_manager 收编 ensure_daemon_blocking/ensure_neo4j_events_blocking；volumes 补 $DATA_DIR/db/events:/data
+      （修复控制台手动启容器无卷的隐性 bug）；Docker CLI 唯一入口恢复
+- [x] 路由: routes/knowledge.py（4 端点）+ routes/events.py（7 端点）；删 routes/ingest.py
+- [x] 薄壳重写: knowledge/server.py（3 工具）/events/server.py（6 工具），签名/description 逐字保留，httpx 代理+端口自愈
+- [x] 删除: mcp-servers/embed_client.py（HTTP 回环全消灭）；全仓引用清零
+- [x] 验证: 单测 61/61（改名 3+新增 2）、集成 5/5、生产重启（token 8e7ced7f）、
+      knowledge 壳 stdio 3 工具真链（store id=895 真embed+脱敏/search 命中/flow 隔离）、
+      events 壳 stdio 4 工具真链（time_search 命中 7 节点含 DeepSeek 提取的 frida/objection 实体、
+      entity_search(Tool)、episode_context、delete→Neo4j 清零）
+- 审计修复: executor 阻塞 get 进程卡死→读者线程+call_soon_threadsafe；loop 就绪竞态→Event 屏障；
+  EdgeSearchMethod.breadth_first_search 不存在（真实枚举 bfs——老 server 该工具从未跑通，顺带修复）；
+  SearchResults pydantic 重建失败→原地过滤；未用 import 清理；pyflakes 全净
+- 测试分层说明: entity_relationships_search/diverse_results_search 已在 service+route 层（fake）覆盖，
+  未做真 Neo4j stdio E2E（需 center_node_uuid 链+DeepSeek 往返，性价比低）
+
+## 追加整改 35（真 E2E 补全 + BFS 真 bug 修复 + 测试提速）
+
+- 用户裁定: 不接受 fake/mock 级验证覆盖本轮大改；测试慢是真问题
+- [x] 真 E2E 补全（真 Neo4j + 真 DeepSeek + stdio 壳全链）:
+      写入 2 事件 → DeepSeek 提取 10 实体 → entity_search(Tool) 取真 center uuid →
+      entity_relationships_search 真 BFS 二跳 → diverse_results_search 真 MMR+cross_encoder
+- [x] 真 E2E 抓出并修复隐藏 bug: BFS 传 center_node_uuid 给 search_() 不生效——
+      graphiti 的 BFS 只认 bfs_origin_node_uuids（列表），origin None → 恒空。
+      老代码该工具从第一天起就返回空（AttributeError 修复只修了枚举名，参数层仍坏）。
+      修复: 改传 bfs_origin_node_uuids=[uuid]; 真链验证 BFS 返回 3 条 DeepSeek 提取的真实关系边
+      （HOOKS/CONNECTS_TO/BYPASSES）; 单测断言同步（禁 center 直传回归）
+- [x] 测试提速: E2E 段共享控制台进程（get_shared_server 懒加载 + main 统一 stop），
+      17 例改共享 / singleton 复用共享作第一进程 / 端口耗尽例先停共享（候选端口全覆盖需要）
+- 效果: 全量 61 例 4-6min → 26.5s（~10 倍），61/61 全绿，集成 5/5
+- 根因确认（用户判断正确）: 生产链路模型只加载一次（常驻进程），慢是测试架构每例起新进程重复加载 4.3GB
+
+## 追加整改 36（用户裁定全量验证：真 E2E 全覆盖——一次性抓出 6 个真 bug）
+
+用户: "都验证！还有什么没验证的全部验证！"——逐项执行结果:
+
+### 抓出并修复的 6 个真 bug（全部真 E2E 暴露，fake 层不可见）
+1. BFS center_node_uuid 不进 BFS 分支 → 改传 bfs_origin_node_uuids（整改 35 已记）
+2. bolt 端口级就绪是假就绪（TCP 可连但握手无响应）→ 升级为 bolt 协议握手探测（20 字节 magic+版本）
+3. 读路径无自愈（缓存 graphiti 实例在容器死后不失效）→ _search 失败 reset 重试一次（重试走完整 ensure 链）
+4. docker ensure 的 status 采样时序 bug（拉 daemon 前采样恒 unknown → 误报 daemon 不可用）→ 拉起后重新采样
+5. BRIDGE_TIMEOUT 180s 被 daemon 冷启动挤爆 + TimeoutError str 为空 → 600s + 可读化错误
+6. torch/MPS 并发推理堆损坏 SIGABRT（8 并发 add_episode → 8 线程并发 encode → 崩溃报告实锤 nanov2_guard_corruption）
+   → model_loader 推理串行锁（embed_sync/rerank_sync/embed_batch_sync），graphiti_config/reranker 全部走带锁方法
+
+### 验证矩阵（全部真链路）
+- plugin postToControl: searcher 子 agent bash probe → SQLite 落库命中（evolve 自身不写是设计：知识双轨分离）
+- ocr MCP 壳: acquire → MLX 拉起 → 推理（本会话工具真调）
+- MemoryDB 坏库重建: EXCLUSIVE 锁 → A 丢弃 → B 自动重建落库
+- Graphiti 断连重连: docker restart 容器 → 写入 → 7 实体落库
+- Docker 全分支: not_exists（rm 容器 → 8.7s 一次调用重建+握手+真数据）/ stopped（stop → 36s 自愈）；
+  daemon 冷启动 open -a Docker 拉起验证过（ensure 链行为正确）；Docker Desktop 自身 quit/open 竞态僵死 4 次 = 外部产品缺陷（pkill 恢复），如实记录
+- 端口自愈: 占 9776 → 控制台 fallback 9777 → 壳读端口文件跟随 → stdio 工具通
+- 并发写入: 8 条并发（修复前 160s 零落库+进程 SIGABRT；修复后 10s 内 8/8 落库+存活）
+- 终态: 61 单测（Docker 死环境也全绿——单测隔离修复）+ 5 集成 + 三壳 stdio + 6030 实体数据完整
+
+### 单测隔离缺陷修复
+event_store._ensure_graphiti 注入 factory 时跳过 docker ensure（此前单测隐式依赖真 Docker 活着）
+
+### 附带产出
+- 控制台崩溃恢复流程: 端口文件残留（指向死 PID）→ rm 端口文件 + canonical spawner 重拉
+- pkill -9 docker 会损坏容器文件系统（RWLayer/conf 乱码）→ rm 容器让 ensure 重建即愈

@@ -1,90 +1,67 @@
-"""OpenSecurity 知识库 MCP server。
+"""OpenSecurity 知识库 MCP server（薄壳，不驻模型/DB）。
 
-提供三个工具：
+三个工具经 HTTP 代理到控制台（对齐 ocr/server.py 薄壳模式）：
   - search_knowledge / store_knowledge：知识库（doc_type=knowledge）
   - search_in_memory：执行记忆库（doc_type=memory）
 
-store_knowledge 在存储前调 anonymize() 清洗敏感信息（IP/凭证/域名）。
-embed 目标是 content，不是 question。
-
-启动模式（lazy 加载）：
-  - 模块顶层不加载 BGE-M3，stdio 握手快（<1s）
-  - lifespan startup 内 run_in_executor 后台加载模型（fire-and-forget）
-  - 工具函数调用前 await _ensure_ready()：模型已就绪立即返回；未就绪则等待
+业务实现在控制台 services/knowledge_store.py（单 MemoryDB 实例）。
+端口发现：control_url.py（读端口文件，事实来源）；控制台重启换端口自动自愈。
 """
-import asyncio
 import json
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent.parent))  # mcp-servers/（embed_client.py 所在）
-from anonymizer import anonymize  # noqa: E402
-from db import MemoryDB, DEFAULT_TOP_K  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent.parent))  # control_url 同级
+from control_url import resolve_control
 
-DATA_DIR = Path.home() / "bw-security-analysis"
-DB_PATH = DATA_DIR / "db" / "knowledge" / "knowledge.db"
-MODEL_NAME = "BAAI/bge-m3"
-
-# ── lazy 加载共享状态 ─────────────────────────────────────
-_state: dict = {"embedder": None, "db": None}
-_ready = asyncio.Event()
-_init_error: list[Exception] = []
-_loop: asyncio.AbstractEventLoop | None = None
-_load_future = None  # 保存 run_in_executor 返回的 Future，避免 GC
+_CONTROL: dict = {"base": None}
+_client: httpx.AsyncClient | None = None
 
 
-def _load_blocking() -> None:
-    """子线程同步加载模型 + 初始化 DB。完成后通过 call_soon_threadsafe 唤醒 Event。
-
-    任何异常存入 _init_error 列表，工具调用时检查并抛出（不 hang）。
-    """
-    try:
-        print(f"[knowledge-mcp] connecting to embed server...", file=sys.stderr)
-        from embed_client import HttpEmbedClient
-        embedder = HttpEmbedClient(model_name=MODEL_NAME)
-        db = MemoryDB(DB_PATH, embedder)
-        _state["embedder"] = embedder
-        _state["db"] = db
-        print(f"[knowledge-mcp] ready, db={DB_PATH}", file=sys.stderr)
-    except Exception as e:
-        _init_error.append(e)
-        print(f"[knowledge-mcp] 加载失败: {e}", file=sys.stderr)
-    finally:
-        # Event 是主 loop 的对象，子线程必须用 call_soon_threadsafe 唤醒
-        if _loop is not None:
-            _loop.call_soon_threadsafe(_ready.set)
+def _base_url() -> str:
+    """控制台地址（延迟解析 + 失败自愈：换端口后下次重新解析）。"""
+    if _CONTROL["base"] is None:
+        addr = resolve_control()
+        if addr is None:
+            raise RuntimeError("控制台地址未知（端口文件不存在，控制台未启动？）")
+        _CONTROL["base"] = addr.url
+    return _CONTROL["base"]
 
 
 @asynccontextmanager
-async def lifespan(app):
-    """FastMCP lifespan：startup 内启动后台加载任务，立即 yield 让 stdio 握手快速完成。
-
-    lifespan 在 stdio initialize 请求处理之前进入（vendor lowlevel/server.py:663）。
-    yield 不等待模型加载，握手 → tools/list → plugin.setup 都不阻塞。
-    """
-    global _loop, _load_future
-    _loop = asyncio.get_running_loop()
-    _load_future = _loop.run_in_executor(None, _load_blocking)  # fire-and-forget
-    yield
-
-
-async def _ensure_ready() -> None:
-    """工具函数开头调用：等待模型加载完成。加载失败则抛 RuntimeError。"""
-    await _ready.wait()
-    if _init_error:
-        raise RuntimeError(f"BGE-M3 加载失败: {_init_error[0]}")
+async def _lifespan(server: FastMCP):
+    """只建 HTTP 客户端（无模型/DB 生命周期，全在控制台）。"""
+    global _client
+    _client = httpx.AsyncClient(timeout=120.0)
+    try:
+        yield
+    finally:
+        await _client.aclose()
+        _client = None
 
 
-mcp = FastMCP("knowledge", lifespan=lifespan)
+async def _post(path: str, payload: dict) -> str:
+    """POST 控制台并返回工具结果 JSON 字符串；失败返回与原降级一致的错误结构。"""
+    if _client is None:
+        return json.dumps({"error": "MCP 未完成初始化（lifespan 未启动）", "results": [], "count": 0})
+    try:
+        r = await _client.post(f"{_base_url()}{path}", json=payload)
+        _CONTROL["base"] = None if r.status_code in (404, 502) else _CONTROL["base"]
+        if r.status_code == 200:
+            return json.dumps(r.json(), ensure_ascii=False)
+        return json.dumps({"error": f"控制台返回 {r.status_code}: {r.text[:200]}", "results": [], "count": 0})
+    except httpx.HTTPError as e:
+        _CONTROL["base"] = None  # 清缓存 → 下次重新解析端口（控制台重启自愈）
+        return json.dumps({"error": f"控制台不可达: {e}", "results": [], "count": 0})
 
 
-# ── knowledge 工具 ────────────────────────────────────────
+mcp = FastMCP("knowledge", lifespan=_lifespan)
 
 
 @mcp.tool(
@@ -96,11 +73,7 @@ async def search_knowledge(
     message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """从向量库检索知识。可选按 lang 过滤。"""
-    await _ensure_ready()
-    if not questions:
-        return json.dumps({"error": "questions must be non-empty", "results": [], "count": 0})
-    results = _state["db"].search(questions, doc_type="knowledge", lang=lang, top_k=DEFAULT_TOP_K)
-    return json.dumps({"results": results, "count": len(results)})
+    return await _post("/api/knowledge/search", {"questions": questions, "lang": lang})
 
 
 @mcp.tool(
@@ -113,16 +86,7 @@ async def store_knowledge(
     message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """存储新知识。存储前自动匿名化。"""
-    await _ensure_ready()
-    if not question.strip() or not content.strip():
-        return json.dumps({"stored": False, "error": "question and content must be non-empty"})
-    safe_q = anonymize(question)
-    safe_c = anonymize(content)
-    row_id = _state["db"].store(safe_q, safe_c, doc_type="knowledge", lang=lang)
-    return json.dumps({"stored": True, "id": row_id})
-
-
-# ── memory 工具 ──────────────────────────────────────────
+    return await _post("/api/knowledge/store", {"question": question, "content": content, "lang": lang})
 
 
 @mcp.tool(
@@ -134,14 +98,7 @@ async def search_in_memory(
     message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """检索执行记忆（doc_type=memory），按 flow_id 隔离。"""
-    await _ensure_ready()
-    if not questions:
-        return json.dumps({"error": "questions must be non-empty", "results": [], "count": 0})
-    results = _state["db"].search(
-        questions, doc_type="memory", top_k=DEFAULT_TOP_K,
-        flow_id=flow_id,
-    )
-    return json.dumps({"results": results, "count": len(results)})
+    return await _post("/api/memory/search", {"questions": questions, "flow_id": flow_id})
 
 
 if __name__ == "__main__":

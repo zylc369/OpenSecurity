@@ -4,7 +4,7 @@
   请求体: {"inputs": "text"} 或 {"inputs": ["text1", "text2"]}
   响应体: [[0.1, 0.2, ...], ...]  (1024 维向量的列表)
 
-embed_client.py 和 graphiti_config.py 的调用代码零改动。
+graphiti_config.py / knowledge_store.py 直接调 model_loader（进程内单例）。
 """
 from __future__ import annotations
 

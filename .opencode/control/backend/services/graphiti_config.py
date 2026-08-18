@@ -14,16 +14,11 @@
 """
 import asyncio
 import os
-import sys
 from pathlib import Path
-
-# embed_client.py 在 mcp-servers/（上级目录），需加入 path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 from graphiti_core.embedder.client import EmbedderClient
 from pydantic import BaseModel
-
 
 # ── 安全分析专用实体类型 ────────────────────────────────────
 # graphiti 的 _build_entity_types_context 会在这些基础上加 {id:0, name:"Entity"}（兜底）。
@@ -77,14 +72,14 @@ CUSTOM_ENTITY_TYPES = {
 def load_ai_env() -> None:
     """读取 .opencode/.ai_env，setdefault 合并到 os.environ。
 
-    控制台架构改造后的优先级：
+    优先级：
       1. 系统 env（最高，Plugin shell.env hook 注入的 DEEPSEEK_API_KEY 等）
-      2. .ai_env 文件（兜底，仅用于用户直接跑 events MCP 不通过 Plugin 的场景）
+      2. .ai_env 文件（兜底，仅用于用户直接跑相关 MCP 不通过 Plugin 的场景）
 
     日常运行时 Plugin 已经把 .ai_env 的配置注入到子进程环境变量，
     此函数 setdefault 不会覆盖已存在的 key，只是兜底。
     """
-    ai_env = Path(__file__).resolve().parents[2] / ".ai_env"  # events/ → mcp-servers/ → .opencode/
+    ai_env = Path(__file__).resolve().parents[3] / ".ai_env"  # services/ → backend/ → control/ → .opencode/
     if not ai_env.is_file():
         return
     for line in ai_env.read_text("utf-8").splitlines():
@@ -114,8 +109,8 @@ def create_graphiti():
     from graphiti_core import Graphiti
     from graphiti_core.llm_client.config import LLMConfig
 
-    from llm_client import DeepSeekLLMClient
-    from reranker import BgeRerankerClient
+    from services.llm_client import DeepSeekLLMClient
+    from services.reranker import BgeRerankerClient
 
     api_key = get_deepseek_api_key()
     if not api_key:
@@ -154,23 +149,22 @@ class BgeM3Embedder(EmbedderClient):
     替代 OpenAI embedding API——零成本、无网络依赖。
     输出 1024 维向量，与 graphiti-core 默认 EMBEDDING_DIM=1024 一致。
 
-    通过 HttpEmbedClient 调用 embed_server（单进程共享模型）。
-    embed_server 是硬依赖——不可用时 HttpEmbedClient 抛 RuntimeError。
-
-    create 方法是 async（graphiti-core 的 EntityNode.generate_name_embedding
-    调 await embedder.create()）。同步的 encode 用 asyncio.to_thread 包装。
+    模型实例经 model_loader.get_embedder()（进程内单例，与 /embed 端点同源）。
+    encode 是同步 CPU 调用，async 方法用 asyncio.to_thread 包装。
     """
 
     def __init__(self):
-        from embed_client import HttpEmbedClient
-
-        self._model = HttpEmbedClient()
         self._embedding_dim = 1024
 
     @property
     def model(self):
-        """返回 HttpEmbedClient（duck-type 兼容 SentenceTransformer.encode()）。"""
-        return self._model
+        """SentenceTransformer 单例（延迟加载，model_loader 内部线程安全）。"""
+        from services import model_loader
+        return model_loader.get_embedder()
+
+    def _encode_locked(self, text: str) -> "list[float]":
+        from services import model_loader
+        return model_loader.embed_sync(text)
 
     async def create(self, input_data) -> list[float]:
         """生成 embedding 向量（async）。
@@ -190,13 +184,10 @@ class BgeM3Embedder(EmbedderClient):
 
         # graphiti 传 [text]（单元素列表）→ 取第一个元素做 embedding
         if isinstance(input_data, list) and len(input_data) > 0 and isinstance(input_data[0], str):
-            text = input_data[0]
-            vec = await asyncio.to_thread(self.model.encode, text, convert_to_numpy=True)
-            return np.asarray(vec).tolist()
+            return await asyncio.to_thread(self._encode_locked, input_data[0])
 
         if isinstance(input_data, str):
-            vec = await asyncio.to_thread(self.model.encode, input_data, convert_to_numpy=True)
-            return np.asarray(vec).tolist()
+            return await asyncio.to_thread(self._encode_locked, input_data)
 
         # 预计算向量（Iterable[int]）→ 原样返回
         return [float(x) for x in input_data]
@@ -207,8 +198,5 @@ class BgeM3Embedder(EmbedderClient):
         self.model 必须在主线程解析（避免工作线程竞态导致重复加载模型），
         只把 encode 调用交给 to_thread。
         """
-        model = self.model  # 主线程解析，确保 lazy load 只执行一次
-        def _do_encode():
-            vecs = model.encode(input_data, convert_to_numpy=True)
-            return [np.asarray(v).tolist() for v in vecs]
-        return await asyncio.to_thread(_do_encode)
+        from services import model_loader
+        return await asyncio.to_thread(model_loader.embed_batch_sync, input_data)

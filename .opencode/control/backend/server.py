@@ -66,7 +66,7 @@ def create_app() -> FastAPI:
         )
 
     # 路由
-    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, processes
+    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, processes, knowledge, events
     app.include_router(embed.router)
     app.include_router(health.router)
     app.include_router(config_route.router)
@@ -80,6 +80,8 @@ def create_app() -> FastAPI:
     app.include_router(fs.router)
     app.include_router(models.router)
     app.include_router(system.router)
+    app.include_router(knowledge.router)
+    app.include_router(events.router)
 
     # 前端静态文件（开发态跳过，发布态挂载 dist/）
     _mount_frontend(app)
@@ -88,6 +90,13 @@ def create_app() -> FastAPI:
     # plugin 首个 /api/deps 请求到达时（spawn 后 0.3~1.1s）快照大概率已就绪。
     # 冷启动首扫含 JVM/磁盘冷缓存，预热正好吸收。失败静默（请求路径会正常构建）。
     from routes.deps import warm_deps_snapshot
+
+    @app.on_event("startup")
+    async def _start_writers() -> None:
+        # 库服务线程（fire-and-forget 写队列；agent 读写按需惰性初始化）
+        from services import event_store, knowledge_store
+        knowledge_store.start()
+        event_store.start()
 
     @app.on_event("startup")
     async def _warm_deps_snapshot() -> None:

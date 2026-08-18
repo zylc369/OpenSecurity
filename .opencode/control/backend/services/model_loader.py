@@ -31,6 +31,10 @@ _reranker: "CrossEncoder | None" = None
 _embed_lock = threading.Lock()
 _rerank_lock = threading.Lock()
 
+# 推理串行锁：torch/MPS 后端多线程并发推理会触发堆损坏（macOS nanov2 检测 SIGABRT），
+# 所有 encode/predict 调用（/embed、/rerank、graphiti embedder、reranker）必须持锁串行。
+_infer_lock = threading.Lock()
+
 # 模型就绪状态：embedder 加载完成后置 True。
 # 只追踪 embedder（reranker 是懒加载，首次 /rerank 才加载）。
 _models_ready = False
@@ -76,17 +80,19 @@ def get_reranker() -> "CrossEncoder":
 
 
 def _do_embed(inputs: list[str]) -> list[list[float]]:
-    """BGE-M3 推理：输入文本列表，返回向量列表（每个 1024 维）。"""
+    """BGE-M3 推理（持锁串行）：输入文本列表，返回向量列表（每个 1024 维）。"""
     model = get_embedder()
-    vecs = model.encode(inputs, convert_to_numpy=True)
+    with _infer_lock:
+        vecs = model.encode(inputs, convert_to_numpy=True)
     return [v.tolist() for v in vecs]
 
 
 def _do_rerank(query: str, texts: list[str]) -> list[float]:
-    """BGE-Reranker 推理：输入 query + 候选文本列表，返回 score 列表。"""
+    """BGE-Reranker 推理（持锁串行）：输入 query + 候选文本列表，返回 score 列表。"""
     model = get_reranker()
     pairs = [(query, t) for t in texts]
-    scores = model.predict(pairs)
+    with _infer_lock:
+        scores = model.predict(pairs)
     return [float(s) for s in np.asarray(scores)]
 
 
@@ -101,6 +107,31 @@ async def embed_async(inputs: list[str]) -> list[list[float]]:
 async def rerank_async(query: str, texts: list[str]) -> list[float]:
     """异步 rerank。"""
     return await asyncio.to_thread(_do_rerank, query, texts)
+
+
+def embed_sync(text: str) -> list[float]:
+    """同步单文本 embed（持锁；graphiti embedder 的 to_thread 路径用）。"""
+    model = get_embedder()
+    with _infer_lock:
+        vec = model.encode(text, convert_to_numpy=True)
+    return np.asarray(vec).tolist()
+
+
+def embed_batch_sync(texts: list[str]) -> list[list[float]]:
+    """同步批量 embed（持锁）。"""
+    model = get_embedder()
+    with _infer_lock:
+        vecs = model.encode(texts, convert_to_numpy=True)
+    return [np.asarray(v).tolist() for v in vecs]
+
+
+def rerank_sync(query: str, passages: list[str]) -> list[float]:
+    """同步 rerank（持锁；graphiti cross-encoder 的 to_thread 路径用）。"""
+    model = get_reranker()
+    pairs = [(query, p) for p in passages]
+    with _infer_lock:
+        scores = model.predict(pairs)
+    return [float(s) for s in np.asarray(scores)]
 
 
 # ─── 后台预加载（B 方案核心）─────────────────────────────

@@ -1,17 +1,18 @@
-"""基于 SQLite + sqlite-vec 的向量存储（knowledge MCP server 后端）。
+"""基于 SQLite + sqlite-vec 的向量存储（knowledge 服务后端）。
 
 双表设计：
   - answers（普通 SQLite 表）：id, question, answer(content), doc_type, lang, flow_id, created_at
   - answer_vectors（vec0 虚拟表）：rowid <-> answers.id，embedding float[1024]
 
 doc_type 区分两种类型：
-  - "knowledge"：知识库（search_knowledge 查 / store_knowledge 写；合并原 answer/guide/code）
-  - "memory"：执行记忆库（search_in_memory 查；写入由 memory_writer_daemon 自动完成）
+  - "knowledge"：知识库（/api/knowledge/search 查 / /api/knowledge/store 写）
+  - "memory"：执行记忆库（/api/memory/search 查；写入由 plugin 经 /api/memory/entry 自动完成）
 
 Embedding 目标：embed content（answer 列存储的文本），不是 question。
   question 存在 answers 表但不 embed——作为元数据供展示。
 
-Embedding 模型：BAAI/bge-m3（1024 维，归一化输出，多语言）。
+Embedding 模型：BAAI/bge-m3（1024 维，归一化输出，多语言），
+实例由 model_loader.get_embedder() 提供（进程内单例，禁止其他加载路径）。
 距离度量：cosine（sqlite-vec 返回 1 - cosine_similarity）。
 
 分数阈值：
@@ -29,14 +30,23 @@ import struct
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
 EMBEDDING_DIM = 1024
 DEFAULT_TOP_K = 5
 SCORE_THRESHOLD = 0.2
+
+
+class EmbedderLike(Protocol):
+    """embedder 鸭子类型（SentenceTransformer 真实例，duck-type 面）。
+
+    model_loader.get_embedder() 返回的 SentenceTransformer 天然满足；
+    测试用 fake 只需实现 encode。
+    """
+
+    def encode(self, texts: Any, **kwargs: Any) -> "np.ndarray": ...
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS answers (
@@ -66,7 +76,7 @@ MIGRATE_COLUMNS = [
 class MemoryDB:
     """向量存储：answers 表 + answer_vectors vec0 虚拟表。"""
 
-    def __init__(self, db_path: Path, embedder: SentenceTransformer):
+    def __init__(self, db_path: Path, embedder: EmbedderLike):
         self.db_path = db_path
         self.embedder = embedder
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

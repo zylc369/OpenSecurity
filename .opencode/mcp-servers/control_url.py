@@ -1,6 +1,6 @@
 """控制台端口发现（Python 侧唯一入口）。
 
-所有需要访问 control/backend 的 Python 代码（embed_client、events/server、
+所有需要访问 control/backend 的 Python 代码（knowledge/events/ocr 薄壳、
 测试脚本）都通过本模块获取控制台地址，不再各自读环境变量或端口文件。
 
 设计：

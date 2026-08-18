@@ -37,7 +37,7 @@ import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
 import TaskSessionPersistence from "./lib/task-session-persistence";
 import { getPythonCmd, getInstallHint, getCompilerName } from "./lib/venv";
-import { startControl } from "./lib/control-manager";
+import { readControlPortFile, startControl } from "./lib/control-manager";
 import { getAllConfig, getCachedConfig } from "./lib/control-config";
 
 /** 从缓存读配置值（同步，不触发 HTTP）。如果缓存为空返回 null。 */
@@ -501,122 +501,44 @@ function expandedSnippet(
 }
 
 /**
- * 常驻事件写入 daemon 管理。
+ * fire-and-forget 投递到控制台服务端。
  *
- * daemon 是一个长驻 Python 进程（write_event_daemon.py），通过 stdin 管道接收事件。
- * 首次调用 fireAndForgetEvent 时懒启动，后续复用。
- * daemon 初始化完成后输出 "READY" 到 stdout，plugin 收到后才开始写事件。
- * opencode 退出时通过 SIGTERM 关闭 daemon。
+ * 事件库/knowledge 库写入收口到控制台：
+ *   - POST /api/events/entry | /api/events/delete → Graphiti（控制台 event_store 线程）
+ *   - POST /api/memory/entry                → knowledge 向量库（控制台 knowledge_store 线程）
+ * 控制台端点入队即返 202；plugin 侧不 await、失败只记日志。
+ * 控制台重启换端口：readControlPortFile 每次实时读端口文件，自动跟随新端口。
  */
-let writerDaemon: import("child_process").ChildProcess | null = null;
-let daemonReady = false; // daemon 是否已输出 READY
-let pendingEvents: string[] = []; // daemon 未就绪时暂存的事件（上限 50）
-let exitHandlerRegistered = false;
-
-function ensureWriterDaemon(): void {
-  if (writerDaemon && !writerDaemon.killed) {
+function postToControl(
+  path: string,
+  body: Record<string, unknown>,
+  tag: string,
+): void {
+  const info = readControlPortFile();
+  if (!info) {
+    debugLog(`postToControl: 控制台端口未知，跳过 ${tag}`);
     return;
   }
-
-  const python = getPythonCmd();
-  if (!python) {
-    debugLog(`ensureWriterDaemon: Python 未就绪`);
-    return;
-  }
-
-  const script = join(
-    OPENCODE_ROOT,
-    "mcp-servers",
-    "events",
-    "write_event_daemon.py",
-  );
-  if (!existsSync(script)) {
-    debugLog(`ensureWriterDaemon: daemon 脚本不存在 ${script}`);
-    return;
-  }
-
-  daemonReady = false;
-
-  try {
-    const { spawn } = require("child_process");
-    writerDaemon = spawn(python, [script], {
-      stdio: ["pipe", "pipe", "pipe"], // stdin/stdout/stderr 全 pipe
-      env: { ...process.env },
-    });
-
-    // daemon stdout → 等 READY 信号
-    if (writerDaemon.stdout) {
-      writerDaemon.stdout.on("data", (data: Buffer) => {
-        const line = data.toString().trim();
-        if (line === "READY" && !daemonReady) {
-          daemonReady = true;
-          debugLog(
-            `ensureWriterDaemon: daemon READY，flush ${pendingEvents.length} 个暂存事件`,
-          );
-          // flush 暂存事件
-          for (const evt of pendingEvents) {
-            try {
-              writerDaemon?.stdin?.write(evt);
-            } catch {}
-          }
-          pendingEvents = [];
-        }
-      });
-    }
-
-    // daemon stderr → debugLog（实时管道，排查用）
-    if (writerDaemon.stderr) {
-      writerDaemon.stderr.on("data", (data: Buffer) => {
-        const lines = data.toString().trim().split("\n");
-        for (const line of lines) {
-          if (line.trim()) debugLog(`writer-daemon: ${line.trim()}`);
-        }
-      });
-    }
-
-    writerDaemon.on("error", (e: Error) => {
-      debugLog(`ensureWriterDaemon: daemon error: ${e.message}`);
-      writerDaemon = null;
-      daemonReady = false;
-    });
-
-    writerDaemon.on("exit", (code: number | null, signal: string | null) => {
-      debugLog(
-        `ensureWriterDaemon: daemon exited code=${code} signal=${signal}`,
-      );
-      if (code !== 0) {
-        debugLog(
-          `ensureWriterDaemon: daemon 异常退出，${pendingEvents.length} 个暂存事件丢失`,
-        );
-        pendingEvents = [];
+  fetch(`http://127.0.0.1:${info.port}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5000), // 控制台挂起态防 promise 永久悬空
+  })
+    .then((resp) => {
+      if (!resp.ok) {
+        debugLog(`postToControl: ${tag} 响应异常 status=${resp.status}`);
       }
-      writerDaemon = null;
-      daemonReady = false;
+    })
+    .catch((e: Error) => {
+      debugLog(`postToControl: ${tag} 发送失败 err=${e?.message}`);
     });
-
-    // opencode 退出时关闭 daemon（只注册一次）
-    if (!exitHandlerRegistered) {
-      process.on("exit", () => {
-        if (writerDaemon && !writerDaemon.killed) {
-          writerDaemon.kill("SIGTERM");
-        }
-      });
-      exitHandlerRegistered = true;
-    }
-
-    debugLog(
-      `ensureWriterDaemon: daemon 已启动 pid=${writerDaemon.pid}，等待 READY...`,
-    );
-  } catch (e) {
-    debugLog(`ensureWriterDaemon: spawn 失败: ${(e as Error)?.message}`);
-    writerDaemon = null;
-  }
 }
+
 
 /**
  * 异步写入事件到 Graphiti 事件库（fire-and-forget，不阻塞主流程）。
- * 通过 daemon stdin 管道写入 line-delimited JSON（含 timestamp 保证时序）。
- * daemon 未就绪时暂存（上限 50），就绪后自动 flush。
+ * 经控制台 /api/events/entry 投递（含 timestamp 保证时序）。
  * 失败只记日志，不影响 agent 运行。
  */
 function fireAndForgetEvent(
@@ -629,138 +551,25 @@ function fireAndForgetEvent(
   if (!session.isRegisteredAgent()) {
     return;
   }
-  ensureWriterDaemon();
-
-  const event =
-    JSON.stringify({
-      name,
-      body,
-      source,
-      group_id: groupId,
-      timestamp: Date.now(),
-    }) + "\n";
-
-  if (!writerDaemon || !writerDaemon.stdin || writerDaemon.stdin.destroyed) {
-    debugLog(`fireAndForgetEvent: daemon 不可用，跳过 name=${name}`);
-    return;
-  }
-
-  if (daemonReady) {
-    // daemon 已就绪 → 直接写
-    try {
-      const canWrite = writerDaemon.stdin.write(event);
-      if (!canWrite) {
-        debugLog(`fireAndForgetEvent: stdin 背压，事件可能延迟 name=${name}`);
-      }
-    } catch (e) {
-      debugLog(
-        `fireAndForgetEvent: stdin 写入失败 name=${name} err=${(e as Error)?.message}`,
-      );
-    }
-  } else {
-    // daemon 未就绪 → 暂存（上限 50，超出丢弃最早的）
-    if (pendingEvents.length >= 50) {
-      pendingEvents.shift();
-      debugLog(`fireAndForgetEvent: 暂存队列已满（50），丢弃最早事件`);
-    }
-    pendingEvents.push(event);
-  }
+  postToControl(
+    "/api/events/entry",
+    { name, body, source, group_id: groupId, timestamp: Date.now() },
+    `event name=${name}`,
+  );
 }
 
 /**
  * 删除指定 flowId 的所有事件库数据（fire-and-forget）。
- * 通过 write_event_daemon 的 stdin 发送 delete 消息，daemon 复用已有 Neo4j 连接执行删除。
- * daemon 不可用时只记日志，不影响 session 删除流程。
+ * 经控制台 /api/events/delete 投递；失败只记日志，不影响 session 删除流程。
  */
 function deleteGraphitiEvents(flowId: string): void {
-  if (!writerDaemon || !writerDaemon.stdin || writerDaemon.stdin.destroyed) {
-    debugLog(`deleteGraphitiEvents: daemon 不可用，跳过 flowId=${flowId}`);
-    return;
-  }
-
-  const msg = JSON.stringify({ action: "delete", group_id: flowId }) + "\n";
-  try {
-    const canWrite = writerDaemon.stdin.write(msg);
-    if (canWrite) {
-      debugLog(`deleteGraphitiEvents: 已发送 delete flowId=${flowId}`);
-    } else {
-      debugLog(
-        `deleteGraphitiEvents: stdin 背压，delete 可能延迟 flowId=${flowId}`,
-      );
-    }
-  } catch (e) {
-    debugLog(
-      `deleteGraphitiEvents: stdin 写入失败 flowId=${flowId} err=${(e as Error)?.message}`,
-    );
-  }
-}
-
-/**
- * 常驻 memory writer daemon 管理（对齐 PentAGI executor.go storeToolResult）。
- * 工具执行后自动把结果写入 knowledge 向量库（doc_type=memory）。
- */
-let memoryDaemon: import("child_process").ChildProcess | null = null;
-let memoryDaemonReady = false;
-const KNOWLEDGE_DAEMON_SCRIPT = join(
-  OPENCODE_ROOT,
-  "mcp-servers",
-  "knowledge",
-  "memory_writer_daemon.py",
-);
-
-function ensureMemoryDaemon(): void {
-  if (memoryDaemon && !memoryDaemon.killed) {
-    return;
-  }
-
-  const python = getPythonCmd();
-  if (!python) {
-    debugLog(`ensureMemoryDaemon: Python 未就绪`);
-    return;
-  }
-
-  try {
-    const { spawn } = require("child_process");
-    memoryDaemon = spawn(python, [KNOWLEDGE_DAEMON_SCRIPT], {
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: false,
-    });
-
-    memoryDaemon.stdout?.on("data", (data: Buffer) => {
-      const output = data.toString().trim();
-      if (output === "READY") {
-        memoryDaemonReady = true;
-        debugLog(`memory daemon: READY`);
-      }
-    });
-
-    memoryDaemon.stderr?.on("data", (data: Buffer) => {
-      debugLog(`memory daemon: ${data.toString().trim()}`);
-    });
-
-    memoryDaemon.on("exit", (code: number | null) => {
-      debugLog(`memory daemon: exited code=${code}`);
-      memoryDaemon = null;
-      memoryDaemonReady = false;
-    });
-
-    if (!exitHandlerRegistered) {
-      exitHandlerRegistered = true;
-      process.on("exit", () => {
-        memoryDaemon?.kill("SIGTERM");
-      });
-    }
-
-    debugLog(`memory daemon: spawning ${python} ${KNOWLEDGE_DAEMON_SCRIPT}`);
-  } catch (e) {
-    debugLog(`ensureMemoryDaemon: spawn 失败 err=${(e as Error)?.message}`);
-  }
+  postToControl("/api/events/delete", { group_id: flowId }, `delete flowId=${flowId}`);
 }
 
 /**
  * 异步写入工具执行结果到 knowledge 向量库（doc_type=memory）。
  * 对齐 PentAGI executor.go:519 storeToolResult + registry.go:149 allowedStoringInMemoryTools。
- * fire-and-forget，失败只记日志，不影响 agent 运行。
+ * 经控制台 /api/memory/entry 投递，fire-and-forget，失败只记日志，不影响 agent 运行。
  */
 
 // 白名单：只有有信息价值的工具结果才存入 memory（对齐 PentAGI allowedStoringInMemoryTools）
@@ -787,36 +596,15 @@ function fireAndForgetMemory(
     return;
   }
 
-  ensureMemoryDaemon();
-
-  if (!memoryDaemon || !memoryDaemon.stdin || memoryDaemon.stdin.destroyed) {
-    debugLog(`fireAndForgetMemory: daemon 不可用，跳过 tool=${toolName}`);
-    return;
-  }
-
   // 对齐 PentAGI executor.go:530 的格式
   const text = `### Incoming arguments\n\n\`\`\`json\n${JSON.stringify(args).slice(0, 2000)}\n\`\`\`\n\n#### Tool result\n\n${(output || "").slice(0, 2000)}\n`;
   const question = `${toolName} execution`;
 
-  const entry =
-    JSON.stringify({
-      question,
-      answer: text,
-      type: toolName,
-      flow_id: flowId,
-    }) + "\n";
-
-  if (memoryDaemonReady) {
-    try {
-      memoryDaemon.stdin.write(entry);
-    } catch (e) {
-      debugLog(
-        `fireAndForgetMemory: stdin 写入失败 tool=${toolName} err=${(e as Error)?.message}`,
-      );
-    }
-  } else {
-    debugLog(`fireAndForgetMemory: daemon 未就绪，跳过 tool=${toolName}`);
-  }
+  postToControl(
+    "/api/memory/entry",
+    { question, answer: text, type: toolName, flow_id: flowId },
+    `memory tool=${toolName}`,
+  );
 }
 
 export const SecurityAnalysisPlugin: Plugin = async (input) => {
