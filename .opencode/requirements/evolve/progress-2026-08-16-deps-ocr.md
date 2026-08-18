@@ -401,3 +401,23 @@ event_store._ensure_graphiti 注入 factory 时跳过 docker ensure（此前单�
 ### 附带产出
 - 控制台崩溃恢复流程: 端口文件残留（指向死 PID）→ rm 端口文件 + canonical spawner 重拉
 - pkill -9 docker 会损坏容器文件系统（RWLayer/conf 乱码）→ rm 容器让 ensure 重建即愈
+
+## 追加整改 37（验证沉淀 + 可优化项落地）
+
+- [x] 真 E2E 套件沉淀 tests/test_e2e_real.py（5 例全绿 87s，替代手写一次性脚本）:
+  knowledge 全链 / events 全链（BFS bug1 + diverse 真分数回归锚点）/ 容器 stopped 自愈 /
+  并发写入（bug6 回归锚点）/ memory 坏库重建；独立 RUN_ID 前缀 + 自清理
+- [x] 密集轮询 poll()（1s 起指数增长到 8s 上限，条件满足即退出）替代固定 sleep——
+  events 全链实测 14s（手写时代固定 sleep 要 55-75s）
+- [x] knowledge 路由降级契约统一（200+error 结构直达 LLM，对齐 events）
+- [x] 61 单测回归全绿；生产重启上线（f3187c82）
+- 套件首跑自身抓出一个套件 bug（cwd 层级错）——修复后 5/5
+
+## 追加整改 37 补充（套件稳定性修复）
+
+- 套件连跑两遍 5/5 全绿（87s/遍）、Neo4j/SQLite 零残留
+- 修套件自身 3 缺陷: cwd 层级（parents[1]→[2]）; 开头幂等清扫历史 e2er-* 残留（上次失败跑遗留）;
+  knowledge 断言阈值抖动（content 与 question 语义弱关联 → cosine 在 0.2 阈值边缘抖动 → 加强语义关联稳定过阈）
+- 清理漏洞: store_knowledge 全局行按 question 前缀清（flow cleanup 删不到）
+- 产品级时序竞态如实记录（低优先级，暂不修）: events delete 与 in-flight DeepSeek 提取竞态——
+  delete 时部分事件实体提取仍在途，落地晚于 delete 会残留；真实场景 session 删除远晚于写入窗口，影响极小
