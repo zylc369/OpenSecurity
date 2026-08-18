@@ -294,6 +294,9 @@ class OcrService:
             if alive:
                 self._subprocess, self._sub_port = None, oport
                 self._sub_model, self._orphan_adopted = model, True
+                # 收养即视为刚活动过：否则 _last_activity_at 保持初始 0，
+                # reaper 的释放判据（>0 且空闲超时）永远不满足，无人使用的孤儿永不回收
+                self._last_activity_at = time.time()
                 self._ready_event.set()
                 return True
         try:

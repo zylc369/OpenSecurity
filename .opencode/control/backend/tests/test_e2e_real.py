@@ -165,7 +165,12 @@ asyncio.run(main())
                        text=True, timeout=timeout, cwd=BACKEND_DIR.parents[2])
     for line in r.stdout.split("\n"):
         if line.startswith("RESULT_JSON:"):
-            return json.loads(line[len("RESULT_JSON:"):])
+            raw = line[len("RESULT_JSON:"):]
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                # 非所有壳都返回 JSON 文本（ocr 壳返回纯文本）——包一层保持 dict 返回
+                return {"text": raw}
     raise RuntimeError(f"壳无输出: {r.stdout[-200:]} {r.stderr[-300:]}")
 
 

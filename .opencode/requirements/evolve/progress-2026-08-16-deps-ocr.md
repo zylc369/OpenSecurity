@@ -421,3 +421,19 @@ event_store._ensure_graphiti 注入 factory 时跳过 docker ensure（此前单�
 - 清理漏洞: store_knowledge 全局行按 question 前缀清（flow cleanup 删不到）
 - 产品级时序竞态如实记录（低优先级，暂不修）: events delete 与 in-flight DeepSeek 提取竞态——
   delete 时部分事件实体提取仍在途，落地晚于 delete 会残留；真实场景 session 删除远晚于写入窗口，影响极小
+
+## 追加整改 38（OCR 孤儿收养时间戳 + 无主模型清理）
+
+- [x] 修复: _adopt_orphan 成功收养时 _last_activity_at = now（此前保持初始 0，
+  reaper 释放判据要求 >0 且空闲超时 → 收养后无人使用的孤儿进程永不回收）
+- [x] 真链验证: 重启控制台 → acquire 收养旧孤儿(pid 23594) → close → 45s 内 reaper 回收
+  （last_activity 归 None = _stop_locked 执行）+ 进程退出确认；61 单测回归全绿
+- [x] 清理无主 HF 模型: whisper-large-v3-turbo(1.5G) + all-MiniLM-L6-v2(87M)，
+  全仓零代码引用确认后删除，释放 1.6G；缓存终态 3 模型 7.57G
+
+## 追加整改 39（ollama 闲置模型卸载 + 测试工具解析修复）
+
+- [x] 三重核查后卸载 ollama glm-ocr:latest（2.1G）: 日志零推理请求、未加载、backend=mlx；
+  ollama list 空、~/.ollama/models 归零；OCR 链路真调复验（PIL 造图 → MCP 壳识别 OCR-OK-2026 成功）
+- [x] 修 test_e2e_real.mcp_shell_tool 解析缺陷: OCR 壳返回纯文本非 JSON（合法），
+  json.loads 失败时包 {"text": raw}——两路径（ocr 纯文本/knowledge JSON）端到端确认
