@@ -322,7 +322,7 @@ if (contentType) {
 4. 浏览器将响应内容（可能是 flight data 等非 HTML 格式）当 HTML 解析
 5. 未转义的内容中的 `<script>` 标签被执行
 
-**案例**：futurejs 中 Next.js middleware 允许 CT 覆盖，flight data 中未转义的 nonce 值被浏览器当 HTML 解析执行。
+**案例**：某 Next.js 实战中 middleware 允许 CT 覆盖，flight data 中未转义的 nonce 值被浏览器当 HTML 解析执行。
 
 **安全写法**：
 

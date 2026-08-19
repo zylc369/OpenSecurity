@@ -111,7 +111,7 @@ src/routes/
 **场景**：Bot 先访问攻击者 URL（firstPage），再在新页面（secondPage）中写入 flag。
 
 ```javascript
-// Bot 时间线（Yipiter 案例）
+// Bot 时间线（某双页模式实战）
 t=0s    firstPage.goto(attackerUrl)      // 攻击者 XSS 开始执行
 t=3s    firstPage.close()                // firstPage 关闭
         但 firstPage 打开的 popup 窗口仍然存活！
@@ -199,31 +199,3 @@ var tk = 0, iv = setInterval(function() {
 - [ ] 是否有 CSP 保护导入内容的渲染？
 - [ ] 导入 URL 是否做了域名限制（SSRF）？
 
----
-
-## 5. 实战案例
-
-### 5.1 Yipiter 攻击链（CyberGame 2026）
-
-```
-架构：SvelteKit SPA + Pyodide notebook + Puppeteer Bot
-Flag 位置：localStorage（Bot 在 secondPage 中写入）
-
-攻击链：
-  ① 控制器页面（外部 HTML）
-  ② window.open(challenge/new/?url=notebook_json_url, 'seed')
-  ③ 应用下载恶意 notebook，HTML 输出放在 sandboxed blob iframe
-  ④ sandbox: allow-scripts allow-popups（无 allow-same-origin）
-  ⑤ iframe 内 JS：location.href = blob URL → postMessage 给控制器
-  ⑥ 控制器收到 blob URL → 构造 SSO 回调 URL
-  ⑦ SSO 回调验证 blob URL origin === challenge origin → 通过
-  ⑧ SSO 重定向到 blob URL → 作为顶级页面加载
-  ⑨ 顶级页面无 sandbox → 可读 localStorage → 轮询等 flag
-  ⑩ flag 写入后轮询检测到 → 外泄到 webhook
-
-关键发现：
-  - blob URL 继承创建者 origin，通过 SSO 回调的 origin 检查
-  - sandbox 的限制只在 iframe 上下文中生效
-  - popup 在 firstPage 关闭后存活，轮询可持续到 flag 写入
-  - 应用完全无后端，所有安全逻辑在客户端 JS 中
-```

@@ -180,32 +180,7 @@ node_modules/next/dist/server/
 
 ---
 
-## 6. 实战案例
-
-### 6.1 future.js 攻击链（CyberGame 2026）
-
-```
-攻击链：
-  ① 发送 GET /_next/pwn + RSC: "" + Content-Type: text/html + x-nonce: <script>XSS</script>
-  ② middleware 覆盖 CT 为 text/html
-  ③ base-server.js: RSC !== "1" → 选标准路由（不标记为 RSC 请求）
-  ④ app-render.js: RSC !== undefined → 按 RSC 模式渲染 → flight data（不转义 nonce）
-  ⑤ nginx 缓存：主键含 Host:proxy，二级键 rsc="" + AE="gzip, deflate"
-  ⑥ Bot 访问 /_next/pwn → Host:proxy + 无 RSC + AE 匹配 → HIT
-  ⑦ 浏览器把 flight data 当 HTML 解析 → <script> 执行 → XSS
-  ⑧ 缓存中缓存：XSS 把 Cookie 写入 /_next/exfil 的缓存
-  ⑨ 攻击者读取 /_next/exfil 的缓存 → 拿到 flag
-
-关键发现：
-  - 框架内部不一致性（base-server.js vs app-render.js 的 RSC 判断）
-  - nginx 对空 header 和缺失 header 的处理差异
-  - 缓存中缓存技术（无外网环境下的数据渗出）
-```
-
-> 缓存投毒的完整方法论（缓存键探测、AE 差异利用、缓存中缓存、Bot AE 探测）见 `$AGENT_DIR/knowledge-base/cache-poisoning.md`。
-> 自动化探测脚本见 `$AGENT_DIR/scripts/cache_poison.py`。
-
-### 6.2 黑盒探测可获取的信息
+## 6. 黑盒探测可获取的信息
 
 | 探测方法 | 可获取 | 不可获取 |
 |---------|-------|---------|
@@ -214,3 +189,6 @@ node_modules/next/dist/server/
 | 缓存行为测试 | 缓存路径范围、缓存键组成 | — |
 | CT 覆盖测试 | middleware 是否允许 CT 覆盖 | — |
 | 灰盒分析 | 下载最近版本源码对比 | 需要猜测版本范围 |
+
+> 缓存投毒的完整方法论（缓存键探测、AE 差异利用、缓存中缓存、Bot AE 探测）见 `$AGENT_DIR/knowledge-base/cache-poisoning.md`。
+> 自动化探测脚本见 `$AGENT_DIR/scripts/cache_poison.py`。
