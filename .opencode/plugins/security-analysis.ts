@@ -535,7 +535,6 @@ function postToControl(
     });
 }
 
-
 /**
  * 异步写入事件到 Graphiti 事件库（fire-and-forget，不阻塞主流程）。
  * 经控制台 /api/events/entry 投递（含 timestamp 保证时序）。
@@ -563,7 +562,11 @@ function fireAndForgetEvent(
  * 经控制台 /api/events/delete 投递；失败只记日志，不影响 session 删除流程。
  */
 function deleteGraphitiEvents(flowId: string): void {
-  postToControl("/api/events/delete", { group_id: flowId }, `delete flowId=${flowId}`);
+  postToControl(
+    "/api/events/delete",
+    { group_id: flowId },
+    `delete flowId=${flowId}`,
+  );
 }
 
 /**
@@ -684,6 +687,18 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       let sessionData: SessionData | null = null;
       try {
         if (!agent) {
+          // 无 agent 的消息 = 程序注入（session.idle 的错误回显走此路径，实测 8/8）。
+          // 注入前置过 pendingErrorCallbackMessage 的话在此清除——该标记的设计消费点
+          // 在下方检查处，但注入消息不带 agent 到不了那里；不清除会残留给
+          // 下一条真实用户消息，导致其跳过全部检查被无条件放行。
+          const injectedSession = ctx.sessionManager.get(sessionID);
+          if (injectedSession?.pendingErrorCallbackMessage) {
+            injectedSession.pendingErrorCallbackMessage = false;
+            debugLog(
+              `chat.message: 注入消息（无 agent）清除错误回调标记 sessionID=${sessionID}`,
+              sessionID,
+            );
+          }
           const errMsg = `chat.message: input 缺少 agent 字段 sessionID=${sessionID}`;
           debugLog(errMsg, sessionID);
           await reportErrorAndAbort(ctx.client, sessionID, null, errMsg);
@@ -695,6 +710,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         // 用它区分：synthetic 回声不刷新 lastUserMessageAt（否则 max_duration 超时检查形同虚设）。
         // 为了补偿opencode重启后会话数据丢失的问题。
         const existingResult = await ctx.sessionManager.create(sessionID);
+        // 标记消费点 A：注入的错误消息若带 agent（opencode 版本行为差异的兜底路径），
+        // 在此消费并放行——不消费则控制台真失败场景会 报错→注入→报错 无限循环。
+        // 正常用户消息到达此处时标记已被消费点 B（!agent 分支）清除，不会误放行。
         if (existingResult.data?.pendingErrorCallbackMessage) {
           existingResult.data.pendingErrorCallbackMessage = false;
           debugLog(

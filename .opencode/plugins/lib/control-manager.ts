@@ -27,7 +27,11 @@ import {
   VENV_PYTHON_CANDIDATES,
 } from "./constants";
 import { ControlPortInfo, isProcessAliveSync } from "./process-utils";
-import { addSelfToUsers, removeSelfFromUsers, cleanupDeadUsers } from "./ref-counter";
+import {
+  addSelfToUsers,
+  removeSelfFromUsers,
+  cleanupDeadUsers,
+} from "./ref-counter";
 import { debugLog } from "./logging";
 
 /** 控制台子进程引用（exit handler 用） */
@@ -88,7 +92,38 @@ export async function isControlHealthy(): Promise<boolean> {
 }
 
 /**
- * 启动控制台。
+ * 启动控制台（单飞入口）。
+ *
+ * 并发安全：进程内任意时刻至多一次真实启动在途——并发调用共享同一个 Promise，
+ * 等待同一次结果，不重复 spawn。背景：曾出现 6 路并发调用（1 主流程 + 5 预热）
+ * 各自 spawn，5 个 Python 进程抢 bind、4 个自杀退出（2026/8/20 08:06:25 事故日志）。
+ *
+ * 完成后清空在途引用：成功 → 下次调用走健康复用快路径；失败 → 下次调用可重试。
+ * 包装层吞掉异常统一返回 null（doStartControl 理论不抛，addSelfToUsers 的文件写
+ * 失败会 rethrow——此前会让无 try/catch 的 getControlPort 调用方直接炸）。
+ *
+ * Returns:
+ *   {port, pid} 启动成功
+ *   null 启动失败（venv 缺失 / spawn 失败 / 超时）
+ */
+let inFlightStart: Promise<{ port: number; pid: number } | null> | null = null;
+
+export function startControl(): Promise<{ port: number; pid: number } | null> {
+  if (!inFlightStart) {
+    inFlightStart = doStartControl()
+      .catch((e) => {
+        debugLog(`startControl: 未预期异常 ${(e as Error)?.message}`);
+        return null;
+      })
+      .finally(() => {
+        inFlightStart = null;
+      });
+  }
+  return inFlightStart;
+}
+
+/**
+ * 启动控制台（实际执行体，仅经 startControl 单飞入口调用）。
  *
  * 流程：
  *   1. 启动前 cleanupDeadUsers（清理上次崩溃残留）
@@ -97,22 +132,23 @@ export async function isControlHealthy(): Promise<boolean> {
  *   4. 等待端口文件出现 + /health 200/503
  *   5. 加自己 PID 到 users
  *   6. 注册 exit handler（退出时减引用）
- *
- * Returns:
- *   {port, pid} 启动成功
- *   null 启动失败（venv 缺失 / spawn 失败 / 超时）
  */
-export async function startControl(): Promise<{ port: number; pid: number } | null> {
+async function doStartControl(): Promise<{ port: number; pid: number } | null> {
   // 启动前清理（处理上次 opencode SIGKILL 后的残留）
   cleanupDeadUsers();
 
   // 1. 检测现有控制台
   if (await isControlHealthy()) {
-    const info = readControlPortFile()!;
-    debugLog(`startControl: 已有控制台运行（port=${info.port}, pid=${info.pid}），复用`);
-    addSelfToUsers();
-    registerExitHandler();
-    return { port: info.port, pid: info.pid };
+    const info = readControlPortFile();
+    if (info) {
+      debugLog(
+        `startControl: 已有控制台运行（port=${info.port}, pid=${info.pid}），复用`,
+      );
+      addSelfToUsers();
+      registerExitHandler();
+      return { port: info.port, pid: info.pid };
+    }
+    debugLog(`startControl: 健康检查通过但端口文件已被删除，未知错误`);
   }
 
   // 2. 不健康 → 清理旧端口文件，spawn 新的
@@ -137,16 +173,16 @@ export async function startControl(): Promise<{ port: number; pid: number } | nu
   try {
     controlProc = spawn(python, [CONTROL_SCRIPT], {
       stdio: ["ignore", "ignore", "ignore"],
-      detached: true,  // 关键：脱离父进程
+      detached: true, // 关键：脱离父进程
       env: {
         ...process.env,
-        OPENCODE_ROOT: OPENCODE_ROOT,  // 控制台读 .ai_env 用
-        DATA_DIR: DATA_DIR,            // 控制台写端口文件/users 文件用
-        HF_HUB_OFFLINE: "1",           // 避免 SentenceTransformer 联网检查
+        OPENCODE_ROOT: OPENCODE_ROOT, // 控制台读 .ai_env 用
+        DATA_DIR: DATA_DIR, // 控制台写端口文件/users 文件用
+        HF_HUB_OFFLINE: "1", // 避免 SentenceTransformer 联网检查
         TRANSFORMERS_OFFLINE: "1",
       },
     });
-    controlProc.unref();  // 让 opencode 事件循环不等待控制台
+    controlProc.unref(); // 让 opencode 事件循环不等待控制台
     debugLog(`startControl: spawn pid=${controlProc.pid}`);
   } catch (e) {
     debugLog(`startControl: spawn 异常 ${(e as Error).message}`);
@@ -173,7 +209,9 @@ export async function startControl(): Promise<{ port: number; pid: number } | nu
  * - 5 秒内端口文件出现 + PID 存活 → 返回 ControlPortInfo
  * - 超时 → 返回 null
  */
-async function waitForPortFile(timeoutMs: number): Promise<ControlPortInfo | null> {
+async function waitForPortFile(
+  timeoutMs: number,
+): Promise<ControlPortInfo | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const info = readControlPortFile();

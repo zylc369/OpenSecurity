@@ -48,6 +48,11 @@ export class SessionData {
   activelyTerminated: boolean = false;
   /** 待输出的错误信息。chat.message 主动终止时保存，session.idle 时取出并通过 session.prompt 输出给用户 */
   pendingErrorMessage: string | null = null;
+  /** 错误注入回执标记。session.idle 注入错误消息前置位。两条消费路径：
+   *  ① 注入消息带 agent 触发 chat.message（走标记检查，防止 报错→注入→报错 死循环——
+   *     控制台真失败场景下若无此消费会无限注入）
+   *  ② 注入消息不带 agent（当前 opencode 对 noReply prompt 的实测行为）走 !agent 分支，
+   *     在该分支同步清除——防止标记残留被下一条真实用户消息误消费（跳过全部检查） */
   pendingErrorCallbackMessage: boolean = false;
   /** 上次 resume prompt 植入的完成标记。maybeResumeAnalysis 发 prompt 成功后写入；
    *  chat.message 时清成 null（用户新消息 = 新一轮，旧 marker 不再相关）。
