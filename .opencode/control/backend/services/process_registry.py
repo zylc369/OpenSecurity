@@ -21,7 +21,7 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 
 import psutil
 
@@ -39,9 +39,6 @@ class ProcessInfo:
     memory_mb: float | None           # RSS
     cmdline: str                      # 截断后的启动命令
     memory_footprint_mb: float | None = None   # 活动监视器口径（仅 macOS）
-    ref_count: int | None = None      # 仅 OCR（引用计数）
-    holders: list[dict] = field(default_factory=list)   # OCR 持有者明细
-    last_active_at: float | None = None                # OCR 最后活跃时间戳
     extra: str = ""                   # 端口等附加信息
 
 

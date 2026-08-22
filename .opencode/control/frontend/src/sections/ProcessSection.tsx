@@ -1,15 +1,12 @@
 /**
- * 进程分区：控制台后端管理的全部进程清单。
+ * 进程分区：控制台后端管理的进程清单（「运行状态」页右卡）。
  *
- * 数据：本组件自轮询（10s）——进程状态与页面其余数据（环境就绪）生命周期不同，
- * 不并入 useScan 刷新链。
- *
- * 展示：每个进程的 PID/内存/用途/状态；OCR 行展开引用计数体系
- * （当前引用数、持有者明细、最后活跃时间）。
+ * 数据：GET /api/processes（10s 自轮询 + 页级统一刷新按钮经 refreshToken 触发）。
+ * 刷新归属：本组件无独立刷新按钮——运行状态页顶部统一刷新（用户指令：
+ * 不要一块一块点刷新）。
  */
 import React, { useCallback, useEffect, useState } from "react";
-import { Card, Table, Tag, Tooltip, Typography, Space } from "antd";
-import { ReloadOutlined, QuestionCircleOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Tooltip, Typography } from "antd";
 import type { ProcessInfo, ProcessRegistryView } from "../types";
 import { api } from "../api/client";
 import EllipsisCell from "../components/EllipsisCell";
@@ -35,16 +32,12 @@ function fmtMB(m: number): string {
   return m >= 1024 ? `${(m / 1024).toFixed(2)} GB` : `${m.toFixed(0)} MB`;
 }
 
-/** 时间戳 → 相对时间（xx 秒/分 前）。 */
-function relTime(ts: number | null): string {
-  if (!ts) return "—";
-  const sec = Math.max(0, Math.round(Date.now() / 1000 - ts));
-  if (sec < 60) return `${sec} 秒前`;
-  if (sec < 3600) return `${Math.floor(sec / 60)} 分前`;
-  return `${Math.floor(sec / 3600)} 时 ${Math.floor((sec % 3600) / 60)} 分前`;
+interface Props {
+  /** 页级统一刷新信号（递增计数器；>0 时触发一次立即刷新） */
+  refreshToken: number;
 }
 
-const ProcessSection: React.FC = () => {
+const ProcessSection: React.FC<Props> = ({ refreshToken }) => {
   const [data, setData] = useState<ProcessRegistryView | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -65,11 +58,16 @@ const ProcessSection: React.FC = () => {
     return () => clearInterval(t);
   }, [refresh]);
 
+  // 页级统一刷新（跳过首渲染 0——挂载 effect 已刷）
+  useEffect(() => {
+    if (refreshToken > 0) void refresh();
+  }, [refreshToken, refresh]);
+
   const cols = [
     {
       title: "进程",
       dataIndex: "name",
-      width: 170,
+      width: 150,
       render: (_: unknown, r: ProcessInfo) => (
         <Tooltip title={r.role} placement="topLeft">
           <Typography.Text strong>{r.name}</Typography.Text>
@@ -80,13 +78,13 @@ const ProcessSection: React.FC = () => {
     {
       title: "PID",
       dataIndex: "pid",
-      width: 90,
+      width: 80,
       render: (pid: number | null) => (pid != null ? String(pid) : "—"),
     },
     {
       title: "内存",
       dataIndex: "memory_footprint_mb",
-      width: 110,
+      width: 100,
       render: (fp: number | null, r: ProcessInfo) => {
         const rss = r.memory_mb;
         // footprint = 活动监视器"内存"列同口径；缺失（非 macOS）回退 RSS
@@ -107,7 +105,7 @@ const ProcessSection: React.FC = () => {
     {
       title: "状态",
       dataIndex: "status",
-      width: 90,
+      width: 80,
       render: (s: string) => (
         <Tag color={STATUS_COLOR[s] ?? "default"} style={{ marginInlineEnd: 0 }}>
           {STATUS_TEXT[s] ?? s}
@@ -115,53 +113,9 @@ const ProcessSection: React.FC = () => {
       ),
     },
     {
-      title: (
-        <Space size={4}>
-          引用计数
-          <Tooltip title="OCR 模型实例的持有者数量：每个识图消费者（MCP 服务）启动时 +1、退出时 -1；归零 30 秒后空闲自动释放模型内存。悬停数字可看持有者明细（PID/命令行/最后心跳）。仅 OCR 行有此机制，其余进程显示 —">
-            <QuestionCircleOutlined style={{ color: "#999", fontSize: 12 }} />
-          </Tooltip>
-        </Space>
-      ),
-      dataIndex: "ref_count",
-      width: 100,
-      render: (n: number | null, r: ProcessInfo) =>
-        n == null ? (
-          "—"
-        ) : (
-          <Tooltip
-            title={
-              r.holders.length > 0 ? (
-                <div>
-                  {r.holders.map((h, i) => (
-                    <div key={i}>
-                      PID {h.pid} · {h.alive ? "存活" : "已死"} ·{" "}
-                      {h.last_seen_sec_ago != null ? `${h.last_seen_sec_ago.toFixed(0)}s 前` : "—"}
-                      {h.cmdline && (
-                        <div style={{ opacity: 0.7, fontSize: 11 }}>{h.cmdline}</div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                "无持有者（空闲计时中，归零 30s 后自动释放）"
-              )
-            }
-          >
-            <Typography.Text>{n}</Typography.Text>
-          </Tooltip>
-        ),
-    },
-    {
-      title: "最后活跃",
-      dataIndex: "last_active_at",
-      width: 110,
-      render: (ts: number | null) => relTime(ts),
-    },
-    {
       title: "启动命令",
       dataIndex: "cmdline",
-      render: (c: string) => <EllipsisCell text={c} maxWidth={380} />,
+      render: (c: string) => <EllipsisCell text={c} maxWidth={260} />,
     },
   ];
 
@@ -176,9 +130,6 @@ const ProcessSection: React.FC = () => {
           </Typography.Text>
         </span>
       }
-      extra={
-        <ReloadOutlined spin={loading} onClick={() => void refresh()} style={{ cursor: "pointer" }} />
-      }
     >
       <Table
         rowKey="key"
@@ -187,39 +138,6 @@ const ProcessSection: React.FC = () => {
         dataSource={data?.processes ?? []}
         loading={loading && !data}
         pagination={false}
-        expandable={{
-          rowExpandable: (r) => r.holders.length > 0,
-          expandedRowRender: (r) => (
-            <Table
-              rowKey={(h) => `${h.pid}-${h.last_seen_sec_ago}`}
-              size="small"
-              pagination={false}
-              dataSource={r.holders}
-              columns={[
-                { title: "持有者 PID", dataIndex: "pid", width: 110 },
-                {
-                  title: "状态",
-                  dataIndex: "alive",
-                  width: 90,
-                  render: (a: boolean) =>
-                    a ? <Tag color="green" style={{ marginInlineEnd: 0 }}>存活</Tag>
-                      : <Tag color="red" style={{ marginInlineEnd: 0 }}>已退出</Tag>,
-                },
-                {
-                  title: "最后心跳",
-                  dataIndex: "last_seen_sec_ago",
-                  width: 110,
-                  render: (s: number | null) => (s != null ? `${s.toFixed(0)} 秒前` : "—"),
-                },
-                {
-                  title: "命令行（识别持有者身份）",
-                  dataIndex: "cmdline",
-                  render: (c: string) => <EllipsisCell text={c} maxWidth={520} />,
-                },
-              ]}
-            />
-          ),
-        }}
       />
     </Card>
   );

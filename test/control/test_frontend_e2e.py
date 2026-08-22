@@ -417,3 +417,133 @@ def test_docker_stop_confirm(rendered):
     page.wait_for_timeout(800)
     visible = page.locator(".ant-popover:not(.ant-popover-hidden):has-text('确定停止')")
     assert visible.count() == 0, "取消后确认框应关闭（不可见）"
+
+
+# ─── 运行状态页（页级 Tab, 2026-08-22）──────────────────────────
+
+
+def test_runtime_tab_switch(rendered):
+    """顶栏 Tab：切「运行状态」→ URL #/runtime + opencode 表可见 + 环境页隐藏。"""
+    page, _ = rendered
+    page.locator(".ant-segmented").first.locator(".ant-segmented-item:has-text('运行状态')").click()
+    page.wait_for_timeout(600)
+    assert page.evaluate("location.hash") == "#/runtime", "URL 应同步 #/runtime"
+    # opencode 心跳表可见（conftest 心跳线程 → 至少 1 行）
+    assert page.locator("text=opencode 进程").first.is_visible()
+    # 管理进程表随页挪入
+    assert page.locator("text=控制台管理的进程").first.is_visible()
+    # 环境页内容隐藏（锚点导航行 + docker 分区）
+    assert page.locator(".ant-anchor").count() == 0 or not page.locator(".ant-anchor").first.is_visible()
+    assert not page.locator("#section-docker").is_visible()
+    # 用例卫生: module 级共享 page——恢复 overview 供后续用例（防状态泄漏连锁）
+    page.locator(".ant-segmented").first.locator(".ant-segmented-item:has-text('环境总览')").click()
+    page.wait_for_timeout(500)
+
+
+def test_runtime_direct_url(rendered, control_server):
+    """#/runtime 直达（可刷新/书签）+ 切回环境总览 + 旧锚点兼容。
+
+    注: 复用 module 级共享 page（函数内新开 sync_playwright 会与已激活的
+    rendered fixture 事件循环冲突——"Sync API inside asyncio loop"）。
+    goto 重载即验证"直达 URL 独立打开"语义。
+    """
+    page, _ = rendered
+    page.goto(f"http://127.0.0.1:{control_server}/#/runtime", wait_until="networkidle", timeout=20000)
+    page.wait_for_timeout(1200)
+    # 直达即运行状态页
+    assert page.locator("text=opencode 进程").first.is_visible()
+    # Tab 切回环境总览
+    page.locator(".ant-segmented").first.locator(".ant-segmented-item:has-text('环境总览')").click()
+    page.wait_for_timeout(600)
+    assert page.evaluate("location.hash") == "", "切回应干净移除 hash"
+    assert page.locator("#section-docker").is_visible()
+    # 旧锚点书签: 从运行页 hash 跳 #section-models → 回落环境总览并滚动到位
+    page.evaluate("location.hash = '#/runtime'")
+    page.wait_for_timeout(500)
+    page.evaluate("location.hash = '#section-models'")
+    page.wait_for_timeout(800)
+    assert page.locator("#section-models").is_visible(), "旧锚点应回落环境总览页"
+    # 用例卫生: 恢复无 hash 初始态
+    page.goto(f"http://127.0.0.1:{control_server}/", wait_until="domcontentloaded", timeout=20000)
+    page.wait_for_timeout(800)
+
+
+def test_overview_no_processes_section(rendered, control_server):
+    """首页瘦身: 环境总览不再渲染进程清单（已挪运行状态页）。"""
+    page, _ = rendered
+    # 防御性重置: 共享 page 可能被前序用例切到 #/runtime（状态泄漏），重开无 hash URL
+    page.goto(f"http://127.0.0.1:{control_server}/", wait_until="domcontentloaded", timeout=20000)
+    page.wait_for_timeout(800)
+    assert page.evaluate("location.hash") != "#/runtime"
+    assert page.locator("#section-processes").count() == 0, "首页不应有 processes 分区"
+
+
+def test_runtime_gone_entry(rendered, control_server):
+    """疑似退出态: 假 pid 心跳条目渲染红色标签（后端降级 + 前端状态分支端到端）。"""
+    import httpx
+
+    httpx.post(f"http://127.0.0.1:{control_server}/api/heartbeat", json={"pid": 999999}, timeout=5)
+    page, _ = rendered
+    page.goto(f"http://127.0.0.1:{control_server}/#/runtime", wait_until="networkidle", timeout=20000)
+    page.wait_for_timeout(1200)
+    row = page.locator("tr:has-text('999999')")
+    assert row.count() >= 1, "假 pid 心跳条目应出现在表内（60s sweep 窗口内）"
+    tag = row.first.locator(".ant-tag")
+    assert "疑似退出" in tag.inner_text(), "应显示红色疑似退出标签"
+    assert "red" in (tag.get_attribute("class") or ""), "应为红色 Tag"
+    # 用例卫生: 等 sweep 移除假条目（60s 超时 + 10s 周期）太久——直接改走 overview,
+    # 假条目对后续用例无影响（只在 runtime 页显示; 70s 内自然消失）
+    page.goto(f"http://127.0.0.1:{control_server}/", wait_until="domcontentloaded", timeout=20000)
+    page.wait_for_timeout(600)
+
+
+def test_runtime_unified_refresh(rendered, control_server):
+    """页级统一刷新: 一个按钮触发全部数据源重拉（非逐卡刷新）。"""
+    import httpx
+
+    page, _ = rendered
+    page.goto(f"http://127.0.0.1:{control_server}/#/runtime", wait_until="networkidle", timeout=20000)
+    page.wait_for_timeout(1200)
+    # 逐卡刷新按钮已移除（用户指令: 统一刷新替代）
+    assert page.locator(".ant-card-extra").count() == 0, "卡片不应再有独立刷新按钮"
+    reqs: list[str] = []
+    page.on("request", lambda r: reqs.append(r.url) if "/api/" in r.url else None)
+    page.locator("button:has-text('刷新')").first.click()
+    page.wait_for_timeout(1000)
+    assert any("/api/heartbeats" in u for u in reqs), "应刷新 opencode 心跳表"
+    assert any("/api/processes" in u for u in reqs), "应刷新管理进程表"
+    # 用例卫生
+    page.goto(f"http://127.0.0.1:{control_server}/", wait_until="domcontentloaded", timeout=20000)
+    page.wait_for_timeout(600)
+
+
+def test_process_section_dead_columns_removed(rendered, control_server):
+    """进程表瘦身: OCR 专属列（引用计数/最后活跃）已删——OCR 转进程内加载后为死字段。"""
+    page, _ = rendered
+    page.goto(f"http://127.0.0.1:{control_server}/#/runtime", wait_until="networkidle", timeout=20000)
+    page.wait_for_timeout(1200)
+    proc_card = page.locator(".ant-card").filter(has_text="控制台管理的进程").first
+    header = proc_card.locator("thead").inner_text()
+    assert "引用计数" not in header, "引用计数列应删除（OCR 专属, 已移模型板块）"
+    assert "最后活跃" not in header, "最后活跃列应删除（OCR 专属死字段）"
+    for col in ["进程", "PID", "内存", "状态", "启动命令"]:
+        assert col in header, f"列 {col} 应保留"
+    # 用例卫生
+    page.goto(f"http://127.0.0.1:{control_server}/", wait_until="domcontentloaded", timeout=20000)
+    page.wait_for_timeout(600)
+
+
+def test_runtime_two_column_layout(rendered, control_server):
+    """信息密度: 运行状态页两卡并排（xl 2 列, 与环境总览同布局语言）。"""
+    page, _ = rendered
+    page.goto(f"http://127.0.0.1:{control_server}/#/runtime", wait_until="networkidle", timeout=20000)
+    page.wait_for_timeout(1200)
+    oc = page.locator("text=opencode 进程").first.bounding_box()
+    pc = page.locator("text=控制台管理的进程").first.bounding_box()
+    assert oc and pc, "两卡都应可见"
+    # 并排判定: 右卡左边缘 > 左卡左边缘 且垂直位置接近（非上下堆叠）
+    assert pc["x"] > oc["x"] + 200, "进程卡应在 opencode 卡右侧（2 列网格）"
+    assert abs(pc["y"] - oc["y"]) < 50, "两卡应大致同一水平线"
+    # 用例卫生
+    page.goto(f"http://127.0.0.1:{control_server}/", wait_until="domcontentloaded", timeout=20000)
+    page.wait_for_timeout(600)

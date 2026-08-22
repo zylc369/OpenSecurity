@@ -153,8 +153,31 @@ export interface SystemInfo {
   hf_cache_dir: string;
   hf_endpoint: string;
   control_pid: number;
+  /** 控制台进程启动时间（Unix 秒; 运行状态页摘要行） */
+  control_start_time: number;
   dev_mode: boolean;
   platform: string;
+}
+
+// ─── /api/heartbeats ──────────────────────────────────────
+
+/** 连接的 opencode 进程（心跳表条目 + psutil 富化）。 */
+export interface OpencodeProcessInfo {
+  pid: number;
+  /** 距最后心跳秒数（10s 周期; >15 视为延迟） */
+  last_seen_sec_ago: number;
+  /** false = 心跳残留（进程已死，60s sweep 窗口内）→"疑似退出" */
+  alive: boolean;
+  /** 空格连接的完整命令行; 权限受限时 null */
+  cmdline: string | null;
+  /** 工作目录; 权限受限时 null */
+  cwd: string | null;
+  /** 进程运行时长秒; 进程不存在时 null */
+  running_sec: number | null;
+}
+
+export interface HeartbeatsResponse {
+  opencode: OpencodeProcessInfo[];
 }
 
 // ─── /api/models ──────────────────────────────────────────
@@ -221,13 +244,6 @@ export type ConfigMetaMap = Record<string, ConfigMetaItem>;
 
 // ─── /api/processes ───────────────────────────────────────
 
-export interface HolderInfo {
-  pid: number;
-  alive: boolean;
-  last_seen_sec_ago: number | null;
-  cmdline: string;
-}
-
 export interface ProcessInfo {
   key: string;
   name: string;
@@ -238,9 +254,6 @@ export interface ProcessInfo {
   /** 活动监视器同口径（phys_footprint，含压缩页+GPU 映射）；仅 macOS */
   memory_footprint_mb: number | null;
   cmdline: string;
-  ref_count: number | null;
-  holders: HolderInfo[];
-  last_active_at: number | null;
   extra: string;
 }
 

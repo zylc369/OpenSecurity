@@ -881,6 +881,83 @@ def test_frontend_port_vite_and_url():
 # 禁用 fastapi.testclient.TestClient（每请求独立循环 → 锁跨循环 → 误报 503），
 # 一律 asyncio.run + 直接 await，或 httpx.AsyncClient+ASGITransport。
 
+@test("heartbeat: snapshot——浅拷贝语义（不污染注册表、last_seen 保持 monotonic）")
+def test_heartbeat_snapshot_pure():
+    from services.heartbeat import HeartbeatRegistry
+
+    reg = HeartbeatRegistry()
+    reg.record(100)
+    snap = reg.snapshot()
+    assert_eq(len(snap), 1, "快照应含 1 条")
+    import time as _t
+
+    _t.sleep(0.02)
+    # 快照条目的 last_seen 是拷贝——原表刷新不影响已取快照
+    reg.record(100)
+    assert_true(snap[0].last_seen < reg.snapshot()[0].last_seen, "原表刷新后新快照应更新")
+    assert_eq(len(reg.snapshot()), 1, "多次 snapshot 不应增加条目")
+
+
+@test("heartbeat: collect_opencode_processes——真 pid 富化 + 假 pid 降级")
+def test_heartbeat_collect_enrich():
+    import os
+
+    from services import heartbeat as hb
+
+    hb.heartbeats.record(os.getpid())
+    hb.heartbeats.record(999999)  # 超出 macOS pid 上限，必不存在
+    infos = {i.pid: i for i in hb.collect_opencode_processes()}
+    try:
+        me = infos[os.getpid()]
+        assert_true(me.alive, "自进程应存活")
+        assert_true(me.cmdline is not None and "python" in me.cmdline, "应富化出命令行")
+        assert_true(me.cwd is not None, "应富化出工作目录")
+        assert_true(me.running_sec is not None and me.running_sec >= 0, "应富化出运行时长")
+        fake = infos[999999]
+        assert_false(fake.alive, "假 pid 应判定不存活")
+        assert_true(
+            fake.cmdline is None and fake.cwd is None and fake.running_sec is None,
+            "不存活进程三字段应降级 None",
+        )
+    finally:
+        # 单例注册表不能被测试污染（生产 heartbeats 与本测试同进程）
+        hb.heartbeats._entries.pop(os.getpid(), None)
+        hb.heartbeats._entries.pop(999999, None)
+
+
+@test("heartbeat: GET /api/heartbeats——响应契约（单键列表 + 条目字段）")
+def test_heartbeat_route_contract():
+    import asyncio
+
+    from routes.heartbeat import list_heartbeats
+
+    # async 路由函数直调（asyncio.run 同循环; 避免 TestClient 每请求独立事件循环）
+    resp = asyncio.run(list_heartbeats())
+    assert_true(set(resp.keys()) == {"opencode"}, f"响应应单键 opencode，实际 {set(resp.keys())}")
+    for item in resp["opencode"]:
+        assert_true(
+            set(item.keys())
+            >= {"pid", "last_seen_sec_ago", "alive", "cmdline", "cwd", "running_sec"},
+            f"条目字段缺失: {item.keys()}",
+        )
+
+
+@test("system: /api/system 响应含 control_start_time（运行状态页摘要行数据源）")
+def test_system_start_time():
+    import asyncio
+
+    from routes.system import get_system_info
+
+    info = asyncio.run(get_system_info())
+    import time as _t
+
+    assert_true(
+        isinstance(info["control_start_time"], float)
+        and _t.time() - info["control_start_time"] < 3600,
+        "control_start_time 应为近过去的 Unix 时间戳",
+    )
+
+
 @test("models: hardware_summary——内存充足路径 + 只计已缓存模型")
 def test_hardware_summary_ok_path():
     import services.model_assets as ma

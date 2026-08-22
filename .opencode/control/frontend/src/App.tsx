@@ -7,7 +7,7 @@
  *   一键安装 N = 缺失项中"可自动安装"的（pip 包 + Docker 镜像 + 硬件达标模型），
  *   悬浮显示将安装什么 + 哪些只能手动。N=0 时禁用（不静默无操作）。
  */
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Layout,
   Anchor,
@@ -24,6 +24,7 @@ import {
   App as AntApp,
   Divider,
   Tooltip,
+  Segmented,
 } from "antd";
 import {
   SafetyCertificateOutlined,
@@ -39,6 +40,7 @@ import PythonDepsSection from "./sections/PythonDepsSection";
 import ToolsSection from "./sections/ToolsSection";
 import ConfigSection from "./sections/ConfigSection";
 import ProcessSection from "./sections/ProcessSection";
+import OpencodeSection from "./sections/OpencodeSection";
 import InstallOrchestrator, {
   InstallTask,
 } from "./sections/InstallOrchestrator";
@@ -54,6 +56,15 @@ import { CATEGORIES, type CategoryKey } from "./constants/categories";
 import { api } from "./api/client";
 
 const { Header, Content } = Layout;
+
+// ─── 页级 Tab（环境总览 / 运行状态）── hash 路由 ───────────────
+// "#/runtime" → 运行状态页; 其余（无 hash / 旧 #section-* 锚点）→ 环境总览。
+// 旧书签 #section-models 点入时 hashchange 触发回落 overview + 原生锚点滚动。
+type PageKey = "overview" | "runtime";
+
+function pageFromHash(): PageKey {
+  return window.location.hash === "#/runtime" ? "runtime" : "overview";
+}
 
 /** docker pull 的 SSE 包装为 Promise（编排器用）——以 __done__ exit_code 为权威标志 */
 function pullImageAsync(image: string): Promise<string> {
@@ -108,6 +119,25 @@ const App: React.FC = () => {
   const system = useSystem();
   const hardware = useHardware();
   const required = useRequiredStatus();
+
+  // ── 页级 Tab: hash 驱动（URL 同步可刷新/书签; Segmented 受控）──
+  const [page, setPage] = useState<PageKey>(pageFromHash);
+  // 运行状态页统一刷新信号（递增 → 两卡 + 摘要行同时立即刷新; 替代逐卡刷新按钮）
+  const [runtimeRefresh, setRuntimeRefresh] = useState(0);
+  useEffect(() => {
+    const onHash = () => setPage(pageFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const switchPage = (key: string) => {
+    if (key === "runtime") {
+      window.location.hash = "#/runtime"; // 触发 hashchange → setPage（幂等）
+    } else {
+      // 清 hash: 设 hash="" 会残留 "#"，用 replaceState 干净移除（不触发 hashchange，手动 set）
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+      setPage("overview");
+    }
+  };
 
   const [orchOpen, setOrchOpen] = useState(false);
   const [orchTitle, setOrchTitle] = useState("");
@@ -489,6 +519,15 @@ const App: React.FC = () => {
               硬件
             </Button>
           </Popover>
+          {/* 页级切换：环境总览（静态环境）/ 运行状态（动态运行时）*/}
+          <Segmented
+            value={page}
+            onChange={(v) => switchPage(v as string)}
+            options={[
+              { label: "环境总览", value: "overview" },
+              { label: "运行状态", value: "runtime" },
+            ]}
+          />
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <Popover
@@ -562,6 +601,31 @@ const App: React.FC = () => {
               一键安装
             </Button>
           )}
+          {/* 重启控制台：全局操作（两页通用）——原在锚点行内，runtime 页无锚点行会失去入口 */}
+          <Popconfirm
+            title="重启控制台？"
+            description="接口断开数秒、模型重载需几十秒；用于让最新代码生效"
+            okText="重启"
+            cancelText="取消"
+            onConfirm={() => void doRestart()}
+            disabled={restarting}
+          >
+            <Tooltip
+              title={
+                restarting
+                  ? "重启中…等待新实例就绪"
+                  : "重启控制台（让最新代码生效）"
+              }
+            >
+              <Button
+                size="small"
+                type="text"
+                danger={restarting}
+                icon={<PoweroffOutlined spin={restarting} />}
+                disabled={restarting}
+              />
+            </Tooltip>
+          </Popconfirm>
         </div>
       </Header>
 
@@ -569,6 +633,8 @@ const App: React.FC = () => {
       <Content
         style={{ padding: "16px clamp(16px, 3vw, 40px) 56px", width: "100%" }}
       >
+        {page === "overview" ? (
+        <>
         {/* 锚点行：分段控件（segmented 风）+ 右刷新；sticky 由本胶囊容器承担。
             注意：Anchor 不用内置 offsetTop（affix 模式会包 ant-affix fixed 层，
             脱离本容器 flex 布局，把刷新按钮挤到下一行——实测踩坑）。 */}
@@ -610,30 +676,6 @@ const App: React.FC = () => {
               onClick={() => refreshAll()}
             />
           </Tooltip>
-          <Popconfirm
-            title="重启控制台？"
-            description="接口断开数秒、模型重载需几十秒；用于让最新代码生效"
-            okText="重启"
-            cancelText="取消"
-            onConfirm={() => void doRestart()}
-            disabled={restarting}
-          >
-            <Tooltip
-              title={
-                restarting
-                  ? "重启中…等待新实例就绪"
-                  : "重启控制台（让最新代码生效）"
-              }
-            >
-              <Button
-                size="small"
-                type="text"
-                danger={restarting}
-                icon={<PoweroffOutlined spin={restarting} />}
-                disabled={restarting}
-              />
-            </Tooltip>
-          </Popconfirm>
         </div>
         <Row gutter={[12, 12]}>
           <Col xs={24} xl={12} id="section-docker">
@@ -814,11 +856,39 @@ const App: React.FC = () => {
             </Card>
           </Col>
 
-          {/* 进程清单：运维观测页（非环境就绪分类），自轮询 */}
-          <Col xs={24} id="section-processes" style={{ marginTop: 12 }}>
-            <ProcessSection />
-          </Col>
         </Row>
+        </>
+        ) : (
+        /* 运行状态页：动态运行时信息（连接的 opencode / 管理进程），2 列网格
+           （与环境总览同布局语言）+ 页级统一刷新（一次刷新全部卡片）。 */
+        <>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "flex-end",
+              marginBottom: 10,
+            }}
+          >
+            <Tooltip title="立即刷新本页全部信息（opencode 进程 / 摘要 / 管理进程）">
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                onClick={() => setRuntimeRefresh((n) => n + 1)}
+              >
+                刷新
+              </Button>
+            </Tooltip>
+          </div>
+          <Row gutter={[12, 12]}>
+            <Col xs={24} xl={12}>
+              <OpencodeSection system={system.data} refreshToken={runtimeRefresh} />
+            </Col>
+            <Col xs={24} xl={12}>
+              <ProcessSection refreshToken={runtimeRefresh} />
+            </Col>
+          </Row>
+        </>
+        )}
       </Content>
 
       <InstallOrchestrator

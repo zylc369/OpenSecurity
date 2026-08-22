@@ -22,6 +22,7 @@ async def get_system_info() -> dict:
     venv_path = str(Path(sys.prefix))
     hf_cache = str(Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")))
     from services import model_assets
+    from services.process_lock import get_process_start_time
     return {
         "venv_path": venv_path,
         "venv_python": sys.executable,
@@ -29,6 +30,7 @@ async def get_system_info() -> dict:
         "hf_cache_dir": hf_cache,
         "hf_endpoint": model_assets._hf_endpoint(),
         "control_pid": os.getpid(),
+        "control_start_time": get_process_start_time(os.getpid()),
         "dev_mode": is_dev_mode(),
         "platform": f"{platform.system()} {platform.machine()}",
     }

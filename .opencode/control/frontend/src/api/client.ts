@@ -13,7 +13,7 @@ import type {
   HardwareInfo, ConfigMap, RequiredStatusMap, ToolStatus, AgentTools,
   DockerScanGlobal, ScanResult, InstallResult,
   SystemInfo, ModelsResponse, FsCheckResult, ConfigMetaMap,
-  ProcessRegistryView,
+  ProcessRegistryView, HeartbeatsResponse,
 } from "../types";
 
 const instance: AxiosInstance = axios.create({
@@ -42,6 +42,12 @@ export const api = {
   // ─── /api/processes ─────────────────────────────────────
   async getProcesses(): Promise<ProcessRegistryView> {
     const r = await instance.get<ProcessRegistryView>("/api/processes");
+    return r.data;
+  },
+
+  // ─── /api/heartbeats（运行状态页: 连接的 opencode 进程）───
+  async getHeartbeats(): Promise<HeartbeatsResponse> {
+    const r = await instance.get<HeartbeatsResponse>("/api/heartbeats");
     return r.data;
   },
 

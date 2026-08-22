@@ -78,6 +78,15 @@ class HeartbeatRegistry:
         with self._lock:
             return len(self._entries)
 
+    def snapshot(self) -> list[HeartbeatEntry]:
+        """心跳表浅拷贝（锁内取副本，调用方迭代不持锁）。
+
+        last_seen 保持 monotonic 时间戳语义不变; 距今秒数由消费方
+        collect_opencode_processes 计算。
+        """
+        with self._lock:
+            return [HeartbeatEntry(pid=e.pid, last_seen=e.last_seen) for e in self._entries.values()]
+
 
 class HeartbeatTask:
     """周期 sweep + 空表自杀的后台任务。
@@ -126,3 +135,64 @@ class HeartbeatTask:
 
 # ─── 模块级单例 + 同名委托（消费方兼容）───────────────────
 heartbeats = HeartbeatRegistry()
+
+
+# ─── 心跳表 → 前端可视化（psutil 富化在本层; registry 保持纯内存）───
+@dataclass
+class OpencodeProcessInfo:
+    """单个 opencode 进程的可视化信息（GET /api/heartbeats 条目）。"""
+
+    pid: int
+    last_seen_sec_ago: float  # 距最后心跳秒数
+    alive: bool  # psutil 进程是否存在（SIGKILL 后 60s sweep 窗口内 False）
+    cmdline: str | None  # 空格连接的完整命令行; AccessDenied → None
+    cwd: str | None  # 工作目录; AccessDenied → None
+    running_sec: float | None  # time.time() - create_time; 进程不存在 → None
+
+
+def collect_opencode_processes() -> list[OpencodeProcessInfo]:
+    """心跳表快照 + psutil 富化。
+
+    边界:
+      • NoSuchProcess/ZombieProcess → alive=False, 其余字段 None
+        （心跳条目在 sweep 超时移除前的正常残留窗口，前端显示"疑似退出"）
+      • AccessDenied → alive=True, 对应字段 None（不重试——同 pid 下轮仍会失败，
+        属正常权限边界; 每轮仅 warning 一条）
+    """
+    import psutil
+
+    now_mono = time.monotonic()
+    now_wall = time.time()
+    infos: list[OpencodeProcessInfo] = []
+    for entry in heartbeats.snapshot():
+        age = max(0.0, now_mono - entry.last_seen)
+        alive = psutil.pid_exists(entry.pid)
+        cmdline: str | None = None
+        cwd: str | None = None
+        running_sec: float | None = None
+        if alive:
+            try:
+                proc = psutil.Process(entry.pid)
+                if proc.status() == psutil.STATUS_ZOMBIE:
+                    alive = False
+                else:
+                    cmdline = " ".join(proc.cmdline()) or None
+                    cwd = proc.cwd()
+                    running_sec = max(0.0, now_wall - proc.create_time())
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                alive = False
+            except psutil.AccessDenied as e:
+                logger.warning("心跳富化: pid=%d 信息受限（%s）", entry.pid, e)
+            except Exception as e:  # psutil 兜底（富化失败不阻塞整体响应）
+                logger.warning("心跳富化: pid=%d 异常（%s）", entry.pid, e)
+        infos.append(
+            OpencodeProcessInfo(
+                pid=entry.pid,
+                last_seen_sec_ago=round(age, 1),
+                alive=alive,
+                cmdline=cmdline,
+                cwd=cwd,
+                running_sec=round(running_sec, 1) if running_sec is not None else None,
+            )
+        )
+    return infos

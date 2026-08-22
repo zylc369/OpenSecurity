@@ -7,6 +7,7 @@
 """
 import os
 import signal
+import threading
 import subprocess
 import sys
 import time
@@ -58,6 +59,7 @@ def control_server():
     )
 
     port = None
+    heartbeat_stop: threading.Event | None = None
     try:
         sock_file = data_dir / "opensecurity-control.sock"
         for _ in range(20):
@@ -67,13 +69,37 @@ def control_server():
                         transport=httpx.HTTPTransport(uds=str(sock_file)), timeout=2,
                     ) as probe:
                         probe.get("http://localhost/health")
-                        # 控制台就绪——取 TCP 端口 + 首跳心跳防自杀
+                        # 控制台就绪——取 TCP 端口 + 心跳线程防自杀
                         with httpx.Client(
                             transport=httpx.HTTPTransport(uds=str(sock_file)), timeout=5,
                         ) as c:
                             port = c.get("http://localhost/api/console-url").json()["tcp_port"]
+                            # 持续心跳（8s 周期线程，teardown 停）：单次心跳 60s 超时移除
+                            # → 表空自杀（90s 宽限），此前全靠用例总时长 <90s 兜底，CI 慢机必翻车;
+                            # 持续心跳同时为 /api/heartbeats 断言供真数据（本进程 alive=True）
+                            heartbeat_stop = threading.Event()
+
+                            def _beat(stop: threading.Event) -> None:
+                                while not stop.wait(8):
+                                    try:
+                                        c2 = httpx.Client(
+                                            transport=httpx.HTTPTransport(uds=str(sock_file)),
+                                            timeout=5,
+                                        )
+                                        try:
+                                            c2.post(
+                                                "http://localhost/api/heartbeat",
+                                                json={"pid": os.getpid()},
+                                            )
+                                        finally:
+                                            c2.close()
+                                    except OSError:
+                                        pass  # 控制台退出（teardown 竞态）静默
+
+                            threading.Thread(target=_beat, args=(heartbeat_stop,), daemon=True).start()
+                            # 首跳立即发（不等首个 8s 周期）
                             c.post("http://localhost/api/heartbeat", json={"pid": os.getpid()})
-                        break
+                    break
                 except OSError:
                     pass
             time.sleep(0.5)
@@ -81,6 +107,8 @@ def control_server():
 
         yield port
     finally:
+        if heartbeat_stop is not None:
+            heartbeat_stop.set()
         proc.send_signal(signal.SIGTERM)
         try:
             proc.wait(timeout=5)

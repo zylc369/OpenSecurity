@@ -3,6 +3,7 @@
 E2E 渲染验证在 test_frontend_e2e.py（无头浏览器）。
 control_server fixture 在 conftest.py（与 E2E 共享沙箱实例）。
 """
+import os
 import re
 import time
 
@@ -125,6 +126,22 @@ def test_api_models(control_server):
     assert set(hs) >= {"ok", "reason", "notes", "available_gb", "total_required_gb"}
     assert hs["available_gb"] > 0
     assert d["hf_endpoint"].startswith("http")
+
+
+def test_api_heartbeats(control_server):
+    """GET /api/heartbeats：conftest 心跳线程的条目可见 + 字段富化。"""
+    r = httpx.get(f"http://127.0.0.1:{control_server}/api/heartbeats", timeout=5)
+    assert r.status_code == 200
+    d = r.json()
+    assert set(d.keys()) == {"opencode"}
+    entries = d["opencode"]
+    assert len(entries) >= 1, "conftest 心跳线程应保证至少 1 条（本测试进程）"
+    me = next(e for e in entries if e["pid"] == os.getpid())
+    # 本测试进程真实存活 → 富化字段齐全
+    assert me["alive"] is True
+    assert me["cmdline"] and "pytest" in me["cmdline"], "应富化出本进程命令行"
+    assert me["cwd"] and me["running_sec"] is not None
+    assert 0 <= me["last_seen_sec_ago"] < 30, "心跳线程 8s 周期, 距今应 <30s"
 
 
 def test_api_fs_check(control_server):
