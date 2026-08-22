@@ -2,31 +2,35 @@
  * 控制台启动管理。
  *
  * 职责（严格收口）：
- *   • 启动时检查现有控制台是否运行（端口文件 + PID + 端口连通）
+ *   • 启动时检查现有控制台是否运行（IPC connect + /health）
  *   • 不运行则 spawn 新的控制台进程（detached:true + unref，让控制台脱离 opencode 生命周期）
- *   • 等待端口文件出现 + /health 200
+ *   • 等待 IPC 通道就绪（/health 200/503）
  *   • 加自己 PID 到 users 文件
  *   • 注册 process.on("exit") 退出时减引用
  *
- * 与 ref-counter.ts / process-utils.ts / port-manager（控制台端）协同。
+ * IPC 语义（取代端口文件机制）：
+ *   • 活性 = connect 固定 IPC 地址一次（Unix sock / Windows 管道）
+ *   • 单例互斥 = 控制台端 IPC bind 内核排他
+ *   • socket 文件由控制台进程自理（退出清理）；TS 侧不碰 IPC 资产
+ *
+ * 与 ref-counter.ts / process-utils.ts / ipc_listener.py（控制台端）协同。
  *
  * 不在本模块：
  *   • 配置读取（control-config.ts）
  *   • 三阶段 waitFor（在 security-analysis.ts 的 chat.message 内调度）
  */
 import { spawn } from "child_process";
-import { existsSync, readFileSync, unlinkSync } from "fs";
+import { existsSync } from "fs";
 import {
   CONTROL_SCRIPT,
-  CONTROL_PORT_FILE,
   CONTROL_STARTUP_TIMEOUT_MS,
-  CONTROL_PORT_FILE_WAIT_MS,
+  CONTROL_IPC_READY_WAIT_MS,
   DATA_DIR,
   OPENCODE_ROOT,
   VENV_DIR,
   VENV_PYTHON_CANDIDATES,
 } from "./constants";
-import { ControlPortInfo, isProcessAliveSync } from "./process-utils";
+import { controlFetch } from "./control-http";
 import {
   addSelfToUsers,
   removeSelfFromUsers,
@@ -56,38 +60,34 @@ function findVenvPython(): string | null {
   return null;
 }
 
-/**
- * 读端口文件。
- * Returns: {port, pid, startTime} 或 null。
- */
-export function readControlPortFile(): ControlPortInfo | null {
-  if (!existsSync(CONTROL_PORT_FILE)) return null;
-  try {
-    const lines = readFileSync(CONTROL_PORT_FILE, "utf-8").trim().split("\n");
-    if (lines.length < 2) return null;
-    return {
-      port: parseInt(lines[0], 10),
-      pid: parseInt(lines[1], 10),
-      startTime: parseFloat(lines[2] || "0"),
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** 检测控制台是否健康（PID 存活 + 端口连通）。 */
+/** 检测控制台是否健康（IPC 请求 /health，通 = 活）。 */
 export async function isControlHealthy(): Promise<boolean> {
-  const info = readControlPortFile();
-  if (!info) return false;
-  if (!isProcessAliveSync(info.pid, info.startTime || undefined)) return false;
-  // 端口连通性检查
   try {
-    const resp = await fetch(`http://127.0.0.1:${info.port}/health`, {
-      signal: AbortSignal.timeout(3000),
-    });
+    const resp = await controlFetch("/health", { timeoutMs: 3000 });
     return resp.ok || resp.status === 503; // 503 是加载中，也算健康
   } catch {
     return false;
+  }
+}
+
+/** 控制台实例身份（/health 的识别字段；供日志与测试断言"同一个实例"用）。 */
+export interface ControlIdentity {
+  pid: number;
+  bootToken: string | null;
+}
+
+/** 取控制台实例身份（pid + boot_token）。不可达返回 null。 */
+export async function getControlIdentity(): Promise<ControlIdentity | null> {
+  try {
+    const resp = await controlFetch("/health", { timeoutMs: 3000 });
+    if (!resp.ok && resp.status !== 503) return null;
+    const data: any = await resp.json();
+    if (typeof data?.pid === "number" && data.pid > 0) {
+      return { pid: data.pid, bootToken: data?.boot_token ?? null };
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -99,21 +99,21 @@ export async function isControlHealthy(): Promise<boolean> {
  * 各自 spawn，5 个 Python 进程抢 bind、4 个自杀退出（2026/8/20 08:06:25 事故日志）。
  *
  * 完成后清空在途引用：成功 → 下次调用走健康复用快路径；失败 → 下次调用可重试。
- * 包装层吞掉异常统一返回 null（doStartControl 理论不抛，addSelfToUsers 的文件写
- * 失败会 rethrow——此前会让无 try/catch 的 getControlPort 调用方直接炸）。
+ * 包装层吞掉异常统一返回 false（doStartControl 理论不抛，addSelfToUsers 的文件写
+ * 失败会 rethrow——调用方普遍无 try/catch，rethrow 会直接炸）。
  *
  * Returns:
- *   {port, pid} 启动成功
- *   null 启动失败（venv 缺失 / spawn 失败 / 超时）
+ *   true 控制台就绪（IPC 可答 /health）
+ *   false 启动失败（venv 缺失 / spawn 失败 / 超时）
  */
-let inFlightStart: Promise<{ port: number; pid: number } | null> | null = null;
+let inFlightStart: Promise<boolean> | null = null;
 
-export function startControl(): Promise<{ port: number; pid: number } | null> {
+export function startControl(): Promise<boolean> {
   if (!inFlightStart) {
     inFlightStart = doStartControl()
       .catch((e) => {
         debugLog(`startControl: 未预期异常 ${(e as Error)?.message}`);
-        return null;
+        return false;
       })
       .finally(() => {
         inFlightStart = null;
@@ -129,47 +129,37 @@ export function startControl(): Promise<{ port: number; pid: number } | null> {
  *   1. 启动前 cleanupDeadUsers（清理上次崩溃残留）
  *   2. 检测现有控制台：健康 → 加自己 PID 复用；不健康 → spawn 新的
  *   3. spawn 新的：venv Python + detached:true + unref
- *   4. 等待端口文件出现 + /health 200/503
+ *   4. 等待 IPC 就绪（/health 200/503）
  *   5. 加自己 PID 到 users
  *   6. 注册 exit handler（退出时减引用）
  */
-async function doStartControl(): Promise<{ port: number; pid: number } | null> {
+async function doStartControl(): Promise<boolean> {
   // 启动前清理（处理上次 opencode SIGKILL 后的残留）
   cleanupDeadUsers();
 
-  // 1. 检测现有控制台
+  // 1. 检测现有控制台（IPC connect 即发现即校验——无文件、无 PID 四步检查）
   if (await isControlHealthy()) {
-    const info = readControlPortFile();
-    if (info) {
-      debugLog(
-        `startControl: 已有控制台运行（port=${info.port}, pid=${info.pid}），复用`,
-      );
-      addSelfToUsers();
-      registerExitHandler();
-      return { port: info.port, pid: info.pid };
-    }
-    debugLog(`startControl: 健康检查通过但端口文件已被删除，未知错误`);
+    const identity = await getControlIdentity();
+    debugLog(
+      `startControl: 已有控制台运行（IPC 通道可达，pid=${identity?.pid ?? "?"}），复用`,
+    );
+    addSelfToUsers();
+    registerExitHandler();
+    return true;
   }
 
-  // 2. 不健康 → 清理旧端口文件，spawn 新的
-  if (existsSync(CONTROL_PORT_FILE)) {
-    try {
-      unlinkSync(CONTROL_PORT_FILE);
-    } catch {}
-  }
-
-  // 3. 找 venv Python
+  // 2. 找 venv Python
   const python = findVenvPython();
   if (!python) {
     debugLog(`startControl: venv Python 未找到（${VENV_DIR} 不存在）`);
-    return null;
+    return false;
   }
   if (!existsSync(CONTROL_SCRIPT)) {
     debugLog(`startControl: 控制台脚本不存在 ${CONTROL_SCRIPT}`);
-    return null;
+    return false;
   }
 
-  // 4. spawn 控制台（detached:true + unref，让控制台脱离 opencode 生命周期）
+  // 3. spawn 控制台（detached:true + unref，让控制台脱离 opencode 生命周期）
   try {
     controlProc = spawn(python, [CONTROL_SCRIPT], {
       stdio: ["ignore", "ignore", "ignore"],
@@ -177,7 +167,7 @@ async function doStartControl(): Promise<{ port: number; pid: number } | null> {
       env: {
         ...process.env,
         OPENCODE_ROOT: OPENCODE_ROOT, // 控制台读 .ai_env 用
-        DATA_DIR: DATA_DIR, // 控制台写端口文件/users 文件用
+        DATA_DIR: DATA_DIR, // 控制台定位 IPC socket / users 文件用
         HF_HUB_OFFLINE: "1", // 避免 SentenceTransformer 联网检查
         TRANSFORMERS_OFFLINE: "1",
       },
@@ -186,48 +176,38 @@ async function doStartControl(): Promise<{ port: number; pid: number } | null> {
     debugLog(`startControl: spawn pid=${controlProc.pid}`);
   } catch (e) {
     debugLog(`startControl: spawn 异常 ${(e as Error).message}`);
-    return null;
+    return false;
   }
 
-  // 5. 等端口文件出现 + 端口可访问
-  const portInfo = await waitForPortFile(CONTROL_PORT_FILE_WAIT_MS);
-  if (!portInfo) {
-    debugLog(`startControl: 端口文件 ${CONTROL_PORT_FILE_WAIT_MS}ms 内未出现`);
-    return null;
+  // 4. 等 IPC 通道就绪（/health 可答；503 加载中也算就绪）
+  const ready = await waitForIpcReady(CONTROL_IPC_READY_WAIT_MS);
+  if (!ready) {
+    debugLog(`startControl: IPC ${CONTROL_IPC_READY_WAIT_MS}ms 内未就绪`);
+    return false;
   }
 
-  // 6. 加自己 PID 到 users + 注册 exit handler
+  // 5. 加自己 PID 到 users + 注册 exit handler
   addSelfToUsers();
   registerExitHandler();
 
-  debugLog(`startControl: 完成 port=${portInfo.port} pid=${portInfo.pid}`);
-  return { port: portInfo.port, pid: portInfo.pid };
+  debugLog(`startControl: 完成（IPC 就绪）`);
+  return true;
 }
 
 /**
- * 等待端口文件出现。
- * - 5 秒内端口文件出现 + PID 存活 → 返回 ControlPortInfo
- * - 超时 → 返回 null
+ * 等待 IPC 通道就绪。
+ * - 超时窗口内 /health 可达（200/503）→ 返回 true
+ * - 超时 → 返回 false
  */
-async function waitForPortFile(
-  timeoutMs: number,
-): Promise<ControlPortInfo | null> {
+async function waitForIpcReady(timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const info = readControlPortFile();
-    if (info) {
-      // 检查端口文件中的 PID 是否存活
-      if (isProcessAliveSync(info.pid, info.startTime || undefined)) {
-        return info;
-      }
-      // PID 已死 → 残留文件，删除继续等
-      try {
-        unlinkSync(CONTROL_PORT_FILE);
-      } catch {}
+    if (await isControlHealthy()) {
+      return true;
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  return null;
+  return false;
 }
 
 /**
@@ -235,7 +215,8 @@ async function waitForPortFile(
  *
  * 职责：
  *   1. 从 users 文件删自己 PID（同步）
- *   2. users 空 → SIGTERM 控制台 + 删端口文件
+ *   2. users 空 → SIGTERM 自己 spawn 的控制台；复用的控制台不 kill
+ *      （依赖其 users 周期清洗自杀，≤60s；IPC socket 文件由控制台自理）
  *   3. users 不空 → 让控制台继续运行（其他 opencode 还在用）
  *
  * 幂等：多次调用只注册一次。
@@ -247,25 +228,16 @@ function registerExitHandler(): void {
     try {
       const isEmpty = removeSelfFromUsers();
       if (isEmpty) {
-        debugLog(`control exit handler: users 空，kill 控制台`);
-        // SIGTERM 控制台
         if (controlProc) {
+          debugLog(`control exit handler: users 空，kill 控制台 pid=${controlProc.pid}`);
           try {
             controlProc.kill("SIGTERM");
           } catch {}
         } else {
-          // 控制台是其他 opencode spawn 的，从端口文件读 PID
-          const info = readControlPortFile();
-          if (info) {
-            try {
-              process.kill(info.pid, "SIGTERM");
-            } catch {}
-          }
+          debugLog(
+            `control exit handler: users 空（复用的控制台由其 users 周期清洗自杀，≤60s）`,
+          );
         }
-        // 删端口文件
-        try {
-          unlinkSync(CONTROL_PORT_FILE);
-        } catch {}
       } else {
         debugLog(`control exit handler: users 还有引用，控制台继续运行`);
       }
@@ -273,15 +245,4 @@ function registerExitHandler(): void {
       debugLog(`control exit handler 异常: ${(e as Error).message}`);
     }
   });
-}
-
-/** 拿控制台端口（供 mcp-manager 等其他模块调用）。 */
-export async function getControlPort(): Promise<number | null> {
-  const info = readControlPortFile();
-  if (info && isProcessAliveSync(info.pid, info.startTime || undefined)) {
-    return info.port;
-  }
-  // 端口文件失效，尝试启动
-  const result = await startControl();
-  return result?.port || null;
 }

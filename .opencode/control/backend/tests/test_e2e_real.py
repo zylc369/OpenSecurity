@@ -6,7 +6,7 @@
   python3 tests/test_e2e_real.py knowledge  # 按名过滤子串
 
 前置条件：
-  - 生产控制台在跑（读 $DATA_DIR/.opencode-control.port）
+  - 生产控制台在跑（IPC sock：$DATA_DIR/opensecurity-control.sock）
   - Docker daemon 可用（neo4j-events 卷数据保留）
   - DEEPSEEK_API_KEY 已配置（.ai_env）
 
@@ -32,7 +32,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(Path.home() / "bw-security-analysis")))
-PORT_FILE = DATA_DIR / ".opencode-control.port"
+SOCK_FILE = DATA_DIR / "opensecurity-control.sock"
 KNOWLEDGE_DB = DATA_DIR / "db" / "knowledge" / "knowledge.db"
 RUN_ID = f"e2er-{os.getpid()}"
 
@@ -63,18 +63,26 @@ def assert_true(cond: bool, msg: str = "") -> None:
 
 # ── 基础设施 ─────────────────────────────────────────────
 
+_client = None
 
-def control_base() -> str:
-    port = int(PORT_FILE.read_text().strip().split("\n")[0])
-    return f"http://127.0.0.1:{port}"
+
+def _get_client():
+    """经 IPC（uds）的 httpx 客户端（惰性单例）。"""
+    global _client
+    if _client is None:
+        import httpx
+        _client = httpx.Client(
+            transport=httpx.HTTPTransport(uds=str(SOCK_FILE)),
+            base_url="http://localhost", timeout=30,
+        )
+    return _client
 
 
 def post(path: str, body: dict, timeout: int = 30) -> dict:
-    req = urllib.request.Request(
-        f"{control_base()}{path}", data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())
+    c = _get_client()
+    c.timeout = timeout
+    r = c.post(path, json=body)
+    return r.json()
 
 
 def poll(fn, timeout: float, first_interval: float = 2.0, max_interval: float = 8.0,
@@ -99,8 +107,8 @@ def poll(fn, timeout: float, first_interval: float = 2.0, max_interval: float = 
 def wait_health(timeout: float = 120) -> None:
     def _ok():
         try:
-            with urllib.request.urlopen(f"{control_base()}/api/health", timeout=3) as r:
-                return r.status == 200
+            c = _get_client()
+            return c.get("/api/health").status_code == 200
         except Exception:
             return False
     poll(_ok, timeout, desc="控制台 /health 200")

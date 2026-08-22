@@ -12,6 +12,10 @@ ensure neo4j-events 容器（docker_manager）→ create_graphiti → build_indi
 """
 from __future__ import annotations
 
+import logging
+logger = logging.getLogger(__name__)
+
+
 import asyncio
 import queue
 import threading
@@ -24,7 +28,7 @@ BRIDGE_TIMEOUT = 600.0  # 桥接调用上限（覆盖 daemon 冷启动 180s + bo
 
 
 def log(msg: str) -> None:
-    print(f"[event-store] {msg}", flush=True)
+    logger.info("%s", msg)
 
 
 @dataclass(frozen=True)

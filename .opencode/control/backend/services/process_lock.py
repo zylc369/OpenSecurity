@@ -1,11 +1,6 @@
-"""跨平台文件锁收口模块。
+"""跨平台进程工具收口模块。
 
-所有 portalocker 调用必须走本模块（grep 验证唯一性）。
-其他模块禁止直接 import portalocker。
-
-锁策略：
-  • 控制台启动期持锁：防止两个控制台实例并发启动
-  • Plugin 端不持锁：靠原子 rename 保证 users 文件并发安全
+控制台启动互斥：IPC bind 内核排他（services/ipc_listener.py）。
 
 辅助函数：
   • is_process_alive(pid, start_time)：PID 存活检测 + 启动时间校验防复用
@@ -14,41 +9,10 @@
 """
 from __future__ import annotations
 
-import contextlib
 import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterator
-
-import portalocker
-
-from config import LOCK_FILE
-
-
-# ─── 文件锁 ──────────────────────────────────────────────
-
-
-@contextlib.contextmanager
-def acquire_startup_lock() -> Iterator[int]:
-    """获取控制台启动协调锁。
-
-    用法：
-        with acquire_startup_lock() as fd:
-            # 持锁期间做端口分配 + 写端口文件
-            ...
-
-    持锁时间应该尽量短（毫秒级），避免阻塞其他控制台启动。
-    进程退出（包括 SIGKILL）时内核自动释放锁。
-    """
-    fd = portalocker.Lock(
-        str(LOCK_FILE),
-        flags=portalocker.LOCK_EX,
-    )
-    with fd:
-        # portalocker.Lock 内部管理 fd，外部不需要直接拿
-        # 这里 yield 一个占位符，保持 with 语法对称
-        yield -1
 
 
 # ─── PID 存活检测（跨平台）───────────────────────────────

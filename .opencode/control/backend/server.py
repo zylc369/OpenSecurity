@@ -107,8 +107,8 @@ def create_app() -> FastAPI:
     # 前端 404）。幂等：vite 已运行则跳过；拉起失败由 dev 提示页指路。
     from config import is_dev_mode as _is_dev
     if _is_dev():
-        from services.vite_dev import start_vite_dev
-        start_vite_dev()
+        from services.frontend_port import frontend_ports
+        frontend_ports.ensure_vite_dev()
 
     return app
 
@@ -142,68 +142,54 @@ def _mount_frontend(app: FastAPI) -> None:
 def main() -> None:
     """控制台主入口。
 
-    单实例检测 + 端口分配 + B 方案启动 + 引用计数周期清洗。
+    单实例检测 + TCP 顺延绑定 + IPC 监听 + B 方案启动 + 引用计数周期清洗。
 
     时序：
-      1. 拿启动锁（防止并发启动）
-      2. 检查现有实例（端口文件 + PID + 端口连通）→ 已运行则 exit 2
-      3. bind 候选端口 → 全部失败 exit 3
-      4. 写端口文件
-      5. 释放锁
-      6. 启动引用计数后台清洗
-      7. 后台线程加载模型
-      8. uvicorn.run
+      1. 日志初始化（文件轮转 DATA_DIR/logs/control.log——stdio=ignore 下 print 不可见）
+      2. IPC 监听（内核排他互斥；按 IpcStartStatus 分支处理）
+      3. bind 浏览器 TCP 候选段（9776 起顺延）+ 注册真实端口
+      4. 启动引用计数后台清洗
+      5. 后台线程加载模型
+      6. uvicorn.run
     """
-    from config import (
-        EXIT_CODE_REUSE, EXIT_CODE_PORT_EXHAUSTED, EXIT_CODE_NORMAL,
-    )
-    from services.process_lock import acquire_startup_lock
-    from services.port_manager import (
-        bind_port_with_fallback, write_port_file, is_control_running,
-        read_port_file, delete_port_file, probe_live_control,
+    from services.logging_setup import setup_logging
+    log = setup_logging()
+    log.info("=" * 50)
+    log.info("控制台启动（pid=%d, platform=%s）", os.getpid(), sys.platform)
+
+    from config import EXIT_CODE_REUSE, EXIT_CODE_PORT_EXHAUSTED, EXIT_CODE_NORMAL, ipc_addr
+    from services.frontend_port import frontend_ports
+    from services.ipc_listener import (
+        start_ipc_listener, cleanup_ipc_listener, IpcStartStatus,
     )
     from services.ref_counter import UsersCleanupTask
 
-    # 步骤 1+2: 拿锁 + 检查现有实例
-    with acquire_startup_lock():
-        if is_control_running():
-            info = read_port_file()
-            print(
-                f"[control] 已有实例运行（port={info[0]}, pid={info[1]}），"
-                f"本进程退出（exit code = {EXIT_CODE_REUSE}）",
-                flush=True,
-            )
-            sys.exit(EXIT_CODE_REUSE)
+    # 步骤 2: IPC 监听（按枚举语义分支，不用 bool 猜）
+    status = start_ipc_listener()
+    if status is IpcStartStatus.EXISTING_INSTANCE:
+        log.info("IPC 通道已有实例运行（%s），本进程退出（exit code = %d）",
+                 ipc_addr(), EXIT_CODE_REUSE)
+        sys.exit(EXIT_CODE_REUSE)
+        return
+    if status is IpcStartStatus.BIND_TIMEOUT:
+        log.error("IPC bind 失败且等待窗口耗尽（%s），本进程退出（exit code = %d）",
+                  ipc_addr(), EXIT_CODE_PORT_EXHAUSTED)
+        sys.exit(EXIT_CODE_PORT_EXHAUSTED)
+        return
+    log.info("IPC 监听已启动：%s", ipc_addr())
 
-        # 步骤 2.5: 端口文件缺失/失效时探测孤儿实例
-        # 场景：端口文件被误删但旧控制台还活着。若不探测，本实例会 bind 到
-        # 下一候选端口 → 双实例（双份模型内存）+ 旧实例退出时误删新端口文件。
-        # 探测到孤儿 → 重写端口文件指向孤儿 → 本实例退出（等价"复用"路径）。
-        orphan = probe_live_control()
-        if orphan is not None:
-            o_port, o_pid, o_start = orphan
-            write_port_file(o_port, pid=o_pid, start_time=o_start)
-            print(
-                f"[control] 发现孤儿实例（port={o_port}, pid={o_pid}），"
-                f"已重建端口文件，本进程退出（exit code = {EXIT_CODE_REUSE}）",
-                flush=True,
-            )
-            sys.exit(EXIT_CODE_REUSE)
+    # 步骤 3: bind 浏览器 TCP 候选段（顺延）+ 注册真实端口（/api/console-url 对外）
+    try:
+        sock = frontend_ports.bind_and_register_tcp()
+    except RuntimeError as e:
+        log.error("%s", e)
+        cleanup_ipc_listener()
+        sys.exit(EXIT_CODE_PORT_EXHAUSTED)
 
-        # 步骤 3: bind 候选端口
-        try:
-            port, sock = bind_port_with_fallback()
-        except RuntimeError as e:
-            print(f"[control] {e}", flush=True)
-            sys.exit(EXIT_CODE_PORT_EXHAUSTED)
-
-        # 步骤 4: 写端口文件（锁持有中）
-        write_port_file(port)
-
-    # 步骤 5: 锁已释放（with 块结束）
-    # 步骤 6: 启动 users 周期清洗后台任务
+    # 步骤 4: 启动 users 周期清洗后台任务
     def shutdown():
-        delete_port_file()
+        log.info("控制台 shutdown（清理 IPC + 退出）")
+        cleanup_ipc_listener()
         # 用 os._exit 跳过任何 atexit hook（避免 uvicorn 优雅关闭阻塞）
         import os
         os._exit(EXIT_CODE_NORMAL)
@@ -211,26 +197,24 @@ def main() -> None:
     cleanup_task = UsersCleanupTask(shutdown)
     cleanup_task.start()
 
-    # 步骤 6.5: SIGTERM/SIGINT 也走 shutdown（删端口文件 + 退出）
-    # 此前只挂在 users 空自杀路径上，kill/SIGTERM 会残留端口文件
-    # （靠 PID 三重校验兜底自愈，但补上信号处理让文件生命周期完整）。
+    # SIGTERM/SIGINT 也走 shutdown（清理 IPC socket + 退出）
     import signal
 
     def _on_signal(signum, _frame):
-        print(f"[control] 收到信号 {signum}，退出", flush=True)
+        log.info("收到信号 %s，退出", signum)
         shutdown()
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
 
-    # 步骤 7: 后台线程加载模型（B 方案核心）
+    # 步骤 5: 后台线程加载模型（B 方案核心）
     model_loader.preload_embedder_background()
 
-    # 步骤 8: 启动 uvicorn（用预绑定的 socket）
+    # 步骤 6: 启动 uvicorn（用预绑定的 socket；uvicorn 日志并入 root → 同文件）
     import uvicorn
     app = create_app()
     fd = sock.detach()
-    uvicorn.run(app, fd=fd, log_level="warning")
+    uvicorn.run(app, fd=fd, log_level="info")
 
 
 if __name__ == "__main__":

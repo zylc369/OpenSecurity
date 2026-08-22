@@ -3,7 +3,7 @@ import { existsSync } from "fs";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { OPENCODE_ROOT, DATA_DIR } from "./constants";
 import { getPythonCmd } from "./venv";
-import { getControlPort } from "./control-manager";
+import { startControl } from "./control-manager";
 import { debugLog } from "./logging";
 
 // MCP server 定义：name → (server.py 路径, timeout)
@@ -39,9 +39,9 @@ export class McpManager {
    * 不预检测依赖——直接 spawn server.py，依赖错误从握手失败的 stderr 捕获。
    * 节省每个 server 启动时 ~1-2s 同步子进程开销（原 checkPackages）。
    *
-   * 端口发现：不再注入 OPENCODE_CONTROL_PORT——Python 侧统一走 control_url.py
-   * 读端口文件（事实来源），控制台重启换端口后 MCP 自动恢复（无需重启）。
-   * 此处仍调 getControlPort() 确保控制台已启动（必要时触发启动），仅用于日志。
+   * 端口发现：不注入任何地址——Python 侧统一走 control_url.py 连 IPC
+   * （sock/管道，编译期常量地址），控制台重启后 MCP 重连自愈。
+   * 此处调 startControl() 确保控制台已启动（必要时触发启动）。
    */
   async registerAll(): Promise<void> {
     const venvPython = getPythonCmd();
@@ -50,23 +50,22 @@ export class McpManager {
       return;
     }
 
-    // 确保控制台已启动（必要时触发启动）。端口由 Python 侧 control_url.py 自行发现。
-    const controlPort = await getControlPort();
+    // 确保控制台已启动（幂等：活则复用、死则拉起）。MCP 经 IPC 地址自行连接。
+    const ready = await startControl();
     debugLog(
-      controlPort
-        ? `[McpManager] 控制台端口 ${controlPort}（Python 侧经 control_url.py 自动发现）`
-        : `[McpManager] 控制台未启动——MCP 首次请求时经端口文件自行发现`,
+      ready
+        ? `[McpManager] 控制台就绪（MCP 经 IPC 自行发现）`
+        : `[McpManager] 控制台未启动——MCP 首次请求时经 IPC 地址自行重试`,
     );
 
     for (const server of MCP_SERVERS) {
-      await this.registerOne(server, venvPython, controlPort);
+      await this.registerOne(server, venvPython);
     }
   }
 
   private async registerOne(
     server: (typeof MCP_SERVERS)[number],
     venvPython: string,
-    controlPort: number | null,
   ): Promise<void> {
     const { name, script, timeout } = server;
 
@@ -76,7 +75,7 @@ export class McpManager {
       return;
     }
 
-    // 2. 构造 env：只注入 DATA_DIR（control_url.py 用它定位端口文件）
+    // 2. 构造 env：只注入 DATA_DIR（control_url.py 用它定位 IPC socket）
     const mcpEnv: Record<string, string> = {
       DATA_DIR: DATA_DIR,
     };
@@ -98,7 +97,7 @@ export class McpManager {
           },
         },
       });
-      debugLog(`[McpManager] ${name} 注册成功：python=${venvPython} server=${script} port=${controlPort}`);
+      debugLog(`[McpManager] ${name} 注册成功：python=${venvPython} server=${script}（IPC 地址自行发现）`);
     } catch (e) {
       const errMsg = (e as Error)?.message ?? String(e);
       debugLog(`[McpManager] ${name} 注册失败：${errMsg}`);

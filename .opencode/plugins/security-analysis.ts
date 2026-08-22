@@ -37,8 +37,9 @@ import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
 import TaskSessionPersistence from "./lib/task-session-persistence";
 import { getPythonCmd, getInstallHint, getCompilerName } from "./lib/venv";
-import { readControlPortFile, startControl } from "./lib/control-manager";
-import { getAllConfig, getCachedConfig } from "./lib/control-config";
+import { startControl } from "./lib/control-manager";
+import { controlFetch } from "./lib/control-http";
+import { refreshConfig, getCachedConfig } from "./lib/control-config";
 
 /** 从缓存读配置值（同步，不触发 HTTP）。如果缓存为空返回 null。 */
 function getCachedConfigValue(key: string): string | null {
@@ -236,20 +237,17 @@ const toolStartTimes = new Map<string, number>();
  */
 async function startControlService(): Promise<void> {
   try {
-    const result = await startControl();
-    if (result) {
-      ctx.services.resolve(CONTROL_STARTUP_SERVICE, "success", undefined, {
-        port: result.port,
-        pid: result.pid,
-      });
-      debugLog(`control_service 就绪 port=${result.port} pid=${result.pid}`);
+    const ok = await startControl();
+    if (ok) {
+      ctx.services.resolve(CONTROL_STARTUP_SERVICE, "success", undefined);
+      debugLog(`control_service 就绪（IPC 通道可达）`);
     } else {
       ctx.services.resolve(
         CONTROL_STARTUP_SERVICE,
         "failed",
-        "startControl 返回 null（venv 未就绪 / 控制台脚本不存在 / spawn 失败 / 端口文件超时）",
+        "startControl 返回 false（venv 未就绪 / 控制台脚本不存在 / spawn 失败 / IPC 就绪超时）",
       );
-      debugLog(`control_service 启动失败：startControl 返回 null`);
+      debugLog(`control_service 启动失败：startControl 返回 false`);
     }
   } catch (e) {
     ctx.services.resolve(
@@ -507,23 +505,18 @@ function expandedSnippet(
  *   - POST /api/events/entry | /api/events/delete → Graphiti（控制台 event_store 线程）
  *   - POST /api/memory/entry                → knowledge 向量库（控制台 knowledge_store 线程）
  * 控制台端点入队即返 202；plugin 侧不 await、失败只记日志。
- * 控制台重启换端口：readControlPortFile 每次实时读端口文件，自动跟随新端口。
+ * 控制台重启：controlFetch 每次实时 connect IPC 地址，自动跟随新实例。
  */
 function postToControl(
   path: string,
   body: Record<string, unknown>,
   tag: string,
 ): void {
-  const info = readControlPortFile();
-  if (!info) {
-    debugLog(`postToControl: 控制台端口未知，跳过 ${tag}`);
-    return;
-  }
-  fetch(`http://127.0.0.1:${info.port}${path}`, {
+  controlFetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(5000), // 控制台挂起态防 promise 永久悬空
+    timeoutMs: 5000, // 控制台挂起态防 promise 永久悬空
   })
     .then((resp) => {
       if (!resp.ok) {
@@ -741,11 +734,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             `chat.message: 控制台启动失败 agent=${agent} error=${controlStatus.error}`,
             sessionID,
           );
-          // 拿控制台端口（如果能拿到，提示控制台地址；拿不到，提示跑 install.sh）
-          const port = controlStatus.metadata?.port;
-          const errorMsg = port
-            ? `控制台部分功能不可用：${controlStatus.error}\n\n控制台地址：http://localhost:${port}`
-            : `控制台启动失败：${controlStatus.error}`;
+          const errorMsg = `控制台启动失败：${controlStatus.error}`;
           await reportErrorAndAbort(
             ctx.client,
             sessionID,
@@ -755,8 +744,10 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           return;
         }
 
-        // 控制台启动成功后，预拉配置（供 shell.env hook 用）
-        await getAllConfig();
+        // 控制台启动成功后，预热配置缓存。关键：shell.env hook 每轮用同步版
+        // getCachedConfig() 注入环境变量（不能 await），缓存未预热时它拿到空对象
+        // → IDA_PRO_HOME 等注入缺失。此处显式 refresh 填充缓存。
+        await refreshConfig();
 
         // 2. 环境检测
         let envCheck: EnvironmentCheckResult | null = null;

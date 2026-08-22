@@ -6,8 +6,7 @@
 注意：uvicorn 启动后 /health 立即可访问（B 方案），即使模型还在加载。
 
 识别字段（service/pid/start_time）：200 和 503 都返回。
-用途：port_manager.probe_live_control() 在端口文件丢失时，通过这些字段
-识别候选端口上是否有本体系控制台（孤儿实例），避免误判其他服务。
+用途：依赖方通过 /health 语义判断就绪状态与实例身份。
 """
 from __future__ import annotations
 
@@ -26,6 +25,33 @@ from services import model_loader
 from services.process_lock import get_process_start_time
 
 router = APIRouter()
+
+
+@router.post("/api/dev-url")
+async def report_dev_url(payload: dict) -> dict:
+    """vite dev server 上报实际端口（经 IPC，取代 .vite-dev.port 文件）。
+
+    vite 冲突自动递增（5173→5174）时上报的是递增后的真实端口。
+    注册进 FrontendPortRegistry（唯一事实源）。
+    """
+    port = payload.get("port")
+    if isinstance(port, int) and 0 < port < 65536:
+        from services.frontend_port import frontend_ports
+        frontend_ports.register_vite_port(port)
+        return {"ok": True, "port": port}
+    return {"ok": False, "error": "invalid port"}
+
+
+@router.get("/api/console-url")
+async def console_url() -> dict:
+    """控制台前端真实地址（浏览器 TCP 顺延后插件/vite 从这里取）。"""
+    from services.frontend_port import frontend_ports
+    tcp_port = frontend_ports.tcp_port()
+    return {
+        "url": frontend_ports.console_url(),
+        "tcp_port": tcp_port,
+        "tcp_candidates": frontend_ports.tcp_candidates(),
+    }
 
 
 def _identity() -> dict:

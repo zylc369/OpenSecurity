@@ -13,8 +13,7 @@
  *   • 不主动刷新（配置变更频率极低）
  *   • 用户改配置后重启 opencode 生效
  */
-import { CONTROL_PORT_FILE } from "./constants";
-import { readControlPortFile } from "./control-manager";
+import { controlFetch } from "./control-http";
 import { debugLog } from "./logging";
 
 let cachedConfig: Record<string, string> | null = null;
@@ -24,15 +23,8 @@ let cachedConfig: Record<string, string> | null = null;
  * 失败时保留旧缓存（如果有），否则空对象。
  */
 export async function refreshConfig(): Promise<void> {
-  const info = readControlPortFile();
-  if (!info) {
-    debugLog(`refreshConfig: 端口文件不存在，控制台未启动？`);
-    return;
-  }
   try {
-    const resp = await fetch(`http://127.0.0.1:${info.port}/api/config`, {
-      signal: AbortSignal.timeout(3000),
-    });
+    const resp = await controlFetch("/api/config", { timeoutMs: 3000 });
     if (!resp.ok) {
       debugLog(`refreshConfig: HTTP ${resp.status}`);
       return;
@@ -47,16 +39,7 @@ export async function refreshConfig(): Promise<void> {
 }
 
 /**
- * 获取单个配置。
- * 第一次调用会触发 refreshConfig（如果缓存为空）。
- */
-export async function getConfig(key: string): Promise<string | null> {
-  if (!cachedConfig) await refreshConfig();
-  return cachedConfig?.[key] ?? null;
-}
-
-/**
- * 获取全部配置（shell.env hook 用）。
+ * 获取全部配置（persistence.ts 等消费方用）。
  * 第一次调用会触发 refreshConfig。
  */
 export async function getAllConfig(): Promise<Record<string, string>> {

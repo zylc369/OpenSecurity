@@ -13,6 +13,10 @@ B 方案：模型在后台线程加载，is_models_ready() 反映状态。
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import asyncio
 import threading
 from typing import TYPE_CHECKING
@@ -54,11 +58,11 @@ def get_embedder() -> "SentenceTransformer":
             if _embedder is None:
                 from sentence_transformers import SentenceTransformer
 
-                print(f"[control] loading {EMBED_MODEL}...", flush=True)
+                logger.info("loading %s...", EMBED_MODEL)
                 _embedder = SentenceTransformer(EMBED_MODEL)
                 with _models_ready_lock:
                     _models_ready = True
-                print(f"[control] {EMBED_MODEL} ready", flush=True)
+                logger.info("%s ready", EMBED_MODEL)
     return _embedder
 
 
@@ -70,9 +74,9 @@ def get_reranker() -> "CrossEncoder":
             if _reranker is None:
                 from sentence_transformers import CrossEncoder
 
-                print(f"[control] loading {RERANKER_MODEL}...", flush=True)
+                logger.info("loading %s...", RERANKER_MODEL)
                 _reranker = CrossEncoder(RERANKER_MODEL, max_length=512)
-                print(f"[control] {RERANKER_MODEL} ready", flush=True)
+                logger.info("%s ready", RERANKER_MODEL)
     return _reranker
 
 
@@ -150,7 +154,7 @@ def preload_embedder_background() -> None:
         except Exception as e:
             # 加载失败打印错误，但不抛出（避免线程死掉）
             # /health 永远 503，Plugin 60s 超时后报错。
-            print(f"[control] embedder 加载失败: {e}", flush=True, file=__import__("sys").stderr)
+            logger.error("embedder 加载失败: %s", e)
 
     t = threading.Thread(target=_load, name="embedder-loader", daemon=True)
     t.start()

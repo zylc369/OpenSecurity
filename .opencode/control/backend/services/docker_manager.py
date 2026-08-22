@@ -11,6 +11,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import asyncio
 import platform
 import shutil
@@ -331,7 +335,7 @@ def ensure_daemon_blocking(timeout: int = 180) -> None:
 
     # 3. 启动 daemon
     system = platform.system()
-    print(f"[docker] 启动 Docker daemon（{system}）...", flush=True)
+    logger.info("启动 Docker daemon（%s）...", system)
     if system == "Darwin":
         subprocess.run(["open", "-a", "Docker"], check=True)
     elif system == "Linux":
@@ -349,7 +353,7 @@ def ensure_daemon_blocking(timeout: int = 180) -> None:
     while time.time() < deadline:
         time.sleep(3)
         if is_daemon_running():
-            print("[docker] daemon 已就绪", flush=True)
+            logger.info("docker daemon 已就绪")
             return
     raise RuntimeError(f"Docker daemon 启动超时（{timeout}s 未就绪，请手动启动 Docker）")
 
@@ -401,7 +405,7 @@ def ensure_neo4j_events_blocking() -> None:
     data_dir = Path(DATA_DIR) / "db" / "events"
     data_dir.mkdir(parents=True, exist_ok=True)
     if image_exists(spec.image) is not True:
-        print(f"[docker] 拉取镜像 {spec.image}（首次需下载，可能较慢）...", flush=True)
+        logger.info("拉取镜像 %s（首次需下载，可能较慢）...", spec.image)
         try:
             _run_docker(["pull", spec.image], timeout=600)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
@@ -410,4 +414,4 @@ def ensure_neo4j_events_blocking() -> None:
     if not ok:
         raise RuntimeError(f"容器 {spec.name} 创建失败: {msg}")
     _wait_bolt()
-    print(f"[docker] 容器 {spec.name} 已就绪（bolt 可连），数据目录: {data_dir}", flush=True)
+    logger.info("容器 %s 已就绪（bolt 可连），数据目录: %s", spec.name, data_dir)

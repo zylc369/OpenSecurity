@@ -21,6 +21,10 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from config import USERS_FILE, USERS_CLEANUP_INTERVAL_SEC, EXIT_CODE_NORMAL
 from services.process_lock import is_process_alive, atomic_write
 
@@ -83,7 +87,7 @@ def cleanup_dead_users() -> list[UserEntry]:
     ]
     if len(alive) != len(entries):
         write_users(alive)
-        print(f"[control] users 清洗：{len(entries)} → {len(alive)}", flush=True)
+        logger.info("users 清洗：%d → %d", len(entries), len(alive))
     return alive
 
 
@@ -123,12 +127,9 @@ class UsersCleanupTask:
             try:
                 alive = cleanup_dead_users()
                 if not alive:
-                    print(
-                        f"[control] users 空，控制台自杀（exit code = {EXIT_CODE_NORMAL}）",
-                        flush=True,
-                    )
+                    logger.info("users 空，控制台自杀（exit code = %d）", EXIT_CODE_NORMAL)
                     self._shutdown_callback()
                     return
             except Exception as e:
                 # 后台任务异常不能让线程死掉
-                print(f"[control] users 清洗异常: {e}", flush=True)
+                logger.warning("users 清洗异常: %s", e)

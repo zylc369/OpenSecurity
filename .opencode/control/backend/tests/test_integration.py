@@ -36,11 +36,9 @@ OPENCODE_ROOT = Path(os.environ.get("OPENCODE_ROOT", WORKSPACE_ROOT / ".opencode
 os.environ["DATA_DIR"] = str(TEST_DATA_DIR)
 os.environ["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
 os.environ["OPENSECURITY_VENV_DIR"] = str(REAL_VENV_DIR)
-# CONTROL_PORT 随机高位（隔离铁律）：bind 候选与孤儿探测范围整体避开生产实例（9776）。
-# 否则沙箱实例的 probe_live_control 会"收编"生产控制台（端口文件指向生产 PID），
-# cleanup_state 再按端口文件 kill 时误杀生产（真实事故：21845 被 SIGTERM）。
-# bun_env 与直接 spawn 均继承本进程环境，一处设置全覆盖。
-os.environ["CONTROL_PORT"] = str(random.randint(41000, 49000))
+# CONTROL_TCP_PORT 随机高位（隔离铁律）：沙箱控制台的浏览器 TCP 通道避开生产 9776。
+# IPC（sock/users）由 DATA_DIR 沙箱隔离；此处只需避开 TCP bind 冲突。
+os.environ["CONTROL_TCP_PORT"] = str(random.randint(41000, 49000))
 
 
 # ─── 测试框架（与 test_control.py 一致）─────────────────
@@ -84,39 +82,48 @@ def assert_false(value, msg=""):
 
 
 def cleanup_state():
-    """清理所有残留状态文件 + 杀残留控制台。"""
-    # 杀残留控制台
-    port_file = TEST_DATA_DIR / ".opencode-control.port"
-    if port_file.exists():
+    """清理所有残留状态文件 + 杀残留控制台（经 IPC /health 拿 PID）。"""
+    import httpx
+    sock = TEST_DATA_DIR / "opensecurity-control.sock"
+    if sock.exists():
         try:
-            lines = port_file.read_text().strip().split("\n")
-            if len(lines) >= 2:
-                pid = int(lines[1])
-                try: os.kill(pid, signal.SIGTERM)
-                except: pass
-                time.sleep(0.5)
-                try: os.kill(pid, signal.SIGKILL)
-                except: pass
+            with httpx.Client(
+                transport=httpx.HTTPTransport(uds=str(sock)), timeout=2,
+            ) as c:
+                r = c.get("http://localhost/health")
+                pid = r.json().get("pid")
+                if isinstance(pid, int):
+                    try: os.kill(pid, signal.SIGTERM)
+                    except: pass
+                    time.sleep(0.5)
+                    try: os.kill(pid, signal.SIGKILL)
+                    except: pass
         except: pass
     # 删状态文件
-    for fname in [".opencode-control.port", ".opencode-control.users", ".opencode-control.lock"]:
+    for fname in ["opensecurity-control.sock", ".opencode-control.users"]:
         f = TEST_DATA_DIR / fname
         if f.exists():
             try: f.unlink()
             except: pass
 
 
-def wait_control_started(proc: subprocess.Popen, timeout: int = 30) -> dict | None:
-    """等子进程输出 CONTROL_STARTED 行，返回 {port, pid}。"""
+def wait_control_pid(proc: subprocess.Popen, timeout: int = 30) -> int | None:
+    """等子进程输出 CONTROL_PID 行（startControl 成功 + 身份 pid），失败返回 None。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc.poll() is not None:
             return None  # 进程已退出
         line = proc.stdout.readline()
-        if line and "CONTROL_STARTED" in line:
-            # 解析 JSON
-            json_part = line.split("CONTROL_STARTED:", 1)[1].strip()
-            return json.loads(json_part)
+        if not line:
+            continue
+        line = line.strip()
+        if line.startswith("CONTROL_PID:"):
+            try:
+                return int(line.split(":", 1)[1].strip())
+            except ValueError:
+                return None
+        if line == "CONTROL_FAILED":
+            return None
     return None
 
 
@@ -142,33 +149,32 @@ def bun_env() -> dict:
 
 # 启动控制台 + 保持运行（模拟 opencode 主进程）
 # 场景 3 需要短清洗间隔，通过 process.env 传给控制台 spawn
+# startControl 返回 boolean；实例身份（pid）经 getControlIdentity 取——复用断言用
 BUN_START_KEEP = """
-import { startControl } from './.opencode/plugins/lib/control-manager.ts';
+import { startControl, getControlIdentity } from './.opencode/plugins/lib/control-manager.ts';
 process.env.USERS_CLEANUP_INTERVAL_SEC = process.env.USERS_CLEANUP_INTERVAL_SEC || '2';
-const r = await startControl();
-if (r) console.log('CONTROL_STARTED:', JSON.stringify(r));
+const ok = await startControl();
+if (ok) { const id = await getControlIdentity(); console.log('CONTROL_PID:', id?.pid ?? 0); }
 else console.log('CONTROL_FAILED');
 setInterval(() => {}, 1000);
 """
 
 # 启动控制台 + 立即退出（触发 exit handler）
 BUN_START_EXIT = """
-import { startControl } from './.opencode/plugins/lib/control-manager.ts';
-const r = await startControl();
-if (r) console.log('CONTROL_STARTED:', JSON.stringify(r));
+import { startControl, getControlIdentity } from './.opencode/plugins/lib/control-manager.ts';
+const ok = await startControl();
+if (ok) { const id = await getControlIdentity(); console.log('CONTROL_PID:', id?.pid ?? 0); }
 else console.log('CONTROL_FAILED');
 await new Promise(r => setTimeout(r, 1500));  // 等 addSelfToUsers + registerExitHandler 完成
 process.exit(0);
 """
 
-# 用 getControlPort 拿端口（如果控制台死了会重启）
+# 用 startControl 重新检测/拉起控制台（控制台死了会重启；pid 经身份接口取）
 BUN_GET_PORT = """
-import { getControlPort } from './.opencode/plugins/lib/control-manager.ts';
-import { readControlPortFile } from './.opencode/plugins/lib/control-manager.ts';
-const port = await getControlPort();
-const info = readControlPortFile();
-console.log('CONTROL_PORT:', port);
-console.log('CONTROL_INFO:', JSON.stringify(info));
+import { startControl, getControlIdentity } from './.opencode/plugins/lib/control-manager.ts';
+const ok = await startControl();
+if (ok) { const id = await getControlIdentity(); console.log('CONTROL_PID:', id?.pid ?? 0); }
+else console.log('CONTROL_FAILED');
 process.exit(0);
 """
 
@@ -187,10 +193,10 @@ def test_multi_opencode_sharing():
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True,
         )
-        info1 = wait_control_started(proc1, timeout=30)
-        if info1 is None:
+        pid1 = wait_control_pid(proc1, timeout=30)
+        if pid1 is None:
             raise AssertionError("第一个 bun 启动控制台失败")
-        print(f"    [setup] opencode1: port={info1['port']} pid={info1['pid']}")
+        print(f"    [setup] opencode1: 控制台 pid={pid1}")
 
         # 启动第二个 bun（应该复用，不 spawn 新控制台）
         proc2 = subprocess.Popen(
@@ -200,14 +206,13 @@ def test_multi_opencode_sharing():
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True,
         )
-        info2 = wait_control_started(proc2, timeout=30)
-        if info2 is None:
+        pid2 = wait_control_pid(proc2, timeout=30)
+        if pid2 is None:
             raise AssertionError("第二个 bun 启动控制台失败")
-        print(f"    [setup] opencode2: port={info2['port']} pid={info2['pid']}")
+        print(f"    [setup] opencode2: 控制台 pid={pid2}")
 
-        # 验证：两次的 port 和 pid 应该相同（复用同一个控制台）
-        assert_eq(info1["port"], info2["port"], "两次 port 应相同（复用）")
-        assert_eq(info1["pid"], info2["pid"], "两次控制台 pid 应相同（复用）")
+        # 验证：两次身份 pid 应相同（复用同一个控制台）
+        assert_eq(pid1, pid2, "两次控制台 pid 应相同（复用）")
 
         # 验证 users 文件有 2 条记录（两个 bun PID）
         users_file = TEST_DATA_DIR / ".opencode-control.users"
@@ -241,10 +246,9 @@ def test_exit_handler():
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True,
         )
-        info = wait_control_started(proc, timeout=30)
-        if info is None:
+        control_pid = wait_control_pid(proc, timeout=30)
+        if control_pid is None:
             raise AssertionError("bun 启动控制台失败")
-        control_pid = info["pid"]
         print(f"    [setup] 控制台 pid={control_pid}")
 
         # 等 bun 退出（exit handler 触发）
@@ -257,9 +261,9 @@ def test_exit_handler():
         # 验证：控制台应该被 kill（users 空 → exit handler kill）
         assert_false(is_pid_alive(control_pid), f"控制台 pid={control_pid} 应被 kill")
 
-        # 验证：端口文件应该被删
-        port_file = TEST_DATA_DIR / ".opencode-control.port"
-        assert_false(port_file.exists(), "端口文件应被删")
+        # 验证：IPC socket 文件应该被删（控制台信号处理清理）
+        sock_file = TEST_DATA_DIR / "opensecurity-control.sock"
+        assert_false(sock_file.exists(), "IPC socket 文件应被删")
     finally:
         if proc and proc.poll() is None:
             proc.terminate()
@@ -293,13 +297,25 @@ def test_sigkill_cleanup():
             text=True,
         )
 
-        # 等端口文件出现
-        from services.port_manager import PORT_FILE
+        # 等 IPC socket 出现 + /health 应答
+        from config import ipc_unix_socket_path
+        import httpx
+        sock_path = ipc_unix_socket_path()
+        started = False
         for _ in range(20):
-            if PORT_FILE.exists(): break
+            if sock_path.exists():
+                try:
+                    with httpx.Client(
+                        transport=httpx.HTTPTransport(uds=str(sock_path)), timeout=2,
+                    ) as probe:
+                        probe.get("http://localhost/health")
+                        started = True
+                        break
+                except OSError:
+                    pass
             time.sleep(0.5)
-        if not PORT_FILE.exists():
-            raise AssertionError("控制台启动失败")
+        if not started:
+            raise AssertionError("控制台启动失败（IPC 未就绪）")
         control_pid = proc.pid
         print(f"    [setup] 控制台 pid={control_pid}")
 
@@ -347,10 +363,9 @@ def test_control_crash_recovery():
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True,
         )
-        info1 = wait_control_started(proc1, timeout=30)
-        if info1 is None:
+        old_control_pid = wait_control_pid(proc1, timeout=30)
+        if old_control_pid is None:
             raise AssertionError("启动失败")
-        old_control_pid = info1["pid"]
         print(f"    [setup] 控制台 pid={old_control_pid}")
 
         # kill 控制台（模拟崩溃）
@@ -375,26 +390,11 @@ def test_control_crash_recovery():
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True,
         )
-        # 等 bun2 输出
-        deadline = time.time() + 30
-        port_line = None
-        info_line = None
-        while time.time() < deadline:
-            if proc2.poll() is not None: break
-            line = proc2.stdout.readline()
-            if not line: continue
-            line = line.strip()
-            if line.startswith("CONTROL_PORT:"):
-                port_line = line.split(":", 1)[1].strip()
-            elif line.startswith("CONTROL_INFO:"):
-                info_line = line.split(":", 1)[1].strip()
-                break
+        # 等 bun2 输出（startControl 重启后的新实例 pid）
+        new_control_pid = wait_control_pid(proc2, timeout=30)
+        if new_control_pid is None:
+            raise AssertionError("bun2 未返回 CONTROL_PID")
 
-        if info_line is None:
-            raise AssertionError("bun2 未返回 CONTROL_INFO")
-
-        new_info = json.loads(info_line)
-        new_control_pid = new_info["pid"]
         print(f"    [verify] 新控制台 pid={new_control_pid}")
 
         # 验证：新控制台 PID 不等于旧的（崩溃后重启）
@@ -413,15 +413,15 @@ def test_control_crash_recovery():
         cleanup_state()
 
 
-# ============ 场景 5：端口文件误删 → 孤儿接管 ============
+# ============ 场景 5：IPC sock 死残留 → 新实例自愈 ============
 
-@test("场景5: 端口文件误删 → 新实例探测孤儿 → 重建文件并退出（无双实例）")
-def test_port_file_deleted_orphan_takeover():
+@test("场景5: sock 死残留（SIGKILL 残留文件）→ 新实例清理重建（无双实例）")
+def test_stale_sock_self_healing():
     cleanup_state()
     proc_a = None
     proc_b = None
     try:
-        # 起 A（等端口文件出现即可，不等模型加载）
+        # 起 A（等 IPC 就绪即可，不等模型加载）
         proc_a = subprocess.Popen(
             [sys.executable, str(BACKEND_DIR / "server.py")],
             env={**os.environ,
@@ -430,22 +430,22 @@ def test_port_file_deleted_orphan_takeover():
                  "OPENSECURITY_VENV_DIR": str(REAL_VENV_DIR)},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        port_file = TEST_DATA_DIR / ".opencode-control.port"
+        sock = TEST_DATA_DIR / "opensecurity-control.sock"
         deadline = time.time() + 15
         while time.time() < deadline:
-            if port_file.exists():
+            if sock.exists():
                 break
             time.sleep(0.3)
-        assert_true(port_file.exists(), "A 的端口文件 15s 内未出现")
-        a_info = port_file.read_text().strip().split("\n")
-        a_port, a_pid = int(a_info[0]), int(a_info[1])
-        print(f"    [setup] 控制台 A pid={a_pid} port={a_port}（模型加载中即开始测）")
+        assert_true(sock.exists(), "A 的 IPC socket 15s 内未出现")
+        print(f"    [setup] 控制台 A pid={proc_a.pid}（IPC 已就绪）")
 
-        # 误删端口文件
-        port_file.unlink()
-        print("    [setup] 端口文件已误删，A 仍存活")
+        # SIGKILL A（模拟崩溃——sock 文件残留，无人监听）
+        proc_a.kill()
+        proc_a.wait(timeout=5)
+        assert_true(sock.exists(), "SIGKILL 后 sock 应残留")
+        print("    [setup] A 被 SIGKILL，sock 残留")
 
-        # 起 B：应探测到孤儿 A → 重建文件指向 A → 自己退出（码 2）
+        # 起 B：应探测残留（connect 失败）→ unlink → bind 成功 → 正常运行
         proc_b = subprocess.Popen(
             [sys.executable, str(BACKEND_DIR / "server.py")],
             env={**os.environ,
@@ -454,19 +454,19 @@ def test_port_file_deleted_orphan_takeover():
                  "OPENSECURITY_VENV_DIR": str(REAL_VENV_DIR)},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        b_exit = proc_b.wait(timeout=30)
-        assert_eq(b_exit, 2, "B 应以复用码 2 退出")
-        print(f"    [verify] B 退出码 = {b_exit}（探测孤儿后复用退出）")
+        # B 应存活（自愈成功，非复用退出）
+        time.sleep(3)
+        assert_true(proc_b.poll() is None, "B 应自愈残留并正常运行（而非异常退出）")
+        print(f"    [verify] B pid={proc_b.pid} 自愈成功")
 
-        # 端口文件应已重建且指向 A
-        b_info = port_file.read_text().strip().split("\n")
-        assert_eq(int(b_info[0]), a_port, "重建文件端口应指向 A")
-        assert_eq(int(b_info[1]), a_pid, "重建文件 PID 应指向 A")
-
-        # A 仍存活（无双实例、无模型二次加载）
-        assert_true(is_pid_alive(a_pid), "A 应仍存活")
+        # B 的 IPC 应可用（/health 应答）
+        import httpx
+        with httpx.Client(
+            transport=httpx.HTTPTransport(uds=str(sock)), timeout=3,
+        ) as c:
+            r = c.get("http://localhost/health")
+            assert_true(r.status_code in (200, 503), f"B 的 IPC 应答 /health，实际 {r.status_code}")
     finally:
-        # SIGTERM 收尾（新信号处理会自删端口文件）
         for p in [proc_b, proc_a]:
             if p and p.poll() is None:
                 try:

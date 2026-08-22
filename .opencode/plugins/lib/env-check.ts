@@ -14,7 +14,8 @@
  * interpretScanExit / interpretDepsSummary: 纯函数，便于测试。
  */
 import { join } from "path";
-import { getControlPort } from "./control-manager";
+import { startControl } from "./control-manager";
+import { controlFetch } from "./control-http";
 import { runProcess } from "./spawn";
 import { debugLog } from "./logging";
 import { SHARED_DIR, OPENCODE_ROOT } from "./constants";
@@ -162,14 +163,11 @@ export function interpretDepsSummary(s: DepsSummary): EnvironmentCheckResult {
   };
 }
 
-async function fetchDeps(
-  port: number,
-  agent: string,
-): Promise<DepsSummary | null> {
+async function fetchDeps(agent: string): Promise<DepsSummary | null> {
   try {
-    const resp = await fetch(
-      `http://127.0.0.1:${port}/api/deps/${encodeURIComponent(agent)}`,
-      { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+    const resp = await controlFetch(
+      `/api/deps/${encodeURIComponent(agent)}`,
+      { timeoutMs: REQUEST_TIMEOUT_MS },
     );
     if (!resp.ok) {
       debugLog(`fetchDeps: HTTP ${resp.status} agent=${agent}`, undefined);
@@ -210,14 +208,13 @@ export async function checkDepsViaControl(
 
   // ── 第二层：控制台五分类检测 ──
   const deadline = Date.now() + CONTROL_WAIT_MS;
-  let port: number | null = null;
   let summary: DepsSummary | null = null;
 
   while (Date.now() < deadline) {
-    port = await getControlPort();
-    if (port) {
-      // /health 200/503 都说明进程活着且 API 可服务（503=模型加载中，deps 不依赖模型）
-      summary = await fetchDeps(port, agent);
+    // startControl 幂等（活则复用、死则拉起；单飞防并发重复 spawn）。
+    // 请求本身走 IPC（controlFetch），不需要 TCP 端口号。
+    if (await startControl()) {
+      summary = await fetchDeps(agent);
       if (summary) break;
     }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));

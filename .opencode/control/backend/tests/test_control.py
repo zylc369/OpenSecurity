@@ -22,6 +22,10 @@ import threading
 import signal
 from pathlib import Path
 
+import httpx
+import uvicorn
+from fastapi import FastAPI
+
 # 配置测试环境
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
@@ -37,9 +41,8 @@ OPENCODE_ROOT = Path(os.environ.get("OPENCODE_ROOT", ""))
 os.environ["DATA_DIR"] = str(TEST_DATA_DIR)
 if OPENCODE_ROOT.exists():
     os.environ["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
-# CONTROL_PORT 随机高位：隔离 bind 候选与孤儿探测范围，避免沙箱 spawn 收编/干扰
-# 生产控制台（9776）。test_e2e_port_exhausted 动态读 get_port_candidates，自洽。
-os.environ.setdefault("CONTROL_PORT", str(__import__("random").randint(41000, 49000)))
+# CONTROL_TCP_PORT 随机高位：沙箱控制台与生产 9776 隔离（bind 冲突会直接退出）
+os.environ.setdefault("CONTROL_TCP_PORT", str(__import__("random").randint(41000, 49000)))
 
 
 # ─── 测试框架（极简）──────────────────────────────────────
@@ -58,7 +61,11 @@ def test(name: str):
             except AssertionError as e:
                 _results.append((name, False, str(e)))
                 print(f"  ✗ {name}: {e}")
+                import traceback
+                traceback.print_exc()
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 _results.append((name, False, f"{type(e).__name__}: {e}"))
                 print(f"  ✗ {name}: {type(e).__name__}: {e}")
         wrapper._is_test = True
@@ -136,70 +143,99 @@ def test_atomic_write_mkdir():
     test_file.parent.rmdir()
 
 
-@test("process_lock.acquire_startup_lock: 拿到锁")
-def test_acquire_lock():
-    from services.process_lock import acquire_startup_lock
-    with acquire_startup_lock():
-        pass  # 拿到锁后正常释放
+# ============ ipc_listener 测试 ============
 
+@test("ipc_listener: Unix bind + probe + 残留自愈 + 并发等待语义")
+def test_ipc_listener_unix():
+    """bind → probe 通；死残留清理重建；已活实例场景 start 返回 False（复用）。"""
+    from services.ipc_listener import IpcListener, ipc_probe_alive
+    from config import ipc_unix_socket_path
 
-@test("process_lock.acquire_startup_lock: SIGKILL 后内核释放")
-def test_lock_release_on_sigkill():
-    """子进程持锁被 SIGKILL，父进程应该能拿到锁。"""
-    import portalocker
-    lock_file = TEST_DATA_DIR / ".opencode-control.lock"
-
-    pid = os.fork()
-    if pid == 0:
-        # 子进程：拿锁后睡眠等被 kill
-        fd = open(str(lock_file), "w")
-        portalocker.lock(fd, portalocker.LOCK_EX)
-        time.sleep(10)
-        os._exit(0)
-
-    time.sleep(0.5)  # 等子进程拿到锁
-    os.kill(pid, signal.SIGKILL)
-    os.waitpid(pid, 0)
-    time.sleep(0.5)
-
-    # 父进程应该能拿到锁
-    from services.process_lock import acquire_startup_lock
-    with acquire_startup_lock():
-        pass  # 成功
-
-
-# ============ port_manager 测试 ============
-
-@test("port_manager.bind_port_with_fallback: bind 端口成功")
-def test_bind_port():
-    from services.port_manager import bind_port_with_fallback
-    from config import get_port_candidates
-    port, sock = bind_port_with_fallback()
+    from services.ipc_listener import IpcStartStatus
+    lst = IpcListener()
+    assert_true(lst.start() is IpcStartStatus.LISTENING, "首次 bind 应返回 LISTENING")
     try:
-        # 断言落在当前候选列表内（CONTROL_PORT env 可重定向起始端口，不再硬编码 9776 段）
-        assert_true(port in get_port_candidates(),
-                    f"端口 {port} 应在候选列表 {get_port_candidates()} 内")
+        assert_true(ipc_probe_alive(timeout=1.0), "bind 后 probe 应通")
+        # 已有活实例：新 IpcListener.start 应返回 EXISTING_INSTANCE（复用语义，不抛错）
+        second = IpcListener()
+        assert_true(
+            second.start() is IpcStartStatus.EXISTING_INSTANCE,
+            "活实例在时第二个 start 应返回 EXISTING_INSTANCE",
+        )
     finally:
-        sock.close()
+        lst.cleanup()
+        ipc_unix_socket_path().unlink(missing_ok=True)
+
+    # 死残留自愈：文件存在但无人监听 → probe 失败 → 再次 start 应清理并成功
+    ipc_unix_socket_path().touch()
+    assert_false(ipc_probe_alive(timeout=0.5), "死残留 probe 应失败")
+    lst2 = IpcListener()
+    assert_true(
+        lst2.start() is IpcStartStatus.LISTENING,
+        "死残留应被清理后重新 bind（LISTENING）",
+    )
+    lst2.cleanup()
+    ipc_unix_socket_path().unlink(missing_ok=True)
 
 
-@test("port_manager.write_port_file + read_port_file: 写读一致")
-def test_port_file_io():
-    from services.port_manager import write_port_file, read_port_file
-    write_port_file(9912)
-    info = read_port_file()
-    assert_true(info is not None, "应该读到端口文件")
-    assert_eq(info[0], 9912, "端口号应该一致")
-    assert_eq(info[1], os.getpid(), "PID 应该一致")
-    assert_true(info[2] > 0, "启动时间应该 > 0")
+@test("ipc_listener: bind 后可通过 uds 完成 HTTP 往返")
+def test_ipc_listener_http_roundtrip():
+    """最小 FastAPI + TCP + IPC 桥 → httpx(uds) 请求 /health。
+
+    上游 uvicorn 用独立随机端口并注册进 FrontendPortRegistry
+    （桥经注册中心找 upstream，与生产路径一致）。
+    """
+    import threading
+    import httpx
+    import uvicorn
+    from services.frontend_port import frontend_ports
+    from services.ipc_listener import IpcListener, cleanup_ipc_listener
+
+    app = FastAPI()
+
+    @app.get("/health")
+    def _h():
+        return {"ok": True}
+
+    upstream_port = __import__("random").randint(41000, 49000)
+    config = uvicorn.Config(app, host="127.0.0.1", port=upstream_port, log_level="error")
+    server = uvicorn.Server(config)
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    for _ in range(20):
+        if server.started:
+            break
+        time.sleep(0.25)
+    assert_true(server.started, "uvicorn 测试实例应启动")
+    assert_true(
+        frontend_ports.register_tcp(upstream_port),
+        "上游端口应注册成功（有监听）",
+    )
+
+    from services.ipc_listener import IpcStartStatus
+    listener = IpcListener()
+    assert_true(listener.start() is IpcStartStatus.LISTENING, "IPC 监听应启动")
+    try:
+        with httpx.Client(
+            transport=httpx.HTTPTransport(uds=str(_ipc_sock())),
+            base_url="http://localhost",
+            timeout=5,
+        ) as c:
+            r = c.get("/health")
+            assert_eq(r.status_code, 200, "uds HTTP 往返应 200")
+            assert_true(r.json().get("ok") is True, "响应体应正确")
+    finally:
+        listener.cleanup()
+        frontend_ports.unregister_tcp()
+        server.should_exit = True
+        t.join(timeout=5)  # 确保 TCP 完全释放，不泄漏到后续测试
 
 
-@test("port_manager.is_control_running: 端口文件不存在时返回 False")
-def test_is_control_running_no_file():
-    from services.port_manager import is_control_running, PORT_FILE
-    if PORT_FILE.exists():
-        PORT_FILE.unlink()
-    assert_false(is_control_running(), "端口文件不存在时应该返回 False")
+def _ipc_sock():
+    from config import ipc_unix_socket_path
+    return ipc_unix_socket_path()
+    from config import ipc_unix_socket_path
+    return ipc_unix_socket_path()
 
 
 # ============ ref_counter 测试 ============
@@ -379,7 +415,7 @@ class ControlProcess:
 
     def __init__(self):
         self.proc: subprocess.Popen | None = None
-        self.port: int | None = None
+        self.client: httpx.Client | None = None
 
     def start(self, custom_users_interval: int = 600):
         """启动控制台（不触发自杀）。"""
@@ -389,32 +425,49 @@ class ControlProcess:
             sys.executable,
             str(BACKEND_DIR / "server.py"),
         ]
-        # 注入 USERS_CLEANUP_INTERVAL_SEC（通过修改 config 模块）
-        # 简化：直接设环境变量
         self.proc = subprocess.Popen(
             cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
-        # 等端口文件出现
-        from services.port_manager import PORT_FILE
+        # 等 IPC socket 出现 + /health 应答（uds 探测）
+        from config import ipc_unix_socket_path
+        sock_path = ipc_unix_socket_path()
         for _ in range(20):
-            if PORT_FILE.exists():
-                content = PORT_FILE.read_text().strip().split("\n")
-                if len(content) >= 1 and content[0].isdigit():
-                    self.port = int(content[0])
-                    # 加一个假的 users 防止自杀
-                    from services.ref_counter import write_users, UserEntry
-                    write_users([UserEntry(pid=os.getpid(), start_time=0)])
-                    return
+            if sock_path.exists():
+                try:
+                    with httpx.Client(
+                        transport=httpx.HTTPTransport(uds=str(sock_path)),
+                        timeout=2,
+                    ) as probe:
+                        probe.get("http://localhost/health")
+                        # 200/503 都算活着（503=模型加载中）；
+                        # disconnected（uvicorn 未起）等异常继续轮询
+                        self.client = httpx.Client(
+                            transport=httpx.HTTPTransport(uds=str(sock_path)),
+                            timeout=15,
+                        )
+                        # 加一个假的 users 防止自杀
+                        from services.ref_counter import write_users, UserEntry
+                        write_users([UserEntry(pid=os.getpid(), start_time=0)])
+                        return
+                except Exception:
+                    pass
             time.sleep(0.5)
-        raise AssertionError("控制台启动超时（端口文件未出现）")
+        raise AssertionError("控制台启动超时（IPC 未就绪）")
 
     def stop(self):
         if self.proc:
             self.proc.terminate()
             self.proc.wait(timeout=5)
             self.proc = None
-        from services.port_manager import PORT_FILE, delete_port_file
-        delete_port_file()
+        if self.client:
+            self.client.close()
+            self.client = None
+        # 清理沙箱 IPC socket 与 users（控制台信号处理已删 sock，这里兜底）
+        from config import ipc_unix_socket_path
+        try:
+            ipc_unix_socket_path().unlink(missing_ok=True)
+        except OSError:
+            pass
         from services.ref_counter import USERS_FILE
         if USERS_FILE.exists():
             USERS_FILE.unlink()
@@ -449,19 +502,19 @@ def test_e2e_control_startup():
     cp = get_shared_server()
     import httpx
     # /health
-    r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=10)
+    r = cp.client.get("http://localhost/health", timeout=10)
     assert_true(r.status_code in (200, 503), f"/health 应返回 200/503，实际 {r.status_code}")
 
     # 等模型加载
     for _ in range(30):
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
+        r = cp.client.get("http://localhost/health", timeout=3)
         if r.status_code == 200:
             break
         time.sleep(1)
 
     # /embed
-    r = httpx.post(
-        f"http://127.0.0.1:{cp.port}/embed",
+    r = cp.client.post(
+        f"http://localhost/embed",
         json={"inputs": "hello world"},
         timeout=30,
     )
@@ -475,15 +528,21 @@ def test_e2e_control_startup():
 def test_e2e_singleton():
     # 复用共享控制台作为"第一个进程"（独立起第二个短命进程验证 exit 2）
     cp = get_shared_server()
-    # 启动第二个控制台
     env = os.environ.copy()
     proc2 = subprocess.Popen(
         [sys.executable, str(BACKEND_DIR / "server.py")],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
-    # 等第二个进程退出
-    proc2.wait(timeout=15)
-    assert_eq(proc2.returncode, 2, f"第二个进程应该 exit 2，实际 {proc2.returncode}")
+    try:
+        proc2.wait(timeout=15)
+        assert_eq(proc2.returncode, 2, f"第二个进程应该 exit 2，实际 {proc2.returncode}")
+    finally:
+        if proc2.poll() is None:
+            proc2.terminate()
+            try:
+                proc2.wait(timeout=5)
+            except Exception:
+                proc2.kill()
 
 
 @test("E2E: GET /api/config 返回配置")
@@ -492,7 +551,7 @@ def test_e2e_get_config():
         raise AssertionError("OPENCODE_ROOT 未设置")
     cp = get_shared_server()
     import httpx
-    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/config", timeout=5)
+    r = cp.client.get("http://localhost/api/config", timeout=5)
     assert_eq(r.status_code, 200)
     data = r.json()
     assert_true("DEEPSEEK_API_KEY" in data, "应有 DEEPSEEK_API_KEY")
@@ -502,7 +561,7 @@ def test_e2e_get_config():
 def test_e2e_required_status():
     cp = get_shared_server()
     import httpx
-    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/config/required-status", timeout=5)
+    r = cp.client.get("http://localhost/api/config/required-status", timeout=5)
     assert_eq(r.status_code, 200)
     data = r.json()
     assert_true("DEEPSEEK_API_KEY" in data, "应有 DEEPSEEK_API_KEY 状态")
@@ -514,12 +573,12 @@ def test_e2e_scan():
     import httpx
     # 等模型加载（scanner 会查 model 状态）
     for _ in range(20):
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
+        r = cp.client.get("http://localhost/health", timeout=3)
         if r.status_code == 200:
             break
         time.sleep(1)
 
-    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/scan", timeout=30)
+    r = cp.client.get("http://localhost/api/scan", timeout=30)
     assert_eq(r.status_code, 200)
     data = r.json()
     assert_true("agents" in data, "应有 agents")
@@ -530,7 +589,7 @@ def test_e2e_scan():
 def test_e2e_deps():
     cp = get_shared_server()
     import httpx
-    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/deps/mobile-analysis", timeout=10)
+    r = cp.client.get("http://localhost/api/deps/mobile-analysis", timeout=10)
     assert_eq(r.status_code, 200)
     tools = r.json()
     assert_true(len(tools) > 0, "应有工具列表")
@@ -540,7 +599,7 @@ def test_e2e_deps():
 def test_e2e_docker():
     cp = get_shared_server()
     import httpx
-    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/docker/status", timeout=10)
+    r = cp.client.get("http://localhost/api/docker/status", timeout=10)
     assert_eq(r.status_code, 200)
     data = r.json()
     assert_true("docker" in data, "应有 docker 字段")
@@ -550,7 +609,7 @@ def test_e2e_docker():
 def test_e2e_hardware():
     cp = get_shared_server()
     import httpx
-    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/hardware", timeout=10)
+    r = cp.client.get("http://localhost/api/hardware", timeout=10)
     assert_eq(r.status_code, 200)
     data = r.json()
     assert_true("cpu" in data, "应有 cpu")
@@ -567,8 +626,8 @@ def test_e2e_config_write():
     original = ai_env_path.read_text()
     cp = get_shared_server()
     import httpx
-    r = httpx.put(
-        f"http://127.0.0.1:{cp.port}/api/config",
+    r = cp.client.put(
+        f"http://localhost/api/config",
         json={"configs": {"E2E_TEST_KEY": "e2e_value"}},
         timeout=5,
     )
@@ -584,39 +643,137 @@ def test_e2e_config_write():
 def test_e2e_install_whitelist():
     cp = get_shared_server()
     import httpx
-    r = httpx.post(
-        f"http://127.0.0.1:{cp.port}/api/install",
+    r = cp.client.post(
+        f"http://localhost/api/install",
         json={"package": "malicious-package-not-in-whitelist"},
         timeout=5,
     )
     assert_eq(r.status_code, 400, "白名单外应返回 400")
 
 
+@test("ipc_listener: BIND_TIMEOUT——窗口耗尽且无活实例时返回真异常枚举")
+def test_ipc_listener_bind_timeout():
+    import services.ipc_listener as il
+
+    lst = il.IpcListener()
+    # monkeypatch：bind 恒失败 + 探测恒不通 + 缩短等待窗口
+    orig_start, orig_probe, orig_wait = (
+        il.IpcListener._do_start_platform, il.ipc_probe_alive, il.IPC_BIND_WAIT_SEC
+    )
+    il.IpcListener._do_start_platform = lambda self: None
+    il.ipc_probe_alive = lambda **kw: False
+    il.IPC_BIND_WAIT_SEC = 0.2
+    try:
+        from config import ipc_unix_socket_path
+        ipc_unix_socket_path().unlink(missing_ok=True)  # 确保不触发"文件消失提前重试"
+        status = lst.start()
+        assert_true(
+            status is il.IpcStartStatus.BIND_TIMEOUT,
+            f"应返回 BIND_TIMEOUT，实际 {status}",
+        )
+    finally:
+        il.IpcListener._do_start_platform = orig_start
+        il.ipc_probe_alive = orig_probe
+        il.IPC_BIND_WAIT_SEC = orig_wait
+
+
+# ============ frontend_port（注册中心）测试 ============
+
+@test("frontend_port: TCP 顺延 bind + 注册")
+def test_frontend_port_fallback():
+    import os
+    import random as _rnd
+    import socket
+    from services.frontend_port import FrontendPortRegistry
+
+    def _port_free(p: int) -> bool:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", p))
+            return True
+        except OSError:
+            return False
+        finally:
+            probe.close()
+
+    # 随机起点段可能撞系统临时端口：选前两个候选都空闲的起点（最多试 5 次）
+    for _ in range(5):
+        if _port_free(FrontendPortRegistry.tcp_candidates()[0]) and \
+           _port_free(FrontendPortRegistry.tcp_candidates()[1]):
+            break
+        os.environ["CONTROL_TCP_PORT"] = str(_rnd.randint(41000, 49000))
+
+    reg = FrontendPortRegistry()
+    candidates = reg.tcp_candidates()
+    assert_true(len(candidates) >= 2, "候选段至少 2 个")
+    # 占住起点 → bind 应顺延到下一候选
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocker.bind(("127.0.0.1", candidates[0]))
+    blocker.listen(1)
+    try:
+        sock = reg.bind_and_register_tcp()
+        try:
+            assert_eq(reg.tcp_port(), candidates[1], "应顺延并注册下一候选端口")
+        finally:
+            sock.close()
+            reg.unregister_tcp()
+        # 候选段全占 → RuntimeError
+        blockers = [blocker]
+        for p in candidates[1:]:
+            b = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            b.bind(("127.0.0.1", p))
+            b.listen(1)
+            blockers.append(b)
+        try:
+            reg2 = FrontendPortRegistry()
+            raised = False
+            try:
+                reg2.bind_and_register_tcp()
+            except RuntimeError:
+                raised = True
+            assert_true(raised, "候选段全占应 RuntimeError")
+        finally:
+            for b in blockers:
+                b.close()
+    finally:
+        blocker.close()
+@test("frontend_port: vite 注册 + console_url 计算分支")
+def test_frontend_port_vite_and_url():
+    from services.frontend_port import FrontendPortRegistry, _port_alive
+
+    reg = FrontendPortRegistry()
+    # 发布态（非 dev）：注册 TCP 后 console_url 指向该端口。
+    # monkeypatch is_dev_mode：防 .ai_env 的 CONTROL_FRONTEND_DEV=1 + 生产 vite(5173) 干扰
+    import services.frontend_port as _fp
+    _orig_dev = _fp.is_dev_mode
+    _fp.is_dev_mode = lambda: False
+    import socket as _s
+    srv = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        assert_true(reg.register_tcp(port), "注册活端口应成功")
+        url = reg.console_url()
+        assert_true(url.endswith(f":{port}"), f"发布态 URL 应含注册端口，实际 {url}")
+        # vite 注册死端口 → vite_port() 不得返回死注册值；返回则必须是真实监听端口
+        # （环境里可能有真 vite 在 5173-5175——回退探测命中是设计行为，不算失败）
+        reg.register_vite_port(1)  # 端口 1 无监听
+        vp = reg.vite_port()
+        if vp is not None:
+            from services.frontend_port import _port_alive
+            assert_true(vp != 1 and _port_alive(vp), f"回退值应为活端口，实际 {vp}")
+    finally:
+        srv.close()
+        reg.unregister_tcp()
+        _fp.is_dev_mode = _orig_dev
+    # register_tcp 死端口 + verify → False
+    assert_false(reg.register_tcp(1), "注册死端口（verify_alive）应失败")
+
+
 # ============ 边界条件补充测试 ============
-
-@test("port_manager.is_control_running: 端口文件残留 + PID 死 → False")
-def test_is_control_running_dead_pid():
-    from services.port_manager import is_control_running, PORT_FILE
-    from services.process_lock import atomic_write
-    if PORT_FILE.exists(): PORT_FILE.unlink()
-    atomic_write(PORT_FILE, "9912\n99999\n0\n")
-    try:
-        assert_false(is_control_running(), "PID 99999 已死应 False")
-    finally:
-        if PORT_FILE.exists(): PORT_FILE.unlink()
-
-
-@test("port_manager.is_control_running: 端口文件格式错误 → False")
-def test_is_control_running_bad_format():
-    from services.port_manager import is_control_running, PORT_FILE
-    from services.process_lock import atomic_write
-    if PORT_FILE.exists(): PORT_FILE.unlink()
-    atomic_write(PORT_FILE, "not_a_port\nabc\n")
-    try:
-        assert_false(is_control_running(), "格式错误应 False")
-    finally:
-        if PORT_FILE.exists(): PORT_FILE.unlink()
-
 
 @test("process_lock.is_process_alive: PID=0 / -1 非法")
 def test_pid_zero_negative():
@@ -685,40 +842,65 @@ def test_tool_optional():
     assert_false(result.required, "GoReSym 应 required=False")
 
 
-@test("E2E: 端口耗尽 exit code 3（模拟）")
-def test_e2e_port_exhausted():
-    # 必须占满全部候选端口验证 exit 3——共享控制台占用的端口会 bind 失败导致覆盖不全，
+@test("E2E: 浏览器 TCP 被占 → 顺延候选段（不 exit 3）")
+def test_e2e_tcp_fallback():
+    # 占住沙箱起点端口 → 控制台应顺延到下一候选并正常服务（IPC 应答）。
     # 先停共享（后续用例懒加载会自动重启，代价一次模型加载）
     stop_shared_server()
     import socket
-    from config import get_port_candidates
-    sockets = []
+    from config import ipc_unix_socket_path
+    from services.frontend_port import frontend_ports
+    start_port = frontend_ports.tcp_candidates()[0]
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocker.bind(("127.0.0.1", start_port))
+    blocker.listen(1)
+    env = os.environ.copy()
+    env["CONTROL_TCP_PORT"] = str(start_port)  # 子进程与沙箱同起点
+    proc = subprocess.Popen(
+        [sys.executable, str(BACKEND_DIR / "server.py")],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
     try:
-        for port in get_port_candidates():
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind(("127.0.0.1", port))
-                s.listen(1)
-                sockets.append(s)
-            except OSError:
-                pass
-        env = os.environ.copy()
-        proc = subprocess.Popen(
-            [sys.executable, str(BACKEND_DIR / "server.py")],
-            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        import httpx
+        sock_path = ipc_unix_socket_path()
+        ok_port = None
+        for _ in range(20):
+            if sock_path.exists():
+                try:
+                    with httpx.Client(
+                        transport=httpx.HTTPTransport(uds=str(sock_path)), timeout=2,
+                    ) as c:
+                        r = c.get("http://localhost/api/console-url")
+                        if r.status_code == 200:
+                            ok_port = r.json().get("tcp_port")
+                            break
+                except Exception:
+                    pass
+            time.sleep(0.5)
+        assert_true(isinstance(ok_port, int), "IPC 应答 /api/console-url")
+        candidates = frontend_ports.tcp_candidates()
+        assert_true(
+            ok_port in candidates and ok_port != start_port,
+            f"应顺延到 {start_port} 之外的候选 {candidates}，实际注册 {ok_port}",
         )
-        proc.wait(timeout=15)
-        assert proc.returncode in (3, 2), f"端口耗尽应 exit 3 或 2，实际 {proc.returncode}"
+        # 顺延后的 TCP 真的在听
+        import services.frontend_port as _fp
+        assert_true(_fp._port_alive(ok_port), f"顺延端口 {ok_port} 应有监听")
     finally:
-        for s in sockets: s.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+        blocker.close()
 
 
 @test("E2E: /embed 空输入 → 400")
 def test_e2e_embed_empty():
     cp = get_shared_server()
     import httpx
-    r = httpx.post(f"http://127.0.0.1:{cp.port}/embed", json={}, timeout=10)
+    r = cp.client.post("http://localhost/embed", json={}, timeout=10)
     assert_eq(r.status_code, 400, "空输入应 400")
 
 
@@ -727,10 +909,10 @@ def test_e2e_embed_batch():
     cp = get_shared_server()
     import httpx
     for _ in range(30):
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
+        r = cp.client.get("http://localhost/health", timeout=3)
         if r.status_code == 200: break
         time.sleep(1)
-    r = httpx.post(f"http://127.0.0.1:{cp.port}/embed",
+    r = cp.client.post("http://localhost/embed",
                    json={"inputs": ["hello", "world", "test"]}, timeout=30)
     assert_eq(r.status_code, 200)
     data = r.json()
@@ -743,10 +925,10 @@ def test_e2e_embed_single():
     cp = get_shared_server()
     import httpx
     for _ in range(30):
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
+        r = cp.client.get("http://localhost/health", timeout=3)
         if r.status_code == 200: break
         time.sleep(1)
-    r = httpx.post(f"http://127.0.0.1:{cp.port}/embed",
+    r = cp.client.post("http://localhost/embed",
                    json={"inputs": "single string"}, timeout=30)
     assert_eq(r.status_code, 200)
     data = r.json()
@@ -758,10 +940,10 @@ def test_e2e_rerank():
     cp = get_shared_server()
     import httpx
     for _ in range(60):
-        r = httpx.get(f"http://127.0.0.1:{cp.port}/health", timeout=3)
+        r = cp.client.get("http://localhost/health", timeout=3)
         if r.status_code == 200: break
         time.sleep(1)
-    r = httpx.post(f"http://127.0.0.1:{cp.port}/rerank",
+    r = cp.client.post("http://localhost/rerank",
                    json={"query": "hello", "texts": ["world", "test"]}, timeout=60)
     assert_eq(r.status_code, 200)
     data = r.json()
@@ -772,7 +954,7 @@ def test_e2e_rerank():
 def test_e2e_config_404():
     cp = get_shared_server()
     import httpx
-    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/config/NOT_EXIST_12345", timeout=5)
+    r = cp.client.get("http://localhost/api/config/NOT_EXIST_12345", timeout=5)
     assert_eq(r.status_code, 404)
 
 
@@ -780,11 +962,11 @@ def test_e2e_config_404():
 def test_e2e_config_delete():
     cp = get_shared_server()
     import httpx
-    httpx.put(f"http://127.0.0.1:{cp.port}/api/config/E2E_DEL",
+    cp.client.put("http://localhost/api/config/E2E_DEL",
               json={"value": "test"}, timeout=5)
-    r = httpx.delete(f"http://127.0.0.1:{cp.port}/api/config/E2E_DEL", timeout=5)
+    r = cp.client.delete("http://localhost/api/config/E2E_DEL", timeout=5)
     assert_eq(r.status_code, 200)
-    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/config/E2E_DEL", timeout=5)
+    r = cp.client.get("http://localhost/api/config/E2E_DEL", timeout=5)
     assert_eq(r.status_code, 404, "删后应 404")
 
 
@@ -792,7 +974,7 @@ def test_e2e_config_delete():
 def test_e2e_deps_unknown():
     cp = get_shared_server()
     import httpx
-    r = httpx.get(f"http://127.0.0.1:{cp.port}/api/deps/non-existent", timeout=5)
+    r = cp.client.get("http://localhost/api/deps/non-existent", timeout=5)
     assert_eq(r.status_code, 200)
     d = r.json()
     # 新契约：响应是聚合对象（summary/python/tools/compiler/shared_infra）
@@ -808,10 +990,10 @@ def test_e2e_scan_cache():
     cp = get_shared_server()
     import httpx
     t1 = time.time()
-    httpx.get(f"http://127.0.0.1:{cp.port}/api/scan?force_refresh=true", timeout=30)
+    cp.client.get("http://localhost/api/scan?force_refresh=true", timeout=30)
     dur1 = time.time() - t1
     t2 = time.time()
-    httpx.get(f"http://127.0.0.1:{cp.port}/api/scan", timeout=30)
+    cp.client.get("http://localhost/api/scan", timeout=30)
     dur2 = time.time() - t2
     assert_true(dur2 < dur1, f"缓存应更快：first={dur1:.2f}s cached={dur2:.2f}s")
 

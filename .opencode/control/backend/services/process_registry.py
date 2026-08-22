@@ -3,7 +3,7 @@
 数据源（三个，全部已在现有服务中持有，本模块只做汇总不改状态）：
   1. 控制台主进程   — os.getpid()；BGE 双模型常驻其内（内存大头在此）
   2. OCR MLX 子进程 — ocr_service（引用计数/最后活跃/持有者明细）
-  3. vite dev      — vite_dev（独立进程组，pid 未记录，按端口识别）
+  3. vite dev      — frontend_port（独立进程组，pid 未记录，按端口识别）
 
 内存口径（两种，前端同时展示）：
   - footprint = 活动监视器"内存"列同口径（phys_footprint：含压缩页 +
@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass, field
 import psutil
 
 from services.ocr_service import ocr_service
-from services.vite_dev import vite_port
+from services.frontend_port import frontend_ports
 
 
 @dataclass
@@ -150,7 +150,7 @@ def collect_processes() -> ProcessRegistryView:
     ))
 
     # 3. vite dev server（独立进程组 spawn 时未记录 PID，按监听端口反查）
-    port = vite_port()
+    port = frontend_ports.vite_port()
     vpid = _pid_on_port(port) if port else None
     if vpid is not None:
         vmem, vcmd, vfp = _ps_proc_info(vpid)

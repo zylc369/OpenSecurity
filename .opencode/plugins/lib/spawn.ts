@@ -45,6 +45,9 @@ export async function runProcess(
   // Unix 上默认就是 UTF-8，加上是无害的防御性配置，保持两端行为一致。
   const env = { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", ...options.env };
 
+  const t0 = Date.now();
+  const debugLog = (await import("./logging")).debugLog;
+
   return await new Promise<ProcessResult>((resolve) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -53,6 +56,9 @@ export async function runProcess(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      debugLog(
+        `runProcess: ${exe} 退出（${Date.now() - t0}ms，status=${result.status}${result.error ? `，error=${result.error.message}` : ""}）`,
+      );
       resolve(result);
     };
 
@@ -67,6 +73,7 @@ export async function runProcess(
         stdin: "ignore",
       });
     } catch (e) {
+      debugLog(`runProcess: ${exe} 启动即失败: ${(e as Error).message}`);
       finish({
         status: null,
         stdout: "",
@@ -82,6 +89,7 @@ export async function runProcess(
         try {
           proc.kill();
         } catch {}
+        debugLog(`runProcess: ${exe} 超时被 kill（${options.timeout}ms）`);
         finish({
           status: null,
           stdout: "",

@@ -10,6 +10,10 @@
 """
 from __future__ import annotations
 
+import logging
+logger = logging.getLogger(__name__)
+
+
 import queue
 import threading
 from dataclasses import dataclass
@@ -22,7 +26,7 @@ DEFAULT_DB_PATH = Path(DATA_DIR) / "db" / "knowledge" / "knowledge.db"
 
 
 def log(msg: str) -> None:
-    print(f"[knowledge-store] {msg}", flush=True)
+    logger.info("%s", msg)
 
 
 @dataclass(frozen=True)

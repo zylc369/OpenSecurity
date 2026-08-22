@@ -24,7 +24,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # control_url 同级
-from control_url import resolve_control
+from control_url import resolve_control, make_control_client
 
 _CONTROL = {"base": None}
 _client: httpx.AsyncClient | None = None
@@ -35,7 +35,7 @@ def _base_url() -> str:
     if _CONTROL["base"] is None:
         addr = resolve_control()
         if addr is None:
-            raise RuntimeError("控制台地址未知（端口文件不存在，控制台未启动？）")
+            raise RuntimeError("控制台未启动（IPC 地址不可达）")
         _CONTROL["base"] = addr.url
     return _CONTROL["base"]
 
@@ -44,7 +44,7 @@ def _base_url() -> str:
 async def _lifespan(server: FastMCP):
     """acquire（启动）/ close（退出）——控制台引用计数的两端。"""
     global _client
-    _client = httpx.AsyncClient(timeout=300.0)
+    _client = make_control_client(timeout=300.0)
     pid = os.getpid()
     try:
         import psutil

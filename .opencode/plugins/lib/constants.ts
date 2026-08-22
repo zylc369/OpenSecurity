@@ -148,26 +148,29 @@ export const CONTROL_SCRIPT = join(
   "server.py",
 );
 
-/** 控制台端口文件路径（与控制台后端 config.py 的 PORT_FILE 一致） */
-export const CONTROL_PORT_FILE = join(DATA_DIR, ".opencode-control.port");
+/** 控制台 IPC：Unix Domain Socket 路径（macOS/Linux；与控制台 config.py 一致） */
+export const CONTROL_UNIX_SOCKET = join(DATA_DIR, "opensecurity-control.sock");
+
+/** 控制台 IPC：Windows 命名管道名（与控制台 config.py 一致；随机后缀防撞名） */
+export const CONTROL_WIN_PIPE = "\\\\.\\pipe\\opensecurity-control-482964";
+
+/** 当前平台是否 Windows */
+export const IS_WINDOWS = process.platform === "win32";
 
 /** 控制台 users 文件路径（与控制台后端 config.py 的 USERS_FILE 一致） */
 export const CONTROL_USERS_FILE = join(DATA_DIR, ".opencode-control.users");
 
-/** Plugin spawn 控制台后，通过此环境变量把端口传给 MCP server（embed_client.py 读） */
-export const ENV_CONTROL_PORT = "OPENCODE_CONTROL_PORT";
-
-/** ServiceRegistry 中控制台启动状态的服务名（控制台 spawn + /health 200） */
+/** ServiceRegistry 中控制台启动状态的服务名（控制台 spawn + IPC 就绪） */
 export const CONTROL_STARTUP_SERVICE = "control_startup";
 
 /** ServiceRegistry 中控制台扫描完成的服务名（第三~五层扫描完成） */
 export const CONTROL_SCAN_SERVICE = "control_scan";
 
-/** 控制台启动超时（毫秒）。包括 spawn + 端口文件出现 + 模型加载（最坏 30s） */
+/** 控制台启动超时（毫秒）。包括 spawn + IPC 就绪 + 模型加载（最坏 30s） */
 export const CONTROL_STARTUP_TIMEOUT_MS = 60_000;
 
 /** 控制台扫描超时（毫秒）。Docker 检测 + 工具检测 */
 export const CONTROL_SCAN_TIMEOUT_MS = 90_000;
 
-/** 端口文件等待超时（毫秒）。控制台 spawn 后写端口文件的时间 */
-export const CONTROL_PORT_FILE_WAIT_MS = 5_000;
+/** IPC 就绪等待超时（毫秒）。控制台 spawn 后 IPC 通道可 connect 的时间 */
+export const CONTROL_IPC_READY_WAIT_MS = 8_000;
