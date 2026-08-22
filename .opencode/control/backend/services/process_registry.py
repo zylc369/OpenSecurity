@@ -1,14 +1,15 @@
 """后端管理的进程清单（GET /api/processes，控制台进程页）。
 
-数据源（三个，全部已在现有服务中持有，本模块只做汇总不改状态）：
-  1. 控制台主进程   — os.getpid()；BGE 双模型常驻其内（内存大头在此）
-  2. OCR MLX 子进程 — ocr_service（引用计数/最后活跃/持有者明细）
-  3. vite dev      — frontend_port（独立进程组，pid 未记录，按端口识别）
+数据源（两个，全部已在现有服务中持有，本模块只做汇总不改状态）：
+  1. 控制台主进程   — os.getpid()；BGE 双模型 + OCR（进程内加载）常驻其内
+  2. vite dev      — frontend_port（独立进程组，pid 未记录，按端口识别）
+
+OCR 引用计数/加载态的可视化在模型板块（/api/models 的 active_clients）。
 
 内存口径（两种，前端同时展示）：
   - footprint = 活动监视器"内存"列同口径（phys_footprint：含压缩页 +
-    GPU/Metal 映射）。BGE 走 MPS、GLM-OCR 走 MLX——模型权重在 Metal
-    缓冲区，RSS 看不见（实测 RSS 1.0GB vs footprint 3.7GB，差 3 倍+）
+    GPU/Metal 映射）。模型权重在 Metal 缓冲区，RSS 看不见
+    （实测 RSS 1.0GB vs footprint 3.7GB，差 3 倍+）
   - RSS = psutil 驻留集（未压缩页；macOS 内存压力下闲置页被压缩后会骤降）
   footprint 经 /usr/bin/footprint 获取（macOS 自带，~0.2s/进程）；
   非 darwin 或工具缺失返回 None，前端回退显示 RSS。
@@ -24,14 +25,13 @@ from dataclasses import asdict, dataclass, field
 
 import psutil
 
-from services.ocr_service import ocr_service
 from services.frontend_port import frontend_ports
 
 
 @dataclass
 class ProcessInfo:
     """单个受管进程的展示快照。"""
-    key: str                          # console / ocr_mlx / vite
+    key: str                          # console / vite
     name: str                         # 显示名
     pid: int | None                   # vite 未记录 pid（独立进程组）
     role: str                         # 用途说明（含内存构成解释）
@@ -126,24 +126,6 @@ def collect_processes() -> ProcessRegistryView:
         memory_footprint_mb=fp,
     ))
 
-    # 2. OCR（进程内加载——内存并入控制台进程；含引用计数体系全景）
-    st = ocr_service.status()
-    ocr_fp = ocr_service.loaded_footprint_mb()
-    status = "running" if st.state == "ready" else st.state
-    procs.append(ProcessInfo(
-        key="ocr_mlx",
-        name="OCR 推理（glm-ocr）",
-        pid=None,
-        role=f"进程内 MLX 视觉模型（{st.backend} 后端，内存并入控制台进程）。引用归零后 {st.idle_release_sec}s 空闲自动卸载归还内存",
-        status=status,
-        memory_mb=None,
-        cmdline="",
-        memory_footprint_mb=ocr_fp,
-        ref_count=st.clients,
-        holders=[asdict(h) for h in ocr_service.holders()],
-        last_active_at=st.last_activity_at,
-        extra=f"state={st.state}" + (f"; error={st.error}" if st.error else ""),
-    ))
 
     # 3. vite dev server（独立进程组 spawn 时未记录 PID，按监听端口反查）
     port = frontend_ports.vite_port()

@@ -109,15 +109,21 @@ def test_api_system(control_server):
 
 
 def test_api_models(control_server):
-    """GET /api/models：两个 BAAI 模型 + 硬件评估 + 下载状态。"""
+    """GET /api/models：三个模型 + 加载态/引用数 + 整体硬件汇总 + 下载状态。"""
     r = httpx.get(f"http://127.0.0.1:{control_server}/api/models", timeout=5)
     assert r.status_code == 200
     d = r.json()
     ids = {m["id"] for m in d["models"]}
-    assert {"bge-m3", "bge-reranker-v2-m3"} <= ids
+    assert {"bge-m3", "bge-reranker-v2-m3", "glm-ocr"} <= ids
     for m in d["models"]:
-        assert set(m["hardware"]) >= {"ok", "reasons", "notes", "available_gb"}
+        # 逐模型 hardware 已废弃（三模型需求同值导致重复显示）——
+        # 整体汇总在顶层 hardware_summary
+        assert "hardware" not in m
         assert set(m["download"]) >= {"status", "progress", "error"}
+        assert "active_clients" in m and "loaded" in m
+    hs = d["hardware_summary"]
+    assert set(hs) >= {"ok", "reason", "notes", "available_gb", "total_required_gb"}
+    assert hs["available_gb"] > 0
     assert d["hf_endpoint"].startswith("http")
 
 

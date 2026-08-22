@@ -27,12 +27,17 @@ class ModelCacheState:
 
 
 @dataclass(frozen=True)
-class HardwareAssessment:
-    """硬件适配评估。ok=False 时 reasons 说明缺什么。"""
+class HardwareSummary:
+    """模型板块整体硬件评估（全部已缓存模型同时驻留的总需求 vs 可用内存）。
+
+    逐模型评估已废弃（三个模型 min_free_gb 恰同值导致三行重复显示）；
+    总需求 = sum(已缓存模型的 min_free_gb)——未下载的模型不计入。
+    """
     ok: bool
-    reasons: tuple[str, ...]
+    reason: str                       # ok=False 时的说明（单条）
     notes: tuple[str, ...]
     available_gb: float
+    total_required_gb: float
 
 
 @dataclass(frozen=True)
@@ -57,7 +62,7 @@ class ModelAssetStatus:
     cache_path: str | None
     size_gb: float
     loaded: bool
-    hardware: HardwareAssessment
+    active_clients: int | None         # OCR 专用: 当前引用数（其他模型 None）
     download: DownloadView
 
 
@@ -197,32 +202,41 @@ def _ocr_loaded_state() -> bool:
         return False
 
 
-def _hardware_assessment(model: ModelAsset) -> HardwareAssessment:
-    """硬件适配评估。ok=False 时 reasons 说明缺什么。"""
-    reasons: list[str] = []
+def hardware_summary() -> HardwareSummary:
+    """整体硬件评估: 全部已缓存模型同时驻留的总内存需求 vs 当前可用。"""
     avail = round(psutil.virtual_memory().available / 1024**3, 1)
-    if avail < model.min_free_gb:
-        reasons.append(f"可用内存 {avail}GB 低于加载所需 {model.min_free_gb}GB（关闭占内存的应用后重试）")
+    cached = [m for m in MODELS if (
+        _ocr_cache_state(m).cached if m.type == "ocr" else _is_cached(m.repo_id).cached)]
+    total = round(sum(m.min_free_gb for m in cached), 1)
+    ok = avail >= total
+    reason = "" if ok else (
+        f"可用内存 {avail}GB 低于全部模型加载需求 {total}GB（关闭占内存的应用后重试）")
     notes: list[str] = []
     if platform.system() == "Darwin" and platform.machine() == "arm64":
         notes.append("Apple Silicon · Metal 加速可用")
-    return HardwareAssessment(ok=not reasons, reasons=tuple(reasons),
-                              notes=tuple(notes), available_gb=avail)
+    return HardwareSummary(ok=ok, reason=reason, notes=tuple(notes),
+                           available_gb=avail, total_required_gb=total)
 
 
 def get_model_assets() -> list[ModelAssetStatus]:
     """全部模型资产状态（/api/models 与 deps 快照的数据源）。"""
     from services import model_loader
-    ready = model_loader.is_models_ready()
+    from services.ocr_service import ocr_service
 
     result: list[ModelAssetStatus] = []
     for m in MODELS:
         if m.type == "ocr":
             cache = _ocr_cache_state(m)
             loaded = _ocr_loaded_state()
+            clients: int | None = ocr_service.status().clients
+        elif m.type == "reranker":
+            cache = _is_cached(m.repo_id)
+            loaded = model_loader.is_reranker_loaded()  # 懒加载真实态
+            clients = None
         else:
             cache = _is_cached(m.repo_id)
-            loaded = ready
+            loaded = model_loader.is_models_ready()
+            clients = None
         with _lock:
             st = _states[m.id]
             download = DownloadView(status=st.status, progress=st.progress, error=st.error)
@@ -230,7 +244,7 @@ def get_model_assets() -> list[ModelAssetStatus]:
             id=m.id, repo_id=m.repo_id, type=m.type, display=m.display,
             purpose=m.purpose, min_free_gb=m.min_free_gb, disk_gb=m.disk_gb,
             cached=cache.cached, cache_path=cache.path, size_gb=cache.size_gb,
-            loaded=loaded, hardware=_hardware_assessment(m), download=download,
+            loaded=loaded, active_clients=clients, download=download,
         ))
     return result
 

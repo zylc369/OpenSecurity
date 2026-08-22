@@ -136,7 +136,14 @@ class OcrService:
                 if self._error:
                     self._cleanup_failed_start_locked()
                     raise RuntimeError(self._error)
-                self._state = STATE_READY
+                if self._state == STATE_STARTING:
+                    # 仅在加载成果未被中途卸载时置 READY。
+                    # 防竞态: force_release 可能在"加载完成 → 本处置 READY"窗口
+                    # 抢到锁完成卸载（state 已回 IDLE）——此时不得把 IDLE 翻成
+                    # READY（引擎已空，假 READY 会让 acquire 快路径永不重载）。
+                    # 等待者直接返回；引擎空由 extract 的 loaded 防御兜住，
+                    # 下次 acquire 走 IDLE 分支重新加载，自愈。
+                    self._state = STATE_READY
 
     async def extract(self, image_b64: str, prompt: str) -> str:
         """识图（并发使用——不持 lifecycle 锁；仅 generate 段串行）。

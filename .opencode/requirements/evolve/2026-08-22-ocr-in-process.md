@@ -21,6 +21,32 @@
 最终测试: 单测 65/65（+2: 推理在途 acquire 复用不阻塞 / force_release 等推理完成）· 六套全绿 ·
 生产 3 路并发 extract 0.30s 全成功（预处理重叠 + worker 串行），各自正确识别
 
+## 第四轮补测（用户复核测试充分性，2026-08-22）
+
+- 上轮验证缺陷（被用户"测试充分吗"问出）: 生产验证全部发生在 90s 心跳宽限窗口内——keeper TTL 16:38 到期退群后，16:55 手动拉起的控制台 16:57:07 按设计自杀（当前 opencode 插件早于心跳机制诞生不发心跳，keeper 是唯一心跳源）。教训: 涉宽限/超时的验证必须观察到窗口之外
+- 补单测 3 个: hardware_summary 充足路径（monkeypatch psutil）/ 不足路径（ok=False + reason 含可用与需求值）/ get_model_assets loaded 三元语义（embedder=调用进程真实态而非硬编码; reranker 不再复用 embedder 标志）
+- 补跑 e2e_real 6/6（上轮 models API 变更后漏跑）
+- 生产: keeper 重启（72912）+ 控制台 72974 存活 7min+（超宽限验证）; OCR e2e 后 idle 自动卸载复验
+
+## 第三轮返工（用户复核释放边界 + 模型板块重构，2026-08-22）
+
+**释放边界审查（用户问"是否考虑到所有边界"）——发现 1 个真 bug**:
+- force_release 在"加载完成→等待者置 READY"窗口抢到锁 → 等待者无条件置 READY → 引擎已空却显示 ready → acquire 快路径永不重载（永久损坏）。修复: 等待者仅在 state==STARTING 时置 READY。回归锚点: test_ocr_force_release_race_with_load（含竞态后自愈验证）
+- 补测 MCP SIGKILL 兜底: 真子进程 acquire→kill→reaper 清引用→30s 窗口→自动卸载（并锚定"清引用后仍等满空闲窗口"的热复用语义）
+- 设计语义（非 bug）: client 活着但不识图 → 不释放（lifespan 持有即使用中）
+
+**模型板块重构（用户 4 项指令全部落地）**:
+- 删类型标签（向量化/重排序/OCR——与用途行重复且导致长行溢出）; purpose 行升级为主视觉（主题蓝 #1677ff）
+- 逐模型硬件行废弃（三模型 min_free_gb 同为 4.0 导致三行重复）→ 板块标题旁整体汇总行: "✓ 内存 19.3GB / 需 12GB"（总需求=已缓存模型 min_free_gb 之和，Tooltip 说明口径）
+- 修 loaded 显示 bug: reranker 原复用 embedder 就绪标志（懒加载未加载却显示"已加载"）→ is_reranker_loaded() 真实态
+- 进程页删 ocr_mlx 条目（in-process 后无独立进程; 引用计数并入 OCR 模型卡"运行中 · N 引用"）
+
+**连带发现并修复（本轮最大意外收获）**:
+- vite.config.ts `import { react }` 命名导入错误（IPC 化时引入）→ **前端自 8/17 起从未成功构建过**（一直靠 dev 模式运行，dist 停留老版本）→ 修复 default import + 重建 dist。此前 e2e 过测的是老 dist
+- mlx-env 删除（699MB 磁盘回收）
+
+测试: 单测 70/70（+2 释放边界）· test/control 44/44（断言随 UI 契约更新）· 集成 5/5 · TS 10/10 · tsc ✓
+
 ## 实施结果记录
 
 - 测试: 单测 63/63（OCR 组 6 用例含并发串行化实测）· 集成 5/5 · TS 10/10 · e2e_real 5/5 · test/control 44/44 · tsc 零错

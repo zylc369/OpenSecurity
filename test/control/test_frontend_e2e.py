@@ -87,13 +87,18 @@ def test_docker_section_tables(rendered):
 
 
 def test_models_section_cards(rendered):
-    """模型分区：两个模型卡 + 缓存路径 + 硬件结论文案。"""
+    """模型分区：模型卡（名称/用途主视觉行/缓存路径）+ 板块头整体内存汇总。
+
+    UI 约定（2026-08-22 重构）: 不显示类型标签（向量化/重排序/OCR——与用途行
+    重复）; 硬件评估为板块级汇总行（标题旁），不逐模型显示。
+    """
     page, _ = rendered
     section_text = page.locator("#section-models").inner_text()
     assert "BGE-M3" in section_text
     assert "Reranker" in section_text
     assert "huggingface" in section_text  # 缓存路径
-    assert "硬件满足" in section_text or "内存" in section_text  # 硬件结论
+    # 板块头汇总行: "✓ 内存 XGB / 需 YGB"（整体评估; 逐模型硬件行已废弃）
+    assert "内存" in section_text and "需" in section_text
 
 
 def test_deps_section_venv(rendered):
@@ -336,10 +341,11 @@ def test_modern_header_not_dark_default(rendered):
 
 
 def test_model_disk_label(rendered):
-    """模型卡磁盘占用文案：'磁盘 X.XXGB'（替代含混的'已缓存'）。"""
+    """模型卡磁盘占用：大小 Tag（X.XXGB）+ 参考行。"""
     page, _ = rendered
     text = page.locator("#section-models").inner_text()
-    assert "磁盘 4.27GB" in text and "磁盘 2.14GB" in text, "应显示'磁盘 X.XXGB'"
+    assert "4.27GB" in text and "2.14GB" in text, "应显示模型大小"
+    assert "参考" in text, "应有'参考 XGB'行"
     assert "已缓存" not in text, "'已缓存'文案应清除"
 
 

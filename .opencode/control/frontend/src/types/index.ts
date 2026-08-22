@@ -159,11 +159,12 @@ export interface SystemInfo {
 
 // ─── /api/models ──────────────────────────────────────────
 
-export interface HardwareAssessment {
+export interface HardwareSummary {
   ok: boolean;
-  reasons: string[];      // 不达标原因（ok=false 时非空）
+  reason: string;         // 不达标说明（ok=false 时非空）
   notes: string[];        // 加速说明（如 Apple Silicon Metal）
   available_gb: number;
+  total_required_gb: number;  // 全部已缓存模型同时驻留的总需求
 }
 
 export interface DownloadState {
@@ -184,12 +185,13 @@ export interface ModelAsset {
   cache_path: string | null;
   size_gb: number;
   loaded: boolean;
-  hardware: HardwareAssessment;
+  active_clients: number | null;  // OCR 专用: 当前引用数
   download: DownloadState;
 }
 
 export interface ModelsResponse {
   models: ModelAsset[];
+  hardware_summary: HardwareSummary;
   hf_endpoint: string;
 }
 

@@ -15,9 +15,10 @@ router = APIRouter(prefix="/api/models", tags=["models"])
 
 @router.get("")
 async def list_models() -> dict:
-    """全部模型资产状态（缓存/硬件评估/下载进度）。"""
+    """全部模型资产状态（缓存/加载态/引用数）+ 整体硬件评估。"""
     return {
         "models": [asdict(m) for m in model_assets.get_model_assets()],
+        "hardware_summary": asdict(model_assets.hardware_summary()),
         "hf_endpoint": model_assets._hf_endpoint(),
     }
 

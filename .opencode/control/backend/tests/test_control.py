@@ -881,6 +881,55 @@ def test_frontend_port_vite_and_url():
 # 禁用 fastapi.testclient.TestClient（每请求独立循环 → 锁跨循环 → 误报 503），
 # 一律 asyncio.run + 直接 await，或 httpx.AsyncClient+ASGITransport。
 
+@test("models: hardware_summary——内存充足路径 + 只计已缓存模型")
+def test_hardware_summary_ok_path():
+    import services.model_assets as ma
+
+    orig = ma.psutil.virtual_memory
+    ma.psutil.virtual_memory = lambda: type("VM", (), {"available": 64 * 1024**3})()
+    try:
+        hs = ma.hardware_summary()
+        assert_true(hs.ok, f"64GB 可用应满足（需 {hs.total_required_gb}GB）")
+        assert_eq(hs.reason, "", "充足时 reason 为空")
+        assert_true(hs.total_required_gb > 0, "总需求应非零（本机有已缓存模型）")
+        assert_true(hs.available_gb == 64.0, "应取 monkeypatch 的可用值")
+    finally:
+        ma.psutil.virtual_memory = orig
+
+
+@test("models: hardware_summary——内存不足路径（ok=False + 用户可读 reason）")
+def test_hardware_summary_insufficient():
+    import services.model_assets as ma
+
+    orig = ma.psutil.virtual_memory
+    ma.psutil.virtual_memory = lambda: type("VM", (), {"available": 1 * 1024**3})()
+    try:
+        hs = ma.hardware_summary()
+        assert_false(hs.ok, "1GB 可用应不满足")
+        assert_true("1.0GB" in hs.reason and f"{hs.total_required_gb}GB" in hs.reason,
+                    f"reason 应含可用值与需求值，实际 {hs.reason!r}")
+    finally:
+        ma.psutil.virtual_memory = orig
+
+
+@test("models: get_model_assets——loaded 三元语义 + active_clients 字段契约")
+def test_model_assets_loaded_semantics():
+    from services.model_assets import get_model_assets
+
+    # loaded 语义 = 调用进程的真实加载态（生产=控制台; 测试进程=未加载）。
+    # 断言与 model_loader 标志一致（而非硬编码 True——那会撒谎）
+    from services import model_loader
+    assets = {m.id: m for m in get_model_assets()}
+    assert_true(assets["bge-m3"].loaded == model_loader.is_models_ready(),
+                "embedder loaded 应与 is_models_ready 一致")
+    assert_true(assets["bge-m3"].active_clients is None, "非 OCR 模型 active_clients=None")
+    assert_true(assets["bge-reranker-v2-m3"].loaded == model_loader.is_reranker_loaded(),
+                "reranker loaded 应与 is_reranker_loaded 一致（懒加载真实态, 不再复用 embedder 标志）")
+    # ocr: 服务状态 + 引用数
+    assert_true(isinstance(assets["glm-ocr"].active_clients, int),
+                "OCR active_clients 应为 int")
+
+
 @test("ocr: 状态机——acquire 加载/extract 就绪校验/close/force_release 卸载")
 def test_ocr_lifecycle():
     import base64
@@ -1184,6 +1233,101 @@ def test_ocr_reaper_release():
         asyncio.run(main())
     finally:
         mod.IDLE_RELEASE_SEC = orig_release
+
+
+@test("ocr: client 死亡（MCP SIGKILL 场景）→ reaper 清引用 → 自动释放")
+def test_ocr_client_death_release():
+    """真实子进程模拟 MCP: acquire 后 SIGKILL 子进程（无 close），
+    reaper 的 psutil 兜底应清引用并在空闲窗口后卸载模型。"""
+    import subprocess
+    import sys as _sys
+    from services.ocr_service import OcrService, STATE_IDLE, STATE_READY
+
+    svc = OcrService()
+    # 真子进程（活着 → acquire → 杀掉 → client_alive False）
+    child = subprocess.Popen(
+        [_sys.executable, "-c", "import time; time.sleep(120)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    async def main():
+        try:
+            await svc.acquire(child.pid, 0)
+            assert_eq(svc.status().state, STATE_READY, "acquire 后 ready")
+            # SIGKILL 子进程（模拟 MCP 崩溃——不会有 close）
+            child.kill()
+            child.wait(timeout=5)
+            # 语义: 清死引用（reaper 5s 周期）后仍需等满 30s 空闲窗口
+            # （自最后活动起算）才卸载——热复用窗口对死 client 同样适用
+            for _ in range(10):
+                await asyncio.sleep(0.5)
+                if svc.status().clients == 0:
+                    break
+            assert_eq(svc.status().clients, 0,
+                      "死 client 引用应在一轮 reaper 内被清理")
+            assert_eq(svc.status().state, "ready",
+                      "空闲窗口内模型保持（热复用语义）")
+            for _ in range(60):  # 等满 30s 窗口 + reaper 周期
+                await asyncio.sleep(0.5)
+                if svc.status().state == STATE_IDLE:
+                    break
+            assert_eq(svc.status().state, STATE_IDLE,
+                      "client 死亡 + 空闲窗口过后应自动卸载")
+        finally:
+            if child.poll() is None:
+                child.kill()
+
+    try:
+        asyncio.run(main())
+    finally:
+        asyncio.run(svc.force_release())
+
+
+@test("ocr: force_release 与加载完成竞态——不得出现假 READY（状态机损坏防御）")
+def test_ocr_force_release_race_with_load():
+    """竞态回归锚点: force_release 在"加载完成 → 等待者置 READY"窗口抢锁。
+
+    旧 bug: 等待者无条件置 READY → 引擎已被 force 卸载却显示 ready →
+    后续 acquire 走快路径永不重载（永久损坏）。修复后: 等待者仅在
+    state==STARTING 时置 READY; 被 force 抢先则保持 IDLE，可重新加载。
+    """
+    import threading
+    from services.ocr_service import OcrService, STATE_IDLE
+
+    svc = OcrService()
+    orig_load = svc._mlx._load_impl
+    load_started = threading.Event()
+    gate = threading.Event()
+
+    def gated_load(path):
+        load_started.set()
+        gate.wait(timeout=10)     # 卡在"加载完成前"——force_release 会阻塞在锁上
+        return orig_load(path)
+
+    async def main():
+        svc._mlx._load_impl = gated_load  # patch worker 执行层（铁律）
+        acq = asyncio.create_task(svc.acquire(os.getpid(), 0))
+        await asyncio.get_running_loop().run_in_executor(None, load_started.wait, 5)
+        # 加载在途（持 lifecycle 锁）→ force_release 排队等锁
+        rel = asyncio.create_task(svc.force_release())
+        await asyncio.sleep(0.3)
+        gate.set()                # 放行加载 → acquire 释放锁 → force 抢到锁卸载
+        await acq                 # 等待者醒来（state 已被 force 置 IDLE）
+        await rel
+        # 无论 force 与等待者的锁顺序如何，终态必须是 IDLE + 引擎空
+        assert_eq(svc.status().state, STATE_IDLE,
+                  f"竞态后不得出现假 READY（实际 {svc.status().state}）")
+        assert_false(svc._mlx.loaded, "引擎应已卸载")
+        # 自愈验证: 竞态后仍可重新加载（旧 bug 会永久卡 READY）
+        svc._mlx._load_impl = orig_load
+        await svc.acquire(os.getpid(), 0)
+        assert_eq(svc.status().state, "ready", "竞态后应可重新加载（自愈）")
+        await svc.force_release()
+
+    try:
+        asyncio.run(main())
+    finally:
+        svc._mlx._load_impl = orig_load
 
 
 @test("ocr: 坏输入防御——坏 b64 / 非图数据")

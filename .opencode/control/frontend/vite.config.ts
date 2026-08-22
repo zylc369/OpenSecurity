@@ -1,5 +1,5 @@
 import { defineConfig, type Plugin, type UserConfig } from "vite";
-import { react } from "@vitejs/plugin-react";
+import react from "@vitejs/plugin-react";
 import { request } from "node:http";
 import { join } from "path";
 import { homedir } from "os";

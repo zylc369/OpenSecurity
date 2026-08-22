@@ -52,7 +52,6 @@ import {
 import { useReadiness } from "./hooks/useReadiness";
 import { CATEGORIES, type CategoryKey } from "./constants/categories";
 import { api } from "./api/client";
-import type { ModelAsset } from "./types";
 
 const { Header, Content } = Layout;
 
@@ -166,7 +165,6 @@ const App: React.FC = () => {
     setTimeout(() => void poll(), 3000); // 跳过 exec 延迟窗（1.5s exec + Python 启动）
   }, [restarting, fetchHealthToken, message, refreshAll]);
 
-
   // ─── 缺失对象（安装编排用；计数展示一律走 readiness 单一源）───
   const toolsMissing = useMemo(
     () =>
@@ -198,9 +196,11 @@ const App: React.FC = () => {
 
   // ─── 可自动安装项（唯一清单全量可装；installer 只决定服务端执行 pip 还是 conda）───
   const pipInstallable = useMemo(() => pyMissing, [pyMissing]);
+  // 模型自动下载门禁 = 整体硬件评估（逐模型评估已废弃; 不达标时缺失模型全部转入手动）
+  const modelsHwOk = models.data?.hardware_summary?.ok ?? true;
   const modelBlocked = useMemo(
-    () => modelMissing.filter((m) => !m.hardware.ok),
-    [modelMissing],
+    () => (modelsHwOk ? [] : modelMissing),
+    [modelsHwOk, modelMissing],
   );
 
   const installableCount =
@@ -226,14 +226,13 @@ const App: React.FC = () => {
             <li>
               模型：
               {modelMissing
-                .filter((m) => m.hardware.ok)
+                .filter(() => modelsHwOk)
                 .map((m) => m.display)
                 .join("、")}
             </li>
           )}
         </ul>
-        {(toolsMissing.length > 0 ||
-          modelBlocked.length > 0) && (
+        {(toolsMissing.length > 0 || modelBlocked.length > 0) && (
           <>
             <Divider style={{ margin: "6px 0" }} />
             <Typography.Text type="warning" style={{ fontSize: 12 }}>
@@ -296,7 +295,7 @@ const App: React.FC = () => {
   const buildModelTasks = useCallback(
     (): InstallTask[] =>
       modelMissing
-        .filter((m: ModelAsset) => m.hardware.ok)
+        .filter(() => modelsHwOk)
         .map((m) => ({
           key: `model-${m.id}`,
           kind: "model" as const,
@@ -619,7 +618,13 @@ const App: React.FC = () => {
             onConfirm={() => void doRestart()}
             disabled={restarting}
           >
-            <Tooltip title={restarting ? "重启中…等待新实例就绪" : "重启控制台（让最新代码生效）"}>
+            <Tooltip
+              title={
+                restarting
+                  ? "重启中…等待新实例就绪"
+                  : "重启控制台（让最新代码生效）"
+              }
+            >
               <Button
                 size="small"
                 type="text"
@@ -674,6 +679,23 @@ const App: React.FC = () => {
                       ? `${catStat("models").ok}/${catStat("models").total} ${catStat("models").unit}`
                       : "…"}
                   </Tag>
+                  {models.data?.hardware_summary && (
+                    <Tooltip
+                      title={
+                        models.data.hardware_summary.ok
+                          ? `全部模型同时驻留需求 ${models.data.hardware_summary.total_required_gb}GB（已缓存模型运行内存合计）; 当前可用 ${models.data.hardware_summary.available_gb}GB`
+                          : models.data.hardware_summary.reason
+                      }
+                    >
+                      <Typography.Text type="success" style={{ fontSize: 12 }}>
+                        {models.data.hardware_summary.ok ? "✓" : "✗"} 可用内存{" "}
+                        {models.data.hardware_summary.available_gb}GB / 需{" "}
+                        {models.data.hardware_summary.total_required_gb}GB
+                        {models.data.hardware_summary.notes.length > 0 &&
+                          ` · ${models.data.hardware_summary.notes.join(" · ")}`}
+                      </Typography.Text>
+                    </Tooltip>
+                  )}
                 </Space>
               }
               extra={

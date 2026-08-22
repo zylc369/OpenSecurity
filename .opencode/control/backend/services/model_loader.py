@@ -50,6 +50,15 @@ def is_models_ready() -> bool:
     return _models_ready
 
 
+def is_reranker_loaded() -> bool:
+    """返回 reranker 是否已实际加载（懒加载——首次 rerank 才加载）。
+
+    供模型板块显示真实加载态;与 embedder 的 is_models_ready 区分
+    （历史上 reranker 复用 embedder 就绪标志导致"未加载却显示已加载"）。
+    """
+    return _reranker is not None
+
+
 def get_embedder() -> "SentenceTransformer":
     """延迟加载 BGE-M3（线程安全）。"""
     global _embedder, _models_ready

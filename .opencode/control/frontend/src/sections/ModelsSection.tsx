@@ -1,11 +1,15 @@
 /**
- * 模型分区：模型资产矩形块（按类型分组，组内每行两个）。
+ * 模型分区：模型资产卡片（两列网格）。
  *
  * 数据：App 的 useModels 统一拉取传入（下载中时 App 层轮询）。
- * OCR 的 loaded = 控制台 OCR 服务 state==="ready"（后端 get_model_assets 计算）。
+ * 加载态: loaded 由后端真实判定（embedder=常驻标志, reranker=懒加载实际态,
+ * OCR=服务 state==="ready"）; OCR 卡片额外显示当前引用数。
  *
- * 布局：全局两列网格（类型由块上彩色 Tag 标识）；块内长文本（路径/用途/硬件说明）
- * 截断显示，悬浮显示全量（Typography ellipsis tooltip）。
+ * 布局约定:
+ *  - 不显示类型标签（向量化/重排序/OCR）——purpose 行已描述用途，避免重复
+ *  - purpose 行为主视觉（主题色, 非灰）——它是用户最关心的"这模型干嘛的"
+ *  - 硬件评估不逐模型显示（三个模型需求值相同导致重复）——汇总行在
+ *    板块标题旁（App.tsx 传入 hardwareSummary）
  */
 import React from "react";
 import { Card, Tag, Button, Progress, Typography, Space, Alert, Row, Col } from "antd";
@@ -18,28 +22,19 @@ interface Props {
   onRelease: () => void;   // OCR 强制释放（停止按钮）
 }
 
-const TYPE_META: Record<string, { color: string; label: string }> = {
-  embedder: { color: "blue", label: "向量化" },
-  reranker: { color: "purple", label: "重排序" },
-  ocr: { color: "geekblue", label: "OCR" },
-};
-
 const ellipsis = { tooltip: true } as const;
 
 const ModelBlock: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; onRelease: () => void }> = ({ m, onDownload, onRelease }) => {
-  const hw = m.hardware;
   const dl = m.download;
-  const typeMeta = TYPE_META[m.type] ?? { color: "default", label: m.type };
 
   return (
     <Card size="small" style={{ height: "100%" }} bodyStyle={{ padding: "10px 12px" }}>
       <Space direction="vertical" size={6} style={{ width: "100%" }}>
-        {/* 标题行：名称（截断+悬浮全量）+ 类型/状态 Tag */}
+        {/* 标题行：名称 + 大小/下载态 + 加载态（OCR 附引用数 + 停止按钮） */}
         <Space size={6} style={{ width: "100%" }}>
-          <Typography.Text strong ellipsis={ellipsis} style={{ fontSize: 13, maxWidth: 130 }}>
+          <Typography.Text strong ellipsis={ellipsis} style={{ fontSize: 13, maxWidth: 150 }}>
             {m.display}
           </Typography.Text>
-          <Tag color={typeMeta.color} style={{ marginInlineEnd: 0 }}>{typeMeta.label}</Tag>
           {m.cached ? (
             <Tag icon={<CheckCircleOutlined />} color="success" style={{ marginInlineEnd: 0 }}>{m.size_gb}GB</Tag>
           ) : (
@@ -47,7 +42,9 @@ const ModelBlock: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; on
           )}
           {m.loaded && (
             <Tag color="processing" style={{ marginInlineEnd: 0 }}>
-              {m.type === "ocr" ? "运行中" : "已加载"}
+              {m.type === "ocr"
+                ? `运行中${m.active_clients != null ? ` · ${m.active_clients} 引用` : ""}`
+                : "已加载"}
             </Tag>
           )}
           {m.type === "ocr" && m.loaded && (
@@ -58,8 +55,8 @@ const ModelBlock: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; on
           )}
         </Space>
 
-        {/* 用途 + 仓库（截断，悬浮全量） */}
-        <Typography.Text type="secondary" ellipsis={ellipsis} style={{ fontSize: 12 }}>
+        {/* 用途（主视觉行——这模型是干什么的） */}
+        <Typography.Text style={{ fontSize: 12.5, color: "#1677ff" }} ellipsis={ellipsis}>
           {m.purpose}
         </Typography.Text>
         <Typography.Text type="secondary" ellipsis={ellipsis} style={{ fontSize: 12 }}>
@@ -73,17 +70,6 @@ const ModelBlock: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; on
           </Typography.Text>
         )}
 
-        {/* 硬件适配结论 */}
-        {hw.ok ? (
-          <Typography.Text type="success" ellipsis={ellipsis} style={{ fontSize: 12 }}>
-            ✓ 硬件满足（可用 {hw.available_gb}GB ≥ 需求 {m.min_free_gb}GB）
-            {hw.notes.length > 0 && ` · ${hw.notes.join(" · ")}`}
-          </Typography.Text>
-        ) : (
-          <Alert type="error" showIcon style={{ padding: "2px 8px", fontSize: 12 }}
-            message={<Typography.Text ellipsis={ellipsis} style={{ fontSize: 12 }}>{hw.reasons.join("；")}</Typography.Text>} />
-        )}
-
         {/* 下载进度 / 错误 / 按钮 */}
         {dl.status === "downloading" && (
           <Progress percent={Math.round(dl.progress * 100)} status="active" size="small" format={(p) => `${p}%`} />
@@ -95,8 +81,6 @@ const ModelBlock: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; on
         {!m.cached && dl.status !== "downloading" && (
           <div>
             <Button size="small" type="primary" icon={<CloudDownloadOutlined />}
-              disabled={!hw.ok}
-              title={hw.ok ? "下载模型权重" : "硬件不满足，无法下载"}
               onClick={() => onDownload(m.id)}>
               下载（约 {m.disk_gb}GB）
             </Button>
