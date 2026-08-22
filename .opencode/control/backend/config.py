@@ -11,14 +11,23 @@ import sys
 
 # ─── 数据目录 ──────────────────────────────────────────────
 # DATA_DIR 由 Plugin spawn 时通过环境变量传入，缺省回退到默认路径。
-# 所有运行时文件（端口文件、users 文件、lock 文件）都在此目录下。
+# 所有运行时状态（IPC socket、日志）都在此目录下。
 DATA_DIR = os.environ.get("DATA_DIR", str(Path.home() / "bw-security-analysis"))
 
 # OPENCODE_ROOT 由 Plugin spawn 时传入，用于定位 .ai_env 等项目级文件。
 OPENCODE_ROOT = os.environ.get("OPENCODE_ROOT", "")
 
-# ─── 运行时文件路径（统一命名，避免散落）─────────────────
-USERS_FILE = Path(DATA_DIR) / ".opencode-control.users"
+# ─── 运行时状态 ──────────────────────────────────────────
+# opencode 引用计数 = 内存心跳表（services/heartbeat.py），无状态文件。
+
+# ─── 心跳协议 ──────────────────────────────────────────────
+# opencode 插件每 HEARTBEAT_INTERVAL_SEC（TS 侧常量，协议两端一致）POST /api/heartbeat；
+# 控制台 HeartbeatTask 周期 sweep：超过 HEARTBEAT_TIMEOUT_SEC 未跳 → 移除；
+# 表空且已过启动宽限（HEARTBEAT_GRACE_SEC，覆盖 spawn 者的就绪等待+首跳）→ 自杀。
+# 各值 env 可覆盖，供测试注入小值加速验证。
+HEARTBEAT_TIMEOUT_SEC = float(os.environ.get("HEARTBEAT_TIMEOUT_SEC", "60"))
+HEARTBEAT_SWEEP_INTERVAL_SEC = float(os.environ.get("HEARTBEAT_SWEEP_INTERVAL_SEC", "10"))
+HEARTBEAT_GRACE_SEC = float(os.environ.get("HEARTBEAT_GRACE_SEC", "90"))
 
 # ─── IPC 与网络 ───────────────────────────────────────────
 # 程序间通信（插件/MCP/vite 上报）走 IPC，无端口、无发现文件：
@@ -59,7 +68,6 @@ RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 MODEL_LOAD_TIMEOUT_SEC = 60        # 模型加载超时（Plugin 端等待）
 HEALTH_POLL_INTERVAL_SEC = 2       # /health 轮询间隔
 IPC_BIND_WAIT_SEC = 8              # 并发启动败者等待胜者 bind 完成的轮询窗口
-USERS_CLEANUP_INTERVAL_SEC = int(os.environ.get("USERS_CLEANUP_INTERVAL_SEC", "60"))  # users 文件周期清洗间隔
 
 # ─── 必要配置清单（缺一项则前端 banner 红色提醒）─────────
 # 用 dataclass 而非裸 dict，便于 IDE 类型提示和后续扩展。
@@ -160,4 +168,4 @@ def is_dev_mode() -> bool:
 # Plugin 通过 exit code 判断控制台状态。
 EXIT_CODE_REUSE = 2          # 已有实例运行，本进程主动退出复用
 EXIT_CODE_PORT_EXHAUSTED = 3 # 候选端口全部占用
-EXIT_CODE_NORMAL = 0         # 正常退出（users 空，自杀）
+EXIT_CODE_NORMAL = 0         # 正常退出（心跳表空，自杀）

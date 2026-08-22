@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/ocr", tags=["ocr"])
 
 class AcquireRequest(BaseModel):
     pid: int             # MCP 进程 pid（client 身份）
-    start_time: float    # 进程启动时间（防 pid 复用，对齐 ref_counter 协议）
+    start_time: float    # 进程启动时间（防 pid 复用）
 
 
 class ExtractRequest(BaseModel):

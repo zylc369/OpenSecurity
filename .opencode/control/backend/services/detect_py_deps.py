@@ -58,8 +58,6 @@ PYTHON_PACKAGES: list[PyPkgField] = [
                description="控制台 ASGI 服务器（fastapi 不自带，必须显式安装）"),
     PyPkgField(name="psutil", pip_name="psutil", agents=["all"],
                description="进程/内存监控库，控制台资源管理依赖"),
-    PyPkgField(name="portalocker", pip_name="portalocker", agents=["all"],
-               description="跨平台文件锁（users 文件原子写协同）"),
     PyPkgField(name="pywin32", pip_name="pywin32", agents=["all"], platforms=("win32",),
                description="Windows 命名管道（控制台 IPC 监听 + MCP 管道代理）"),
     PyPkgField(name="numpy", pip_name="numpy", agents=["all"],

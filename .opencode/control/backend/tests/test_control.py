@@ -2,7 +2,7 @@
 
 按需求文档 §4 验收标准设计测试用例，覆盖：
 - 功能验收 F1-F12, F15, F16（F13/F14 前端测试，留待前端完成）
-- 边界条件（PID 复用、文件锁 SIGKILL、原子写、端口 fallback、users 清洗）
+- 边界条件（心跳超时、启动宽限、原子写、端口 fallback）
 - 端到端集成（Plugin spawn 控制台 → HTTP 调用 → 配置获取 → embed 推理）
 
 运行方式：
@@ -91,27 +91,6 @@ def assert_false(value, msg=""):
 # ─── 测试用例 ─────────────────────────────────────────────
 
 # ============ 模块单元测试 ============
-
-@test("process_lock.is_process_alive: 自己 PID 存活")
-def test_is_process_alive_self():
-    from services.process_lock import is_process_alive
-    assert_true(is_process_alive(os.getpid()), "自己 PID 应该存活")
-
-
-@test("process_lock.is_process_alive: 死 PID")
-def test_is_process_alive_dead():
-    from services.process_lock import is_process_alive
-    assert_false(is_process_alive(99999), "99999 应该不存在")
-
-
-@test("process_lock.is_process_alive: PID 复用防护（startTime=0 视为未提供）")
-def test_pid_reuse_protection():
-    from services.process_lock import is_process_alive
-    # startTime=0 视为未提供，宽容处理（返回 True）
-    assert_true(is_process_alive(os.getpid(), 0), "startTime=0 应宽容返回 True")
-    # startTime=99999（明显不匹配）应该返回 False
-    assert_false(is_process_alive(os.getpid(), 99999), "不匹配的 startTime 应返回 False")
-
 
 @test("process_lock.get_process_start_time: 跨平台获取")
 def test_get_process_start_time():
@@ -238,43 +217,167 @@ def _ipc_sock():
     return ipc_unix_socket_path()
 
 
-# ============ ref_counter 测试 ============
+# ============ heartbeat 测试 ============
 
-@test("ref_counter: 写入 + 读取 users")
-def test_users_io():
-    from services.ref_counter import read_users, write_users, UserEntry
-    entries = [
-        UserEntry(pid=11111, start_time=1000),
-        UserEntry(pid=22222, start_time=2000),
-    ]
-    write_users(entries)
-    got = read_users()
-    assert_eq(len(got), 2, "应该读到 2 条")
+@test("heartbeat: record + 幂等键 + active_count")
+def test_heartbeat_record():
+    from services.heartbeat import HeartbeatRegistry
+    reg = HeartbeatRegistry()
+    reg.record(11111)
+    reg.record(22222)
+    reg.record(11111)  # 同 pid 重复心跳 → 刷新而非新增
+    assert_eq(reg.active_count(), 2, "同 pid 重复心跳应幂等")
 
 
-@test("ref_counter.cleanup_dead_users: 死 PID 被清理")
-def test_cleanup_dead_users():
-    from services.ref_counter import (
-        read_users, write_users, cleanup_dead_users, UserEntry
+@test("heartbeat.sweep: 超时未跳的条目被移除，活跃的保留")
+def test_heartbeat_sweep():
+    import services.heartbeat as hb
+    from services.heartbeat import HeartbeatRegistry
+    orig = hb.HEARTBEAT_TIMEOUT_SEC
+    hb.HEARTBEAT_TIMEOUT_SEC = 0.3  # monkeypatch 小超时（sweep 读模块全局）
+    try:
+        reg = HeartbeatRegistry()
+        reg.record(11111)
+        time.sleep(0.5)          # 11111 超时
+        reg.record(22222)        # 刚跳，活跃
+        removed = reg.sweep()
+        assert_eq(removed, 1, "应移除 1 个超时条目")
+        assert_eq(reg.active_count(), 1, "应剩 1 个活跃条目")
+    finally:
+        hb.HEARTBEAT_TIMEOUT_SEC = orig
+
+
+@test("heartbeat.HeartbeatTask: 宽限期内表空不自杀，过宽限后自杀")
+def test_heartbeat_task_grace_and_suicide():
+    import services.heartbeat as hb
+    from services.heartbeat import HeartbeatRegistry, HeartbeatTask
+    orig_interval, orig_grace = hb.HEARTBEAT_SWEEP_INTERVAL_SEC, hb.HEARTBEAT_GRACE_SEC
+    hb.HEARTBEAT_SWEEP_INTERVAL_SEC = 0.1
+    hb.HEARTBEAT_GRACE_SEC = 0.4
+    fired = []
+    try:
+        # 宽限期内表空：不自杀
+        reg1 = HeartbeatRegistry()
+        t1 = HeartbeatTask(reg1, lambda: fired.append("early"))
+        t1.start()
+        time.sleep(0.25)  # < 0.4 宽限
+        assert_eq(len(fired), 0, "宽限期内表空不应自杀")
+        t1.stop()
+        # 过宽限后表空：自杀
+        reg2 = HeartbeatRegistry()
+        t2 = HeartbeatTask(reg2, lambda: fired.append("late"))
+        t2.start()
+        time.sleep(0.7)  # > 0.4 宽限 + 多个 sweep 周期
+        assert_true("late" in fired, "过宽限后表空应触发自杀回调")
+        t2.stop()
+    finally:
+        hb.HEARTBEAT_SWEEP_INTERVAL_SEC = orig_interval
+        hb.HEARTBEAT_GRACE_SEC = orig_grace
+
+
+@test("heartbeat.HeartbeatTask: 宽限过后注册→停跳→必须等满超时才自杀（非表空即杀）")
+def test_heartbeat_task_full_timeout_after_registration():
+    """防语义曲化的锚点: 表空 ≠ 立即自杀。
+
+    场景: 宽限期已过，opencode 注册后又退出。它的条目留在表里直到
+    超时被 sweep 移除——移除那一刻才是自杀判定点，而非"最后一次心跳后
+    宽限结束就杀"。若未来有人把宽限判定改成"距最后心跳"，此测试会抓住。
+    """
+    import services.heartbeat as hb
+    from services.heartbeat import HeartbeatRegistry, HeartbeatTask
+    orig_interval, orig_grace, orig_timeout = (
+        hb.HEARTBEAT_SWEEP_INTERVAL_SEC, hb.HEARTBEAT_GRACE_SEC, hb.HEARTBEAT_TIMEOUT_SEC
     )
-    entries = [
-        UserEntry(pid=os.getpid(), start_time=0),  # 自己（startTime=0 宽容存活）
-        UserEntry(pid=99999, start_time=0),         # 死 PID
-    ]
-    write_users(entries)
-    alive = cleanup_dead_users()
-    assert_eq(len(alive), 1, "应该剩 1 条（自己）")
-    assert_eq(alive[0].pid, os.getpid(), "应该是自己的 PID")
+    hb.HEARTBEAT_SWEEP_INTERVAL_SEC = 0.1
+    hb.HEARTBEAT_GRACE_SEC = 0.3
+    hb.HEARTBEAT_TIMEOUT_SEC = 0.8
+    fired = []
+    try:
+        # 时序: 宽限内先注册，宽限过后才停跳
+        reg = HeartbeatRegistry()
+        t0 = time.monotonic()
+        task = HeartbeatTask(reg, lambda: fired.append(time.monotonic()))
+        task.start()
+        reg.record(11111)      # 宽限期内注册
+        time.sleep(0.45)       # 过宽限(0.3)，但条目未到超时(0.8)——不得自杀
+        assert_eq(len(fired), 0, "条目未超时前不得自杀（即使宽限已过）")
+        time.sleep(0.6)        # 条目超时(0.8)被 sweep → 表空 → 自杀
+        assert_eq(len(fired), 1, "条目超时移除后应自杀")
+        suicide_at = fired[0] - t0
+        assert_true(suicide_at >= 0.75, f"自杀应不早于条目超时时刻（实际 {suicide_at:.2f}s）")
+        task.stop()
+    finally:
+        hb.HEARTBEAT_SWEEP_INTERVAL_SEC = orig_interval
+        hb.HEARTBEAT_GRACE_SEC = orig_grace
+        hb.HEARTBEAT_TIMEOUT_SEC = orig_timeout
 
 
-@test("ref_counter.is_users_empty: 全死时返回 True")
-def test_users_empty():
-    from services.ref_counter import write_users, is_users_empty, UserEntry
-    write_users([UserEntry(pid=99999, start_time=0)])
-    assert_true(is_users_empty(), "全死时应该 True")
+@test("heartbeat: 多 opencode 时序——A 停跳被移除，B 持续跳则控制台不死")
+def test_heartbeat_multi_user_timeline():
+    import services.heartbeat as hb
+    from services.heartbeat import HeartbeatRegistry, HeartbeatTask
+    orig = (hb.HEARTBEAT_SWEEP_INTERVAL_SEC, hb.HEARTBEAT_GRACE_SEC, hb.HEARTBEAT_TIMEOUT_SEC)
+    hb.HEARTBEAT_SWEEP_INTERVAL_SEC = 0.1
+    hb.HEARTBEAT_GRACE_SEC = 0.3
+    hb.HEARTBEAT_TIMEOUT_SEC = 0.5
+    fired = []
+    try:
+        reg = HeartbeatRegistry()
+        task = HeartbeatTask(reg, lambda: fired.append(1))
+        task.start()
+        reg.record(11111)  # A
+        reg.record(22222)  # B
+        time.sleep(0.25)   # 宽限内
+        # A 停跳；B 每 0.15s 续跳
+        import threading
+        stop_b = threading.Event()
+
+        def b_loop():
+            while not stop_b.wait(0.15):
+                reg.record(22222)
+
+        bt = threading.Thread(target=b_loop, daemon=True)
+        bt.start()
+        time.sleep(1.2)   # A 早已超时移除；B 一直续跳
+        assert_eq(len(fired), 0, "B 存活时控制台不得自杀")
+        assert_eq(reg.active_count(), 1, "应只剩 B")
+        # B 也停跳 → 全移除 → 自杀
+        stop_b.set()
+        bt.join(timeout=2)
+        time.sleep(1.0)
+        assert_eq(len(fired), 1, "B 停跳超时后应自杀")
+        task.stop()
+    finally:
+        hb.HEARTBEAT_SWEEP_INTERVAL_SEC, hb.HEARTBEAT_GRACE_SEC, hb.HEARTBEAT_TIMEOUT_SEC = orig
 
 
-# ============ config_store 测试 ============
+@test("heartbeat 路由: 并发 POST 不丢注册（10 路同时跳）")
+def test_heartbeat_route_concurrent():
+    from concurrent.futures import ThreadPoolExecutor
+    from fastapi.testclient import TestClient
+    from routes.heartbeat import router
+    from services.heartbeat import heartbeats
+
+    # 直接压路由层（TestClient 走 ASGI，绕过 uds；heartbeats 是生产单例，
+    # 测完手动清空防止影响其他测试）
+    from fastapi import FastAPI
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+    try:
+        with ThreadPoolExecutor(10) as ex:
+            results = list(ex.map(
+                lambda i: client.post("/api/heartbeat", json={"pid": 30000 + i}).status_code,
+                range(10),
+            ))
+        assert_true(all(s == 200 for s in results), f"应全 200，实际 {results}")
+        assert_eq(heartbeats.active_count(), 10, "10 个不同 pid 应全部入表")
+        # 非法 pid 被拒（pydantic gt=0）
+        assert_eq(client.post("/api/heartbeat", json={"pid": -1}).status_code, 422, "负 pid 应 422")
+    finally:
+        # 清空生产单例表（防泄漏到其他测试的 active 断言）
+        with heartbeats._lock:
+            heartbeats._entries.clear()
 
 @test("config_store.read_all: 读到 4 项配置")
 def test_config_read_all():
@@ -417,10 +520,9 @@ class ControlProcess:
         self.proc: subprocess.Popen | None = None
         self.client: httpx.Client | None = None
 
-    def start(self, custom_users_interval: int = 600):
-        """启动控制台（不触发自杀）。"""
+    def start(self):
+        """启动控制台（首跳心跳防自杀）。"""
         env = os.environ.copy()
-        # 短化 users 清洗间隔仅用于自杀测试，正常测试设大避免误自杀
         cmd = [
             sys.executable,
             str(BACKEND_DIR / "server.py"),
@@ -445,9 +547,12 @@ class ControlProcess:
                             transport=httpx.HTTPTransport(uds=str(sock_path)),
                             timeout=15,
                         )
-                        # 加一个假的 users 防止自杀
-                        from services.ref_counter import write_users, UserEntry
-                        write_users([UserEntry(pid=os.getpid(), start_time=0)])
+                        # 首跳心跳防自杀（同时验证 /api/heartbeat 路由）
+                        r = self.client.post(
+                            "http://localhost/api/heartbeat",
+                            json={"pid": os.getpid()},
+                        )
+                        assert r.status_code == 200, f"心跳路由应 200，实际 {r.status_code}"
                         return
                 except Exception:
                     pass
@@ -462,15 +567,12 @@ class ControlProcess:
         if self.client:
             self.client.close()
             self.client = None
-        # 清理沙箱 IPC socket 与 users（控制台信号处理已删 sock，这里兜底）
+        # 清理沙箱 IPC socket（控制台信号处理已删 sock，这里兜底）
         from config import ipc_unix_socket_path
         try:
             ipc_unix_socket_path().unlink(missing_ok=True)
         except OSError:
             pass
-        from services.ref_counter import USERS_FILE
-        if USERS_FILE.exists():
-            USERS_FILE.unlink()
 
 
 # ── E2E 共享控制台进程（模型只加载一次；端口/用户全局文件生命周期由首个启动者管理） ──
@@ -774,22 +876,6 @@ def test_frontend_port_vite_and_url():
 
 
 # ============ 边界条件补充测试 ============
-
-@test("process_lock.is_process_alive: PID=0 / -1 非法")
-def test_pid_zero_negative():
-    from services.process_lock import is_process_alive
-    assert_false(is_process_alive(0), "PID=0 非法")
-    assert_false(is_process_alive(-1), "PID=-1 非法")
-
-
-@test("ref_counter: 多条记录解析（含错行 + 注释）")
-def test_users_parse_robust():
-    from services.ref_counter import _parse_users
-    content = "\npid=11111 start_time=1000\n# 注释\npid=22222 start_time=2000\n\nbad_line\npid=bad\npid=33333 start_time=3000\n"
-    entries = _parse_users(content)
-    assert_eq(len(entries), 3, "应解析 3 条")
-    assert_eq(entries[2].pid, 33333)
-
 
 @test("config_store.write: 覆盖已存在 key")
 def test_config_overwrite():

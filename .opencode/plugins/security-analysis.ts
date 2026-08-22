@@ -1,5 +1,4 @@
 import {
-  writeFileSync,
   readFileSync,
   statSync,
   existsSync,
@@ -223,10 +222,9 @@ const toolStartTimes = new Map<string, number>();
 //
 // 控制台架构改造后，原 embed_server 启动逻辑迁移到 control-manager.ts。
 // control-manager 负责：
-//   1. 启动时检查现有控制台（端口文件 + PID + 端口连通）
+//   1. 启动时检查现有控制台（IPC connect 即发现即校验）
 //   2. 复用 or spawn 新控制台（detached:true + unref）
-//   3. 加自己 PID 到 users 文件
-//   4. 注册 process.on("exit") 退出时减引用 + 必要时 SIGTERM 控制台
+//   3. 启动心跳（每 10s 上报；控制台心跳表空过宽限自动自杀，无需 exit handler）
 //
 // ServiceRegistry 中 CONTROL_STARTUP_SERVICE 在 setup() 里 resolve（成功 or 失败），
 // chat.message 通过 waitFor(CONTROL_STARTUP_SERVICE) 等待。
@@ -623,20 +621,6 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   debugLog(
     `  PYTHON_CMD: ${getPythonCmd() ?? "未初始化（等待首次 chat.message 触发）"}`,
   );
-
-  // 写心跳文件，供 agent 检测 Plugin 是否正常加载
-  const heartbeatFile = join(DATA_DIR, ".plugin-heartbeat");
-  try {
-    const heartbeat = {
-      pid: process.pid,
-      loadedAt: new Date().toISOString(),
-      version: "1.0.0",
-    };
-    writeFileSync(heartbeatFile, JSON.stringify(heartbeat, null, 2));
-    debugLog(`  心跳文件已写入: ${heartbeatFile}`);
-  } catch (e) {
-    debugLog(`  心跳文件写入失败: ${e}`);
-  }
 
   // ── 动态注册 MCP server（跨平台，不写死路径）──
   // fire-and-forget：必须不 await。OpenCode Plugin API 限制——plugin.setup 在 Effect runtime

@@ -7,7 +7,7 @@
   cd .opencode/control/backend
   OPENCODE_ROOT=<path> DATA_DIR=<path> python tests/test_integration.py
 
-注意：场景 3 默认等 65 秒（USERS_CLEANUP_INTERVAL_SEC + buffer）。
+注意：自杀场景经 HEARTBEAT_* 小值 env 加速（超时 3s + sweep 1s + 宽限 5s）。
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 WORKSPACE_ROOT = BACKEND_DIR.parent.parent.parent  # OpenSecurity/
 # 集成测试用沙箱 DATA_DIR（/tmp）——不碰真实 ~/bw-security-analysis 的
-# 端口/users/lock 文件（曾因直接 cleanup 真实 DATA_DIR 把生产控制台搞死）。
+# 状态文件（曾因直接 cleanup 真实 DATA_DIR 把生产控制台搞死）。
 # venv 仍用真实位置：constants.ts 的 VENV_DIR 支持 OPENSECURITY_VENV_DIR 覆盖，
 # bun（control-manager → venv.ts）经此变量找到真实 venv Python。
 TEST_DATA_DIR = Path(os.environ.get("DATA_DIR", "/tmp/control_integration_test"))
@@ -37,7 +37,7 @@ os.environ["DATA_DIR"] = str(TEST_DATA_DIR)
 os.environ["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
 os.environ["OPENSECURITY_VENV_DIR"] = str(REAL_VENV_DIR)
 # CONTROL_TCP_PORT 随机高位（隔离铁律）：沙箱控制台的浏览器 TCP 通道避开生产 9776。
-# IPC（sock/users）由 DATA_DIR 沙箱隔离；此处只需避开 TCP bind 冲突。
+# IPC（sock）由 DATA_DIR 沙箱隔离；此处只需避开 TCP bind 冲突。
 os.environ["CONTROL_TCP_PORT"] = str(random.randint(41000, 49000))
 
 
@@ -100,7 +100,7 @@ def cleanup_state():
                     except: pass
         except: pass
     # 删状态文件
-    for fname in ["opensecurity-control.sock", ".opencode-control.users"]:
+    for fname in ["opensecurity-control.sock"]:
         f = TEST_DATA_DIR / fname
         if f.exists():
             try: f.unlink()
@@ -137,22 +137,22 @@ def is_pid_alive(pid: int) -> bool:
         return True
 
 
-def bun_env() -> dict:
-    """bun 子进程环境变量。"""
+def bun_env(extra: dict[str, str] | None = None) -> dict:
+    """bun 子进程环境变量。extra 注入 HEARTBEAT_* 小值可加速自杀场景。"""
     env = os.environ.copy()
     env["DATA_DIR"] = str(TEST_DATA_DIR)
     env["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
+    if extra:
+        env.update(extra)
     return env
 
 
 # ─── bun 脚本片段（最小化）────────────────────────────────
 
-# 启动控制台 + 保持运行（模拟 opencode 主进程）
-# 场景 3 需要短清洗间隔，通过 process.env 传给控制台 spawn
-# startControl 返回 boolean；实例身份（pid）经 getControlIdentity 取——复用断言用
+# 启动控制台 + 保持运行（模拟 opencode 主进程）。心跳由 startControl 内的
+# HeartbeatSender 发送（首跳立即 + 10s 周期）；HEARTBEAT_* 小值经 bun_env 注入控制台
 BUN_START_KEEP = """
 import { startControl, getControlIdentity } from './.opencode/plugins/lib/control-manager.ts';
-process.env.USERS_CLEANUP_INTERVAL_SEC = process.env.USERS_CLEANUP_INTERVAL_SEC || '2';
 const ok = await startControl();
 if (ok) { const id = await getControlIdentity(); console.log('CONTROL_PID:', id?.pid ?? 0); }
 else console.log('CONTROL_FAILED');
@@ -165,7 +165,7 @@ import { startControl, getControlIdentity } from './.opencode/plugins/lib/contro
 const ok = await startControl();
 if (ok) { const id = await getControlIdentity(); console.log('CONTROL_PID:', id?.pid ?? 0); }
 else console.log('CONTROL_FAILED');
-await new Promise(r => setTimeout(r, 1500));  // 等 addSelfToUsers + registerExitHandler 完成
+await new Promise(r => setTimeout(r, 1500));  // 等首跳心跳完成
 process.exit(0);
 """
 
@@ -214,11 +214,17 @@ def test_multi_opencode_sharing():
         # 验证：两次身份 pid 应相同（复用同一个控制台）
         assert_eq(pid1, pid2, "两次控制台 pid 应相同（复用）")
 
-        # 验证 users 文件有 2 条记录（两个 bun PID）
-        users_file = TEST_DATA_DIR / ".opencode-control.users"
-        users_content = users_file.read_text()
-        pid_count = users_content.count("pid=")
-        assert_true(pid_count >= 2, f"users 应有 ≥2 条记录，实际 {pid_count}")
+        # 验证心跳表含两个 bun 的引用（测试侧再跳一次，active 应 ≥3:
+        # 2 个 bun 首跳 + 本测试进程——心跳路由响应携带当前 active 数）
+        import httpx
+        from config import ipc_unix_socket_path
+        with httpx.Client(
+            transport=httpx.HTTPTransport(uds=str(ipc_unix_socket_path())), timeout=5,
+        ) as c:
+            r = c.post("http://localhost/api/heartbeat", json={"pid": os.getpid()})
+            active = r.json().get("active", -1)
+        assert_true(r.status_code == 200 and active >= 3,
+                    f"心跳表应 ≥3（2 bun + 测试），实际 {active}")
     finally:
         # 清理：强制 kill 两个 bun（SIGTERM 可能不响应）
         for name in ['proc1', 'proc2']:
@@ -231,18 +237,21 @@ def test_multi_opencode_sharing():
         cleanup_state()
 
 
-# ============ 场景 2：exit handler 减引用 + kill 控制台 ============
+# ============ 场景 2：正常退出 → 停跳 → 控制台超时自杀 ============
 
-@test("场景2: opencode 退出 → exit handler 减引用 → 控制台自杀")
+@test("场景2: opencode 正常退出 → 停跳 → 心跳表空 → 控制台自杀")
 def test_exit_handler():
     cleanup_state()
     proc = None
     try:
-        # 启动 bun（startControl + 立即 process.exit）
+        # 启动 bun（startControl + 立即 process.exit）。
+        # HEARTBEAT 小值: 超时 3s / sweep 1s / 宽限 5s（覆盖 bun 首跳延迟 ~3s）
         proc = subprocess.Popen(
             ["bun", "-e", BUN_START_EXIT],
             cwd=str(WORKSPACE_ROOT),
-            env=bun_env(),
+            env=bun_env({"HEARTBEAT_TIMEOUT_SEC": "3",
+                         "HEARTBEAT_SWEEP_INTERVAL_SEC": "1",
+                         "HEARTBEAT_GRACE_SEC": "5"}),
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True,
         )
@@ -251,17 +260,22 @@ def test_exit_handler():
             raise AssertionError("bun 启动控制台失败")
         print(f"    [setup] 控制台 pid={control_pid}")
 
-        # 等 bun 退出（exit handler 触发）
+        # 等 bun 退出（之后心跳停止）
         proc.wait(timeout=15)
-        print(f"    [setup] bun 已退出（exit handler 触发）")
+        print(f"    [setup] bun 已退出（心跳停止）")
 
-        # 给 exit handler 一点时间完成 SIGTERM
-        time.sleep(2)
+        # 等控制台自杀（超时 3s + sweep 1s + 宽限判定，最多 12s）
+        control_dead = False
+        for i in range(12):
+            time.sleep(1)
+            if not is_pid_alive(control_pid):
+                control_dead = True
+                print(f"    [wait] 第 {i+1}s 控制台自杀")
+                break
+        assert_true(control_dead, "控制台应在 12s 内自杀（心跳表空）")
 
-        # 验证：控制台应该被 kill（users 空 → exit handler kill）
-        assert_false(is_pid_alive(control_pid), f"控制台 pid={control_pid} 应被 kill")
-
-        # 验证：IPC socket 文件应该被删（控制台信号处理清理）
+        # 验证：IPC socket 文件应该被删（控制台自杀路径清理）
+        time.sleep(1)
         sock_file = TEST_DATA_DIR / "opensecurity-control.sock"
         assert_false(sock_file.exists(), "IPC socket 文件应被删")
     finally:
@@ -272,74 +286,49 @@ def test_exit_handler():
         cleanup_state()
 
 
-# ============ 场景 3：SIGKILL 后周期清洗自杀 ============
+# ============ 场景 3：SIGKILL 后心跳超时自杀 ============
 
-@test("场景3: opencode SIGKILL 后控制台周期清洗自杀")
+@test("场景3: opencode SIGKILL 后控制台心跳超时自杀")
 def test_sigkill_cleanup():
-    """直接用 Python 启动控制台（不通过 bun），写假 users，等周期清洗。
+    """bun 启动 + 控制台就绪 → SIGKILL bun（心跳戛然而止）→ 控制台超时自杀。
 
-    bun spawn 控制台时 stdio=ignore + env 传递可能有边缘问题，
-    这里直接用 Python 启动，跟手动验证一致。
+    与场景 2 的区别: 场景 2 是正常退出，本场景验证 SIGKILL（无任何退出钩子）
+    也收敛到同一结果——新机制下退出方式不再重要，停跳即释放。
     """
-    from services.ref_counter import write_users, UserEntry
-    from services.process_lock import get_process_start_time
-
     cleanup_state()
     proc = None
     try:
-        # 直接用 Python 启动控制台（跟手动测试一致）
-        env = os.environ.copy()
-        env["USERS_CLEANUP_INTERVAL_SEC"] = "2"  # 短间隔加速
+        # HEARTBEAT 小值: 超时 3s / sweep 1s / 宽限 5s（覆盖 bun 首跳延迟 ~3s）
         proc = subprocess.Popen(
-            [sys.executable, str(BACKEND_DIR / "server.py")],
-            env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            ["bun", "-e", BUN_START_KEEP],
+            cwd=str(WORKSPACE_ROOT),
+            env=bun_env({"HEARTBEAT_TIMEOUT_SEC": "3",
+                         "HEARTBEAT_SWEEP_INTERVAL_SEC": "1",
+                         "HEARTBEAT_GRACE_SEC": "5"}),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True,
         )
-
-        # 等 IPC socket 出现 + /health 应答
-        from config import ipc_unix_socket_path
-        import httpx
-        sock_path = ipc_unix_socket_path()
-        started = False
-        for _ in range(20):
-            if sock_path.exists():
-                try:
-                    with httpx.Client(
-                        transport=httpx.HTTPTransport(uds=str(sock_path)), timeout=2,
-                    ) as probe:
-                        probe.get("http://localhost/health")
-                        started = True
-                        break
-                except OSError:
-                    pass
-            time.sleep(0.5)
-        if not started:
-            raise AssertionError("控制台启动失败（IPC 未就绪）")
-        control_pid = proc.pid
+        control_pid = wait_control_pid(proc, timeout=30)
+        if control_pid is None:
+            raise AssertionError("bun 启动控制台失败")
         print(f"    [setup] 控制台 pid={control_pid}")
+        time.sleep(2)  # 确保首跳已入表（宽限 5s 内）
 
-        # 写假 users（一个不存在的 PID）
-        fake_pid = 99999
-        write_users([UserEntry(pid=fake_pid, start_time=1000)])
-        print(f"    [setup] 写假 users: pid={fake_pid}")
+        # SIGKILL bun——心跳戛然而止，无任何退出钩子
+        proc.kill()
+        proc.wait(timeout=5)
+        print(f"    [setup] bun 已 SIGKILL（心跳停止）")
 
-        # 等周期清洗（USERS_CLEANUP_INTERVAL_SEC=2，最多 10s）
-        print(f"    [wait] 等周期清洗（最多 10s）...")
+        # 等控制台自杀（超时 3s + sweep 1s + 过宽限，最多 12s）
+        print(f"    [wait] 等心跳超时自杀（最多 12s）...")
         control_dead = False
-        for i in range(10):
+        for i in range(12):
             time.sleep(1)
-            if proc.poll() is not None:
+            if not is_pid_alive(control_pid):
                 control_dead = True
-                print(f"    [wait] 第 {i+1}s 控制台退出（自杀）")
+                print(f"    [wait] 第 {i+1}s 控制台自杀")
                 break
-        assert_true(control_dead, "控制台应在 10s 内自杀（users 清洗后空）")
-
-        # 读日志确认自杀消息
-        if proc.stdout:
-            output = proc.stdout.read()
-            assert_true("自杀" in output or "users 空" in output,
-                        f"日志应含'自杀'或'users 空'，实际: {output[-200:]}")
+        assert_true(control_dead, "控制台应在 12s 内自杀（心跳表空）")
     finally:
         if proc and proc.poll() is None:
             try: proc.kill()

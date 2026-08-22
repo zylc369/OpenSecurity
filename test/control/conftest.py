@@ -22,27 +22,32 @@ VENV_PYTHON = Path.home() / "bw-security-analysis" / ".venv" / "bin" / "python"
 
 
 @pytest.fixture(scope="session")
-def control_server(tmp_path_factory):
+def control_server():
     """启动发布态沙箱控制台实例（E2E/API 共享）。
 
     隔离铁律：
-      • DATA_DIR → tmp 沙箱（端口/users/lock 全隔离）
+      • DATA_DIR → tmp 沙箱（IPC sock / TCP 候选段全隔离）
       • CONTROL_FRONTEND_DEV=0（env 优先级，不碰真实 .ai_env）
-      • CONTROL_PORT 随机高位（bind 候选 + 孤儿探测范围整体避开生产 9776）
-      • users 写入测试进程引用（防周期清洗自杀）
+      • CONTROL_TCP_PORT 随机高位（bind 候选整体避开生产 9776）
+      • 心跳上报测试进程引用（防心跳表空自杀）
     """
     if not VENV_PYTHON.exists():
         pytest.skip("venv python 不存在")
 
     import random
 
-    data_dir = tmp_path_factory.mktemp("frontend_test")
+    import httpx
+
+    # DATA_DIR 必须是短路径：macOS AF_UNIX sock 路径 ≤104 字节，
+    # pytest tmp_path（/private/var/folders/...）+ sock 文件名会超长 → bind 必败
     rand_port = random.randint(41000, 49000)
+    data_dir = Path(f"/tmp/frontend_test_{rand_port}")
+    data_dir.mkdir(parents=True, exist_ok=True)
     env = {
         **os.environ,
         "DATA_DIR": str(data_dir),
         "CONTROL_FRONTEND_DEV": "0",
-        "CONTROL_PORT": str(rand_port),
+        "CONTROL_TCP_PORT": str(rand_port),
     }
 
     proc = subprocess.Popen(
@@ -54,16 +59,25 @@ def control_server(tmp_path_factory):
 
     port = None
     try:
-        port_file = data_dir / ".opencode-control.port"
+        sock_file = data_dir / "opensecurity-control.sock"
         for _ in range(20):
-            if port_file.exists():
-                port = int(port_file.read_text().strip().split("\n")[0])
-                break
+            if sock_file.exists():
+                try:
+                    with httpx.Client(
+                        transport=httpx.HTTPTransport(uds=str(sock_file)), timeout=2,
+                    ) as probe:
+                        probe.get("http://localhost/health")
+                        # 控制台就绪——取 TCP 端口 + 首跳心跳防自杀
+                        with httpx.Client(
+                            transport=httpx.HTTPTransport(uds=str(sock_file)), timeout=5,
+                        ) as c:
+                            port = c.get("http://localhost/api/console-url").json()["tcp_port"]
+                            c.post("http://localhost/api/heartbeat", json={"pid": os.getpid()})
+                        break
+                except OSError:
+                    pass
             time.sleep(0.5)
-        assert port, "控制台端口文件 10s 内未出现"
-
-        users = data_dir / ".opencode-control.users"
-        users.write_text(f"pid={os.getpid()} start_time={time.time()}\n")
+        assert port, "控制台 IPC 通道 10s 内未就绪"
 
         yield port
     finally:
@@ -72,3 +86,5 @@ def control_server(tmp_path_factory):
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+        import shutil
+        shutil.rmtree(data_dir, ignore_errors=True)

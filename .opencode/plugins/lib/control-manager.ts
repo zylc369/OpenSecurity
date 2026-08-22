@@ -5,15 +5,15 @@
  *   • 启动时检查现有控制台是否运行（IPC connect + /health）
  *   • 不运行则 spawn 新的控制台进程（detached:true + unref，让控制台脱离 opencode 生命周期）
  *   • 等待 IPC 通道就绪（/health 200/503）
- *   • 加自己 PID 到 users 文件
- *   • 注册 process.on("exit") 退出时减引用
+ *   • 启动心跳（每 10s POST /api/heartbeat；控制台 60s 未收到 → 移除，
+ *     心跳表空过宽限 → 控制台自杀。opencode 正常退出/SIGKILL 均停跳，无需 exit handler）
  *
- * IPC 语义（取代端口文件机制）：
+ * IPC 语义：
  *   • 活性 = connect 固定 IPC 地址一次（Unix sock / Windows 管道）
  *   • 单例互斥 = 控制台端 IPC bind 内核排他
  *   • socket 文件由控制台进程自理（退出清理）；TS 侧不碰 IPC 资产
  *
- * 与 ref-counter.ts / process-utils.ts / ipc_listener.py（控制台端）协同。
+ * 与 heartbeat.ts / ipc_listener.py + heartbeat.py（控制台端）协同。
  *
  * 不在本模块：
  *   • 配置读取（control-config.ts）
@@ -31,18 +31,8 @@ import {
   VENV_PYTHON_CANDIDATES,
 } from "./constants";
 import { controlFetch } from "./control-http";
-import {
-  addSelfToUsers,
-  removeSelfFromUsers,
-  cleanupDeadUsers,
-} from "./ref-counter";
+import { heartbeatSender } from "./heartbeat";
 import { debugLog } from "./logging";
-
-/** 控制台子进程引用（exit handler 用） */
-let controlProc: any = null;
-
-/** exit handler 是否已注册（避免重复注册） */
-let exitHandlerRegistered = false;
 
 /** venv Python 路径（惰性查找，缓存） */
 let cachedVenvPython: string | null | undefined;
@@ -99,8 +89,7 @@ export async function getControlIdentity(): Promise<ControlIdentity | null> {
  * 各自 spawn，5 个 Python 进程抢 bind、4 个自杀退出（2026/8/20 08:06:25 事故日志）。
  *
  * 完成后清空在途引用：成功 → 下次调用走健康复用快路径；失败 → 下次调用可重试。
- * 包装层吞掉异常统一返回 false（doStartControl 理论不抛，addSelfToUsers 的文件写
- * 失败会 rethrow——调用方普遍无 try/catch，rethrow 会直接炸）。
+ * 包装层吞掉异常统一返回 false（调用方普遍无 try/catch，rethrow 会直接炸）。
  *
  * Returns:
  *   true 控制台就绪（IPC 可答 /health）
@@ -126,25 +115,19 @@ export function startControl(): Promise<boolean> {
  * 启动控制台（实际执行体，仅经 startControl 单飞入口调用）。
  *
  * 流程：
- *   1. 启动前 cleanupDeadUsers（清理上次崩溃残留）
- *   2. 检测现有控制台：健康 → 加自己 PID 复用；不健康 → spawn 新的
- *   3. spawn 新的：venv Python + detached:true + unref
- *   4. 等待 IPC 就绪（/health 200/503）
- *   5. 加自己 PID 到 users
- *   6. 注册 exit handler（退出时减引用）
+ *   1. 检测现有控制台：健康 → 复用 + 启动心跳；不健康 → spawn 新的
+ *   2. spawn 新的：venv Python + detached:true + unref
+ *   3. 等待 IPC 就绪（/health 200/503）
+ *   4. 启动心跳（首跳立即）
  */
 async function doStartControl(): Promise<boolean> {
-  // 启动前清理（处理上次 opencode SIGKILL 后的残留）
-  cleanupDeadUsers();
-
   // 1. 检测现有控制台（IPC connect 即发现即校验——无文件、无 PID 四步检查）
   if (await isControlHealthy()) {
     const identity = await getControlIdentity();
     debugLog(
       `startControl: 已有控制台运行（IPC 通道可达，pid=${identity?.pid ?? "?"}），复用`,
     );
-    addSelfToUsers();
-    registerExitHandler();
+    await heartbeatSender.start(); // 幂等；首跳立即
     return true;
   }
 
@@ -161,19 +144,19 @@ async function doStartControl(): Promise<boolean> {
 
   // 3. spawn 控制台（detached:true + unref，让控制台脱离 opencode 生命周期）
   try {
-    controlProc = spawn(python, [CONTROL_SCRIPT], {
+    const proc = spawn(python, [CONTROL_SCRIPT], {
       stdio: ["ignore", "ignore", "ignore"],
       detached: true, // 关键：脱离父进程
       env: {
         ...process.env,
         OPENCODE_ROOT: OPENCODE_ROOT, // 控制台读 .ai_env 用
-        DATA_DIR: DATA_DIR, // 控制台定位 IPC socket / users 文件用
+        DATA_DIR: DATA_DIR, // 控制台定位 IPC socket 用
         HF_HUB_OFFLINE: "1", // 避免 SentenceTransformer 联网检查
         TRANSFORMERS_OFFLINE: "1",
       },
     });
-    controlProc.unref(); // 让 opencode 事件循环不等待控制台
-    debugLog(`startControl: spawn pid=${controlProc.pid}`);
+    proc.unref(); // 让 opencode 事件循环不等待控制台
+    debugLog(`startControl: spawn pid=${proc.pid}`);
   } catch (e) {
     debugLog(`startControl: spawn 异常 ${(e as Error).message}`);
     return false;
@@ -186,9 +169,8 @@ async function doStartControl(): Promise<boolean> {
     return false;
   }
 
-  // 5. 加自己 PID 到 users + 注册 exit handler
-  addSelfToUsers();
-  registerExitHandler();
+  // 5. 启动心跳（首跳立即——控制台刚起需要第一个引用防"空表自杀"）
+  await heartbeatSender.start();
 
   debugLog(`startControl: 完成（IPC 就绪）`);
   return true;
@@ -210,39 +192,3 @@ async function waitForIpcReady(timeoutMs: number): Promise<boolean> {
   return false;
 }
 
-/**
- * 注册 process.on("exit") handler。
- *
- * 职责：
- *   1. 从 users 文件删自己 PID（同步）
- *   2. users 空 → SIGTERM 自己 spawn 的控制台；复用的控制台不 kill
- *      （依赖其 users 周期清洗自杀，≤60s；IPC socket 文件由控制台自理）
- *   3. users 不空 → 让控制台继续运行（其他 opencode 还在用）
- *
- * 幂等：多次调用只注册一次。
- */
-function registerExitHandler(): void {
-  if (exitHandlerRegistered) return;
-  exitHandlerRegistered = true;
-  process.on("exit", () => {
-    try {
-      const isEmpty = removeSelfFromUsers();
-      if (isEmpty) {
-        if (controlProc) {
-          debugLog(`control exit handler: users 空，kill 控制台 pid=${controlProc.pid}`);
-          try {
-            controlProc.kill("SIGTERM");
-          } catch {}
-        } else {
-          debugLog(
-            `control exit handler: users 空（复用的控制台由其 users 周期清洗自杀，≤60s）`,
-          );
-        }
-      } else {
-        debugLog(`control exit handler: users 还有引用，控制台继续运行`);
-      }
-    } catch (e) {
-      debugLog(`control exit handler 异常: ${(e as Error).message}`);
-    }
-  });
-}

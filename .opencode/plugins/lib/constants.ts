@@ -157,8 +157,9 @@ export const CONTROL_WIN_PIPE = "\\\\.\\pipe\\opensecurity-control-482964";
 /** 当前平台是否 Windows */
 export const IS_WINDOWS = process.platform === "win32";
 
-/** 控制台 users 文件路径（与控制台后端 config.py 的 USERS_FILE 一致） */
-export const CONTROL_USERS_FILE = join(DATA_DIR, ".opencode-control.users");
+/** 心跳间隔（毫秒）。与控制台 config.py 的 HEARTBEAT_TIMEOUT_SEC(60s) 协议配对：
+ *  控制台超过 60s 未收到本心跳 → 移除；心跳表空 → 控制台自杀 */
+export const HEARTBEAT_INTERVAL_MS = 10_000;
 
 /** ServiceRegistry 中控制台启动状态的服务名（控制台 spawn + IPC 就绪） */
 export const CONTROL_STARTUP_SERVICE = "control_startup";

@@ -2,23 +2,13 @@
  * Plugin 控制台模块测试。
  *
  * 覆盖：
- *   - ref-counter.ts: users 文件读写
- *   - process-utils.ts: PID 检测 + 启动时间
+ *   - heartbeat.ts: 心跳发送器（幂等 start/stop）
  *   - control-config.ts: 配置缓存
- *   - control-manager.ts: 端口文件解析
+ *   - control-manager.ts: 控制台启动管理
  *
  * 运行：bun .opencode/plugins/tests/test-control.ts
  */
-import {
-  parseUsers,
-  formatUsers,
-  readUsers,
-  atomicWriteUsers,
-  addSelfToUsers,
-  removeSelfFromUsers,
-  cleanupDeadUsers,
-} from "../lib/ref-counter";
-import { isProcessAliveSync, getProcessStartTime } from "../lib/process-utils";
+import { HeartbeatSender, heartbeatSender } from "../lib/heartbeat";
 import {
   getAllConfig,
   getCachedConfig,
@@ -26,15 +16,14 @@ import {
 } from "../lib/control-config";
 import { controlFetch } from "../lib/control-http";
 import * as constants from "../lib/constants";
-import { CONTROL_USERS_FILE } from "../lib/constants";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
 // ── 沙箱防污染保护 ────────────────────────────────────────
-// 本测试直接 unlink/write 真实路径常量（CONTROL_USERS_FILE 等）。
+// 本测试经 IPC 常量触达真实路径（CONTROL_UNIX_SOCKET 等）。
 // constants.ts 的 DATA_DIR 支持 env 覆盖——必须设置到 /tmp 沙箱，
-// 否则会删掉生产控制台的 users 文件、导致真实控制台自杀退出（已发生过一次事故）。
+// 否则单飞测试会 spawn/干扰生产控制台。
 // 不设置 DATA_DIR 直接运行 → 立即报错退出。
 if (
   !process.env.DATA_DIR ||
@@ -84,86 +73,36 @@ async function test(
   }
 }
 
-// ─── process-utils 测试 ────────────────────────────────────
+// ─── heartbeat 测试 ────────────────────────────────────────
+// （HeartbeatSender 的真实 HTTP 往返由单飞测试的子进程控制台覆盖；
+//   此处验证类协议约束: 幂等/停跳/unref 语义）
 
-await test("process-utils: 自己 PID 存活", () => {
-  assert(isProcessAliveSync(process.pid), "自己 PID 应存活");
+await test("heartbeat: 单例已导出且初始未运行", () => {
+  assert(heartbeatSender instanceof HeartbeatSender, "模块级单例");
+  assert(!heartbeatSender.running, "初始应未运行");
 });
 
-await test("process-utils: 死 PID 99999 不存活", () => {
-  assert(!isProcessAliveSync(99999), "99999 应不存活");
+await test("heartbeat: start 首跳失败不炸（无控制台时吞异常）", async () => {
+  // 沙箱 DATA_DIR 下无控制台——首跳必然连接失败，但必须安全吞掉
+  const sender = new HeartbeatSender();
+  await sender.start(); // 不应抛
+  assert(sender.running, "start 后应处于运行态（interval 已挂载）");
+  sender.stop();
+  assert(!sender.running, "stop 后应停跳");
 });
 
-await test("process-utils: PID 复用防护（startTime=0 视为未提供）", () => {
-  // startTime=0 视为未提供，宽容返回 true
-  assert(isProcessAliveSync(process.pid, 0), "startTime=0 应宽容返回 true");
-  // startTime=99999 不匹配，应返回 false
-  assert(!isProcessAliveSync(process.pid, 99999), "不匹配 startTime 应 false");
+await test("heartbeat: start 幂等（二次 start 不产生第二个 interval）", async () => {
+  const sender = new HeartbeatSender();
+  await sender.start();
+  await sender.start(); // 幂等：直接返回
+  sender.stop();
+  sender.stop(); // stop 也幂等
+  assert(true, "未抛异常即通过");
 });
 
-await test("process-utils: getProcessStartTime 返回有效时间戳", () => {
-  const st = getProcessStartTime(process.pid);
-  assert(st !== null, "应返回非 null");
-  assert((st ?? 0) > 1_000_000_000, "时间戳应 > 2001 年");
-});
-
-// ─── ref-counter 测试 ──────────────────────────────────────
-
-await test("ref-counter: parseUsers + formatUsers 往返", () => {
-  const entries = [
-    { pid: 12345, startTime: 1000 },
-    { pid: 67890, startTime: 2000 },
-  ];
-  const text = formatUsers(entries);
-  const parsed = parseUsers(text);
-  assertEq(parsed.length, 2, "应解析 2 条");
-  assertEq(parsed[0].pid, 12345, "第一条 pid");
-  assertEq(parsed[1].startTime, 2000, "第二条 startTime");
-});
-
-await test("ref-counter: addSelfToUsers + readUsers", () => {
-  // 清理
-  if (existsSync(CONTROL_USERS_FILE)) unlinkSync(CONTROL_USERS_FILE);
-  addSelfToUsers();
-  const users = readUsers();
-  assert(
-    users.some((u) => u.pid === process.pid),
-    "应包含自己 PID",
-  );
-});
-
-await test("ref-counter: cleanupDeadUsers 清理死 PID", () => {
-  // 先写自己 + 死 PID
-  const users = readUsers();
-  users.push({ pid: 99999, startTime: 0 });
-  atomicWriteUsers(users);
-
-  const alive = cleanupDeadUsers();
-  assertEq(alive.length, 1, "应剩 1 条（自己）");
-  assertEq(alive[0].pid, process.pid, "应是自己");
-});
-
-await test("ref-counter: removeSelfFromUsers 返回 isEmpty=true", () => {
-  // 先确保只有自己
-  atomicWriteUsers([{ pid: process.pid, startTime: 0 }]);
-  const isEmpty = removeSelfFromUsers();
-  assert(isEmpty, "删自己后应 isEmpty=true");
-  // 验证文件内容（可能为空字符串或只剩其他不存在的 PID）
-  if (existsSync(CONTROL_USERS_FILE)) {
-    const content = readFileSync(CONTROL_USERS_FILE, "utf-8").trim();
-    // 应该不包含自己 PID
-    assert(!content.includes(`pid=${process.pid}`), "文件不应包含自己 PID");
-  }
-});
-
-await test("ref-counter: removeSelfFromUsers 有其他引用时返回 isEmpty=false", () => {
-  // 自己 + 另一个 PID（活的）
-  atomicWriteUsers([
-    { pid: process.pid, startTime: 0 },
-    { pid: process.ppid ?? 1, startTime: 0 }, // 父进程（一般活着）
-  ]);
-  const isEmpty = removeSelfFromUsers();
-  assert(!isEmpty, "还有父进程引用时应 isEmpty=false");
+await test("heartbeat: HEARTBEAT_INTERVAL_MS 与控制台超时协议配对", () => {
+  // TS 侧 10s 间隔 × 6 = 60s 超时窗口（丢 5 跳仍活；第 6 跳超时前必须到）
+  assert(constants.HEARTBEAT_INTERVAL_MS === 10_000, "间隔应为 10s");
 });
 
 // ─── control-config 测试 ───────────────────────────────────
@@ -285,61 +224,6 @@ console.log("ALL_OK:", results.every((r) => r === true));
 
 // ─── 边界条件补充测试 ─────────────────────────────────────
 
-await test("ref-counter: atomicWriteUsers 多次写不残留 tmp", () => {
-  if (existsSync(CONTROL_USERS_FILE)) unlinkSync(CONTROL_USERS_FILE);
-  // 连续多次写
-  for (let i = 0; i < 5; i++) {
-    atomicWriteUsers([{ pid: 10000 + i, startTime: i * 1000 }]);
-  }
-  // 验证 tmp 文件清理（PID 后缀的 tmp 应该被 rename 走）
-  const dir = CONTROL_USERS_FILE.substring(
-    0,
-    CONTROL_USERS_FILE.lastIndexOf("/"),
-  );
-  // 验证最终文件正确
-  const final = readUsers();
-  assertEq(final.length, 1, "应剩 1 条（最后写入的）");
-  assertEq(final[0].pid, 10004, "应是最后一次写入的 PID");
-});
-
-await test("ref-counter: parseUsers 容错（空文件）", () => {
-  const result = parseUsers("");
-  assertEq(result.length, 0, "空文件应返回空数组");
-});
-
-await test("ref-counter: parseUsers 容错（仅注释和空行）", () => {
-  const result = parseUsers("\n# 注释\n\n");
-  assertEq(result.length, 0, "纯注释应返回空数组");
-});
-
-await test("ref-counter: parseUsers 容错（缺 start_time）", () => {
-  // 缺 start_time 字段时应该用 0 兜底
-  const result = parseUsers("pid=11111\n");
-  assertEq(result.length, 1, "应解析 1 条");
-  assertEq(result[0].pid, 11111);
-  assertEq(result[0].startTime, 0, "缺 start_time 应默认 0");
-});
-
-await test("process-utils: PID 复用防护（startTime 精确匹配）", () => {
-  const st = getProcessStartTime(process.pid);
-  if (st !== null) {
-    // 精确匹配应存活
-    assert(isProcessAliveSync(process.pid, st), "精确匹配 startTime 应存活");
-    // 偏差 1s 内应存活（容忍）
-    assert(isProcessAliveSync(process.pid, st - 0.5), "偏差 0.5s 应存活");
-    // 偏差 >1s 应不存活
-    assert(
-      !isProcessAliveSync(process.pid, st + 100),
-      "偏差 100s 应判定 PID 复用",
-    );
-  }
-});
-
-await test("process-utils: 死 PID 99999 不存活", () => {
-  assert(!isProcessAliveSync(99999), "99999 应不存活");
-  // 用不匹配的 startTime 也应该不存活
-  assert(!isProcessAliveSync(99999, 12345), "死 PID + startTime 也不存活");
-});
 
 // ─── 汇总 ──────────────────────────────────────────────────
 

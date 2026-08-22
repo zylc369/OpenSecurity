@@ -66,9 +66,10 @@ def create_app() -> FastAPI:
         )
 
     # 路由
-    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, processes, knowledge, events
+    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, processes, knowledge, events, heartbeat
     app.include_router(embed.router)
     app.include_router(health.router)
+    app.include_router(heartbeat.router)
     app.include_router(config_route.router)
     app.include_router(deps.router)
     app.include_router(ocr.router)
@@ -162,7 +163,7 @@ def main() -> None:
     from services.ipc_listener import (
         start_ipc_listener, cleanup_ipc_listener, IpcStartStatus,
     )
-    from services.ref_counter import UsersCleanupTask
+    from services.heartbeat import HeartbeatTask, heartbeats
 
     # 步骤 2: IPC 监听（按枚举语义分支，不用 bool 猜）
     status = start_ipc_listener()
@@ -186,7 +187,7 @@ def main() -> None:
         cleanup_ipc_listener()
         sys.exit(EXIT_CODE_PORT_EXHAUSTED)
 
-    # 步骤 4: 启动 users 周期清洗后台任务
+    # 步骤 4: 启动心跳周期检测后台任务（表空过宽限 → 自杀）
     def shutdown():
         log.info("控制台 shutdown（清理 IPC + 退出）")
         cleanup_ipc_listener()
@@ -194,8 +195,8 @@ def main() -> None:
         import os
         os._exit(EXIT_CODE_NORMAL)
 
-    cleanup_task = UsersCleanupTask(shutdown)
-    cleanup_task.start()
+    heartbeat_task = HeartbeatTask(heartbeats, shutdown)
+    heartbeat_task.start()
 
     # SIGTERM/SIGINT 也走 shutdown（清理 IPC socket + 退出）
     import signal
