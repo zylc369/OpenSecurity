@@ -508,7 +508,7 @@ const App: React.FC = () => {
               </div>
             }
             placement="bottomRight"
-            trigger="click"
+            trigger="hover"
             overlayStyle={{ maxWidth: "calc(100vw - 24px)" }}
           >
             <Button
