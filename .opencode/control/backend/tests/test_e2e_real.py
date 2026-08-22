@@ -313,6 +313,24 @@ c.rollback(); c.close()
     knowledge_cleanup(flow)
 
 
+@test("ocr 全链: 壳 lifespan acquire 真加载 → extract_text 真推理 → 退出 close")
+def test_ocr_mcp_roundtrip():
+    """MCP 壳 stdio 真调用（生产控制台 + 真模型 + worker 串行推理）。"""
+    import base64 as _b64
+    import io as _io
+    img_path = Path(f"/tmp/ocr_e2e_{RUN_ID}.png")
+    from PIL import Image as _Image, ImageDraw as _Draw
+    img = _Image.new("RGB", (400, 120), "white")
+    _Draw.Draw(img).text((30, 45), "E2E-MCP-2026", fill="black")
+    img.save(img_path)
+    try:
+        out = mcp_shell_tool("ocr", "extract_text", {"image_path": str(img_path)})
+        text = out.get("text", "") if isinstance(out, dict) else str(out)
+        assert_true("E2E-MCP-2026" in text, f"壳真链路应正确识别，实际 {text!r}")
+    finally:
+        img_path.unlink(missing_ok=True)
+
+
 def main() -> int:
     print("=" * 60)
     print(f"真链路 E2E 套件 RUN_ID={RUN_ID}")
@@ -328,6 +346,7 @@ def main() -> int:
              if callable(fn) and getattr(fn, "_is_test", False)]
     name_filter = sys.argv[1] if len(sys.argv) > 1 else ""
     ran = 0
+
     for name, fn in tests:
         if name_filter and name_filter not in getattr(fn, "_name", ""):
             continue

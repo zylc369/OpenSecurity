@@ -126,23 +126,19 @@ def collect_processes() -> ProcessRegistryView:
         memory_footprint_mb=fp,
     ))
 
-    # 2. OCR MLX 子进程（含引用计数体系全景）
+    # 2. OCR（进程内加载——内存并入控制台进程；含引用计数体系全景）
     st = ocr_service.status()
-    pid = ocr_service.mlx_pid()
-    if pid is not None:
-        mem, cmd, fp = _ps_proc_info(pid)
-        status = "running" if st.state == "ready" else st.state
-    else:
-        mem, cmd, fp, status = None, "", None, "stopped"
+    ocr_fp = ocr_service.loaded_footprint_mb()
+    status = "running" if st.state == "ready" else st.state
     procs.append(ProcessInfo(
         key="ocr_mlx",
         name="OCR 推理（glm-ocr）",
-        pid=pid,
-        role=f"MLX 视觉模型子进程（{st.backend} 后端，模型权重在 Metal 缓冲区——内存以 footprint 为准）。引用归零后 {st.idle_release_sec}s 空闲自动释放归还内存",
+        pid=None,
+        role=f"进程内 MLX 视觉模型（{st.backend} 后端，内存并入控制台进程）。引用归零后 {st.idle_release_sec}s 空闲自动卸载归还内存",
         status=status,
-        memory_mb=mem,
-        cmdline=cmd,
-        memory_footprint_mb=fp,
+        memory_mb=None,
+        cmdline="",
+        memory_footprint_mb=ocr_fp,
         ref_count=st.clients,
         holders=[asdict(h) for h in ocr_service.holders()],
         last_active_at=st.last_activity_at,

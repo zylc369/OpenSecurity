@@ -60,6 +60,8 @@ PYTHON_PACKAGES: list[PyPkgField] = [
                description="进程/内存监控库，控制台资源管理依赖"),
     PyPkgField(name="pywin32", pip_name="pywin32", agents=["all"], platforms=("win32",),
                description="Windows 命名管道（控制台 IPC 监听 + MCP 管道代理）"),
+    PyPkgField(name="mlx-vlm", pip_name="mlx-vlm", agents=["all"], platforms=("darwin",),
+               description="MLX 视觉模型库（OCR 进程内推理；Apple Silicon 专属）"),
     PyPkgField(name="numpy", pip_name="numpy", agents=["all"],
                description="数值计算库，embed 接口返回值"),
     PyPkgField(name="httpx", pip_name="httpx", agents=["all"],

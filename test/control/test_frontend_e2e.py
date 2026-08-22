@@ -187,8 +187,8 @@ def test_config_path_exists_badge(rendered):
 def test_install_button_disabled_readable(rendered):
     """一键安装按钮文字可读（两态断言：enabled 主色白字 / disabled 墨色低透明度）。
 
-    glm-ocr 资产加入后，沙箱 DATA_DIR 无 mlx-env → 模型判缺失 →
-    按钮呈 enabled（白字）属正常；全齐时为 disabled 墨色。两态都是设计内颜色。
+    glm-ocr 资产状态两种都可能出现（主环境 mlx_vlm 检测 + HF 缓存）——
+    按钮呈 enabled（白字）或 disabled（墨色）都属设计内颜色。
     """
     page, _ = rendered
     btn = page.locator("header button:has-text('一键安装')").first

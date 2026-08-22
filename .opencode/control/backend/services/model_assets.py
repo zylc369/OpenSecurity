@@ -22,7 +22,7 @@ from config import DATA_DIR
 class ModelCacheState:
     """模型缓存查询结果。"""
     cached: bool
-    path: str | None             # 缓存路径或状态说明（如 mlx-env 缺失提示）
+    path: str | None             # 缓存路径或状态说明（如依赖缺失提示）
     size_gb: float
 
 
@@ -164,16 +164,16 @@ def _is_cached(repo_id: str) -> ModelCacheState:
 def _ocr_cache_state(model: ModelAsset) -> ModelCacheState:
     """OCR 模型缓存状态（平台分支）。
 
-    mac(apple silicon): mlx-env Python 存在 + HF 缓存快照 → cached
+    mac(apple silicon): 主环境可 import mlx_vlm + HF 缓存快照 → cached
     其他平台:          Ollama /api/tags 有 glm-ocr → cached
     """
     if platform.system() == "Darwin" and platform.machine() == "arm64":
-        mlx_py = os.path.join(DATA_DIR, "mlx-env", "bin", "python")
+        from services.ocr_engines import mlx_available
         hf = _is_cached(model.repo_id)
-        if hf.cached and os.path.isfile(mlx_py):
+        if hf.cached and mlx_available():
             return hf
-        if hf.cached and not os.path.isfile(mlx_py):
-            return ModelCacheState(False, "模型已缓存但 mlx-env 缺失（下载按钮会补装环境）", hf.size_gb)
+        if hf.cached and not mlx_available():
+            return ModelCacheState(False, "模型已缓存但主环境缺 mlx-vlm（依赖页可安装）", hf.size_gb)
         return ModelCacheState(False, None, 0.0)
     # win/linux/intel-mac → Ollama
     try:
@@ -282,9 +282,8 @@ def start_download(model_id: str) -> bool:
 def _ocr_download_worker(model: ModelAsset) -> None:
     """OCR 模型下载（平台分支）。
 
-    mac(apple silicon):
-      1. 确保 mlx-env（venv + pip install mlx-vlm==0.6.13，幂等）
-      2. HF snapshot_download 拉模型权重
+    mac(apple silicon): HF snapshot_download 拉模型权重
+      （运行环境 mlx-vlm 由依赖检测统一准备，控制台进程内加载）
     其他平台: ollama pull glm-ocr（Ollama 未安装/未运行则报错提示）
     """
     import subprocess
@@ -303,23 +302,8 @@ def _ocr_download_worker(model: ModelAsset) -> None:
 
     try:
         if platform.system() == "Darwin" and platform.machine() == "arm64":
-            # 1. mlx-env 幂等确保
-            mlx_env = os.path.join(DATA_DIR, "mlx-env")
-            mlx_py = os.path.join(mlx_env, "bin", "python")
-            if not os.path.isfile(mlx_py):
-                r = subprocess.run(
-                    [sys.executable, "-m", "venv", mlx_env],
-                    capture_output=True, text=True, timeout=300,
-                )
-                if r.returncode != 0:
-                    return _fail(f"创建 mlx-env 失败: {r.stderr[-200:]}")
-                r = subprocess.run(
-                    [mlx_py, "-m", "pip", "install", "-q", "mlx-vlm==0.6.13"],
-                    capture_output=True, text=True, timeout=1800,
-                )
-                if r.returncode != 0:
-                    return _fail(f"安装 mlx-vlm 失败: {r.stderr[-200:]}")
-            # 2. 模型权重（复用 _download_worker 的子进程下载机制：offline 标志剥离）
+            # 模型权重（复用 _download_worker 的子进程下载机制：offline 标志剥离）。
+            # 运行环境（mlx-vlm）由依赖检测统一准备，不再私建 venv
             endpoint = _hf_endpoint()
             env = {
                 k: v for k, v in os.environ.items()

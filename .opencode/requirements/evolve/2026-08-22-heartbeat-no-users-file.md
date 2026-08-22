@@ -12,6 +12,7 @@
 - 生产切换: 旧控制台(users 版) 26529 SIGTERM → users 文件删除 → 新控制台(心跳版) 89587 + heartbeat-keeper 过渡守护（8h TTL，bun pid 见 keeper 日志；用户重启 opencode 后新插件接管心跳，keeper 到期自退，生态自洽）
 - 生产验证: 假 pid 60s 被 sweep 精确移除、keeper 持续跳控制台不死、MCP 检索/console-url/前端 API 全 200
 - 已知无害残留: 旧 opencode(插件为内存中旧代码) 退出时会重建一个空的 .opencode-control.users 文件（新控制台不读，可手动删）
+- 追加（2026-08-22 复核）: 顺带删除 .plugin-heartbeat 文件及其写入代码——插件加载时一次性写的"Plugin 已加载"标记，全仓（代码/agent prompt/知识库/scripts）零消费方，且内容（旧实例 pid/loadedAt）对新读者纯误导。插件活性语义已由本心跳机制完整覆盖。生效需重启 opencode
 前置: `2026-08-20-ipc-no-port-files.md`（IPC 化消除了端口文件；本文消除最后一个跨语言共享状态文件）
 
 ## §1 背景与目标

@@ -1,7 +1,7 @@
 """/api/ocr 路由：本地图像文字识别（glm-ocr，控制台持有模型）。
 
 消费方：mcp-servers/ocr/server.py（MCP 薄壳，lifespan acquire/close）。
-生命周期语义见 services/ocr_service.py（引用计数 + 30s 空闲释放 + 孤儿复用）。
+生命周期语义见 services/ocr_service.py（引用计数 + 30s 空闲释放，进程内加载）。
 """
 from __future__ import annotations
 

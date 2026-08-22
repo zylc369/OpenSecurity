@@ -2,8 +2,8 @@
 
 薄壳设计：不驻模型。生命周期由控制台 ocr_service 管理——
   lifespan startup → POST /api/ocr/acquire（引用+1，首次触发模型加载）
-  工具调用        → POST /api/ocr/extract（HTTP 转发，自动刷新活跃时间）
-  lifespan 退出   → POST /api/ocr/close（引用-1，归零 30s 后控制台释放内存）
+  工具调用        → POST /api/ocr/extract（持锁串行推理，自动刷新活跃时间）
+  lifespan 退出   → POST /api/ocr/close（引用-1，归零 30s 后控制台卸载模型归还内存）
 
 端口发现：control_url.py（读端口文件，事实来源）。
 

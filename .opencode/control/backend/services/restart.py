@@ -9,7 +9,7 @@ POSIX 方案（延迟 1.5s 后 os.execv）：
   - 关键陷阱：exec 不改变 PID，若不删 IPC socket 文件，新实例的
     残留自愈（connect 失败 → unlink）虽然兜得住，但显式清理更干净
     → exec 前 unlink IPC socket（Windows 管道无文件实体，无需清理）
-  - MLX 子进程独立进程组（start_new_session）不受影响
+  - OCR 模型进程内加载：exec 后随新实例自然重新初始化
 
 Windows 方案（subprocess + os._exit，与 detect_py_deps 自举同模式）：
   - spawn 分离的 helper：轮询等旧 PID 死亡后再 exec server
