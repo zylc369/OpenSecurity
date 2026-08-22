@@ -208,7 +208,8 @@ export interface ModelAsset {
   cache_path: string | null;
   size_gb: number;
   loaded: boolean;
-  active_clients: number | null;  // OCR 专用: 当前引用数
+  idle_sec: number | null;        // OCR 专用: 已空闲秒数（未加载 null）
+  idle_timeout_sec: number | null; // OCR 专用: 空闲自动卸载阈值（600s）
   download: DownloadState;
 }
 

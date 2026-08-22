@@ -163,19 +163,25 @@ export function useModels(): {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerMsRef = useRef(0); // 当前轮询档位（0=停）
 
   const refresh = useCallback(async () => {
     try {
       const d = await api.getModels();
       setData(d);
       setError(null);
-      // 有下载中任务 → 轮询；否则停
+      // 轮询档位（变化时才重设计时器）:
+      //   下载中 → 2s（进度条流畅）
+      //   OCR 已加载（空闲倒计时 + 卸载翻转）→ 10s（reaper 600s 卸载后卡片须翻回未加载）
+      //   否则停（静态数据不刷）
       const downloading = d.models.some((m) => m.download.status === "downloading");
-      if (downloading && !timerRef.current) {
-        timerRef.current = setInterval(refresh, 2000);
-      } else if (!downloading && timerRef.current) {
-        clearInterval(timerRef.current);
+      const ocrActive = d.models.some((m) => m.type === "ocr" && m.loaded);
+      const wantMs = downloading ? 2000 : ocrActive ? 10_000 : 0;
+      if (wantMs !== timerMsRef.current) {
+        if (timerRef.current) clearInterval(timerRef.current);
         timerRef.current = null;
+        timerMsRef.current = wantMs;
+        if (wantMs > 0) timerRef.current = setInterval(refresh, wantMs);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -188,6 +194,7 @@ export function useModels(): {
     refresh();
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+      timerMsRef.current = 0; // 防 StrictMode 双挂载时档位残留误判
     };
   }, [refresh]);
 

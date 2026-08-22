@@ -1,9 +1,7 @@
 """图像文字识别 MCP server（ocr，本地 glm-ocr）。
 
-薄壳设计：不驻模型。生命周期由控制台 ocr_service 管理——
-  lifespan startup → POST /api/ocr/acquire（引用+1，首次触发模型加载）
-  工具调用        → POST /api/ocr/extract（持锁串行推理，自动刷新活跃时间）
-  lifespan 退出   → POST /api/ocr/close（引用-1，归零 30s 后控制台卸载模型归还内存）
+薄壳设计：不驻模型、不管理生命周期——控制台 ocr_service 负责：
+  工具调用 → POST /api/ocr/extract（未就绪自动懒加载; 10 分钟空闲自动卸载）
 
 端口发现：control_url.py（读端口文件，事实来源）。
 
@@ -13,7 +11,6 @@
 """
 import asyncio
 import base64
-import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -42,38 +39,12 @@ def _base_url() -> str:
 
 @asynccontextmanager
 async def _lifespan(server: FastMCP):
-    """acquire（启动）/ close（退出）——控制台引用计数的两端。"""
+    """仅建/销 HTTP 客户端——模型生命周期完全由控制台管理（懒加载+空闲卸载）。"""
     global _client
     _client = make_control_client(timeout=300.0)
-    pid = os.getpid()
-    try:
-        import psutil
-        start_time = psutil.Process(pid).create_time()
-    except Exception:
-        start_time = 0.0
-    try:
-        r = await _client.post(
-            f"{_base_url()}/api/ocr/acquire",
-            json={"pid": pid, "start_time": start_time},
-            timeout=120.0,  # 首次含模型加载（MLX ~5s / 复用孤儿 0s）
-        )
-        if r.status_code != 200:
-            print(f"[ocr-mcp] acquire 失败: {r.status_code} {r.text[:200]}", file=sys.stderr)
-        else:
-            print("[ocr-mcp] acquire ok", file=sys.stderr)
-    except httpx.HTTPError as e:
-        print(f"[ocr-mcp] acquire 异常（控制台不可达）: {e}", file=sys.stderr)
     try:
         yield
     finally:
-        try:
-            await _client.post(
-                f"{_base_url()}/api/ocr/close",
-                json={"pid": pid, "start_time": start_time},
-                timeout=10.0,
-            )
-        except httpx.HTTPError:
-            pass  # 控制台已死则引用由 reaper 的死 pid 检测兜底清理
         await _client.aclose()
 
 

@@ -110,7 +110,7 @@ def test_api_system(control_server):
 
 
 def test_api_models(control_server):
-    """GET /api/models：三个模型 + 加载态/引用数 + 整体硬件汇总 + 下载状态。"""
+    """GET /api/models：三个模型 + 加载态/OCR 空闲字段 + 整体硬件汇总 + 下载状态。"""
     r = httpx.get(f"http://127.0.0.1:{control_server}/api/models", timeout=5)
     assert r.status_code == 200
     d = r.json()
@@ -121,7 +121,9 @@ def test_api_models(control_server):
         # 整体汇总在顶层 hardware_summary
         assert "hardware" not in m
         assert set(m["download"]) >= {"status", "progress", "error"}
-        assert "active_clients" in m and "loaded" in m
+        assert "idle_sec" in m and "idle_timeout_sec" in m and "loaded" in m
+    ocr = next(m for m in d["models"] if m["id"] == "glm-ocr")
+    assert ocr["idle_timeout_sec"] == 600, "OCR 空闲阈值应 600s"
     hs = d["hardware_summary"]
     assert set(hs) >= {"ok", "reason", "notes", "available_gb", "total_required_gb"}
     assert hs["available_gb"] > 0

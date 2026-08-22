@@ -6,7 +6,7 @@
 export function fmtDuration(sec: number | null | undefined): string {
   if (sec == null) return "—";
   if (sec < 60) return `${Math.round(sec)} 秒`;
-  if (sec < 3600) return `${Math.floor(sec / 60)} 分`;
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟`;
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   return `${h} 时 ${m} 分`;

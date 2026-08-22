@@ -12,9 +12,10 @@
  *    板块标题旁（App.tsx 传入 hardwareSummary）
  */
 import React from "react";
-import { Card, Tag, Button, Progress, Typography, Space, Alert, Row, Col } from "antd";
+import { Card, Tag, Button, Progress, Typography, Space, Alert, Row, Col, Tooltip } from "antd";
 import { CloudDownloadOutlined, CheckCircleOutlined, PoweroffOutlined } from "@ant-design/icons";
 import type { ModelAsset } from "../types";
+import { fmtDuration } from "../utils/format";
 
 interface Props {
   models: ModelAsset[] | undefined;
@@ -30,7 +31,8 @@ const ModelBlock: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; on
   return (
     <Card size="small" style={{ height: "100%" }} bodyStyle={{ padding: "10px 12px" }}>
       <Space direction="vertical" size={6} style={{ width: "100%" }}>
-        {/* 标题行：名称 + 大小/下载态 + 加载态（OCR 附引用数 + 停止按钮） */}
+        {/* 标题行：名称 + 大小/下载态 + 加载态 + 停止按钮（OCR 空闲倒计时独立行——
+            挤标题行会超出卡片边框） */}
         <Space size={6} style={{ width: "100%" }}>
           <Typography.Text strong ellipsis={ellipsis} style={{ fontSize: 13, maxWidth: 150 }}>
             {m.display}
@@ -41,11 +43,7 @@ const ModelBlock: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; on
             <Tag color="warning" style={{ marginInlineEnd: 0 }}>未下载</Tag>
           )}
           {m.loaded && (
-            <Tag color="processing" style={{ marginInlineEnd: 0 }}>
-              {m.type === "ocr"
-                ? `运行中${m.active_clients != null ? ` · ${m.active_clients} 引用` : ""}`
-                : "已加载"}
-            </Tag>
+            <Tag color="processing" style={{ marginInlineEnd: 0 }}>已加载</Tag>
           )}
           {m.type === "ocr" && m.loaded && (
             <Button
@@ -59,6 +57,17 @@ const ModelBlock: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; on
         <Typography.Text style={{ fontSize: 12.5, color: "#1677ff" }} ellipsis={ellipsis}>
           {m.purpose}
         </Typography.Text>
+
+        {/* OCR 空闲倒计时（独立行——挤标题行会超边框; 悬浮详情） */}
+        {m.type === "ocr" && m.loaded && m.idle_timeout_sec != null && (
+          <Tooltip
+            title={`最近识图 ${m.idle_sec != null ? fmtDuration(m.idle_sec) : "—"}前 · 空闲满 ${fmtDuration(m.idle_timeout_sec)}自动释放内存 · 下次识图自动重新加载（约 1.6s）`}
+          >
+            <Typography.Text type="secondary" style={{ fontSize: 12, cursor: "default" }}>
+              空闲 {fmtDuration(m.idle_sec ?? 0)} / {fmtDuration(m.idle_timeout_sec)}
+            </Typography.Text>
+          </Tooltip>
+        )}
         <Typography.Text type="secondary" ellipsis={ellipsis} style={{ fontSize: 12 }}>
           {m.repo_id} · 参考 {m.disk_gb}GB
         </Typography.Text>

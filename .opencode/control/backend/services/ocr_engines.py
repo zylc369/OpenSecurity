@@ -241,7 +241,7 @@ class MlxEngine:
     def _infer_impl(self, prepared: PreparedOcrInput):
         """实际推理（仅在 worker 线程执行: 模板 + generate）。"""
         if not self.loaded:
-            raise RuntimeError("MLX 引擎未加载（需先 acquire）")
+            raise RuntimeError("MLX 引擎未加载（推理窗口内被卸载，请重试）")
         t0 = time.monotonic()
         try:
             from mlx_vlm.prompt_utils import apply_chat_template

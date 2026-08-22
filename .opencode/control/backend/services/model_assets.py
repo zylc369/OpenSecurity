@@ -62,7 +62,8 @@ class ModelAssetStatus:
     cache_path: str | None
     size_gb: float
     loaded: bool
-    active_clients: int | None         # OCR 专用: 当前引用数（其他模型 None）
+    idle_sec: float | None            # OCR 专用: 已空闲秒数（其他模型 None）
+    idle_timeout_sec: int | None      # OCR 专用: 空闲自动卸载阈值（其他模型 None）
     download: DownloadView
 
 
@@ -194,7 +195,7 @@ def _ocr_cache_state(model: ModelAsset) -> ModelCacheState:
 
 
 def _ocr_loaded_state() -> bool:
-    """OCR 模型当前是否在内存（引用计数服务的运行状态）。"""
+    """OCR 模型当前是否在内存（懒加载 + 空闲卸载，state==ready 即驻留）。"""
     try:
         from services import ocr_service
         return ocr_service.status().state == "ready"
@@ -228,15 +229,16 @@ def get_model_assets() -> list[ModelAssetStatus]:
         if m.type == "ocr":
             cache = _ocr_cache_state(m)
             loaded = _ocr_loaded_state()
-            clients: int | None = ocr_service.status().clients
+            idle_sec = ocr_service.idle_sec()
+            idle_timeout: int | None = ocr_service.status().idle_release_sec
         elif m.type == "reranker":
             cache = _is_cached(m.repo_id)
             loaded = model_loader.is_reranker_loaded()  # 懒加载真实态
-            clients = None
+            idle_sec, idle_timeout = None, None
         else:
             cache = _is_cached(m.repo_id)
             loaded = model_loader.is_models_ready()
-            clients = None
+            idle_sec, idle_timeout = None, None
         with _lock:
             st = _states[m.id]
             download = DownloadView(status=st.status, progress=st.progress, error=st.error)
@@ -244,7 +246,8 @@ def get_model_assets() -> list[ModelAssetStatus]:
             id=m.id, repo_id=m.repo_id, type=m.type, display=m.display,
             purpose=m.purpose, min_free_gb=m.min_free_gb, disk_gb=m.disk_gb,
             cached=cache.cached, cache_path=cache.path, size_gb=cache.size_gb,
-            loaded=loaded, active_clients=clients, download=download,
+            loaded=loaded, idle_sec=idle_sec, idle_timeout_sec=idle_timeout,
+            download=download,
         ))
     return result
 

@@ -6,31 +6,29 @@
        └─ Windows/Linux: OllamaEngine HTTP（127.0.0.1:11434）
 
 并发安全（lifecycle 锁 + MLX 专职 worker 线程）:
-  _lifecycle_lock（asyncio）: 状态变更独占——acquire 加载路径 / close /
-                              force_release / reaper 卸载路径
+  _lifecycle_lock（asyncio）: 状态变更独占——懒加载路径 / force_release /
+                              reaper 卸载路径
   _MlxWorker（引擎内，FIFO 单线程）: load/generate/unload 的物理串行点。
 
   • 使用并发（性能）: extract 不持 lifecycle——多请求并发进入，预处理
     （base64+PIL，线程安全）并行重叠；generate 段进 worker FIFO 排队
     （MLX Metal stream 是 thread-local，多线程并发推理实测必崩——GPU 串行
-    是物理上限，并发收益 = 预处理重叠 + 推理不阻塞 acquire 复用/status）
+    是物理上限，并发收益 = 预处理重叠 + 推理不阻塞懒加载/status）
   • 三动作互斥: 使用/加载/卸载都汇聚到 worker FIFO——卸载排在在途推理后
     （等推理完成才动模型），加载与推理/卸载互斥，天然无竞争
-  • 加载单飞: 并发 acquire 等同一 ready 事件；成功不重复加载（ready 直接
-    复用）；失败回 idle，下次 acquire 重新加载
+  • 加载单飞: 并发 extract 懒加载等同一 ready 事件；成功不重复加载；
+    失败回 idle，下次 extract 重新加载
   • 竞争窗口（设计内，引擎层防御兜底）: extract 过 ready 检查后模型被
     reaper 卸载且无新 load → generate 提交时引擎 loaded 检查（worker 内
-    执行）报"需先 acquire"，客户端重试即可（仅在 30s 空闲窗口触发，极低）
+    执行）报"未就绪"，客户端重试即可（仅在空闲超时窗口触发，极低）
 
-生命周期（引用计数 + 30s 空闲释放）:
-  acquire(client_id) → 引用+1（无模型则加载）
-  extract(...)       → 持锁推理（刷新活跃）
-  close(client_id)   → 引用-1
-  reaper 协程每 5s: clients 空 AND 空闲 >30s AND ready → 卸载
-  MCP 被 SIGKILL 忘 close 的兜底: psutil 检测 client pid 死亡 → 清引用
+生命周期（纯空闲超时，无引用计数）:
+  extract(...)       → 未就绪则懒加载（首图 ~1.6s）; 推理刷新活跃时间
+  reaper 协程每 5s:  READY 且空闲 >IDLE_RELEASE_SEC(600) → 卸载（还内存）
+  force_release()    → 前端停止按钮（推理在途则等其完成）
 
-推理超时语义: MLX generate 无中断 API，不做硬中断——max_tokens=4096 上界
-（~400 tok/s 下 ≤20s）+ 推理耗时日志；客户端层（MCP/HTTP）超时自行断开。
+  推理超时语义: MLX generate 无中断 API，不做硬中断——max_tokens=4096 上界
+  （~400 tok/s 下 ≤20s）+ 推理耗时日志；客户端层（MCP/HTTP）超时自行断开。
 """
 from __future__ import annotations
 
@@ -39,9 +37,7 @@ import logging
 import os
 import platform
 import time
-from dataclasses import asdict, dataclass
-
-import psutil
+from dataclasses import dataclass
 
 from services.ocr_engines import (
     MlxEngine,
@@ -53,7 +49,7 @@ from services.ocr_engines import (
 
 logger = logging.getLogger(__name__)
 
-IDLE_RELEASE_SEC = 30      # 引用归零后的空闲释放窗口
+IDLE_RELEASE_SEC = 600     # 纯空闲自动卸载窗口（用户确认 10 分钟）
 REAPER_INTERVAL_SEC = 5    # 后台清理协程周期
 
 STATE_IDLE = "idle"
@@ -68,22 +64,11 @@ class OcrStatus:
 
     backend: str                  # mlx / ollama
     state: str                    # idle / starting / ready / stopping
-    clients: int
     idle_release_sec: int
     last_activity_at: float | None
     error: str | None
     mlx_ready: bool               # 主环境可 import mlx_vlm（原 mlx_env_ready）
     model_cached: bool
-
-
-@dataclass
-class HolderInfo:
-    """单个引用持有者（进程页展示用）。cmdline 用于人读识别持有者身份。"""
-
-    pid: int
-    alive: bool
-    last_seen_sec_ago: float | None
-    cmdline: str
 
 
 class OcrService:
@@ -98,26 +83,83 @@ class OcrService:
         self._mlx = MlxEngine()
         self._ollama = OllamaEngine()
         self._ready_event: asyncio.Event | None = None
-        self._clients: dict[str, float] = {}       # client_id("pid:start_time") → last_seen
         self._last_activity_at: float = 0.0
         self._error: str = ""
         self._reaper_task: asyncio.Task | None = None
 
     # ─── 公开 API（routes/ocr.py 调用） ───────────────────
 
-    async def acquire(self, pid: int, start_time: float) -> None:
-        """引用+1。无模型则加载（并发 acquire 等同一就绪事件，单飞）。
+    async def extract(self, image_b64: str, prompt: str) -> str:
+        """识图（懒加载 + 并发使用——推理段不持 lifecycle 锁）。
+
+        未就绪时自动加载（并发首图等同一就绪事件，单飞）。
+        多请求并发: 预处理并行重叠（to_thread），generate 在引擎 worker
+        FIFO 排队（MLX 物理串行）。进入与完成都刷新活跃时间。
+
+        Raises:
+            RuntimeError: 加载失败 / 竞争窗口内模型被卸载 / 推理失败。
+        """
+        self._last_activity_at = time.time()
+        if self._backend() == "ollama":
+            if not self._ollama.available():
+                raise RuntimeError("Ollama 不可用或未拉取 glm-ocr（控制台模型页可下载）")
+            text, _ = await self._ollama.infer(image_b64, prompt)
+            self._last_activity_at = time.time()
+            return text
+        await self._ensure_ready()
+        # 阶段 1: 预处理（并发——不持任何锁）
+        prepared = await asyncio.to_thread(self._mlx.preprocess, image_b64, prompt)
+        # 阶段 2: generate（经 to_thread 提交 worker FIFO——与 load/unload 互斥）
+        text, _ = await asyncio.to_thread(self._mlx.infer_serialized, prepared)
+        self._last_activity_at = time.time()
+        return text
+
+    async def force_release(self) -> None:
+        """强制卸载（前端模型页停止按钮）。推理在途则等其完成（锁互斥）。"""
+        async with self._lifecycle_lock:
+            if self._backend() == "ollama":
+                await self._ollama.unload()
+            else:
+                await self._stop_locked()
+
+    def status(self) -> OcrStatus:
+        """状态快照（不持锁——字段原子性要求低，供轮询）。"""
+        if self._backend() == "mlx":
+            cached = find_mlx_model() is not None
+        else:
+            cached = self._ollama.available()
+        return OcrStatus(
+            backend=self._backend(),
+            state=self._state,
+            idle_release_sec=IDLE_RELEASE_SEC,
+            last_activity_at=self._last_activity_at or None,
+            error=self._error or None,
+            mlx_ready=mlx_available(),
+            model_cached=cached,
+        )
+
+    def idle_sec(self) -> float | None:
+        """当前已空闲秒数（模型页"空闲 X / 10 分钟"）。未加载 → None。"""
+        if self._state != STATE_READY or self._last_activity_at <= 0:
+            return None
+        return max(0.0, time.time() - self._last_activity_at)
+
+    def loaded_footprint_mb(self) -> float | None:
+        """OCR 就绪时的控制台进程 footprint（进程页 in-process 内存口径）。"""
+        if self._backend() == "mlx" and self._state == STATE_READY:
+            return footprint_mb()
+        return None
+
+    # ─── 内部: 状态变更（必须持锁） ────────────────────────
+
+    async def _ensure_ready(self) -> None:
+        """懒加载入口（extract 调用）。未就绪则加载，并发单飞。
 
         Raises:
             RuntimeError: 加载失败（环境缺失/模型未缓存/底层异常）/ 状态机异常。
         """
-        cid = self._client_id(pid, start_time)
         self._ensure_reaper()
         async with self._lifecycle_lock:
-            self._clients[cid] = time.time()
-            self._last_activity_at = time.time()
-            if self._backend() == "ollama":
-                return
             if self._state == STATE_READY:
                 return
             if self._state == STATE_STOPPING:
@@ -129,7 +171,7 @@ class OcrService:
                 event = self._ready_event
             else:                                  # starting: 搭车等同一事件
                 event = self._ready_event
-                logger.info("OCR acquire: 已有加载在途，并发等待")
+                logger.info("OCR 懒加载: 已有加载在途，并发等待")
         if event is not None:
             await event.wait()
             async with self._lifecycle_lock:
@@ -140,97 +182,10 @@ class OcrService:
                     # 仅在加载成果未被中途卸载时置 READY。
                     # 防竞态: force_release 可能在"加载完成 → 本处置 READY"窗口
                     # 抢到锁完成卸载（state 已回 IDLE）——此时不得把 IDLE 翻成
-                    # READY（引擎已空，假 READY 会让 acquire 快路径永不重载）。
+                    # READY（引擎已空，假 READY 会让懒加载快路径失效）。
                     # 等待者直接返回；引擎空由 extract 的 loaded 防御兜住，
-                    # 下次 acquire 走 IDLE 分支重新加载，自愈。
+                    # 下次 extract 走 IDLE 分支重新加载，自愈。
                     self._state = STATE_READY
-
-    async def extract(self, image_b64: str, prompt: str) -> str:
-        """识图（并发使用——不持 lifecycle 锁；仅 generate 段串行）。
-
-        多请求并发: 预处理并行重叠（to_thread），generate 在引擎 worker
-        FIFO 排队（MLX 物理串行）。自动记录活跃时间。
-
-        Raises:
-            RuntimeError: 未就绪（需先 acquire）/ 竞争窗口内模型被卸载 / 推理失败。
-        """
-        self._last_activity_at = time.time()
-        if self._backend() == "ollama":
-            if not self._ollama.available():
-                raise RuntimeError("Ollama 不可用或未拉取 glm-ocr（控制台模型页可下载）")
-            text, _ = await self._ollama.infer(image_b64, prompt)
-            return text
-        if self._state != STATE_READY or not self._mlx.loaded:
-            raise RuntimeError("OCR 服务未就绪（需先 acquire）")
-        # 阶段 1: 预处理（并发——不持任何锁）
-        prepared = await asyncio.to_thread(self._mlx.preprocess, image_b64, prompt)
-        # 阶段 2: generate（经 to_thread 提交 worker FIFO——与 load/unload 互斥）
-        text, _ = await asyncio.to_thread(self._mlx.infer_serialized, prepared)
-        self._last_activity_at = time.time()
-        return text
-
-    async def close(self, pid: int, start_time: float) -> None:
-        """引用-1。归零后由 reaper 在空闲窗口后卸载。"""
-        cid = self._client_id(pid, start_time)
-        async with self._lifecycle_lock:
-            self._clients.pop(cid, None)
-
-    async def force_release(self) -> None:
-        """强制卸载（前端模型页停止按钮）。推理在途则等其完成（锁互斥）。"""
-        async with self._lifecycle_lock:
-            self._clients.clear()
-            if self._backend() == "ollama":
-                await self._ollama.unload()
-            else:
-                await self._stop_locked()
-
-    def status(self) -> OcrStatus:
-        """状态快照（不持锁——字段原子性要求低，供轮询）。"""
-        alive = sum(1 for cid in self._clients if self._client_alive(cid))
-        if self._backend() == "mlx":
-            cached = find_mlx_model() is not None
-        else:
-            cached = self._ollama.available()
-        return OcrStatus(
-            backend=self._backend(),
-            state=self._state,
-            clients=alive,
-            idle_release_sec=IDLE_RELEASE_SEC,
-            last_activity_at=self._last_activity_at or None,
-            error=self._error or None,
-            mlx_ready=mlx_available(),
-            model_cached=cached,
-        )
-
-    def holders(self) -> list[HolderInfo]:
-        """当前引用持有者明细（进程页展示用）。"""
-        now = time.time()
-        result = []
-        for cid, last_seen in self._clients.items():
-            pid_str = cid.split(":", 1)[0]
-            pid = int(pid_str) if pid_str.isdigit() else 0
-            alive = self._client_alive(cid)
-            cmdline = ""
-            if alive and pid:
-                try:
-                    cmdline = " ".join(psutil.Process(pid).cmdline())
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    cmdline = ""
-            result.append(HolderInfo(
-                pid=pid,
-                alive=alive,
-                last_seen_sec_ago=round(now - last_seen, 1) if last_seen else None,
-                cmdline=cmdline,
-            ))
-        return result
-
-    def loaded_footprint_mb(self) -> float | None:
-        """OCR 就绪时的控制台进程 footprint（进程页 in-process 内存口径）。"""
-        if self._backend() == "mlx" and self._state == STATE_READY:
-            return footprint_mb()
-        return None
-
-    # ─── 内部: 状态变更（必须持锁） ────────────────────────
 
     async def _start_mlx_locked(self) -> None:
         """idle → starting → (to_thread → worker 加载)。持 lifecycle 锁调用。"""
@@ -276,19 +231,15 @@ class OcrService:
             self._reaper_task = asyncio.get_running_loop().create_task(self._reaper_loop())
 
     async def _reaper_loop(self) -> None:
-        """周期清理：死 client 引用 + 空闲卸载。异常绝不退出。"""
+        """周期清理：空闲超时卸载。异常绝不退出。"""
         while True:
             await asyncio.sleep(REAPER_INTERVAL_SEC)
             try:
                 async with self._lifecycle_lock:
-                    dead = [cid for cid in self._clients if not self._client_alive(cid)]
-                    for cid in dead:
-                        self._clients.pop(cid, None)
                     if (self._state == STATE_READY
-                            and not self._clients
                             and self._last_activity_at > 0
                             and time.time() - self._last_activity_at > IDLE_RELEASE_SEC):
-                        logger.info("OCR reaper: 引用空且空闲>%ds，卸载", IDLE_RELEASE_SEC)
+                        logger.info("OCR reaper: 空闲>%ds，卸载", IDLE_RELEASE_SEC)
                         await self._stop_locked()
             except asyncio.CancelledError:
                 return
@@ -304,29 +255,11 @@ class OcrService:
             return "mlx"
         return "ollama"
 
-    @staticmethod
-    def _client_id(pid: int, start_time: float) -> str:
-        return f"{pid}:{start_time}"
-
-    @staticmethod
-    def _client_alive(client_id: str) -> bool:
-        """client pid 存活检测（MCP SIGKILL 兜底）。id 格式错视为死。"""
-        try:
-            pid_s, _, st_s = str(client_id).partition(":")
-            pid = int(pid_s)
-            st = float(st_s) if st_s else 0.0
-            p = psutil.Process(pid)
-            return p.is_running() and (st == 0 or abs(p.create_time() - st) < 1.0)
-        except (ValueError, psutil.Error):
-            return False
-
 
 # 模块级单例 + 兼容委托（routes/ocr.py、model_assets 消费）
 ocr_service = OcrService()
 
-acquire = ocr_service.acquire
 extract = ocr_service.extract
-close = ocr_service.close
 force_release = ocr_service.force_release
 
 
