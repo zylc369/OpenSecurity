@@ -274,9 +274,10 @@ def test_anchor_refresh_button(rendered):
 
 
 def test_hardware_popover(rendered):
-    """硬件 Popover：宽度紧凑（≤360px）+ 标题旁刷新按钮生效 + 无 0GHz 伪值。"""
+    """硬件 Popover：悬浮弹出 + 宽度紧凑（≤360px）+ 标题旁刷新按钮生效 + 无 0GHz 伪值。"""
     page, _ = rendered
-    page.locator("header button:has-text('硬件')").click()
+    # trigger=hover（2026-08-22 用户指令: 悬浮弹出替代点击）
+    page.locator("header button:has-text('硬件')").hover()
     page.wait_for_timeout(600)
     pop = page.locator(".ant-popover:not(.ant-popover-hidden)").first
     text = pop.inner_text()
@@ -545,5 +546,69 @@ def test_runtime_two_column_layout(rendered, control_server):
     assert pc["x"] > oc["x"] + 200, "进程卡应在 opencode 卡右侧（2 列网格）"
     assert abs(pc["y"] - oc["y"]) < 50, "两卡应大致同一水平线"
     # 用例卫生
+    page.goto(f"http://127.0.0.1:{control_server}/", wait_until="domcontentloaded", timeout=20000)
+    page.wait_for_timeout(600)
+
+
+def test_ocr_idle_countdown_live(rendered, control_server):
+    """OCR 空闲倒计时端到端: 懒加载 → 卡片空闲行（独立行）→ 倒计时随轮询走动
+    → 卸载后卡片自动翻转为未加载。
+
+    走动/翻转会随 useModels 轮询退化（静态快照 bug 的回归锚点）。
+    release 走 reaper 同一条 _stop_locked 卸载路径（600s 等不起，用等价路径）。
+    """
+    import base64
+    import io as _io
+    import re
+
+    import httpx
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (300, 90), "white")
+    ImageDraw.Draw(img).text((30, 35), "E2E IDLE", fill="black")
+    buf = _io.BytesIO(); img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    # 懒加载（沙箱控制台真模型真推理）→ OCR loaded
+    r = httpx.post(f"http://127.0.0.1:{control_server}/api/ocr/extract",
+                   json={"image_b64": b64}, timeout=60)
+    assert r.status_code == 200, f"懒加载识图失败: {r.text[:120]}"
+
+    page, _ = rendered
+    page.goto(f"http://127.0.0.1:{control_server}/", wait_until="networkidle", timeout=20000)
+    page.wait_for_timeout(1500)
+    # ⚠ .ant-card 匹配两层: 外层板块卡（含全部子卡文本）+ OCR 内层卡。
+    # DOM 序外层在前 → 取 last 才是真正的 OCR 卡（first 会让"已加载"断言
+    # 永远看外层、翻转断言必然假败）
+    ocr_card = page.locator(".ant-card").filter(has_text="GLM-OCR").last
+    txt1 = ocr_card.inner_text()
+    assert "BGE-M3" not in txt1, "定位到外层板块卡（应取 OCR 内层卡）"
+    assert "已加载" in txt1, f"OCR 卡应显示已加载: {txt1[:120]}"
+    assert "空闲" in txt1 and "10 分" in txt1, f"OCR 卡应显示空闲倒计时行: {txt1[:120]}"
+    # 独立行断言: 空闲文本在标题行下方（沉淀此前的临时验证）
+    idle_el = ocr_card.locator("span", has_text=re.compile(r"^空闲 ")).first
+    title_el = ocr_card.locator(".ant-typography").first
+    ib, tb = idle_el.bounding_box(), title_el.bounding_box()
+    assert ib and tb and ib["y"] > tb["y"] + 14, "空闲行应在标题行下方（独立行）"
+    overflow = ocr_card.evaluate("el => el.scrollWidth - el.clientWidth")
+    assert overflow <= 0, f"卡片内容横向溢出 {overflow}px"
+
+    # 倒计时走动: 等一个轮询周期（10s）→ 空闲秒数增长
+    m1 = re.search(r"空闲 (\d+) 秒", txt1)
+    assert m1, f"应显示空闲秒数: {txt1[:150]}"
+    page.wait_for_timeout(11_000)
+    txt2 = ocr_card.inner_text()
+    m2 = re.search(r"空闲 (\d+) 秒", txt2)
+    assert m2, f"轮询后仍应显示空闲行: {txt2[:150]}"
+    assert int(m2.group(1)) >= int(m1.group(1)) + 9, \
+        f"空闲倒计时应随轮询走动（{m1.group(1)}s → {m2.group(1)}s）"
+
+    # 卸载翻转: release（reaper 等价路径）→ 下一轮轮询卡片翻回未加载
+    rr = httpx.post(f"http://127.0.0.1:{control_server}/api/ocr/release", timeout=30)
+    assert rr.status_code == 200 and rr.json()["state"] == "idle"
+    page.wait_for_timeout(11_000)
+    txt3 = ocr_card.inner_text()
+    assert "已加载" not in txt3 and "空闲" not in txt3, \
+        f"卸载后卡片应翻转为未加载（无空闲行）: {txt3[:120]}"
+    # 用例卫生: 页面回默认 + OCR 保持 idle（已 release）
     page.goto(f"http://127.0.0.1:{control_server}/", wait_until="domcontentloaded", timeout=20000)
     page.wait_for_timeout(600)
