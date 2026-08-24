@@ -192,3 +192,7 @@ node_modules/next/dist/server/
 
 > 缓存投毒的完整方法论（缓存键探测、AE 差异利用、缓存中缓存、Bot AE 探测）见 `$AGENT_DIR/knowledge-base/cache-poisoning.md`。
 > 自动化探测脚本见 `$AGENT_DIR/scripts/cache_poison.py`。
+
+
+## CVE-2025-29927 中间件认证绕过
+单头绕过: `x-middleware-subrequest: middleware:middleware:middleware:middleware:middleware`（内部子请求标识）→ 受保护端点直接可达。SSRF 链: 绕过后加 `Location: http://backend:4000/flag` 头——Next.js 处理 Location 对指定 URL 发内部 fetch（内网直连）。

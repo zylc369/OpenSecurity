@@ -14,11 +14,12 @@
 | 凯撒/维吉尼亚/单表替换/无密钥、字母频率 | 古典 | `classical-crypto.md` |
 | AES/DES、CBC/ECB/CTR/GCM、padding 报错、IV 可控 | 对称 | `symmetric-and-hash.md` |
 | MD5/SHA、`mac=hash(key∥msg)`、长度扩展 | 哈希 | `symmetric-and-hash.md` |
-| PRNG、随机数、状态恢复 | 伪随机 | 按子类（LCG/LFSR/Mersenne Twister）查通用资料；LCG 恢复见 `symmetric-and-hash.md` §6 |
+| PRNG、随机数、状态恢复 | 伪随机 | `prng-attacks.md`（MT/V8/Java/LCG/种子审计/自制递推）；LCG 参数恢复另见 `symmetric-and-hash.md` §6 |
 | 构造满足整除/模运算/位运算约束的输入（非给密文求明文） | 数论构造题 | `number-theory-construction.md` |
 | circom/snarkjs/halo2 电路、Σ 协议、`c=H(transcript)` Fiat-Shamir | ZKP（零知识证明） | §5 ZQP 攻击速查（Fiat-Shamir 伪造/欠约束电路/Castryck-Decru SIDH） |
 | 加密/评估 oracle（SEAL/CKKS/BFV）、LWE 参数、噪声预算 | FHE（全同态加密） | `fhe-attacks.md`（方案识别/密钥恢复/galois/CKKS精度/oracle）；密钥恢复见 `lattice-attacks.md` |
-| Kyber/ML-KEM、Dilithium、LWE/RLWE 公式、SIDH 辅助点映像 | PQC（后量子） | LWE→`lattice-attacks.md`；SIDH→§5 ZQP 攻击速查（Castryck-Decru） |
+| Kyber/ML-KEM、Dilithium、LWE/RLWE 公式、SIDH 辅助点映像 | PQC（后量子） | LWE→`lattice-attacks.md`（§5h PQC 实现泄漏）；SIDH→§5 ZQP 攻击速查（Castryck-Decru） |
+| 辫群/热带半环/Paillier/GM/OSS/Cayley-Purser/BB-84 模拟等冷门方案 | 异型代数结构 | `exotic-algebra-attacks.md`（不变量/残差/复制隔离/小群查表） |
 | `.sol`/Foundry(`foundry.toml`)/Hardhat、`pragma solidity`、`isSolved()`、RPC 端点 | 智能合约（blockchain） | `blockchain-attacks.md`（delegatecall/重入/access control/整数/签名/随机数/flash loan） |
 
 **判断不清时**：把题目所有参数列出来，看"哪个参数异常"（e 太小/太大、hint 数量、比特长度关系）——异常点就是攻击方向。
@@ -141,6 +142,12 @@ phi = (p-1)*(q-1)
 | circom/halo2 电路有 `<--` 无 `<==` | **Under-constrained circuit** | 找未约束信号，构造满足等式但取非预期值的 witness |
 | SIDH 公开辅助扭基点映像 | **Castryck-Decru 攻击** | 构造积曲面 + Richelot (2,2)-isogeny 分裂逐位恢复私钥（SageMath 脚本搜索：Castryck-Decru-SageMath）|
 | challenge 可被操纵为常量（calldata/transcript 可控） | **Frozen Heart** | 固定 β,γ → 令某因子=0（如 f[0]=-γ）使 grand-product 方程恒成立。Plonkup 经 assembly calldatacopy offset 操纵把真值挪出 hash 区 → β,γ 固定已知 |
+| ZKP 挑战通用清单 | **协议缺陷扫描** | ①证明不可能实例（如 K4 3-染色）= 必须作弊（承诺碰撞/揭示换值）②commit=H(salt∥值) 且 salt 已知 → 小域枚举 ③salt 由可恢复 PRNG 生成 ④networkx greedy_color 判可染色性 |
+| 混淆电路 free XOR | **δ 恢复/密钥泄漏** | 真值表三行 XOR 消去 AES 项得 δ（W0⊕W1=δ）; 固定密钥跨会话 + 可提交自定义电路 → δ 本地评估 key schedule + S-box 逐字节（256）爆破重构 AES 密钥 |
+| Shamir 系数缺陷 | **门限失效** | ①系数全部由秘密派生 → 单份额=单变量方程，gcd(x^p-x, h(x)) Frobenius 提根 ②系数跨字符重用 → 同求值点份额相减消随机项，已知首字符逐位恢复 |
+| 门限签名（FROST 类）挑战可控 | **区间交攻击** | 承诺选择固定 c → z=λ·u+noise(mod q)，不同签名者子集给多尺度 λ，区间交迭代收敛份额 |
+| DV-SNARG + verifier oracle | **可靠性崩塌** | 未约束 pair 提取验证者随机 v; CRS 条目线性组合代数相消伪造（ePrint 2024/1138） |
+| KZG 点集 shuffle | **配对 oracle 排序** | e(P_i,ψ(P_j)) 暴露指数加法关系（distortion map ζ³=1）→ 链式比较恢复 α^i 排序 → 解 A(x)=0 提取 toxic waste α |
 
 **SIDH/Castryck-Decru 工程化要点**:
 - 素数形式: `p = 2^a · 3^b - 1`
@@ -174,6 +181,7 @@ phi = (p-1)*(q-1)
 | **partial factor (p)** | 已知 p 的高/低 k 位 | `f(x) = x + p_high`，`beta=0.5`，在 mod n 下 |
 | **stereotyped message** | 已知明文前缀 | `f(x) = (prefix + x)^e - c` |
 | **related message** | m2 = a*m1 + b | `f1 = m1^e - c1`, `f2 = (a*m1+b)^e - c2`，resultant 消元 |
+| **short pad** | 同消息两次短随机 padding（m·2^k+r1, m·2^k+r2） | `g1=x^e-c1, g2=(x+y)^e-c2`，`resultant(g1,g2,x)` 消 x 得 y 的单变量式，small_roots(X=2^pad_bits) 得 r1-r2 再解 m |
 | **broadcast** | 同明文 e 组 (c_i, n_i) | CRT 合并 → `m^e mod (n1*n2*...)` → 开 e 次方。**超界退路**: 若 `m^e ≥ Πn_i`（明文有未知段），CRT 后用 Coppersmith: `g=sum(ts[i]*((shift*x+r_i+C)^e-c_i))` 在 `mod Πn_i` 上 `small_roots(X=未知段上界)` |
 | **多元（defund）** | 多变量多项式小根 | 用 `defund/coppersmith` 封装（GitHub） |
 
@@ -186,6 +194,18 @@ roots = f.small_roots(X=256^unknown_bytes, beta=1, epsilon=0.05)
 ```
 
 **参数调优**：`epsilon` 越小越能找到根但越慢（默认 1/e）；`X` 是根的上界（要准确估计）。
+
+## 6a. 数学方程求解工具（高级）
+
+- **Hensel 提升（模 p^k 根）**: P(x)≡0 (mod p^k)、p 小可枚举、k 大——枚举 mod p 根后牛顿迭代 `r' = r - P(r)·inv(P'(r), p) mod p^(i+1)` 逐级提升。**每步必须 mod p^(i+1)** 否则中间整数指数膨胀卡死。N=Πp_i^k_i 时各素幂独立提升再 CRT。前提 P'(root)≡0 (mod p) 不成立（单根）
+- **Pell 方程 x²-D·y²=1**: 连分数 √D 逐收敛项验证得基本解 (x1,y1); 解成乘法群 (x1+y1√D)^n——群内二进制幂快速算大指标解，按附加约束枚举 n（解指数增长 n 范围小），剩余量配 Coppersmith 收尾
+- **矩阵群 DLP（Jordan 形）**: GL(n,F_p) 求 G^k=H——可对角化时对每对特征值解标量 discrete_log 再 CRT 合并; 不可对角化（重根）时 Jordan 块 J=λI+N 的幂零部分 N 给 k 的附加线性方程，必须走此路线否则丢解。另查 |GL(n,p)|=Π(p^n-p^i) 光滑可整体 Pohlig-Hellman
+- **Vandermonde 系数恢复**: 隐藏 n 次多项式求值 oracle——n+1 点建 A[i][k]=x_i^k 解线性系统得全部系数（sage solve_right 支持大次数）。秘密多项式/Shamir 阈值内插值/"拟合曲线"题通用，本质线性代数
+- **Z3 适用面与 BPF/seccomp 重建**: XOR/移位→BitVec、模加/比较→Int、有限域方程→Int+mod。BPF flag 校验器: `seccomp-tools dump` 导出 → flag 按 4 字节小端字建模 BitVec32 + 每字节可打印约束 + 逐条 BPF if/alu 重建约束 → check/model 读出。声明式约束用 Z3，指令式混淆逻辑用 Ghidra 模拟器（prng-attacks.md §7）
+- **De Bruijn 序列子串覆盖**: 输入需包含任意 n 位 k 进制码作子串且长度受限——B(k,n) 循环长 k^n 全覆盖，尾接首 n-1 字符线性化（k^n+n-1）; 每轮同一输入必中
+- **Benford 分布合规生成**: 服务校验首位数字频率（P(d)=log10(1+1/d)，约 30/18/12/10/8/7/6/5/5%）时按比例构造数字串+shuffle——容差常 ±5% 近似即可，随机数过不了
+- **15-puzzle 可解性当 bit 编码**: 可解 ⟺ 逆序数+空行自底行数偶——每实例 1 bit; 多 puzzle 且数量为 8 倍数即编码信号
+- **线性递推大 N**: `a_{n+1}=f(a_n,...)` 经典形（Fibonacci/Tribonacci/青蛙跳步数=step{1..k} 组合计数）N 达 10^12 时写 2×2/3×3 矩阵更新+二进制矩阵幂 O(log N)（mod 下）; "下一个数是什么"类序列题先 OEIS 一发 HTTP（oeis.org/search?q=1,1,2,5,14 解析 pre 取下一项），瓶颈在包装层（captcha/PoW）不在数学
 
 ## 7. 注意
 

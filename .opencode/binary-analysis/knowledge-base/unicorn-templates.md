@@ -245,6 +245,29 @@ if __name__ == "__main__":
 
 ---
 
+## 混合模式 64↔32 切换
+
+64 位 ELF 经 retf（0xCB/0xCA，0x48 前缀=retfq）跳入 32 位 blob（识别: 32 位区 SSE 紧循环 psubb/pxor/paddb + 计算跳转落 32 位区）。三步:
+1. 建 UC_MODE_32 模拟器，拷贝内存 + GPR + **EFLAGS + XMM 全套**（blob 依赖继承状态，缺了输出错）
+2. 执行 32 位块
+3. 内存+寄存器拷回 64 位侧继续
+
+陷阱: retf 弹 **6 字节**（4B EIP + 2B CS）不是 8。fork/ptrace 反调试配套时先模拟父进程 log POKE 序列再子侧重放。
+
+## Ghidra EmulatorHelper 替代模板
+
+Ghidra 内置模拟器，免搭 Unicorn 环境、复用 Ghidra 已有分析（函数边界/地址直接引用）。Java 脚本五步:
+```java
+EmulatorHelper emu = new EmulatorHelper(currentProgram);
+emu.writeRegister("RSP", 0x2fff0000);            // 1. 栈指针（RBP 同设）
+emu.writeMemory(dataAddress, encryptedBytes);     // 2. 写输入
+emu.writeRegister("RDI", arg1);                   // 3. 设参数（x86-64 ABI）
+emu.setBreakpoint(returnAddress);                 // 4. 返回地址断点
+emu.run(functionEntryAddress);
+byte[] out = emu.readMemory(outputAddress, len);  // 5. 读输出
+```
+适用: 一次性"跑函数拿解密结果"（密钥派生枚举同思路）。逐指令 hook 追踪仍首选 Unicorn（UC_HOOK_CODE）; Ghidra API 生态为 Java，速度略慢。
+
 ## 常见陷阱
 
 | 陷阱 | 说明 |
@@ -254,4 +277,5 @@ if __name__ == "__main__":
 | 未处理系统调用 | 模拟不包含 OS API 调用（如 malloc、printf）。遇到时需手动 hook 返回值 |
 | 浮点指令 | Unicorn 默认不映射浮点寄存器。需要时手动映射 |
 | 自修改代码 | 某些壳/保护会修改自身代码。需要在写操作后重新读取 |
+| 未实现寄存器告警噪音 | 设环境变量 `UC_IGNORE_REG_BREAK=1` 静默未实现寄存器告警 |
 | 函数边界判断 | `emu_start` 的结束地址不一定是下一条指令。用 `emu_stop()` 在 hook 中手动停止更可靠 |

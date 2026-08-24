@@ -9,6 +9,7 @@
 **识别信号**：
 - `.sol` 文件；Foundry（`foundry.toml`/`forge-std/`/`script/Deploy.s.sol`）；Hardhat（`hardhat.config.js`）
 - RPC 端点（HTTP/WS）、私钥或助记词、链 ID
+- 助记词部分泄露（24 词缺 1）: BIP39 内置校验自验证——枚举词表 `Mnemonic.check()` 过滤（每词 11 bit，缺词仅 2048 候选），`to_entropy()` 取熵。工具 python-mnemonic（详见 exotic-algebra-attacks.md §13 旁注）
 - 题目目标：通常有 `isSolved()` 函数，返回 true 的条件（如余额达标、成为 owner、selfdestruct 合约）
 
 **读题优先**：找 `isSolved()` 的判定条件 → 反推要达成的链上状态 → 定位能改这个状态的合约函数。
@@ -226,3 +227,32 @@ cast 4byte 0x9e5faafc                          # 解函数选择器 → 签名
 ```
 
 ---
+
+
+## 11. 高级模式
+### EIP-1967 代理
+标准槽: impl=0x360894...82bbc、admin=0xb53127...d6103（keccak256(字符串)-1）; `cast storage $PROXY <slot>` 直读。storage 在 proxy、代码在 implementation（address(this)=proxy）; **升级/setImplementation/setGovernance 必查访问控制**——开放即换自己实现合约全控（配 §3 delegatecall 布局匹配: 攻击合约声明同序变量覆盖 owner/paused）。
+
+### ABI 编码层
+- **Coder v1 dirty address**: v2 校验 address 高 12 字节为零、v1 不校验——要求 dirty 地址的合约以 `pragma abicoder v1` 部署再换入; revert 空数据 "0x" = v2 校验失败特征
+- **calldata 重叠**: 强制 msg.data.length 时 offset 0x20 同时充当偏移指针与 bytes 长度（4+32+32+32=100B 非 132B）
+- **CBOR codehash 绕过**: code[-2:] 读 meta 长度剥离后 keccak256 比对
+- bytes32("str") 左对齐零填充直读
+
+### ZK/Groth16 伪造
+① vk_delta_2==vk_gamma_2（破碎 setup）: A=vk_alpha1、B=vk_beta2、C=neg(vk_x) 对任意公开输入验证通过; ② nullifier 未追踪: 从部署/setup 交易提取合法证明重放。
+
+### 预测市场三连
+幽灵市场下注（不查 market<nextMarketIndex）+ createMarket 写 resolution=0 的 unresolve（旧 bet 总量残留二次兑现）+ EIP-6780 构造器 selfdestruct 强制注资。坑: .call 余额不足静默失败、ethers BigInt 用 0n。
+
+### Transient Storage 碰撞（SOL-2026-1，0.8.28-0.8.33 via-ir，0.8.34 修复）
+delete 的 Yul helper 名不含存储位置——同类型持久+transient 双清除时后者用错 opcode: transient delete 发 sstore 写零 slot 0（owner/admin/初始化标志被清）; 持久 delete 发 tstore（approval 永久无法撤销）。无警告不 revert 静默损坏; 规避: delete _lock 改 _lock=address(0); 检测: solc --ir 对比 0.8.34 输出的 helper 改名。
+
+### 通用
+factory 查 playerToInstance; 子合约地址 keccak256(rlp([parent,nonce]))[-20:]（nonce 从 1 起）; 空 revert 0x=ABI 校验失败; Web3 签名登录用 eth_account encode_defunct（地址大小写按服务端要求——查前端 JS）。
+
+## 12. 链上追踪与混币分析
+
+- **BTC peel chain**: mempool.space `api/tx/<TXID>`——**永远跟较大输出**; 整数金额=peel 信号
+- **ETH/混币器统计启发式**（etherscan account/txlist）: ①金额相关（输出≈输入-fee）②时间窗（输出跟随输入分钟/小时级）③扇出一进多出 ④**交易数分层: 5<n<100=中介钱包（追）; 1000+=交易所/水龙头（跳过）** ⑤整数 ETH 额
+- 工具: Etherscan API / Blockchair（多链）/ breadcrumbs.app（免费可视化）/ Chainalysis Reactor（商用）; Wei→ETH ÷1e18

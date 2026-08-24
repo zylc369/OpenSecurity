@@ -41,7 +41,7 @@ permission:
 
 | subagent_type | 擅长 | 不擅长 | 关键工具 | 典型输入 |
 |---------------|------|--------|---------|---------|
-| `binary-analysis` | IDA Pro 静态逆向、算法还原、壳检测、漏洞挖掘 | 移动端设备交互、APK 整体上下文、Web 协议测试 | IDA Pro 9.1 + IDAPython 脚本体系 | .exe .dll .so .dylib .bin 固件镜像 |
+| `binary-analysis` | IDA Pro 静态逆向、算法还原、壳检测、pwn 漏洞利用（栈/堆/内核/V8）、沙箱逃逸（pyjail/Docker/K8s）、取证（隐写/磁盘/内存/网络流量）、恶意软件分析、OSINT、内网渗透与提权、平台固件逆向 | 移动端设备交互、APK 整体上下文、Web 协议测试 | IDA Pro 9.1 + IDAPython 脚本体系 | .exe .dll .so .dylib .bin 固件镜像 pcap 内存镜像 |
 | `mobile-analysis` | APK/IPA 反编译、Java/Native 混合分析、Frida 动态 Hook、设备交互 | 纯 Web 应用测试、独立 PC 二进制分析（无移动端上下文） | Frida + jadx + apktool + IDA（native 层） | .apk .ipa .dex .jar 已连接设备 |
 | `web-analysis` | Web 漏洞审计、攻击链构造、框架安全分析、缓存投毒 | 二进制逆向、移动端设备交互、AI 模型越狱 | playwright + curl + webfetch | URL 源码目录 API 端点 |
 | `ai-security-analysis` | LLM 提示注入、越狱攻击、数据泄露测试、对抗性输入 | 传统 Web 漏洞（XSS/SQLi）、二进制分析、移动端分析 | LLM 模拟客户端 + 提示注入 payload 库 | LLM 应用 URL 对话 API 模型名称 |

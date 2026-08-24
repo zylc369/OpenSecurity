@@ -25,7 +25,7 @@
 检测到已知壳名（`packer_name` 不为 null 且不为 "unknown"）时：
 
 1. 检查系统是否安装对应脱壳工具（`which upx` 等）
-2. **已安装** → 执行脱壳（输出到 `$TASK_DIR`，不覆盖原文件），如 `upx -d "<原始文件>" -o "$TASK_DIR/<文件名>_unpacked"`
+2. **已安装** → 执行脱壳（输出到 `$TASK_DIR`，不覆盖原文件），如 `upx -d "<原始文件>" -o "$TASK_DIR/<文件名>_unpacked"`; UPX 失败时先验魔改——核对 UPX 节名/头部字段/版本标记完整性，疑似篡改对照 UPX 源码（GitHub）定位修改点
 3. **已安装但脱壳失败** → 进入阶段 2.5
 4. **未安装** → 告知用户安装命令（如 `brew install upx`），然后进入阶段 2.5
 
@@ -99,6 +99,8 @@
 1. **首选 IDA 调试器 dump**（阶段 3.5a）
 2. **IDA 调试器失败**（反调试 / 无法启动 / 超时）→ 尝试 Frida（阶段 3.5b）
 3. **Frida 也失败**（未安装 / 非 PE 格式 / 反 Frida）→ 回退到阶段 3（静态分析）
+
+**memfd_create 无文件载荷**（games-and-vms-3）: 载荷经 memfd_create+fexecve 全内存执行、磁盘零落盘——解密产物在 fexecve 前拦截: hook memfd_create 取缓冲，或 dump `/proc/<pid>/fd/` 的匿名 fd 条目（fd 指向 `memfd:xxx`），照常分析 dump 出的二进制。
 
 ## 阶段 3：静态分析脱壳（最后手段）
 
@@ -273,3 +275,10 @@ $PYTHON_CMD "$SHARED_DIR/scripts/frida_unpack.py" <目标二进制> -o "$TASK_DI
 ### 处理方式
 
 **不要尝试让 IDA 完整分析 VMP 段**。内核驱动分析需要双机调试等特殊方法，详见 `$SHARED_DIR/knowledge-base/kernel-driver-analysis.md`。
+
+
+---
+
+## .NET 保护器（ConfuserEx 型）
+
+.NET 保护器加密方法体，运行时从 <Module> .cctor 解密。dump: dnSpy → Assembly Explorer → <Module> .cctor F9 断点 → F5 跑到构建完成 → 右键 Save Module（token 完整）→ `de4dot` 清混淆符号。原理: 磁盘代码被保护但运行时表示是明文——与 native 壳 OEP dump 同理。

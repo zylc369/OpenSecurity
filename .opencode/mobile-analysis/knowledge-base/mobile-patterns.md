@@ -480,3 +480,37 @@ adb shell dumpsys activity broadcasts <pkg>
 | Sender 验证 | 代码中检查 `Binder.getCallingUid()` 和包名 | 即使 token 泄露 |
 | Token 动态化 | 运行时生成 token，存储在 Android Keystore 中 | 静态提取攻击 |
 | Intent 验证 | 验证 intent 的 action、extras 类型和值范围 | 参数注入 |
+
+---
+
+## Android 逆向模式
+
+### JNI RegisterNatives 混淆
+
+Java native 方法无对应 Java_ 前缀符号 + JNI_OnLoad 存在 = RegisterNatives 手动注册（名与符号解耦）。定位: JNI_OnLoad → RegisterNatives(env,clazz,methods,n) → methods 数组 {name,signature,fnPtr} 三元组 → fnPtr 即真 handler。静态分析选 lib/**x86_64**/（Ghidra 反编译质量最好）。
+
+### Java 层验证整体绕过三捷径
+
+1. **新工程直调 native**: 新建工程用相同包名/类名/方法签名 + loadLibrary 原 .so → 直接调 native 函数，全部 Java 验证（PIN/随机/root 检测）绕过
+2. **DEX 运行时 patch 重建**: native 经 /proc/self/maps+mprotect XOR patch DEX（仅 Dalvik<21）→ 从 .so 提 key+offset 对静态 DEX 同 patch + **重算 checksum/SHA-1** 再反编译
+3. **LocalBroadcastManager 破局**: 本地广播 adb 发不进——onReceive 体克隆内联进 onCreate+输出改 Log.d → apktool b 重打包 + debug keystore 签名 → logcat 看明文
+
+### 动态三式
+
+- **Firebase Cloud Functions 直调**: 认证后 Frida 构造 payload（uid+值+时间戳）直调 getHttpsCallable("validateX")——AppCheck 信任客户端构造
+- **Frida 调类方法免抓包**: 秘密在方法里直接 Java.use 调，不用绕证书锁定
+- **logcat 密钥泄漏**: `adb logcat | grep -iE "agreement|ephemeral|shared|key"` 收集后重建 AES 参数
+- **JNI 签名绕过**: 断 XOR 解密后 dump 明文 key + baksmali 改**被签参数**重打包——免逆完整签名算法
+
+
+---
+
+## macOS/iOS 逆向补集
+
+- **objc_msgSend 调度**: RDI=self, RSI=selector; selector 在 __objc_methname 节——交叉引用找实现。lldb: `expression -l objc -O -- [[Cls new] meth]`。method_exchangeImplementations/class_replaceMethod=反篡改 swizzle
+- **Swift**: VWT（类型操作）/PWT（动态分发）; swift_allocObject/release/once; String ≤15B 内联。__swift5_types/__swift5_proto Ghidra Swift 模块解析
+- **iOS 脱壳**: LC_ENCRYPTION_INFO cryptid=1=FairPlay → frida-ios-dump -H <IP> -p 22 / Clutch / bfdecrypt
+- **fat 二进制**: lipo -info / -thin arm64 -output
+- **注入**: DYLD_INSERT_LIBRARIES（hardened runtime/SIP 屏蔽系统件）; DYLD_PRINT_LIBRARIES 看加载
+- **越狱检测绕过**: Frida hook access——路径命中 Cydia//bin/sh//etc/apt//private/var/lib/apt 清单时 retval.replace(-1)
+- iOS 固件/平台其他主题见 binary-analysis platform-reversing.md

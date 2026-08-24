@@ -40,6 +40,19 @@
 2. imports 追踪: 找 GetDlgItemTextA/GetWindowTextA → 谁调用它们 → 追踪到验证逻辑
 3. Button 点击回调: 找 WM_COMMAND 处理 → BN_CLICKED 分支 → 追踪到验证函数
 
+**校验逻辑分析三原则**:
+1. **比较方向判定**（动手前先判）: `transform(输入)==存储目标` → 逆算法/Z3 求解; `transform(存储目标)==输入` → 免逆向，直接对存储数据应用变换即得答案
+2. **Memory Dumping**: transform 复杂但可运行时——最终比较处断点 + 任意等长输入 → 断点处 dump 程序计算的期望值（x/s $rsi）
+3. **Decoy 检测**: 多个比较目标+多个成功消息=假 flag 序列，断点设**最终**比较，数比较次数取最后一个
+
+**XOR 场景操作化**（混淆器免疫）: 混淆器 bury 逐字节 XOR 循环（obfy 类不透明谓词墙）时不 unwind——断终点 `strcmp(expected, enc(input))`，GDB commands 块自动 dump RDI/RSI 双操作数; 喂已知明文 "AAAA..." 记录 computed_A[i]，则 `key[i]=computed_A[i]^'A'`、正确输入 `=expected[i]^key[i]`。独立性验证: 输入翻一字节确认 computed 只动一字节。混淆器再厚，终点必须等于固定串——一跑泄漏 keystream、二跑换算合法输入。
+
+**memcmp 计数 oracle**: LD_PRELOAD 把 memcmp 换成返回前缀匹配数的版本（`for i<n: if s1[i]==s2[i] cnt++ else break; return cnt`）——二值验证变逐字节计数 oracle; GDB 断 memcmp 后读返回值=前缀匹配数，逐位置换字符找计数+1 者。判定: 验证走 memcmp/strcmp 且前缀逐比较（返回非 0 语义不破坏）。与上文「XOR 场景操作化」互补——那边从双操作数泄漏期望值，这边利用程序自身的匹配计数反馈。
+
+**Levenshtein 编辑距离 oracle**: oracle 返回编辑距离时三步恢复——①空串定长; ②逐字符发 `c*length`，distance=length-count 揪出存在字符及数量; ③一半存在/一半不存在二分定位。反馈越连续信息泄漏越多（存在性+数量+位置梯度）。通用: 任何 boolean 比较器（regex 匹配/时延/HTTP 状态码）经 2 的幂加减都坍缩为二分全值 oracle。
+
+**位级验证器刮取**: 验证按位分解（每 flag 位一次 `call functionN`，读 `flag[offset]>>bit&1` 调不透明函数比常量）时不反编译 wrapper——PEDA `current_inst(rip)[1]` 当廉价反汇编器单步刮取: 解析 call 前 `sar imm`（bit index）/`add imm`（byte offset），call 前读 edi、ni 后读 eax，`ret==arg` 投票 bit=0 否则 1，`set $eax=0` 中和继续。任何 `f_i(bit_i)==const_i` 结构都是黑盒 oracle——不需要理解 f_i。
+
 ### 策略 1（首选）：Hook 比较逻辑地址
 
 **原理**：绕过整个 GUI 交互流程，直接 hook 程序内部的比较/验证函数。
@@ -210,3 +223,90 @@ IDA_OEP_ADDR=0x401000 IDA_OUTPUT="$TASK_DIR/unpacked.exe" \
 **功能**：加载调试器 → 运行到 OEP → dump 所有段 → 重建 PE → 写入输出。
 
 **注意**：输出 PE 不含 IAT 重建，仅用于 IDA 加载分析。
+
+---
+
+## 替代调试器: x64dbg 与 WinDbg 用户态
+
+IDA 调试器不可用（如强反调试需隐藏调试器特征）或目标场景更适合交互式调试时使用。
+
+### x64dbg（Windows 用户态开源调试器主力）
+
+- 快捷键: F2 断点 / F7 步入 / F8 跳过 / F9 运行 / F4 运行到光标 / Ctrl+F9 执行到返回 / Ctrl+G 跳转 / Ctrl+B 内存搜索
+- 字符串搜索: 右键 → 查找 → 当前模块/所有模块（定位校验函数）
+- 视图 → SEH 链 / 调用栈 / 句柄
+- 修补: 双击指令改汇编 → 应用; 补丁管理器导出补丁后文件
+- 插件: **ScyllaHide**（反反调试，隐藏调试器特征）/ **OllyDump**（内存转储，脱壳配套）/ xAnalyzer / Graph
+
+### WinDbg 用户态命令速查（内核双机调试见 kernel-driver-analysis.md）
+
+```cmd
+windbg -pn target.exe           :: 按进程名附加
+bp kernel32!CreateFileW         :: API 符号断点
+bl / bc *                       :: 断点列表 / 清除
+d esp L10                       :: 查看栈
+dd poi(esp+4)                   :: 指针解引用后 dump（查参数）
+k / lm                          :: 调用栈 / 模块列表
+r eax = 0                       :: 改寄存器
+```
+
+远程: 服务端 `windbg -server tcp:port=5000 target.exe`，客户端 `windbg -remote tcp:server=<IP>,port=5000`。
+Python 扩展 PyKD: `!py` 交互，pykd.setBreakpoint()/go() 脚本化。
+
+内存 dump: `procdump -ma PID dump.dmp`（Windows 完整转储，等价 Linux gcore）。
+
+### lldb（macOS/iOS 主调试器）
+
+macOS（Mach-O）/iOS/Swift/ObjC 首选。速查: `breakpoint set -r "check.*"` 正则断点批量 hook 校验函数族; `image list` 读 PIE 的 ASLR slide; `register write rax 0` 改寄存器; `dis -n main` 反汇编。Python 脚本化: frame.FindRegister("rdi").GetValueAsUnsigned() + process.ReadCStringFromMemory() 读参数，`command script add` 注册自定义命令——API 比 GDB 结构化。
+
+### r2frida（r2 界面 + Frida 注入）
+
+`r2 frida://spawn/./binary` 附加; `\dt strcmp` 跟踪调用、`\ii/\il` 列导入/模块、`\dm` 内存映射。适合 r2 工作流内做动态跟踪，省写 Frida JS。
+
+### libSegFault.so 无调试器兜底（version-sensitive）
+
+`LD_PRELOAD=libSegFault.so ./target` 崩溃即打印全寄存器+backtrace+内存映射到 stderr——gdb 不可用/被检测时拿 shellcode 入口寄存器快照（常见 RAX→缓冲、RDI→0）。**版本限定**: glibc ≥2.35 已移除（官方 2022-01 移除，进程内捕 SIGSEGV 不安全）; 替代 systemd-coredump/coredumpctl 或外部 libsegfault 项目。
+
+### rr 逆向调试
+
+`rr record ./binary` 录制 + `rr replay` 回放（GDB 界面+反向命令）: `reverse-continue`/`reverse-stepi`/`reverse-next` 反向执行、`checkpoint`+`restart 1` 存档回跳。单步错过关键时刻时反向回去免重跑——反调试破坏状态/竞态/不可重现环境尤其宝贵。
+
+## 调试自动化: r2pipe 循环爆破与 GDB one-liner
+
+r2pipe 驱动 radare2 调试模式做逐字符 oracle 爆破（改寄存器→重启→跑→判输出循环）:
+```python
+import r2pipe
+r2 = r2pipe.open('./binary', flags=['-d'])
+r2.cmd('aaa'); r2.cmd('db 0x401234')
+for char in range(256):
+    r2.cmd('ood')             # 重启调试进程（恢复初始状态）
+    r2.cmd(f'dr eax={char}')  # 直接改寄存器当输入
+    if 'correct' in r2.cmd('dc'): print(chr(char))
+```
+
+GDB one-liner 适合固定断点单跑（`start` 先跑 main 强制解析 PIE 基址，之后可用相对断点）:
+```bash
+gdb -ex 'start' -ex 'b *main+0x198' -ex 'run' ./binary
+```
+选型: 固定断点验证用 GDB -ex 链; 循环改值爆破用 r2pipe。
+
+**输出函数断点批量提取**（绕人工延时）: 逐字符输出+usleep/忙等延时的程序——字符在延时前已在参数寄存器，断输出函数+commands 块自动打印，毫秒拿全:
+```gdb
+set logging file flag.log; set logging on
+break putchar
+commands
+  silent
+  printf "%c", $rdi      # ARM=$r0; RISC-V/MIPS=$a0; write 调用看 fd=1 缓冲指针
+  continue
+end
+run
+```
+
+## 无调试器运行时监视（恶意样本行为分析）
+- 系统调用/库: `strace -f -e trace=network,file -o trace.log ./malware` / `ltrace -f`
+- 三路并行监视: `tcpdump -i any -w traffic.pcap`（网络）+ `inotifywait -m -r /tmp /var/tmp --format '%T %w%f %e' --timefmt '%H:%M:%S'`（落盘）+ `watch -n 1 'ps aux | grep mal'`（进程）——隔离环境（VM 快照/容器）中同时开
+- 运行时内存字符串: `pid=$(pgrep mal); cat /proc/$pid/mem 2>/dev/null | strings | grep -i flag`——解密后的明文（C2 域名/key）只存在于运行内存; 或 `gdb -p $pid -batch -ex 'dump memory dump.bin 0x400000 0x500000'`
+
+`gdb -batch -x script.gdb ./crackme && cat flag.log`。反调试检测软件断点的场景换 hbreak。
+
+**位置编码+ZF 监控一次跑恢复**: 喂 `input[i]=i`（\x00\x01\x02...），GDB 单步全程监控 `$eflags>>6&1`（ZF）——比较命中即期望值等于该位编码值，此时 `x/1i rip-5` 取比较立即数=期望值，一跑映射全部位置。适用逐位置比较+分支结构; 位置编码技巧同用于 ILP 约束提取（angr 文件 §6）标定涉及位置。与黑盒改位法互补: 黑盒逐位多跑（改一位看一位变化），白盒单步一跑全收。

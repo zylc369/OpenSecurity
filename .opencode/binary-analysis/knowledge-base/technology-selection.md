@@ -241,3 +241,15 @@ else:
 | 大数模幂 (1024-bit) | ~1000 次/s (gmpy2) | ~50000 次/s (GMP) | ~50x |
 | AES 加密 | ~10 MB/s (pycryptodome) | ~1 GB/s (OpenSSL) | ~100x |
 | 简单整数运算 | ~50M 次/s | ~2G 次/s | ~40x |
+
+---
+
+## 反编译器选型与交叉验证
+
+- **Binary Ninja**: headless `binaryninja.open_view()` → `bv.functions`/`func.hlil`（HLIL/伪 C/伪 Rust/伪 Python）。较 Ghidra 启动快、IL 更干净、Python API 顺; 免费版 cloud-based 受限
+- **Ghidra MCP** 命令族（list_functions/decompile_function/get_xrefs_to/rename_*）: agent 经 MCP 遥控 Ghidra
+- **dogbolt.org**: 上传二进制并排跑 Hex-Rays/Ghidra/BN/angr/RetDec/Snowman/dewolf/Reko/Relyze，`curl -F "file=@binary" https://dogbolt.org/api/binaries/`。适用: 单引擎输出混乱时换家（不同引擎擅长不同构造）/交叉对照捕获反编译 bug/无本地工具快速分诊
+- **补充生态**: Manticore（符号执行，原生 EVM 智能合约; 常规 RE angr 更成熟）/ Rizin+Cutter（r2 维护 fork+Cutter GUI 内置 r2ghidra 反编译器，免费全家桶）/ RetDec（LLVM 多架构反编译，`--select-ranges` 指定区域，Ghidra 支持差的架构备用）
+- 核心认知: 反编译输出不是唯一真相，交叉引用多引擎可验证正确性
+
+**二进制 diff**: "原始+修补版"双二进制题 diff 直接揭示漏洞/隐藏功能。BinDiff（IDA/Ghidra 经 BinExport 导出后 `bindiff a.BinExport b.BinExport`，相似度分数 0.0-1.0+未匹配函数=新增/删除）/ Diaphora（免费 IDA 插件+Ghidra 版）。先 diff 定位 changed/unmatched 函数再聚焦，免逐函数盲比。

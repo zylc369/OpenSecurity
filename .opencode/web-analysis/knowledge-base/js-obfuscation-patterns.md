@@ -231,3 +231,22 @@ debug(func, "window.step += 10; false");
    ├── 检查是否有 HTML 长度/哈希校验
    └── 检查 CSP script-src 是否使用 sha256 脚本哈希（详见 $AGENT_DIR/knowledge-base/csp-bypass.md）
 ```
+
+## AAEncode/JJEncode 反混淆
+两类混淆最终都走 Function(...)()——先劫持再加载:
+```javascript
+Function.prototype.constructor = function(code){ console.log("Decoded:", code); return function(){}; };
+```
+识别: 日文 Unicode 字符噪声（AAEncode）/ `$=~[]` 模式（JJEncode）。解码优先于手工重写。
+
+## 前端加密对抗
+
+**定位加密函数**: F12 搜 `encrypt`/`encryptedData`/`setPublicKey`/`publicKey`/`secretKey`/`sign`｜XHR 断点（AJAX 发送时暂停回溯调用栈）｜DOM 标签断点（子树/属性修改）定位事件处理函数。小程序: wxappUnpacker 反编译后接口与加密逻辑在 `app-service.js`。
+
+**小程序包提取与抓包**: Android root 后 `/data/data/com.tencent.mm/MicroMsg/{hash}/appbrand/pkg/` 取 .wxapkg（按时间找最新）; iOS 用 iTunes 备份提取。抓包: Proxifier 强制引流 + Burp（小程序流量不认系统代理时）。小程序地址可复制到浏览器直接打开——Web 端复用同后端，账号通用。 解包工具: wxappUnpacker（旧版出 JS+WXML）/ unveilr（新版字节码格式）; Windows 缓存 WeChat Files\Applet\<appid>\，详谱见 binary-analysis platform-reversing.md §7。
+
+**算法判定**: RSA——输入超长数值报错（只能加密短数据）｜AES——密文 Base64 且固定 Key 可还原｜Sign——找 secretKey+拼接规则重算。
+
+**自动化工具**: autoDecoder（Burp 自动加解密重写 body）｜ctool（浏览器加解密插件）｜JsRpc（远程调用浏览器内加密函数，免 Python 复现）｜LinkFinder（JS 提取接口路径）。
+
+**原则**: 基于前端生成的签名校验，绝对存在一个 Key 在前端；签名校验≠鉴权——拿到算法即可构造任意用户请求。

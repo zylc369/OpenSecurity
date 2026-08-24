@@ -14,6 +14,11 @@
 | 内存镜像（`.raw`/`.vmem`/`.dmp`，常无扩展名，`file` 显示 "Windows dump"/"data"） | 内存取证 | §3 |
 | 磁盘镜像（`.dd`/`.E01`/`.img`） | 磁盘取证 | §4 |
 | `.evtx`/`/var/log/*`/access.log | 日志分析 | §5 |
+| 图像/音频/视频/文档疑似藏数据 | 隐写分析 | `steganography-forensics.md`（专项文件） |
+| pcap 加密流量/隐蔽信道/隧道/文件层修复 | 网络取证进阶 | `network-forensics.md`（专项文件，本文件 §2 是基础侦察） |
+| 磁盘恢复/加密卷/内存 key/容器云/文件系统修复 | 磁盘内存进阶 | `disk-memory-forensics.md`（专项文件，本文件 §3-§4 是基础） |
+| Windows 事件ID/USN/ADS/反取证/MPLog | Windows 专项 | `windows-forensics.md` |
+| USB 外设/逻辑分析/显示信号/侧信道/3D 打印 | 硬件信号 | `hardware-signal-forensics.md` |
 | 压缩包/混合 | 先解压分类，按内容类型分流 | — |
 
 **通用第一步（任何类型先做）**：
@@ -47,6 +52,10 @@ tshark -r cap.pcap -Y "dns" -T fields -e dns.qry.name           # DNS 查询名
 **文件 carving（pcap 内嵌文件）**：
 ```bash
 tshark -r cap.pcap --export-objects "smb,./out/"     # SMB 传输文件
+tshark -r cap.pcap -z expert                          # 专家信息汇总（告警/错误分组统计）
+tshark -r cap.pcap -z follow,tcp,0                    # 命令行追踪流（ASCII 流还原）
+tshark -r cap.pcap -z conv,ip                          # IP 会话统计（谁和谁聊最多）
+# 捕获过滤器（BPF，-f 抓包时）与显示过滤器（-Y 读包时）语法不同: BPF=`tcp port 80 and host 1.2.3.4`; 显示=`tcp.port==80 && ip.addr==1.2.3.4`
 foremost -i cap.pcap -o out/                          # 按 magic 提取嵌入文件
 ```
 
@@ -122,8 +131,16 @@ grep -iE "4624|4625|4688|4698" sec.xml
 **Web 日志（access.log）**：
 ```bash
 grep -iE "union|select|%3Cscript|cmd=|wget|curl" access.log   # SQLi/XSS/RCE 痕迹
-awk '{print $1}' access.log | sort | uniq -c | sort -rn        # IP 频次（扫描识别）
+awk '{print $1}' access.log | sort |uniq -c | sort -rn        # IP 频次（扫描识别）
 ```
+
+**盲注日志还原**（攻击已完成、从日志反推被拖出的数据）: 布尔盲注日志形如 `...ORD(RDER BY flag LIMIT 0,1),(N,1))>V HTTP/1.1" 200 LEN`——正则提取三元组（字符位 N/比较值 V/响应长度 LEN）: 响应长度与"正确页"一致则真实 ascii=V+1、否则=V; 全部字符位按 N 排序后 `chr()` 拼接即明文。`re.findall(r'%2C(\d+)%2C1%29%29%3E(\d+).*? 200 (\d+)', line)` + 以 LEN 区分真假页。
+
+**扫描器 UA/请求指纹**（应急响应定性攻击工具）: awvs→`http contains "acunetix"`（或 wvs）/ netsparker→"netsparker" / appscan→"Appscan" / nessus→"nessus" / sqlmap→"sqlmap"。
+
+**应急响应流量/日志搜索套路**（问什么搜什么）: 黑客后台→`http contains "admin"`; webshell→搜 eval/base64 POST; robots 泄露→"Disallow"; 数据库凭据→"dbhost"; 网卡配置→"eth0"; VPN/CC 地址→统计→端点按流量排序; 暴力枚举范围→`tcp.connection.syn and ip.src==攻击者IP`; telnet 登录信息→`ip.addr==攻击者 and telnet contains "login"`。
+
+**中国菜刀 webshell 流量特征**（pcap 取证解码）: POST 参数典型三元组 `z1`=目标主机名+连接用户名+数据库密码（以自定义分隔符拼接，分隔符看 webshell 源码 `$ar = explode("分隔符", $conf)` 得知）/ `z2`=库名 / `z3`=base64 的 SQL 语句（`c2VsZWN0...` 解码即 `select ...`）; 抓到 z1 串后按分隔符切开即得数据库凭据，无需解密。登录成功判别: 同一批 POST 中响应长度显著异于其余（如 75x vs 4xx）的即成功登录。中文乱码处理: 追踪 TCP 流→显示"原始数据"→save as 文本。
 
 **Linux 日志**：`/var/log/auth.log`（登录/sudo/SSH）、`/var/log/syslog`、`/var/log/cron`、`.bash_history`。
 

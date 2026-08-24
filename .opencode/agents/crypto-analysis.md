@@ -112,6 +112,10 @@ permission:
 | `classical-crypto.md` | 古典密码：替换/维吉尼亚/频率分析 |
 | `symmetric-and-hash.md` | 对称+哈希：padding oracle/CBC bit flip/哈希长度扩展 |
 | `number-theory-construction.md` | 数论构造题：构造满足整除梅森数/模运算/位运算约束的输入 |
+| `prng-attacks.md` | PRNG 题目：MT19937 untemper/LCG 参数恢复/V8·Java·Ghidra 种子提取/时间种子 |
+| `exotic-algebra-attacks.md` | 冷门代数结构：辫群/热带半环/Paillier/FPE/Rabin/BIP39/OSS 伪造等 14 节路由表 |
+| `blockchain-attacks.md` | 区块链/智能合约：EIP-1967 槽位/ABI 编码绕过/Groth16 伪造/私钥泄漏模式/链上追踪 |
+| `fhe-attacks.md` | 全同态加密题目：HE 方案参数与攻击面 |
 
 ---
 

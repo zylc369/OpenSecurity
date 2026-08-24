@@ -86,17 +86,7 @@ Remove-Item Env:\IDA_OUTPUT
 
 {{buwai-rule:execution-discipline}}
 
-**常见失败模式与切换方向**：
-
-| 失败现象 | 切换方向 |
-|---------|---------|
-| `SetDlgItemTextA` 不生效 | 切 `SendMessage(WM_SETTEXT)` 直接发到控件句柄 |
-| 调试器断点不触发（WoW64） | 切 code cave 代码注入，不依赖断点 |
-| 标准 MD5/hash 结果不匹配 | 不要假设输入内容——用 Frida hook 或 process_patch.py 从运行时内存 dump 实际输入字节。dump 输出必须包含非空 hex 数据才算有效；空输出=hook 地址/时机错误，修工具而非改方向。拿到实际输入后再用标准库计算对比 |
-| `VirtualAllocEx` 注入失败 | 切 `.text` 段 code cave（零填充区域）|
-| 静态脱壳算法理解困难 | 立即切 OEP 定位 → 动态 dump |
-| 已知工具脱壳失败 | 切 IDA 调试器 dump → Frida dump → 静态分析 |
-| 假设标准算法但结果不匹配 | 用 process_patch.py --capture 捕获实际中间值。capture 输出必须是非空 hex（如 4b435446...）；空输出=地址/时机错，修脚本而非改分析方向。拿到非空数据后再与标准库逐字节对比 |
+**常见失败模式与切换方向表**见 `$AGENT_DIR/knowledge-base/analysis-planning.md`「执行失败切换表」节（方案执行失败时必读）。
 
 ---
 
@@ -124,29 +114,7 @@ Remove-Item Env:\IDA_OUTPUT
 
 **工具输出异常的处理**：当验证工具（Frida/Unicorn/process_patch.py/subprocess）的输出为空、报错或格式不符合预期时，这是**工具问题**不是分析结论——必须修复工具后重试，禁止基于异常输出下结论。
 
-**完整方案模板见 `$AGENT_DIR/knowledge-base/verification-patterns.md`。**
-
-### 验证决策树
-
-```
-第一步：能否定位到验证函数？
-├─ 能 → 函数是否"干净"（纯计算，不调系统 API，无 SEH）？
-│       ├─ 是 → Unicorn 模拟原函数
-│       └─ 否 → Hook 注入参数 + Hook 读返回值
-│               （DLL 例外：直接 ctypes 加载调用，更简单可靠）
-└─ 不能 → 程序类型？
-        ├─ 命令行 → subprocess 传参，读 stdout/退出码
-        ├─ DLL → 枚举导出函数 + ctypes 逐个调用
-        └─ GUI → 视觉驱动 GUI 自动化（首选）
-                  ├─ 截图 → MCP 定位控件 → 键鼠操作 → 截图读结果
-                  ├─ MCP 连续 2 次超时或不可用 → 降级 gui_verify.py
-                  │   ├─ 控件 ID 未知 → --discover
-                  │   ├─ 标准操作 → 默认模式
-                  │   ├─ 输入不进去 → --hook-inject
-                  │   ├─ 读不出结果 → --hook-result
-                  │   └─ 全部失败 → Patch 排除法 → 用户人工确认
-                  └─ 全部失败 → Patch 排除法 → 用户人工确认
-```
+**完整验证决策树与方案模板见 `$AGENT_DIR/knowledge-base/verification-patterns.md`**（GUI 降级护栏: 降级到 gui_verify.py 后，每次 GUI 操作前仍尝试 MCP 1 次，恢复则切回视觉驱动）。
 
 **核心禁令**:
 - **绝对禁止**用自己重实现代码验证自己重实现结果（作弊式验证）
@@ -210,15 +178,7 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 
 ### GUI 自动化工具
 
-> 视觉驱动 GUI 自动化方案详情见 `$AGENT_DIR/knowledge-base/gui-automation.md`。
-> 以下为脚本快速参考。
-
-| 脚本 | 用途 | 关键参数 |
-|------|------|---------|
-| `gui_launch.py` | 启动/等待/终止目标程序 | `--action launch\|wait_window\|kill --exe <TARGET> --pid <PID>` |
-| `gui_capture.py` | 截图 | `--output-dir "$TASK_DIR/views" --name <名称>` |
-| `gui_act.py` | 键鼠操作 | `--action click\|type --x <X> --y <Y> --text <TEXT> --paste` |
-| `gui_verify.py` | Win32 控件方案（MCP 不可用时降级） | `--exe <TARGET> --discover\|--hook-inject\|--hook-result` |
+> 视觉驱动 GUI 自动化方案与脚本命令模板（gui_launch/gui_capture/gui_act/gui_verify 四脚本）详见 `$AGENT_DIR/knowledge-base/gui-automation.md`。
 
 ### 脚本生成与沉淀规则
 
@@ -226,11 +186,7 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 
 ### 网页渲染工具
 
-> 当 webfetch 无法获取 SPA 页面内容时使用。详情见 `$AGENT_DIR/knowledge-base/web-rendering.md`。
-
-| 脚本 | 用途 | 关键参数 |
-|------|------|---------|
-| `web_render.py` | Playwright 无头浏览器渲染（JS 执行 + 截图） | `--url <URL> --format markdown\|text\|html --screenshot <PATH>` |
+> 当 webfetch 无法获取 SPA 页面内容时使用。命令模板与切换条件详见 `$AGENT_DIR/knowledge-base/web-rendering.md`。
 
 ### 进程 Patch 工具
 
@@ -271,6 +227,25 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 | `pwn-kernel-methodology.md` | pwn 题：内核漏洞利用（结构体泄漏、msg_msg、Dirty PageTable、竞态扩大） |
 | `arm64-pwn-methodology.md` | pwn 题目标为 ARM64 架构（调用约定、ROP gadget 形态、PAC/BTI/MTE 绕过） |
 | `deobfuscation-selection.md` | 反编译含混淆代码（OLLVM/平坦化/MBA/VM），需选择反混淆工具（D-810/deflat/QSynth） |
+| `anti-debugging-bypass.md` | 目标含反调试/反调试检测（PEB/NtQuery/INT3 扫描/时序/自哈希/Frida 检测），需绕过 |
+| `reverse-patterns.md` | 逆向通用解题模式（校验逻辑三原则/编码可视化/trace diffing/博弈论等 50+ 模式速查） |
+| `language-binary-reversing.md` | 识别语言运行时特征（Go/Rust/Kotlin/Swift/Python 字节码/PyArmor/NativeAOT/编译器指纹） |
+| `platform-reversing.md` | 平台/固件逆向（IoT 解包链/U-Boot/CAN·UDS/工控协议/WASM/冷门 ISA/macOS·iOS） |
+| `vm-bytecode-reversing.md` | 目标为自定义 VM/字节码解释器（dispatcher 识别/ISA 提取/VMProtect·Tigress/Sleigh） |
+| `v8-browser-exploitation.md` | V8/浏览器引擎利用（addrof-fakeobj/WASM RWX/沙箱逃逸/Mojo/补丁 diff 法） |
+| `windows-shellcode-loader.md` | Windows shellcode 加载与 evasion（回调执行族/编码存储/SEH+CFG 三件套/loader 组件） |
+| `angr-symbolic-execution.md` | 符号执行求解（angr pipeline/Z3 模式/Qiling 模拟/Triton 对比/路径爆炸管理） |
+| `sandbox-escape.md` | 沙箱逃逸（pyjail/bashjail/chroot/Docker/K8s/Lua/Ruby/模拟器注入面） |
+| `malware-analysis.md` | 恶意软件分析（C2 协议族/RAT 家族取证/YARA 规则/内存注入检测/VBA·.NET 配置提取） |
+| `osint-techniques.md` | OSINT 情报收集（社交媒体追踪/地理定位/用户名枚举/WHOIS·Shodan·GitHub 挖掘） |
+| `steganography-forensics.md` | 隐写分析（图片/音频/文档载体/PNG·GIF 结构/QR/工具分诊表） |
+| `network-forensics.md` | 网络流量取证（pcap 修复/TLS 解密/WiFi/DNS 隧道/协议重组/元数据信道） |
+| `disk-memory-forensics.md` | 磁盘与内存取证（文件系统恢复/RAID/加密容器/volatility 命令族/勒索处置） |
+| `windows-forensics.md` | Windows 取证（事件日志/注册表/ADS/timestomping/反取证/内存凭证顺序） |
+| `hardware-signal-forensics.md` | 硬件信号取证（GPIO 协议重建/RF·SDR/声学侧信道/显示协议/外设信道） |
+| `internal-pentest-methodology.md` | 内网渗透（Linux·Windows 提权/横向移动/隧道矩阵/网络服务渗透速查/痕迹清除） |
+| `ad-domain-attacks.md` | AD 域渗透（攻击链/Kerberoast/NTLM relay/哈希离线破解 hashcat·john） |
+| `mail-services-pentesting.md` | 邮件服务渗透（POP3/IMAP/SMTP 枚举·爆破·利用/SEG 绕过/伪造矩阵） |
 
 ---
 
@@ -305,9 +280,3 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 - 数据库修改操作执行前在输出中列出预览，批量修改支持 `IDA_DRY_RUN=1` 预览
 - 不执行可能损坏数据库的操作，数据库锁定时立即报错退出
 - 失败后不静默忽略，必须说明失败原因
-
----
-
-## IDAPython 编码规范
-
-需要生成 IDAPython 脚本时，读取 `$AGENT_DIR/knowledge-base/idapython-conventions.md` 获取完整编码规范（导入规则、日志规范、代码风格）。

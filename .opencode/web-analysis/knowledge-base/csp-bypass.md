@@ -123,6 +123,8 @@ add_header Content-Security-Policy "default-src 'self'" always;
 
 **检查**：`script-src` 中是否包含：
 - `*.cloudflare.com` / `*.googleapis.com` → 可能有 JSONP 端点
+- 云平台共享域（`*.run.app`/`*.cloudfunctions.net`/`*.azurewebsites.net`）→ **自己部署函数**即满足 CSP（gcloud functions deploy 服务任意 JS，更强原语——不是找已有端点而是造一个）
+- CDN 上的**行为式框架**（hyperscript/Alpine.js/htmx）→ 从 HTML 属性执行代码，sanitizer 不识别 `_=`/`x-data`/`hx-*` 属性、CSP 白名单域上有库: `<div _="on load fetch '/api' then put document.cookie into its body">`
 - `*.cdn.jsdelivr.net` → 可以上传恶意包
 - `*.wordpress.org` → JSONP 端点
 
@@ -148,6 +150,9 @@ add_header Content-Security-Policy "default-src 'self'" always;
 **适用条件**：CSP 中没有 `object-src` 限制（或设为 `'self'`）。
 
 **利用**：嵌入 Flash/PDF 等插件执行 JavaScript。
+
+#### 2.2.5 攻击者可控 MIME 的同源脚本 gadget
+`script-src 'self'` + nosniff 时，存在反射 payload 且响应 Content-Type 可控的端点（如 /xss?xss=<p>&mime=<m>）——选 application/javascript（或 Chrome 宽容的 jscript）使同源响应可被 `<script src>` 加载。两段式注释走私: 第一段开 `/*`、第二段 `*/payload;//` 拼成合法 JS。nosniff 拦嗅探不拦服务端自声明的 Content-Type。
 
 ### 2.3 利用 nonce/hash 实现缺陷
 

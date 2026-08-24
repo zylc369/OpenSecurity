@@ -79,6 +79,31 @@ Vary: rsc, next-router-state-tree, next-router-prefetch, Accept-Encoding
 - [ ] 目标用户（Bot/其他用户）的请求头值是什么？
 - [ ] 攻击者的缓存键和目标用户的缓存键能匹配吗？
 
+### 2.4 unkeyed header 探针清单
+
+**什么时候用**：确认目标路径被缓存后，寻找"影响响应内容但不进缓存键"的请求头（unkeyed input）——投毒的原料。
+
+**缓存存在性识别**（同一请求发两次，对比响应头）：
+
+| 响应头 | 含义 |
+|--------|------|
+| `X-Cache: HIT/MISS` | 通用缓存命中状态 |
+| `Age: <秒>` | 缓存已存活时间（>0 说明命中） |
+| `CF-Cache-Status: HIT` | Cloudflare 缓存 |
+| `Via: 1.1 varnish` | 反代/缓存软件指纹 |
+
+**探针清单**（逐头发送，观察响应是否被头值改变）：
+
+| 请求头 | 测试值 | 预期反应（若头被后端消费） |
+|--------|--------|---------------------------|
+| `X-Forwarded-Host` | `evil.com` | 响应正文/链接/重定向中反射 evil.com |
+| `X-Forwarded-Scheme` | `http` | 强制 HTTP 重定向 |
+| `X-Original-URL` | `/admin` | 路径覆盖（访问控制绕过） |
+| `X-Rewrite-URL` | `/admin` | 路径覆盖 |
+| `X-Forwarded-For` | `127.0.0.1` | 绕过 IP 限制 |
+
+**判定标准**：头值改变了响应内容 + 该头不在缓存键内（其他用户同 URL 请求命中同一缓存）→ 确认 unkeyed input，可构造投毒。成功标志：带恶意头的请求 MISS 后，无恶意头的普通请求返回 HIT 且携带恶意内容。
+
 ---
 
 ## 3. Vary 头绕过
@@ -286,3 +311,101 @@ conn.request('GET', '/_next/attack', headers={
 ```
 
 **注意**：浏览器的 Fetch API 禁止修改 `Host` 头，必须用 Python/curl 等工具。
+
+---
+
+## 8. 缓存欺骗（Cache Deception）
+
+> 与缓存投毒目标相反：投毒是让所有用户收到恶意内容；欺骗是窃取特定用户的敏感数据。两者可与请求走私组合成跨用户攻击。
+
+### 8.1 路径后缀手法
+
+利用路径后缀让缓存层误认为是静态资源（缓存层看扩展名决定缓存，Web 服务器忽略多余路径段返回动态内容）：
+
+```
+/profile.php/nonexistent.js
+/profile.php/.css
+/profile.php/../test.js
+/profile.php/%2e%2e/test.js
+/profile.php/x.avif
+```
+
+验证：对敏感 API/页面追加 `.css`/`.js`/`.json` 后缀请求，检查 `X-Cache: Hit` 且缓存键不含认证头（无认证请求可命中同一缓存）。
+
+**变体——用户名带 .js 后缀**: 注册用户名 `hfs-12345678.js` → `/profile/<user>.js` 本身即静态扩展名 URL，CDN 按扩展名当静态资产缓存（不 Vary Cookie）+ 个人页 self-XSS → 自己登录态访问一次污染边缘缓存 → 后续访问者（含 admin bot）拿到攻击者的已认证 HTML，self-XSS 变蠕虫式存储 XSS。
+
+### 8.2 CSPT 辅助的缓存欺骗（账户接管链）
+
+前置：SPA 存在客户端路径遍历（CSPT，前端 JS 把用户输入拼接进后续请求路径）+ CDN 按扩展名缓存。
+
+```
+受害者访问 → /user?userId=../../../v1/token.css
+SPA 发起认证请求 → GET /v1/users/info/../../../v1/token.css
+浏览器规范化 → GET /v1/token.css（自动携带 X-Auth-Token）
+CDN 按 .css 缓存 → 响应体是受害者的 token JSON
+攻击者访问 /v1/token.css → 从缓存读到 token
+```
+
+CSPT 漏洞点常见于 SPA 中把 URL 参数/查询参数拼接到 fetch 路径的位置。
+
+---
+
+## 9. URL 差异投毒（URL Discrepancy）
+
+缓存服务器和 Web 服务器对 URL 的解析不一致 → 让缓存存储非预期内容。
+
+### 9.1 分隔符差异
+
+| 分隔符 | 框架行为 | 示例 |
+|--------|---------|------|
+| `;` | Spring 视为 matrix 参数 | `/hello;var=a/world` → `/hello/world` |
+| `.` | Rails 视为格式后缀剥离 | `/MyAccount.css` → `/MyAccount` |
+| `%00` | OpenLiteSpeed 截断路径 | `/MyAccount%00aaa` → `/MyAccount` |
+| `%0a` | Nginx 分割 URL | `/users/MyAccount%0aaaa` → `/account/MyAccount` |
+
+探测：动态页面路径后追加分隔符候选 + 随机字符串，响应与原始页面一致 → 有效分隔符。行为依框架版本/配置而异，用前实测。
+
+### 9.2 编码差异
+
+```
+GET /myAccount%3Fparam HTTP/1.1
+```
+
+- Web 服务器解码 `%3F` 为 `?` → 返回 `/myAccount` 的内容
+- 缓存服务器保留 `/myAccount%3Fparam` 作为缓存键
+
+### 9.3 点段（Dot Segment）规范化差异
+
+```
+GET /static/../home/index HTTP/1.1
+```
+
+缓存以原始路径为键；源站规范化为 `/home/index` 返回内容 → 动态内容被缓存在 `/static/` 路径键下。
+
+### 9.4 静态资源缓存规则利用
+
+| 缓存触发条件 | 利用路径 |
+|---|---|
+| 按扩展名（.js/.css/.png/.jpg） | `/home$image.png` → 缓存键含 image.png，源站响应 /home |
+| 按目录（/static/ /assets/ /wp-content/ /media/ /public/） | `/home/..%2fstatic/something` → 缓存规则命中，源站响应 /home |
+| 按文件名（/robots.txt /favicon.ico /index.html） | `/home/..%2Frobots.txt` → 缓存 /robots.txt，响应 /home |
+
+核心模式：让"缓存规则判定的路径"与"源站实际处理的路径"解耦。
+
+---
+
+## 10. 缓存投毒 DoS 技术
+
+无法注入 XSS 时，投毒缓存为错误响应实现 DoS：
+
+| 技术 | 原理 |
+|------|------|
+| Header Oversize (HHO) | 请求头超出源站头大小限制但不超缓存限制 → 400 被缓存 |
+| Meta Character (HMC) | unkeyed 头注入 `\n` `\r` 控制字符触发源站 400 |
+| Method Override (HMO) | `X-HTTP-Method-Override: POST` 改变方法触发错误 |
+| Unkeyed Port | `Host: target.com:1` 端口不入缓存键但影响源站行为 |
+| Fat GET | GET 带 body 触发源站 403（走私用法见 request-smuggling.md §3） |
+| Host 大小写 | `Host: Cdn.TARGET.com` 大小写敏感源站返回 404 被缓存 |
+| 路径编码 | `GET /api/v1%2e1/user` 源站 404，缓存层不解码以编码形式缓存 |
+
+共同模式：找到"影响源站响应但不影响缓存键命中"的输入 → 错误响应占住正常 URL 的缓存条目。

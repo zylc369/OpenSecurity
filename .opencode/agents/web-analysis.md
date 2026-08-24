@@ -65,63 +65,7 @@ permission:
 
 **触发条件**：分析型需求、混合型需求。查询型需求跳过。
 
-根据目标类型选择信息收集路径：
-
-#### A-1: 白盒（有源码）
-
-```
-1. 读取项目结构（ls / tree）
-2. 识别技术栈
-   ├── package.json / composer.json / requirements.txt → 框架和依赖版本
-   ├── Dockerfile / docker-compose.yml → 基础设施配置
-   ├── nginx.conf / .htaccess → 反向代理/缓存配置
-   └── config files → 应用配置
-3. 识别攻击面
-   ├── 路由定义 → 所有可达的 URL 端点
-   ├── 中间件 → 请求处理链（CT 覆盖、认证、CORS）
-   ├── 模板引擎 → 反射点
-   ├── 数据库操作 → 注入点
-   └── 文件操作 → LFI/RFI
-4. 识别安全机制
-   ├── CSP / XSS 过滤 → XSS 可行性
-   ├── Cookie 安全属性 → Cookie 窃取可行性
-   ├── CORS 配置 → 跨域利用可行性
-   └── 认证/授权机制 → 权限绕过可能性
-```
-
-#### A-2: 黑盒（只有 URL）
-
-```
-1. HTTP 基础探测
-   ├── curl -v → 响应头（Server/X-Powered-By/Vary/Set-Cookie）
-   ├── curl -I → HEAD 请求
-   └── 多路径探测（/robots.txt / /sitemap.xml / /.well-known/）
-2. 框架指纹识别
-   ├── 响应头特征（X-Powered-By: Next.js / X-Request-ID 等）
-   ├── Cookie 名称（PHPSESSID / JSESSIONID / connect.sid 等）
-   ├── HTML 特征（meta generator / 特有 class 名 / 内联脚本模式）
-   └── 路径特征（/_next/ → Next.js / /wp-admin/ → WordPress）
-3. 攻击面枚举
-   ├── 可达路径（爬虫 + 常见路径字典）
-   ├── 参数发现（HTML 表单 / JS 中的 API 调用 / URL 参数）
-   └── 功能点识别（登录/上传/搜索/评论等用户输入点）
-4. 安全机制探测
-   ├── CSP 头分析
-   ├── Cookie 属性检查
-   ├── CORS 策略测试
-   └── WAF 指纹识别
-```
-
-#### A-3: Docker/基础设施分析
-
-当目标包含 Docker 配置时，额外收集：
-
-```
-1. 容器架构（服务间关系、网络隔离、端口映射）
-2. 反向代理配置（缓存规则、上游服务、负载均衡）
-3. Bot/爬虫配置（如果存在 → XSS 类题目）
-4. 环境变量（敏感信息、配置开关）
-```
+根据目标类型选择信息收集路径，**完整流程清单见 `$AGENT_DIR/knowledge-base/web-methodology.md` §1（白盒: 项目结构→技术栈→攻击面→安全机制）与 §2（黑盒: HTTP 探测→框架指纹→攻击面枚举→安全机制探测）**。目标含 Docker 配置时额外收集: 容器架构/反向代理缓存规则/Bot 爬虫配置/环境变量敏感信息。
 
 ### 阶段 B：分析规划（强制）
 
@@ -137,19 +81,7 @@ permission:
 
 {{buwai-rule:execution-discipline}}
 
-**常见失败模式与切换方向**：
-
-| 失败现象 | 切换方向 |
-|---------|---------|
-| 某路径投毒无缓存（MISS/无 X-Cache 头） | 换路径测试哪些路径被缓存 |
-| Vary 头阻止缓存命中 | 分析 Vary 字段，寻找值差异（空值 vs 缺失） |
-| XSS payload 被转义 | 换注入上下文（HTML 属性/JS 字符串/URL）或换编码方式 |
-| Cookie 无法外传（无外网） | 换数据渗出方式（DNS/缓存中缓存/时间侧信道） |
-| 框架版本不明确 | 从 buildId/chunk 文件名/依赖版本推断 |
-| 标准攻击手法全部失败 | 读框架源码（node_modules/vendor）找实现差异 |
-| 所有已知 XSS 方向被阻止 | 回溯：是否有非 XSS 利用方式（CSS 注入、Dangling markup、缓存投毒、CSRF 链） |
-| 所有已知攻击方向都失败 | 系统性回溯：回到信息收集，检查遗漏的攻击面/输入点/配置细节（见 execution-discipline「系统性卡住恢复」） |
-| 漏洞存在但无法链接成攻击链 | 单独报告每个漏洞，重新审视是否有遗漏的链接环节 |
+**常见失败模式与切换方向表**见 `$AGENT_DIR/knowledge-base/web-methodology.md` §4a「执行失败切换表」（方案执行失败时必读）。
 
 ---
 
@@ -179,22 +111,7 @@ permission:
 
 ### 网页渲染工具（通过 $SHARED_DIR 调用）
 
-> 当 webfetch 无法获取 SPA 页面内容时使用。详情见 `$SHARED_DIR/knowledge-base/web-rendering.md`。
-
-| 脚本 | 用途 | 关键参数 |
-|------|------|---------|
-| `$SHARED_DIR/scripts/web_render.py` | Playwright 无头浏览器渲染（JS 执行 + 截图） | `--url <URL> --format markdown\|text\|html --screenshot <PATH>` |
-
-**页面内容获取工具选择**：
-
-| 场景 | 工具 | 原因 |
-|------|------|------|
-| 获取静态页面 HTML | webfetch | 快速，无 JS 执行开销 |
-| 获取 API/JSON 响应 | webfetch | 不需要渲染 |
-| 页面需要 JS 渲染才能看到内容（SPA） | web_render.py | 需要 JS 执行 |
-| 需要页面截图 | web_render.py | webfetch 无法截图 |
-| 需要登录后的页面内容 | 编写 Playwright 脚本（`$TASK_DIR/render_auth.py`），在脚本中设置 Cookie/Token 后渲染 | web_render.py 不支持传入认证信息，需要自行编写带认证的渲染脚本 |
-| 获取 CTF writeup / 技术文章 | webfetch | 文章类页面通常不需要 JS |
+> webfetch 无法获取 SPA 页面/需截图时用 `$SHARED_DIR/scripts/web_render.py`。**与 webfetch 的选择策略、命令模板见 `$SHARED_DIR/knowledge-base/web-rendering.md`**。需要登录后的页面内容时 web_render.py 不支持传认证——自行编写 Playwright 脚本（`$TASK_DIR/render_auth.py`）在脚本中设置 Cookie/Token 后渲染。
 
 ### 源码分析工具
 
@@ -214,34 +131,7 @@ permission:
 | `$AGENT_DIR/scripts/sandbox_escape.py` | 无（纯标准库） | iframe sandbox 逃逸 payload 生成：sandbox 测试 JS、控制器页面、notebook 注入、SSO blob URL 绕过 | `generate_sandbox_test_payload`、`generate_controller_page`、`generate_notebook_payload`、`generate_sso_bypass_url` |
 | `$AGENT_DIR/scripts/bot_analyze.py` | 无（纯标准库） | Bot server.js 自动分析：提取关键参数、分类模式（单页/双页）、生成攻击时间线 | `analyze_bot_file`、`analyze_bot_code`、`BotAnalysis` |
 
-**使用方式**（在临时脚本中）：
-
-```python
-import sys
-sys.path.insert(0, "$AGENT_DIR/scripts")
-
-# Web 基础操作
-from web_helpers import create_session, get_csrf, register_and_login
-
-# 缓存投毒
-from cache_poison import CachePoison, probe_accept_encoding
-
-# PHP 参数炸弹
-from param_bomb import build_bomb_post_data, build_bomb_get_url, build_two_stage_bomb
-
-# Markdown XSS 测试
-from markdown_fuzz import MarkdownFuzzer, generate_payloads
-
-# Sandbox 逃逸
-from sandbox_escape import (
-    generate_sandbox_test_payload,
-    generate_controller_page,
-    generate_notebook_payload,
-)
-
-# Bot 代码分析（命令行: python bot_analyze.py <server.js>）
-from bot_analyze import analyze_bot_file
-```
+**使用方式**：临时脚本头部 `import sys; sys.path.insert(0, "$AGENT_DIR/scripts")`，再按上表 import 对应模块/函数（bot_analyze 亦可命令行: `python bot_analyze.py <server.js>`）。
 
 ---
 
@@ -265,6 +155,35 @@ from bot_analyze import analyze_bot_file
 | `browser-debugging.md` | 需要浏览器自动化/远程调试时。CDP 核心 API、Playwright + CDP 模式、debug() API、常见陷阱 |
 | `client-side-attacks.md` | 有 admin bot + flag 在 bot 端。bfcache 污染、CSS trigram exfil、xsleak、iframe reparenting、connection pool |
 | `race-conditions.md` | 竞态条件（单包攻击/HTTP/2 并发）；原型链污染（sources/sinks/gadgets/RCE 链） |
+| `sqli-advanced.md` | SQL 注入实战（WAF 绕过全族/无列名/堆叠预处理/DNS OOB/写 shell/sqlmap 进阶） |
+| `xss-advanced.md` | XSS 进阶（DOM Clobbering/Shadow DOM/Unicode 折叠/Referer 泄漏/XS-Leak 组合） |
+| `command-injection.md` | 命令注入（无字母数字 RCE/无参数 RCE/临时文件 glob/分段写/各语言绕过表） |
+| `ssti.md` | 模板注入（Jinja2/Twig/Smarty/EL/SpEL 沙箱逃逸/过滤绕过/动态索引查找） |
+| `xxe.md` | XML 外部实体（OOB/XInclude/像素通道外带/解析器差异） |
+| `path-traversal-lfi.md` | 路径穿越与文件包含（伪协议矩阵/日志投毒/filter 链 RCE/死亡 exit 绕过） |
+| `file-upload.md` | 文件上传（upload-labs 全关绕过/解析漏洞/二次渲染/htaccess·user.ini/WAF 绕过） |
+| `deserialization.md` | 反序列化（Java/PHP/Python/.NET/Ruby/Node 全栈 POP 链/Phar/逃逸技巧族） |
+| `ssrf-advanced.md` | SSRF 进阶（IP 变体表/gopher 协议/云元数据/302 升级/Dict·FTP·LDAP 利用） |
+| `request-smuggling.md` | HTTP 请求走私（CL·TE 组合/h2c/HTTP2 伪头/降级翻译/缓存 desync） |
+| `host-header-attacks.md` | Host 头攻击（密码重置投毒/缓存投毒/路由绕过/Web 缓存欺骗） |
+| `prototype-pollution.md` | 原型链污染（gadget 总表 EJS·Handlebars·Lodash/client side/沙箱逃逸） |
+| `jwt-attacks.md` | JWT 攻击（算法混淆/jwk·jku·kid 注入/None/爆破/Flask session） |
+| `auth-attacks.md` | 认证攻击（逻辑缺陷审计/OTP·MAC 伪造/账号碰撞/JA4/基础设施后攻击） |
+| `graphql-security.md` | GraphQL（端点发现/introspection/绕过/别名批量/隐藏参数） |
+| `nosql-injection.md` | NoSQL 注入（Mongo 操作符/认证绕过/盲注/CouchDB·Redis·ES） |
+| `ldap-injection.md` | LDAP 注入（过滤器绕过/盲注四法/AD UAC 属性） |
+| `xslt-injection.md` | XSLT 注入（文件读取/写入通道/.NET RCE/盲利用/WAF 绕过） |
+| `jndi-injection.md` | JNDI 注入（Log4Shell/JDK 版本约束/BeanFactory 绕过/WAF 变形） |
+| `web-crypto-attacks.md` | Web 密码学攻击（Padding Oracle/CBC bit-flip/弱随机数/长度扩展） |
+| `ghost-bits-cast-attack.md` | Ghost Bits（Unicode 大字符编码注入/三族根因/上传·JSON·URL 场景/组件配方） |
+| `waf-bypass.md` | WAF 绕过（识别指纹/产品矩阵 Cloudflare·AWS·国内/网络层绕过/决策树） |
+| `csrf-clickjacking.md` | CSRF 与点击劫持（SameSite 绕过/JSON CSRF/token 缺陷/frame-busting 绕过） |
+| `cors-misconfiguration.md` | CORS 错误配置（null origin/正则绕过/Vary Origin 投毒/JSONP/子域链） |
+| `dangling-markup.md` | Dangling Markup 注入（CSP 旁路七向量/可窃取数据表/组合攻击） |
+| `websocket-security.md` | WebSocket 安全（CSWSH/升级走私/消息注入/Socket.IO/二进制帧） |
+| `subdomain-takeover.md` | 子域接管（14 服务商指纹/CNAME·NS·MX 认领/影响评估） |
+| `web-privesc.md` | Web 提权（Mass Assignment/端点·方法·Header·Cookie 越权/SPA 前端绕过） |
+| `china-products-attacks.md` | 国产 CMS·OA·中间件攻击速查（泛微/WebLogic/ThinkPHP/Fastjson/Shiro 产品→漏洞映射） |
 
 ### 通用知识库（$SHARED_DIR/knowledge-base/）
 
