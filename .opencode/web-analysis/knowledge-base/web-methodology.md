@@ -259,7 +259,7 @@ const poll = setInterval(() => {
 
 | 枚举方向 | 方法 | 工具 |
 |---------|------|------|
-| 路径发现 | 爬虫 + 常见路径字典 | curl / gobuster / ffuf |
+| 路径发现 | 爬虫 + 常见路径字典 | curl / dirsearch |
 | 参数发现 | HTML 表单 / JS API 调用 | 浏览器 DevTools / curl |
 | 子域名 | DNS 枚举 / 证书透明度 | subfinder / crt.sh |
 | 技术栈 | 响应头 + 行为特征 | whatweb / wappalyzer |
@@ -382,32 +382,50 @@ xray 插件: xss/sqldet/cmd-injection(含 SSTI)/dirscan/path-traversal/xxe/uploa
 
 ```bash
 nuclei -u T -t cves/ -tags CVE-2021-44228    # 秒级
-nuclei -u T -t cves/ -tags tomcat            # 产品定向
+nuclei -u T -t cves/ -tags tomcat            # 产品定向（nuclei 为附录工具; 单 CVE 验证按模板 raw 字段转 curl 手动复现）
 nuclei -u T -t cves/ -severity critical,high # 1-3 分钟
 grep -rl "apache 2.4.49" ~/nuclei-templates/http/cves/   # 内容搜模板
 ```
 模板字段: raw=原始请求（直接转 curl）/matchers=成功判定/extractors=数据提取。发现必手动复现（模板匹配非 100%）。
 
-### 7.3 fuzz 工具
+### 7.3 fuzz 实现（dirsearch + python 内联）
 
-ffuf（多位置+精细过滤）:
+**目录/路径**:
 ```bash
-ffuf -u URL/FUZZ -w common.txt -e .php -ac                    # 目录，-ac 自动校准
-ffuf -u 'URL?FUZZ=test' -w burp-parameter-names.txt -fs 4242 # 参数
-ffuf -H 'Host: FUZZ.target.com' -u URL/ -w subs.txt -fs SIZE # vhost
-ffuf -d 'u=HFUZZ&p=WFUZZ' -w users.txt:HFUZZ -w pass.txt:WFUZZ -fc 401  # 爆破
+$(dirname $PYTHON_CMD)/dirsearch -u URL -e php,jsp         # 扩展名追加
+$(dirname $PYTHON_CMD)/dirsearch -u URL -e bak,old,zip,tar.gz,sql  # 备份专项
+$(dirname $PYTHON_CMD)/dirsearch -u URL -r --recursion-depth 3 -x 404  # 递归+排 404
 ```
-过滤/匹配: -fc/-fs/-fw/-fl/-fr/-ft 排除，-mc/-ms/-mr 反向（`-mr 'flag\{.*\}'` 猎 flag）。模式 clusterbomb(笛卡尔积)/pitchfork/sniper。默认 40 线程易 429 → -t 10 -p 0.1。
 
-dirsearch（快速目录）: `-e php,jsp` 扩展｜`-e bak,old,zip,tar.gz,sql` 备份专项｜`-r --recursion-depth 3` 递归｜`-x 404` 排码。
-wfuzz（编码器特色）: `-z file,p.txt,urlencode-urlencode` 双重编码过 WAF｜`-z file,p.txt,base64`｜`--basic FUZZ:FUZ2Z` 认证爆破｜`-z list,GET-POST-PUT -X FUZZ` 方法枚举。
-dalfox（XSS 专项）: `--blind` 回调/`--waf-evasion`/`--mining-dom`；管道 `gau T | grep "=" | dalfox pipe --silence`。
+**任意位置 fuzz**（python 线程池模板——路径/参数/vhost/POST body/认证爆破通用）:
+```python
+import requests, itertools, concurrent.futures as cf
+def fuzz(tmpl, words, headers=None, filt=lambda r: r.status_code != 404):
+    # tmpl 含 {F} 占位: "http://T/{F}.php" / "http://T/?{F}=1"; headers 值同占位
+    def one(w):
+        kw = {"url": tmpl.format(F=w), "timeout": 8}
+        if headers: kw["headers"] = {k: v.format(F=w) for k, v in headers.items()}
+        try: r = requests.get(**kw); return (w, r) if filt(r) else None
+        except Exception: return None
+    with cf.ThreadPoolExecutor(10) as ex:  # 线程勿超 10——高并发易 429，需节流加 time.sleep(0.1)
+        return [x for x in ex.map(one, words) if x]
+```
+- **过滤/匹配**（fuzzer 的 -fs/-fc/-mr 语义）: filt 闭包写判定——`lambda r: len(r.content) != BASELINE`（排同长响应=自动校准）、`lambda r: "flag{" in r.text`（猎 flag）、`r.status_code in (200,301)` 白名单。
+- **多字典笛卡尔积**（用户×密码）: `words = itertools.product(users, pwds)`，tmpl 用 {F0}/{F1} 双占位（format 换 format_map）。
+- **编码器过 WAF**（请求前函数链）: `words = [urllib.parse.quote(w, safe='') for w in words]`（双重编码套两层）/ base64 变换。
+- **方法枚举**: requests.request(method, ...) 外层循环 GET/POST/PUT。
+
+**vhost 枚举**（Host 头占位）: `fuzz("http://IP/", vhosts, headers={"Host": "{F}.target.com"})`，响应长度/状态与基线比对判命中。
+
+**XSS 专项**: dalfox 为附录工具（盲打/waf-evasion 引擎）; 常规 XSS fuzz 用上方模板+payload 字典。
 
 **老版本后门速查**: vsftpd 2.3.4（用户名 :) 结尾→TCP 6200 shell）/ proftpd 1.3.3c / unreal-ircd 3.2.8.1（源码后门）——banner 版本命中先试后门。**Bazaar .bzr 泄露**: bzr check 报错含缺失文件路径→wget 循环重建仓库→bzr log/diff 翻全部修订（删除的凭据可恢复; .git/.hg/.svn 同理）。**.idea/workspace.xml** 等 IDE 项目文件泄露结构/配置。
 
 **侦察增补行**: source map（.map 文件）直接读; 404 的 favicon.ico/robots.txt 可能仍带数据（strings favicon.ico | grep -i flag）; Tor 隐藏服务 feroxbuster --proxy socks5h://127.0.0.1:9050; URL 参数删鉴权组件（admin.auth.inc→admin.inc）与扩展名变换（.inc/.php/.html）; IDOR 枚举中 403=资源存在仅无权（404=不存在）——403 的资源换方法/参数再试。
 
 ### 7.4 侦察与端口扫描工具链
+
+> 本节为附录工具生态（go 工具族——高速无状态扫描/SAN 批量/渲染爬虫无 python 等价，见 tool-dependency-index 附录）。**项目内最小替代路径**: 子域→`curl "https://crt.sh/?q=%25.target.com&output=json"`（证书 SAN）+ dnspython 爆破; 存活探测→python 线程池模板（§7.3）; 端口→nmap（附录）; 历史 URL→`curl "http://web.archive.org/cdx/search/cdx?url=*.target.com*&output=json&limit=500"`; JS 端点→web_render.py（playwright 渲染后 grep）; 测绘→FOFA/Shodan API curl。环境具备 go 工具族时用下方管道效率更高。
 
 **端口扫描三件分工**: naabu（SYN 高并发快 10×，非 root 自动 CONNECT，`-top-ports 100/1000`，端口发现首选）→ nmap 深度（`-sV` 版本 `--version-intensity 9` 精确/`-O` OS 指纹/`-A` 组合/600+ NSE; UDP 慢限定 `-sU -p 53,161,500`）; masscan 大规模（/16+ 异步无状态 `--rate 10000`，需 root，nmap XML 兼容输出）。
 **fscan 内网优先**: 单二进制 scp 即用/600 线程/内置 10 服务弱口令爆破/POC（MS17-010·Redis 未授权·WebLogic·Struts2 兼容 xray POC）/利用动作直接打（Redis 写公钥）/NetBIOS 域控识别/国产 CMS·OA 指纹; `-nopoc` 与 `-nobr` 独立开关，`-m ssh/ms17010` 单模块，`-pa` 追加端口。同族 gogo（500 并发 `--filter`）。nikto: `-Tuning` 数字（1上传 2默认文件 3信息泄露 4注入 6DoS 8命令执行 9SQLi; `x6` 排除 DoS）/`-no404` 减误报。服务指纹: fingerprintx（51 协议 `--json`，`naabu -silent | fingerprintx`）/nerva。

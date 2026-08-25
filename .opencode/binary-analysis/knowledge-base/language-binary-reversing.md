@@ -94,7 +94,7 @@ D: _D 前缀+长度前缀 mangling; Phobos _D3std; 模板变体函数成群（�
 
 ## §18 .NET NativeAOT 与 LLVM IR
 
-**NativeAOT**: 无 IL 纯原生代码，dnSpy/ILSpy/dotPeek 全部无效。识别锚点: `System.Private.CoreLib` 字符串（运行时内嵌）; 类型元数据被重组（非标准 #Strings/#US 堆，不能按常规元数据表解析）; 字符串=长度前缀 UTF-16（非 null 终止）。分析路径: 按 native 流程走（IDA/Ghidra），导出表/字符串交叉引用切入。
+**NativeAOT**: 无 IL 纯原生代码，ilspycmd/de4dot 等 IL 反编译器全部无效。识别锚点: `System.Private.CoreLib` 字符串（运行时内嵌）; 类型元数据被重组（非标准 #Strings/#US 堆，不能按常规元数据表解析）; 字符串=长度前缀 UTF-16（非 null 终止）。分析路径: 按 native 流程走（IDA/Ghidra），导出表/字符串交叉引用切入。
 
 **LLVM IR (.ll)**: 直接编译运行动态验证（静态读 IR 慢且易错）:
 ```bash

@@ -198,7 +198,7 @@ throw onerror=eval,1
 
 | 工具 | 用途 |
 |------|------|
-| Burp Suite + Turbo Intruder | 单包攻击（见 `race-conditions.md`）、DOM Invader（自动找 DOM XSS/PP 源/sink） |
+| python httpx(h2)/asyncio | 单包攻击（见 `race-conditions.md`）; DOM 源/sink 用 JS 静态 grep |
 | Playwright | admin bot 交互、批量二分 leak、timing oracle |
 | 自建 express/fastify | CSS leak server、bfcache/reparenting 复现台 |
 | 多版本 Chrome | 旧版 Chrome 行为差异是 exploit 前置条件 |

@@ -243,10 +243,19 @@ Function.prototype.constructor = function(code){ console.log("Decoded:", code); 
 
 **定位加密函数**: F12 搜 `encrypt`/`encryptedData`/`setPublicKey`/`publicKey`/`secretKey`/`sign`｜XHR 断点（AJAX 发送时暂停回溯调用栈）｜DOM 标签断点（子树/属性修改）定位事件处理函数。小程序: wxappUnpacker 反编译后接口与加密逻辑在 `app-service.js`。
 
-**小程序包提取与抓包**: Android root 后 `/data/data/com.tencent.mm/MicroMsg/{hash}/appbrand/pkg/` 取 .wxapkg（按时间找最新）; iOS 用 iTunes 备份提取。抓包: Proxifier 强制引流 + Burp（小程序流量不认系统代理时）。小程序地址可复制到浏览器直接打开——Web 端复用同后端，账号通用。 解包工具: wxappUnpacker（旧版出 JS+WXML）/ unveilr（新版字节码格式）; Windows 缓存 WeChat Files\Applet\<appid>\，详谱见 binary-analysis platform-reversing.md §7。
+**小程序包提取与抓包**: Android root 后 `/data/data/com.tencent.mm/MicroMsg/{hash}/appbrand/pkg/` 取 .wxapkg（按时间找最新）; iOS 用 iTunes 备份提取。抓包（小程序流量不认系统代理时）: iptables/Proxifier 强制引流到 mitmproxy 透明代理。小程序地址可复制到浏览器直接打开——Web 端复用同后端，账号通用。 解包工具: wxappUnpacker（旧版出 JS+WXML）/ unveilr（新版字节码格式）; Windows 缓存 WeChat Files\Applet\<appid>\，详谱见 binary-analysis platform-reversing.md §7。
 
 **算法判定**: RSA——输入超长数值报错（只能加密短数据）｜AES——密文 Base64 且固定 Key 可还原｜Sign——找 secretKey+拼接规则重算。
 
-**自动化工具**: autoDecoder（Burp 自动加解密重写 body）｜ctool（浏览器加解密插件）｜JsRpc（远程调用浏览器内加密函数，免 Python 复现）｜LinkFinder（JS 提取接口路径）。
+**自动化**: 加密 body 自动重写——python 复现加密函数后脚本预处理请求｜JsRpc（远程调用浏览器内加密函数，免 Python 复现）。
+**JS 接口路径提取**（自包含，无需外部工具）: 
+```bash
+# 提取绝对/相对路径形态的端点
+grep -oE "['\"](/[a-zA-Z0-9][a-zA-Z0-9/_.-]{2,})['\"]" app.js | sort -u
+# 提取 api/fetch/axios 调用上下文（前后各一行看参数名）
+grep -nE "(api|fetch|axios|\\$\.(get|post)|url)" app.js | head -50
+# 提取 REST 风格接口（v1/v2 段常见）
+grep -oE "['\"][^'\"]*/(api|v[0-9])/[^'\"]*['\"]" *.js | sort -u
+```
 
 **原则**: 基于前端生成的签名校验，绝对存在一个 Key 在前端；签名校验≠鉴权——拿到算法即可构造任意用户请求。

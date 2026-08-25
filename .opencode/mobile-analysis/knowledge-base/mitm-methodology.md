@@ -21,7 +21,7 @@
 ```
 目标应用是否有 SSL Pinning？
 ├── 否 → 方案 A（DNS 重定向 + 代理）
-│        配置简单，Burp/Charles 即可
+│        配置简单，mitmproxy 即可
 │
 ├── 是 → 应用类型？
 │        ├── Flutter 应用 → 是否需要让 APP 显示篡改内容？
@@ -175,13 +175,13 @@ Interceptor.attach(libc.getExportByName("read"), {
 
 ### 3.3 方案 A（纯代理）适用时
 
-如果应用**没有 SSL pinning**，直接用 DNS 重定向 + 代理（Burp/Charles）更简单：
+如果应用**没有 SSL pinning**，直接用 DNS 重定向 + 代理（mitmproxy）更简单：
 
 ```bash
 # iptables 重定向（Android）
 adb shell iptables -t nat -A OUTPUT -p tcp --dport 443 -j DNAT --to-destination PROXY_IP:PROXY_PORT
 
-# 或使用 adb forward + Burp
+# 或使用 adb forward + mitmproxy
 adb forward tcp:8080 tcp:8080
 # 在应用中配置 HTTP 代理（如果应用支持）
 ```

@@ -103,7 +103,9 @@ GCS：V4 查 X-Goog-SignedHeaders 是否含 content-type；Resumable URL 权限�
 - 扩展 ASCII：`shell.php[0xcc]`（测试 0x7f/0x88/0xb0/0xc0/0xaa/0xe0/0xcc）——WAF 处理不一致、文件系统忽略
 - JSPX：WAF 只查 .jsp 时用 .jspx（Tomcat 默认解析，XML 格式可绑命名空间）
 - 响应修改 allowedTypes（见 §2）
-- **0x0a 文件名截断**: 文件名可控时在 `.php` 后 hex 插入 `0a` 字节（bp Repeater hex 视图插入）绕 WAF 文件名匹配，访问 `shell.php%0a` 执行
+- **0x0a 文件名截断**: 文件名可控时在 `.php` 后插入 0x0a 字节（python requests 构造上传正文时文件名参数直接写 "shell.php\n"）绕 WAF 文件名匹配，访问 `shell.php%0a` 执行
+
+> 术语: **multipart/form-data** = HTTP 文件上传的标准正文格式——请求头 `Content-Type: multipart/form-data; boundary=XXX`，正文用 `--XXX` 分隔成多段，每段自带字段名/文件名/Content-Type 小头再接内容。文件上传漏洞的解析差异（WAF 按段判断 vs 服务器按段落盘）都发生在这套结构里。
 - **multipart 层绕过族**（WAF 与容器解析差异）:
   - 垃圾数据填充: 主机 WAF 设校验大小上限（如 1M）——前 1M 填垃圾内容木马放尾部绕内容校验; 或垃圾数据放开头绕文件名校验; 或加长 Content-Disposition 参数值使 WAF 检测出错
   - 双/多 filename: 重复 filename 字段; **IIS 多 Content-Disposition 取第一个**而部分 WAF 取最后一个——错位绕过（IIS6/7 实测）

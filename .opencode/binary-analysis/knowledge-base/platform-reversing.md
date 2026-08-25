@@ -20,8 +20,8 @@ eBPF: bpftool prog list / dump xlated（反汇编）/ dump jited（原生码）;
 
 ## §3 游戏引擎（IL2CPP 见 language-binary-reversing §4）
 
-- **UE**: .pak（UnrealPakTool/quickbms）; FModel 浏览; Blueprint=Kismet 字节码（K2_SetTimer/DoOnce/Branch）; UObject 反射 StaticClass 识类型; FString UTF-16
-- **Unity Mono**: Data/Managed/Assembly-CSharp.dll → dnSpy（反编译+调试）; AssetStudio/AssetRipper 提资源; flag 藏点含 PlayerPrefs 存档/TextMesh/Shader 源码; APK patch: dnSpy 改 Update → apktool b 重签
+- **UE**: .pak 解包 UnrealPakTool/quickbms; Blueprint=Kismet 字节码（K2_SetTimer/DoOnce/Branch）; UObject 反射 StaticClass 识类型; FString UTF-16
+- **Unity Mono**: Data/Managed/Assembly-CSharp.dll → ilspycmd 反编译; 资源提取 AssetRipper CLI; flag 藏点含 PlayerPrefs 存档/TextMesh/Shader 源码; patch 路径: dnlib（.NET 库）改 Assembly-CSharp.dll 的 Update 逻辑 → 回打包 → apktool b 重签
 - **反作弊**: EAC（内核+完整性）/ BattlEye（注入+加密信道+截图）/ VAC（用户态+延迟封禁）; CTF 只绕特定检查——存档操纵常比运行时易
 - **Lua 游戏**: luadec/unluac（5.1-5.3）/ luajit -bl + ljd; 识别 lua51.dll/lua_ 串; hook lua_pcall 截执行
 - **Tauri**: 前端资产 Brotli 压缩嵌入可执行文件——`index.html` 交叉引用定位 asset 索引表 → dump 压缩 blob → Brotli 解压得前端源码; 索引表结构参照 tauri-codegen/src/embedded_assets.rs

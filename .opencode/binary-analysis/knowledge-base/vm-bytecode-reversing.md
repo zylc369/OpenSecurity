@@ -48,7 +48,7 @@ dispatcher 静态分析过复杂（混淆/规模大）时的替代路线:
 **难度表**: VMProtect·Themida 高（CISC 大 handler 集）/ Tigress 中高 / movfuscator 中（全 mov 无 dispatcher 特征）/ CTF 自制低中。
 工具: Pin/DynamoRIO（trace）/ REVEN（录制回放）/ Miasm（IR 提升）/ Sleigh（复用规范）。
 
-**补集**: VMProtect 识别锚点 .vmp0/.vmp1 节+熵>7.5+push/pop 密集入口+mutation engine（同 opcode 每 build handler 不同，脚本不可跨版本复用）; devirt 工具 VMPAttack（IDA 自动识别 handler）/NoVmp（VTIL）。**CTF 策略: 操作追踪优于完全 devirtualize**——Frida hook dispatch 记 handler 索引+栈状态，聚焦 VM 内对输入的操作（比较/加密）即可，全还原很少必要。Themida dump 六步: ScyllaHide Themida preset → 跑 OEP（多次尝试）→ Scylla Dump → IAT Autosearch+Get Imports → Fix Dump → 修复后按 normal 分析（识别 .themida/.winlice 节+内核级反调试三合一）。
+**补集**: VMProtect 识别锚点 .vmp0/.vmp1 节+熵>7.5+push/pop 密集入口+mutation engine（同 opcode 每 build handler 不同，脚本不可跨版本复用）; devirt 工具 VMPAttack（IDA 自动识别 handler）/NoVmp（VTIL）。**CTF 策略: 操作追踪优于完全 devirtualize**——Frida hook dispatch 记 handler 索引+栈状态，聚焦 VM 内对输入的操作（比较/加密）即可，全还原很少必要。Themida dump（AI 无头路径）: Frida 反反调试脚本跑起进程 → 内存特征定位 OEP（入口节熵降+API 调用模式）→ Frida 读全内存段 dump → 自写脚本重建导入表（脱壳后 IAT 重建的自动化: 扫 dump 中 IAT 指针回填名称）→ 修复后按 normal 分析（识别 .themida/.winlice 节+内核级反调试三合一）。
 
 ## §5 Ghidra Sleigh 处理器
 

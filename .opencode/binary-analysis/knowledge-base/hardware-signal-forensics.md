@@ -10,7 +10,7 @@
 - **RFCOMM 蓝牙**: btrfcomm 过滤; 头 4B/5B（raw[2]&0x01）; 载荷 order+group 双键排序拼接; USB bulk 分片同构
 - **GBA 帧缓冲**: raw[3]==0x06 内存 dump 块→240×160 RGB565（r>>8/g>>3/b<<3）; type 7=音频
 - **USB 音频**: `tshark -T fields -e usb.iso.data` → Audacity raw signed 16bit PCM
-- **bulk 文件提取**: `usb.transfer_type==3` + capdata → Wireshark "Leftover Capture Data"→Export Packet Bytes
+- **bulk 文件提取**: usb.transfer_type==3 过滤 + tshark -T fields -e usb.capdata 直接出 hex（Leftover Capture Data 字段）
 
 ## §2 3D 打印
 

@@ -11,8 +11,8 @@
 | TLS 无 key | coredump 掏 master key: OpenSSL ssl_session_st 里 master_key[48] 在 session_id[32] **前面**——握手抄 session ID→内存搜→前 48B; keylog 行 `RSA Session-ID:<hex> Master-Key:<hex>` |
 | SMB3 | NTLMv2 抽取（messagetype==0x3 的 ntproofstr）→hashcat 5600→MD4/HMAC-MD5 推 session key→SP800-108 KDF（Label SMBC2SCipherKey/SMBS2CCipherKey+preauth_hash）→AES-128-GCM 解 Transform 头（[4:20]tag/[20:32]nonce/[20:52]AAD/[52:]密文） |
 | WiFi | aircrack-ng（-a 1 WEP PTW/-a 2 WPA 字典）→airdecap-ng 出 *-dec.pcapng; 密钥来源: rom-0 路由器配置（HTTP 流量里 GET /rom-0→LZS 解压→WPA 密码）; 密钥轮换→分段解密逐段找提示; IPP job-name 是 flag 高发点 |
-| RDP | pcap 里 PKCS12(.p12/.pfx) 传输（常 UDP/FTP）: `openssl pkcs12 -in c.p12 -nocerts -nodes -out key.pem`→Wireshark RSA keys（Protocol=tpkt, Port 3389） |
-| RADIUS | `radius2john.pl cap.pcap`→john→Shared Secret 填 Wireshark→User-Password 自动解出 |
+| RDP | pcap 里 PKCS12(.p12/.pfx) 传输（常 UDP/FTP）: `openssl pkcs12 -in c.p12 -nocerts -nodes -out key.pem`→tshark `-o rsa_keys:"tpkt,3389,keyfile" key.pem`（旧版 RSA 解密选项; 新版 RDP 走 tls.keylog_file） |
+| RADIUS | `radius2john.pl cap.pcap`→john 破解 Shared Secret→tshark `-o radius.secret:<key>` 自动解 User-Password |
 | RC4 流 | shellcode 256 轮 KSA 指纹; key=TCP 流首段固定长度突发（如 32B urandom）其后高熵流; 标准 RC4 解 |
 
 ## §2 隐蔽信道与外泄
@@ -34,7 +34,7 @@
 ## §3 隧道与多层
 
 - **dnscat2 重组**: 单域名海量 hex/base32 标签; 每 chunk 剥 9B 协议头; 相邻比较去重传; 重组流按魔术识别
-- **假协议流**: Wireshark 判 TLS 但 raw hex 是 PK 头——按字节不按 dissector 判断
+- **假协议流**: 协议解析器判 TLS 但 raw hex 是 PK 头——按字节特征不按 dissector 判断
 - **多层 XOR**: key 藏带内协议（mDNS TXT 记录 rrname 含 key）; ZIP 内两等长流各解密后单流乱码→逐位取可打印的那路合并
 - **Brotli 炸弹接缝**: 极端压缩比+全量解压 OOM→比较相邻块找周期破坏点（如 105B 周期）→只解异常块
 
@@ -47,7 +47,7 @@
 ## §5 pcap 文件层与重建
 
 - **pcapfix 修复**: `pcapfix -d x.pcap`（也支持 pcapng）; 手工: 全局头 24B=magic(4)+ver(4)+tz(4)+sigfigs(4)+snaplen(4)+linktype(4); magic 微秒 `0xa1b2c3d4`/纳秒 `0xa1b23c4d` 小端
-- **pcapng 自定义块**: 块=Type(4)+TotalLength(4)+Body+TotalLength(4); 标准类型 {0x0A0D0D0A,0x1..0x6} 之外 Wireshark 静默忽略——逐块解析拼 body（常 gzip）
+- **pcapng 自定义块**: 块=Type(4)+TotalLength(4)+Body+TotalLength(4); 标准类型 {0x0A0D0D0A,0x1..0x6} 之外解析器静默忽略——自写脚本逐块解析拼 body（常 gzip）
 - **校验和重建**: 缺字节 256 爆破+IP 头反码和验证（有效头代入后和 0）; TCP 校验和含伪头; 多字节用 seq+头结构缩空间
 - **分卷归档重组**: 同尺寸文件集+一个小的尾片=分卷; 排序看 Apache 目录列表页的时间戳（非下载序）; 密码在另一 TCP 流聊天记录
 - **HTTP 外发快速分诊**: 第一步 `--export-objects http,dir` 再深挖; multipart POST/异常 UA（DeadDropBot 类）/死投递模式

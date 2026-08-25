@@ -281,4 +281,4 @@ $PYTHON_CMD "$SHARED_DIR/scripts/frida_unpack.py" <目标二进制> -o "$TASK_DI
 
 ## .NET 保护器（ConfuserEx 型）
 
-.NET 保护器加密方法体，运行时从 <Module> .cctor 解密。dump: dnSpy → Assembly Explorer → <Module> .cctor F9 断点 → F5 跑到构建完成 → 右键 Save Module（token 完整）→ `de4dot` 清混淆符号。原理: 磁盘代码被保护但运行时表示是明文——与 native 壳 OEP dump 同理。
+.NET 保护器加密方法体，运行时从 <Module> .cctor 解密。dump: de4dot 解混淆 → ilspycmd 反编译定位 <Module> .cctor 解密逻辑 → 复现解密算法还原方法体: F5 跑到构建完成 → 右键 Save Module（token 完整）→ `de4dot` 清混淆符号。原理: 磁盘代码被保护但运行时表示是明文——与 native 壳 OEP dump 同理。

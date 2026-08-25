@@ -46,7 +46,7 @@ PEB 四字段（x64: `mov rax,gs:[0x60]`）:
 | ProcessHeap.Flags | Heap+0x40 | 0x40000062 | 0x02 |
 | ProcessHeap.ForceFlags | Heap+0x44 | 0x40000060 | 0 |
 
-绕过: 四字段清零（ScyllaHide 自动）。直接读 PEB 的检测必须 patch 内存，hook API 无效。
+绕过: 四字段清零（Frida 直接写 PEB 内存）。直接读 PEB 的检测必须 patch 内存，hook API 无效。
 
 NtQueryInformationProcess 三类:
 
@@ -67,7 +67,7 @@ CheckRemoteDebuggerPresent 底层=NtQIP(DebugPort)，hook 底层一并覆盖。I
 - UD2 无效指令异常同族
 
 线程/早期执行:
-- **TLS 回调**: 在 main 前执行。绕过: x64dbg "Break on TLS Callbacks" / WinDbg `sxe ld` / GDB `starti`
+- **TLS 回调**: 在 main 前执行。断点: WinDbg `sxe ld` / GDB `starti`（停在首个镜像加载处再下 TLS 断点）
 - **ThreadHideFromDebugger (0x11)**: NtSetInformationThread 调用后线程对调试器隐身（症状=静默失控）。绕过: hook NtSIT 当 0x11 时 NOP
 - **硬件断点检测**: GetThreadContext 读 DR0-DR3 非零。绕过: hook GTC 清零（注意与 0xCC 扫描互斥: 一个要软断点一个要硬断点，组合用 Frida 免断点 hook）
 - **内核调试器检测**: NtQuerySystemInformation(SystemKernelDebuggerInformation)。绕过: TitanHide 驱动
@@ -95,7 +95,7 @@ elf.save('patched')
 ## 5. 系统化 Bypass 四阶段 + 决策树
 
 ```
-Phase 1 自动工具(~80%): ScyllaHide 全选项 / LD_PRELOAD(ptrace+时序 shim)
+Phase 1 自动化(~80%): Frida 反反调试脚本群（PEB 清零+时间函数平滑+API 返回值改写）/ LD_PRELOAD(ptrace+时序 shim)
 Phase 2 早期执行(+10%): 断 TLS/_init → patch pre-main 检查
 Phase 3 自定义(+8%): trace exit/abort 回溯 → Frida hook 残余 → 二进制 patch 持久化
 Phase 4 多进程/内核(+2%): 双进程调试 / TitanHide / Qiling 全模拟
@@ -107,7 +107,7 @@ Phase 4 多进程/内核(+2%): 双进程调试 / TitanHide / Qiling 全模拟
 | 症状 | 根因 | 动作 |
 |---|---|---|
 | main 前崩 | TLS 回调 | 开 TLS 断点 |
-| 启动即崩 | TRACEME / PEB | LD_PRELOAD / ScyllaHide |
+| 启动即崩 | TRACEME / PEB | LD_PRELOAD / Frida PEB 清零 |
 | 固定点崩 | API 检查 | hook 返回值 |
 | 随机点崩 | 时序 | hook rdtsc/QPC |
 | 断点命中即崩 | INT 2D / SIGTRAP | VEH / nostop pass |
@@ -116,7 +116,7 @@ Phase 4 多进程/内核(+2%): 双进程调试 / TitanHide / Qiling 全模拟
 
 ## 6. 工具矩阵与保护器画像
 
-| 检测类 | GDB | x64dbg+ScyllaHide | WinDbg | Frida | Qiling |
+| 检测类 | GDB | WinDbg | Frida | Qiling |
 |---|---|---|---|---|---|
 | ptrace 自附加 | catch syscall | N/A | N/A | hook 返 0 | 模拟 |
 | PEB/NtQuery | N/A | 自动 | 手动 eb | hook | 模拟 |
@@ -127,9 +127,9 @@ Phase 4 多进程/内核(+2%): 双进程调试 / TitanHide / Qiling 全模拟
 | fork watchdog | follow-fork | N/A | N/A | hook fork | 双模拟 |
 | 0xCC 扫描 | 硬件断点 | 硬件断点 | 硬件断点 | 免断点 | 模拟 |
 
-ScyllaHide 配置: Plugins→Options→勾 PEB 三项+NtQuery 全类+NtSetInfo(HideFrom)+GetTickCount+QPC→Apply 重启调试会话。
+反反调试覆盖清单（Frida 脚本逐项 hook）: PEB 三字段+NtQueryInformationProcess 全类+NtSetInformationThread(HideFromDebugger)+GetTickCount/QPC 时间平滑——一个脚本全包。
 
-保护器画像: VMProtect(PEB+时序+驱动级→TitanHide+ScyllaHide) / Themida(多层 PEB+SEH+时序→ScyllaHide+手动) / Enigma(IsDebuggerPresent+CRC→x64dbg+ScyllaHide+patch 哈希) / 恶意软件自定义(Frida+Qiling)。Qiling 全模拟是终极兜底（无真实调试器特征）。
+保护器画像: VMProtect(PEB+时序+驱动级→TitanHide+Frida hook 群) / Themida(多层 PEB+SEH+时序→Frida+逐项 patch) / Enigma(IsDebuggerPresent+CRC→Frida 改返回值+patch 哈希) / 恶意软件自定义(Frida+Qiling)。Qiling 全模拟是终极兜底（无真实调试器特征）。
 
 ## 7. 恶意软件环境检查（anti-sandbox/anti-VM）与 Ghidra 修补）
 

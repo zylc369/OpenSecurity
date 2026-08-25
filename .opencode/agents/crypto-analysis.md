@@ -72,7 +72,7 @@ permission:
 | Coppersmith 无解 | 检查 bound 是否满足、换 small_roots 参数或换攻击 |
 | 离散对数超时 | 检查阶是否光滑（Pohlig-Hellman）/ 曲线是否 anomalous |
 | 求出明文非 flag | 检查 byte order / 是否多步加密 / 回溯参数识别 |
-| sage 调用报 ImportError | 装坏了，重装：`~/bw-security-analysis/.venv/bin/pip install --force-reinstall sagemath-standard` |
+| sage 调用报 ImportError | 装坏了，重装：`$PYTHON_CMD -m pip install --force-reinstall sagemath-standard` |
 
 {{buwai-rule:execution-discipline}}
 

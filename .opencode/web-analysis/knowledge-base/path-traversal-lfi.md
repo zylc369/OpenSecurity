@@ -53,7 +53,7 @@
 ## 4. PHP Wrapper 矩阵
 
 **php://filter**（首试）：`convert.base64-encode/resource=index.php` 读源码｜`string.rot13`｜iconv 变换｜链式多重变换。
-- **iconv 编码爆破**（编码名被 WAF 拦时）: `convert.iconv.$A$.$B$` 两编码位用 Intruder 集束炸弹交叉爆破，可用编码字典 UCS-4*/UCS-4BE/UCS-4LE/UCS-2*/UCS-2BE/UCS-2LE/UTF-32*/UTF-32BE/UTF-32LE/UTF-16*/UTF-16BE/UTF-16LE/UTF-7/UTF7-IMAP/UTF-8*/ASCII*/EUC-JP*/SJIS*/eucJP-win*/SJIS-win*（带 * 的含多种变体），选响应最长的组合即有效编码对。
+- **iconv 编码爆破**（编码名被 WAF 拦时）: `convert.iconv.$A$.$B$` 两编码位 python itertools.product 双循环交叉爆破（编码字典） UCS-4*/UCS-4BE/UCS-4LE/UCS-2*/UCS-2BE/UCS-2LE/UTF-32*/UTF-32BE/UTF-32LE/UTF-16*/UTF-16BE/UTF-16LE/UTF-7/UTF7-IMAP/UTF-8*/ASCII*/EUC-JP*/SJIS*/eucJP-win*/SJIS-win*（带 * 的含多种变体），选响应最长的组合即有效编码对。
 - **filter chain RCE**：`synacktiv/php_filter_chain_generator`——iconv 链内存写任意 PHP，无需上传。
 - **dechunk oracle 盲读**：`synacktiv/php_filter_chains_oracle_exploit` 错误差分逐字符。
 - **wrapwrap**（ambionics）：文件内容加前后缀→转 XXE/SSRF/反序列化。

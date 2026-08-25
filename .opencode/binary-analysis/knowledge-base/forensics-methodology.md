@@ -31,7 +31,7 @@ strings -n 8 <素材> | grep -iE "flag|ctf|key|pass"   # 快速捞敏感串
 
 ## 2. 网络取证（pcap）
 
-工具：**tshark**（Wireshark CLI，AI 友好）。
+工具：**tshark**。
 
 **基本侦察**：
 ```bash
@@ -56,27 +56,27 @@ tshark -r cap.pcap -z expert                          # 专家信息汇总（告
 tshark -r cap.pcap -z follow,tcp,0                    # 命令行追踪流（ASCII 流还原）
 tshark -r cap.pcap -z conv,ip                          # IP 会话统计（谁和谁聊最多）
 # 捕获过滤器（BPF，-f 抓包时）与显示过滤器（-Y 读包时）语法不同: BPF=`tcp port 80 and host 1.2.3.4`; 显示=`tcp.port==80 && ip.addr==1.2.3.4`
-foremost -i cap.pcap -o out/                          # 按 magic 提取嵌入文件
+tshark -r cap.pcap --export-objects http,out_http       # HTTP 传输文件导出（pcap 场景首选）
 ```
 
 ---
 
 ## 3. 内存取证（Volatility 3）
 
-工具：**Volatility 3**（命令 `vol` 或 `python -m volatility3`；v3 自动识别 profile，无需像 v2 手动指定）。
+工具：**Volatility 3**（随 $PYTHON_CMD 环境提供，调用 `$(dirname $PYTHON_CMD)/vol`；v3 自动识别 profile，无需像 v2 手动指定）。
 
 **Windows 镜像常用插件**：
 ```bash
-vol -f mem.raw windows.info                                    # OS 版本/架构
-vol -f mem.raw windows.pslist                                  # 进程列表
-vol -f mem.raw windows.pstree                                  # 进程树（看父子异常）
-vol -f mem.raw windows.netscan                                 # 网络连接（找 C2）
-vol -f mem.raw windows.cmdline                                 # 各进程命令行
-vol -f mem.raw windows.filescan | grep -iE "flag|\.txt|\.zip"  # 扫文件名
-vol -f mem.raw windows.dumpfiles --pid <PID>                   # 提取某进程文件
-vol -f mem.raw windows.hashdump                                # SAM 密码哈希
-vol -f mem.raw windows.registry.printkey --key "SAM\\Domains\\Account"  # 注册表
-vol -f mem.raw windows.malfind --pid <PID>                     # 检测注入代码（malware）
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.info                                    # OS 版本/架构
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.pslist                                  # 进程列表
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.pstree                                  # 进程树（看父子异常）
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.netscan                                 # 网络连接（找 C2）
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.cmdline                                 # 各进程命令行
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.filescan | grep -iE "flag|\.txt|\.zip"  # 扫文件名
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.dumpfiles --pid <PID>                   # 提取某进程文件
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.hashdump                                # SAM 密码哈希
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.registry.printkey --key "SAM\\Domains\\Account"  # 注册表
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.malfind --pid <PID>                     # 检测注入代码（malware）
 ```
 
 **Linux 镜像**：插件前缀换 `linux.`（`linux.pslist`/`linux.netscan`/`linux.bash` 等）。
@@ -96,8 +96,8 @@ AI 用命令行（autopsy 是 GUI，不便自动化）。
 
 **文件 carving（按 magic 提取，含已删文件）**：
 ```bash
-foremost -i image.dd -o out/             # 通用 carving（图片/文档/zip）
-binwalk -e firmware.bin                  # 固件/嵌入文件系统提取
+$(dirname $PYTHON_CMD)/binwalk -e firmware.bin   # 固件/嵌入文件系统提取（签名库扫描+递归解包，覆盖通用 carving）
+$(dirname $PYTHON_CMD)/binwalk --dd=".*" image.dd  # 按签名提取全部嵌入文件（含已删文件的 magic 级恢复）
 ```
 
 **挂载只读分析**：
@@ -107,7 +107,7 @@ mount -o ro,loop,show_sys_files -t ntfs-3g image.dd /mnt   # NTFS（含 $MFT 等
 ```
 
 **Windows artifact（解析注册表 hive：SAM/SYSTEM/SOFTWARE/NTUSER.DAT）**：
-- 工具：regripper（`rip.pl -r <hive> -f <profile>`）或 python-registry
+- 工具：python-registry（随 $PYTHON_CMD 环境提供; `import Registry; Registry.Registry(hive)` 程序化解析）
 - 关键键：`UserAssist`（程序执行记录）、`Shellbags`（浏览过的文件夹）、`Run`/`RunOnce`（持久化）、`MountedDevices`
 - 捞串：`strings -n 8 NTUSER.DAT | grep -iE "flag|recent"`
 
@@ -119,7 +119,7 @@ mount -o ro,loop,show_sys_files -t ntfs-3g image.dd /mnt   # NTFS（含 $MFT 等
 
 **Windows 事件日志（`.evtx`）**：
 ```bash
-evtx_dump security.evtx > sec.xml        # 转 XML（python-evtx 或 evtx-dump）
+python-evtx 解析（$PYTHON_CMD 环境: `from Evtx.Evtx import Evtx; Evtx(path).records()` 逐条 record; evtx_dump 为 Rust 等效外部 CLI） security.evtx > sec.xml        # 转 XML（python-evtx 或 evtx-dump）
 grep -iE "4624|4625|4688|4698" sec.xml
 ```
 关键事件 ID：
@@ -170,13 +170,13 @@ awk '{print $1}' access.log | sort |uniq -c | sort -rn        # IP 频次（扫�
 |------|------|--------------|
 | tshark | pcap 分析 | `-r`/`-Y <filter>`/`--export-objects <proto,dir>` |
 | vol (Volatility 3) | 内存取证 | `vol -f <dump> windows.<plugin>`；Linux 用 `linux.*` |
-| foremost | 文件 carving | `foremost -i <img> -o <dir>` |
+| binwalk | 文件 carving/固件提取 | `$(dirname $PYTHON_CMD)/binwalk -e <file>` |
 | binwalk | 固件/嵌入文件 | `binwalk -e <file>` |
 | strings | 字符串提取 | `strings -n 8 <file>` |
-| evtx_dump | Windows 日志 | `evtx_dump <evtx>` |
-| regripper | 注册表 hive | `rip.pl -r <hive> -f <profile>` |
+| python-evtx 解析（$PYTHON_CMD 环境: `from Evtx.Evtx import Evtx; Evtx(path).records()` 逐条 record; evtx_dump 为 Rust 等效外部 CLI） | Windows 日志 | `python-evtx 解析（$PYTHON_CMD 环境: `from Evtx.Evtx import Evtx; Evtx(path).records()` 逐条 record; evtx_dump 为 Rust 等效外部 CLI） <evtx>` |
+| python-registry | 注册表 hive | `import Registry; Registry.Registry("NTUSER.DAT")` |
 
-**安装**：`pip install volatility3`；tshark/foremost/binwalk 走系统包管理（brew/apt）；`pip install python-evtx python-registry`。
+**获取**：python 依赖全部在 $PYTHON_CMD 环境（volatility3/binwalk/python-registry/python-evtx/pytsk3/scapy/yara 等）; tshark 为外部工具（`brew install wireshark`），无 tshark 时 pcap 解析用 scapy（$PYTHON_CMD 环境: `from scapy.all import rdpcap`），HTTP 对象导出用 scapy 遍历 tcp.payload 重组。
 
 > autopsy/FTK/X-Ways 是 GUI 工具，AI 自动化优先用上方命令行替代；确需 GUI 时参考 `$SHARED_DIR/knowledge-base/gui-automation.md`。
 

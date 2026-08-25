@@ -161,7 +161,6 @@ idat 执行失败时：
 
 > Windows 上使用 PowerShell 执行。与上方 bash 模板一一对应。
 > 关键差异: `VAR=xxx command` → `$env:VAR="xxx"; command`，路径分隔符 `\`。
-> `$PYTHON_CMD` 由 Plugin 保证为 venv Python 绝对路径（含第三方包），无需区分平台。
 
 ### 预检查脚本
 

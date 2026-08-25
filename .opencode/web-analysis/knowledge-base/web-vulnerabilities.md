@@ -372,7 +372,7 @@
 2. 多次并发请求同一操作
 
 **利用思路**：
-- 用 Burp Intruder / Python 并发请求
+- 并发请求打时序差: python 线程池/aiohttp 并发同一端点
 - 时间窗口内的双重使用
 - TOCTOU（检查时间/使用时间不一致）
 - **Barrier 同步并发 + 签名 cache-bust**: `if counter < 4` 检查先于自增时——multiprocessing Barrier(N) 全体对齐后同时发出，全部在任一自增前过检查；每请求对签名做无害变形（nonce 前补零）防服务端缓存验证结果绕过竞争窗口

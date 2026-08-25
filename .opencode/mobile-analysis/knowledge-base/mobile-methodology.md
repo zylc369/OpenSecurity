@@ -84,7 +84,7 @@ Payload/
 │     1. apktool d app.apk -o unpacked
 │     2. 检查 assets/ 下的 HTML/JS/CSS 文件
 │     3. 搜索 JS Bridge 接口（addJavascriptInterface、shouldOverrideUrlLoading）
-│     4. 如需抓包 → 使用 mitmproxy/Charles 抓取 HTTPS 流量
+│     4. 如需抓包 → 使用 mitmproxy 抓取 HTTPS 流量
 │     5. 如需动态操作 WebView 内部 GUI（填表单、点按钮）→ 视觉驱动方案
 │        a. mobile_screenshot.py 截图
 │        b. MCP extract_text_from_screenshot 识别控件坐标

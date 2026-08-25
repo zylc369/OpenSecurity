@@ -20,7 +20,7 @@
 
 **缓存投毒**：缓存键不含 Host + 应用把 Host 写进响应 → 全用户中毒。多数 CDN 含 Host，自建 Varnish/Nginx 可能不含。
 
-**vhost 枚举**：`ffuf -u http://IP -H "Host: FUZZ.target.com" -w vhosts.txt`；试 localhost/admin/staging/internal，对比响应差异。
+**vhost 枚举**：python 循环设 Host 头（`for v in vhosts: requests.get(url, headers={"Host": f"{v}.target.com"})` 按响应差异判命中）；试 localhost/admin/staging/internal，对比响应差异。
 
 ## 2. 校验绕过全集
 
@@ -31,7 +31,7 @@
 5. **尾点**：`target.com.`——DNS 等价、字符串校验不等
 6. **TAB/空格**：`target.com\tattacker.com`——校验看前段、解析取后段
 7. **包裹值**：`"attacker.com"`/`<attacker.com>`——一侧剥一侧不剥
-8. **连接状态攻击**：keep-alive 首请求合法 Host 过校验、同连接第二请求恶意 Host（部分代理只校验首请求）。Burp Repeater 保连接手测
+8. **连接状态攻击**：keep-alive 首请求合法 Host 过校验、同连接第二请求恶意 Host（部分代理只校验首请求）。python http.client 同一 HTTPConnection 连发两请求复现
 9. **DNS 组合**：自己域名 A 记录指向目标 IP → Host 是你的域、请求打他们服务器 → 绕 IP 控制
 
 **框架差异**：PHP `$_SERVER['HTTP_HOST']` 直接可注入（SERVER_NAME 仅 UseCanonicalName On 安全）｜Django `USE_X_FORWARDED_HOST=True` 绕 ALLOWED_HOSTS｜Rails 6+ HostAuthorization 缓解｜Express 无内建校验。

@@ -23,7 +23,8 @@
 
 **密码重置验证码流程缺陷五型**: ①空验证码（空值绕过 `if code == expected`）②万能验证码（000000/123456 后门值）③验证码重用（未做一次性标记）④验证码回显（响应含明文，改返回包同理）⑤4-6 位纯数字无频率限制全空间爆破。测试顺序: 空值/万能值 → 重放已用码 → 查响应 → 估熵定爆破。Sequencer 分析随机性。
 
-**验证码 OCR 自动识别**: captcha-killer-modified（Burp 插件）+ ddddocr（本地 OCR 服务）——拦截验证码图片转发识别接口自动填充，Intruder 全自动爆破。简单绕过失败后再上 OCR。**响应递归提取（Intruder Grep-Extract）**: 载荷参数需从上一响应动态取（每请求刷新的 token/验证码字段）——Settings→Grep-Extract 从响应正文选区提取定义变量 → Pitchfork 模式把该变量设为 payload 2 与密码字典 payload 1 配对迭代; 密码 md5 后传输场景用 payload Processing→Hash 规则内联加密免外部脚本。
+**验证码 OCR 自动识别**: 项目内 OCR 工具（ocr_extract_text，本地 glm-ocr 多模态模型——扭曲/干扰线/算术型验证码都稳，prompt 可引导如"只输出图中字符，区分大小写"）。脚本流程: 请求验证码端点存图片到 $TASK_DIR → ocr_extract_text 识别 → 带码重放登录请求，循环爆破。简单绕过失败后再上 OCR。
+**响应递归提取**: 载荷参数需从上一响应动态取（每请求刷新的 token/验证码字段）——纯脚本实现: 正则/XPath 从上一响应提取变量 → f-string 注入下一请求构造 → 会话保持循环; 密码 md5 后传输场景在脚本内 hashlib.md5(pwd).hexdigest() 内联加密，全程无外部爆破器依赖。
 
 **接收者篡改与 openid 篡改**: ①重置请求同时含目标账号与手机号/邮箱参数——手机号替换为自己的→验证码到己方手机→重置目标账号（服务端不校验绑定关系）②openid 作为客户端可控参数直接篡改登录他人账号（微信/小程序生态）③Access-Reset-Ticket 类重置票据直接置入跳过验证。
 
@@ -62,7 +63,7 @@
 - **JA4** = TLS ClientHello 参数哈希（版本/密码套件排序/扩展/签名算法/群组）；不同 TLS 库同 UA 不同 JA4
 - **JA4H** = HTTP 头顺序+名称+值哈希；浏览器/curl/requests 头序各异
 
-绕过: JA4H 用 OrderedDict 复刻目标浏览器头序（Host→UA→Accept→Accept-Language→Accept-Encoding→Connection）；JA4 用真实浏览器（老版本进 VM）或 `curl --ciphers <list> --tls-max 1.2`。识别: 报错提 JA3/JA4/TLS fingerprint、curl 与浏览器同头不同响应。工具: ja4 CLI、Wireshark JA4 插件。Cloudflare/Akamai bot 检测已广泛部署。
+绕过: JA4H 用 OrderedDict 复刻目标浏览器头序（Host→UA→Accept→Accept-Language→Accept-Encoding→Connection）；JA4 用真实浏览器（老版本进 VM）或 `curl --ciphers <list> --tls-max 1.2`。识别: 报错提 JA3/JA4/TLS fingerprint、curl 与浏览器同头不同响应。工具: ja4 CLI、tshark（≥4.2 内置 JA4 字段 -T fields -e tls.ja4）。Cloudflare/Akamai bot 检测已广泛部署。
 
 ## §7 服务端信息泄露与会话伪造
 

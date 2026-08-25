@@ -9,9 +9,9 @@
 
 **参数**：loc/url/path/endpoint/imageUrl/dest/redirect/uri/callback/load/file/resource/src。**非显式**：PDF/截图生成、Webhook、CSV/RSS 导入、OAuth redirect_uri、X-Forwarded-Host、XXE 实体、GraphQL `@link`。参数名补充变体：share/wap/link/target/u/3g/display/sourceURL/imageURL/domain。
 
-**确认**：Collaborator 回调 → 时间差（开放端口快/关闭慢）→ localhost 端口清单（8080/22/6379/9200/5984/**2375 Docker**/4840）→ 错误差异（not found vs refused vs timeout 摸拓扑）。
+**确认**：interactsh 回调 → 时间差（开放端口快/关闭慢）→ localhost 端口清单（8080/22/6379/9200/5984/**2375 Docker**/4840）→ 错误差异（not found vs refused vs timeout 摸拓扑）。
 
-**file 协议内网横向三步**（无回显限制时的标准链）: ①`file:///etc/hosts` 看本机网卡/网段 → ②`file:///proc/net/arp` 读 ARP 缓存表拿存活内网主机（burp Intruder number 1-254 爆网段同理） → ③`dict://<内网IP>:<port>` 逐端口探测开放服务（Intruder 1-65535）→ 定位 Redis/FastCGI 等再用 gopher 打。Windows 路径 `file://D:/images/1.png`（盘符即 host 位）。
+**file 协议内网横向三步**（无回显限制时的标准链）: ①`file:///etc/hosts` 看本机网卡/网段 → ②`file:///proc/net/arp` 读 ARP 缓存表拿存活内网主机（python 循环替换末位 1-254 爆网段同理） → ③`dict://<内网IP>:<port>` 逐端口探测开放服务（python 并发循环 1-65535）→ 定位 Redis/FastCGI 等再用 gopher 打。Windows 路径 `file://D:/images/1.png`（盘符即 host 位）。
 
 **localhost 变体**：`127.1`｜`127.000.000.001`｜`0x7f000001`｜`2130706433`｜`0177.0000.0000.0001`｜`[::]`/`[::1]`/`[::ffff:127.0.0.1]`。
 **元数据变体**：`2852039166`｜`0xa9fea9fe`｜`0251.0376.0251.0376`｜`[::ffff:169.254.169.254]`｜`[fd00:ec2::254]`｜`*.nip.io`。

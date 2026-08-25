@@ -226,34 +226,9 @@ IDA_OEP_ADDR=0x401000 IDA_OUTPUT="$TASK_DIR/unpacked.exe" \
 
 ---
 
-## 替代调试器: x64dbg 与 WinDbg 用户态
+## 调试器选型（Windows 用户态）
 
-IDA 调试器不可用（如强反调试需隐藏调试器特征）或目标场景更适合交互式调试时使用。
-
-### x64dbg（Windows 用户态开源调试器主力）
-
-- 快捷键: F2 断点 / F7 步入 / F8 跳过 / F9 运行 / F4 运行到光标 / Ctrl+F9 执行到返回 / Ctrl+G 跳转 / Ctrl+B 内存搜索
-- 字符串搜索: 右键 → 查找 → 当前模块/所有模块（定位校验函数）
-- 视图 → SEH 链 / 调用栈 / 句柄
-- 修补: 双击指令改汇编 → 应用; 补丁管理器导出补丁后文件
-- 插件: **ScyllaHide**（反反调试，隐藏调试器特征）/ **OllyDump**（内存转储，脱壳配套）/ xAnalyzer / Graph
-
-### WinDbg 用户态命令速查（内核双机调试见 kernel-driver-analysis.md）
-
-```cmd
-windbg -pn target.exe           :: 按进程名附加
-bp kernel32!CreateFileW         :: API 符号断点
-bl / bc *                       :: 断点列表 / 清除
-d esp L10                       :: 查看栈
-dd poi(esp+4)                   :: 指针解引用后 dump（查参数）
-k / lm                          :: 调用栈 / 模块列表
-r eax = 0                       :: 改寄存器
-```
-
-远程: 服务端 `windbg -server tcp:port=5000 target.exe`，客户端 `windbg -remote tcp:server=<IP>,port=5000`。
-Python 扩展 PyKD: `!py` 交互，pykd.setBreakpoint()/go() 脚本化。
-
-内存 dump: `procdump -ma PID dump.dmp`（Windows 完整转储，等价 Linux gcore）。
+主力就是 IDA（$IDAT 已配置）+ Frida（AI 无头主力）。两者覆盖用户态全部场景: IDA 调试器支持符号断点（bp kernel32.CreateFileW）、条件断点、内存监视，脚本化走 idat + IDAPython; Frida 负责 hook/改返回值/dump 内存/反反调试（IsDebuggerPresent/NtQueryInformationProcess 返回值改写+PEB 清零，hook 群一个脚本全包）; 内存 dump 用项目脚本 process_patch.py。
 
 ### lldb（macOS/iOS 主调试器）
 

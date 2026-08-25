@@ -8,11 +8,6 @@
 - 需要 `zai-mcp-server` MCP（视觉理解能力，全局安装在 OpenCode 中）
 - 脚本路径: `$SHARED_DIR/scripts/gui_capture.py` / `gui_act.py` / `gui_launch.py`
 
-**环境变量说明**:
-- `$PYTHON_CMD`: venv Python 绝对路径（由 Plugin 保证可用，含 pyautogui/pyperclip 等所有第三方包）
-- `$SHARED_DIR`: 脚本根目录（由 Plugin 环境信息注入，见系统提示"环境信息"段）
-- `$TASK_DIR`: 当前任务的工作目录（`~/bw-security-analysis/workspace/<task_id>/`），截图放在 `views/` 子目录下
-
 ## 标准操作流程
 
 ### Step 1: 启动目标程序

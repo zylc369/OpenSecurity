@@ -14,8 +14,8 @@ steghide extract -sf image.jpg                  # JPEG 通用提取（info 子�
 stegseek image.jpg /usr/share/wordlists/rockyou.txt   # steghide 密码爆破（比 stegcracker 快）
 outguess -k pass -r stego.jpg out.txt           # outguess 提取（-d 写入; PPM/PNM/JPEG 载体）
 stegbreak -r rules.ini -f dict.txt -r p img.jpg # jphide 密码爆破（与 stegdetect -t jopi 配套）
-stegsolve                                       # 通道遍历 / Data Extract / Image Combiner(XOR)
-python2 lsb.py extract 0.png out.data <hexkey>  # cloacked-pixel 加密 LSB（zsteg/stegsolve 见乱码 hex 时试; AES 加密需密钥）
+python3 $SHARED_DIR/scripts/stego_bit_planes.py img.png -o planes/   # R/G/B×bit0-7 位平面渲染（项目脚本）
+python2 lsb.py extract 0.png out.data <hexkey>  # cloacked-pixel 加密 LSB（zsteg 见乱码 hex 时试; AES 加密需密钥）
 ```
 
 - 两张相似图 → Image Combiner **and/or/xor 三算法 × RGB 通道全试**（差异显形）; 除文件大小外完全相同的两张图 → 盲水印（BlindWaterMark 脚本 py2/3 不通用/PuzzleSolver 四模式/单张图也可能藏）
@@ -40,14 +40,14 @@ while pos < len(data):
 | 高度/CRC 篡改 | 图"被裁过"/IHDR CRC 校验失败 | 爆破 h∈1..4096 对 CRC32; CRC 也改过则直接放大 height+重算 CRC |
 | 宽高反算（无 CRC 可用时） | JPG/PNG 显示尺寸与文件大小对不上 | 文件字节−头尾开销 ≈ 像素数×3（RGB）: `(size-56)/3/已知宽=真实高`; JPG 也可 010 模板 SOF0 的 `word y_image` 直接改大（不毁图，秒杀法） |
 | GIF 多帧宽高 | 分帧数>1 且图被裁 | 每帧 Logical Screen Descriptor 各有宽高字段——逐个全改，只改第一帧无效 |
-| 多 IDAT 疑似藏数据 | pngcheck 列异常块 | TweakPNG 逐个删除 IDAT 试显示; 或 edit→combine all IDAT 合并后 binwalk 再扫（§1 IDAT 异常小块互补） |
+| 多 IDAT 疑似藏数据 | §1 python chunk 解析器列异常块（长度/顺序） | python 重写 chunk 流: 逐个剔除末尾小 IDAT 重算 CRC 拼新文件试显示; 或合并全部 IDAT 后 $(dirname $PYTHON_CMD)/binwalk 再扫 |
 | chunk 乱序 | 头合法但解码报错 | 重排 签名+IHDR+辅助+IDAT(原序)+IEND |
 | CRC 字段藏数据 | 各 chunk CRC 是可读 ASCII | 拼接 CRC 字节 |
 | 自定义 chunk | 类型非标准集（如 scRT） | 提取 data（可能 XOR 分层加密，见 §8） |
 | Fireworks 私有块 | exiftool Software=Adobe Fireworks CS6 | Fireworks 开图层（version-sensitive，已停产） |
 | APNG 多帧 | 数据含 acTL（后 4B=帧数） | `apngdis image.apng` 或 python apng 库; 查看器只显默认帧 |
-| 签名/chunk 大小写损坏 | pngcheck -v 报错 | dd 补 8B 签名; idat→IDAT（首字母大写=critical，小写被当 ancillary 跳过）|
-| IDAT 异常小块 | `pngcheck -v` 列块: 倒数第二块未满（<65524）后还有小 IDAT | 多余小块 data 单独 `zlib.decompress`（剔除 4B length+4B type+4B CRC）——正常块写满才开新块 |
+| 签名/chunk 大小写损坏 | §1 解析器按 offset 报错（chunk 长度/CRC） | dd 补 8B 签名; idat→IDAT（首字母大写=critical，小写被当 ancillary 跳过）|
+| IDAT 异常小块 | §1 解析器列块: 倒数第二块未满（<65524）后还有小 IDAT | 多余小块 data 单独 `zlib.decompress`（剔除 4B length+4B type+4B CRC）——正常块写满才开新块 |
 | BMP 宽高修复 | BMP 显示尺寸与 bfSize 对不上 | 头部修复三路: ①`(bfSize-bfOffBits)//channel//已知宽=真实高`（channel=biBitCount/8）反推宽/高/方根三元组全存; ②删文件头存 `.data` 后 GIMP raw 打开手调宽高; ③同法适用一切"无头像素流"（相机 ARW/mspaint dump 改 .data） |
 | GIF 帧间时间轴 | 动画无视觉异常但帧 delay 只有两三种值 | `identify -format "%s %T\n" x.gif` 列每帧 delay，两值映射 0/1 转 ASCII |
 | GIF 逐帧 comment | strings 见 GIF89a 后跟异常 hex | `identify -format "%s %c\n" x.gif` 逐帧提 comment（可藏 RSA key 分片）|
@@ -59,7 +59,7 @@ while pos < len(data):
 - **F5 统计检测**: jpegio 取 Y 通道 AC 系数，±1/±2 比 <0.10 判 F5（自然 0.25-0.45）; 稀疏图（>80% 零系数）改 ±2/±3 <2.5 副指标
 - **种子置换多平面**: `RandomState(SEED).shuffle` 定访问序 + Y 通道 + bitplane 交错（bit0,bit1 交替）; seed 藏 EXIF/文件名/尺寸或小范围爆破; 无 seed 输出纯噪声
 - **条件 LSB**: 载体像素过滤（如 R≤1∧G≤1∧B≤1 近黑）——全像素 LSB 工具全漏，过滤条件是关键
-- **跨通道多位 LSB**: 各通道不同 bit 位（R[0]G[1]B[2] 循环移位）每像素 3bit; zsteg/stegsolve 全空但 metadata 明示有隐写时枚举组合
+- **跨通道多位 LSB**: 各通道不同 bit 位（R[0]G[1]B[2] 循环移位）每像素 3bit; zsteg 全平面全空但 metadata 明示有隐写时用 stego_bit_planes.py 枚举通道×bit 组合
 - **RGB 奇偶**: (R+G+B)%2 渲染二值图（题面提 pairs/adding colors）
 - **JPEG slack space**: 尺寸向上取 8 倍数（253×195→256×200），padding 像素黑白=bit; `magick -define jpeg:size=256x200` 或 jpeg_uncrop 取全块; payload 结构 2B magic+1B keylen+key+1B msglen+msg
 - **JPEG 缩略图掩码**: `exiftool -b -ThumbnailImage` 抽缩略图，暗像素 (x,y) 索引主图 OCR 文本 text_lines[y][x]（选字密码）
@@ -69,7 +69,7 @@ while pos < len(data):
 
 ## §3 图像拼合与重建
 
-- **拼图重组**: 边缘差分相容矩阵+贪心（难加回溯）或 `gaps --image=strip.png --size=N` 遗传算法; `foremost` carve → `convert +append` 横拼 → gaps; 产物可能再叠 ROT13。**碎纸条高速变体**: 每条左右缘编码二进制 bitmask（暗像素=1 逐 y 位移位）→ 相邻边 XOR+popcount（Hamming）贪心拼接——100 条毫秒级
+- **拼图重组**: 边缘差分相容矩阵+贪心（难加回溯）或 python 贪心/遗传自动求解（相容矩阵+回溯）; 位图 carve → `convert +append` 横拼 → gaps; 产物可能再叠 ROT13。**碎纸条高速变体**: 每条左右缘编码二进制 bitmask（暗像素=1 逐 y 位移位）→ 相邻边 XOR+popcount（Hamming）贪心拼接——100 条毫秒级
 - **QR tile 重排**: finder pattern 三角锚定+timing pattern 定向优先; 小网格（3×3/4×4）全排列×zbarimg 爆破; tile 带旋转时先结构锚定。**无索引变体补集**: ①分块编号藏目录名——目录名像随机串时 `base64 -d` 解出数字索引（MDAx→001），按索引排序拼接免结构分析; ②有索引但大网格时用 codeword 约束回溯代替全排列——按 QR spec 每个 payload 长度找不变像素（finder/timing/alignment 先固定约 50%），剩余块在像素约束下回溯。**1px 列碎片剪枝**: V1 format string 仅 32 合法值（ECC×mask）——列 8 与 32 值集匹配先过滤，剩余少量再全排列。**大图批量 tile 扫描**: PIL crop 按网格切块 → 每块 `resize((500,500))` 放大后 pyzbar 才识别（小块分辨率不足 zbar 不识别）; `Image.ANTIALIAS` 需 pillow≤9.5.0（新版已移除该常量改 `Image.LANCZOS`）。定位角缺失时手画三个 7×7 回字补全（左上/右上/左下）
 - **像素坐标链**: R=数据/G,B=下一坐标（变体 G*256+B 宽图）; G/B 通道小数值结构化分布是识别信号
 - **RGB 文本像素点合成**: 纯文本每行 `R,G,B` 十进制值（无图片结构）——行数做整数分解猜宽高（x*y=行数，逐因子对试），PIL `putpixel((i,j),(r,g,b))` 重建; 长度先修成平方数也是信号

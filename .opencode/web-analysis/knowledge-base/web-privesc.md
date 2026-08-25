@@ -36,7 +36,7 @@
 
 **默认凭据**（最快路径）: `admin:admin` / `admin:password` / `admin:123456` / `root:root` / `root:toor` / `test:test` / `guest:guest`
 
-**自动化检测**: Burp Autorize 插件——配置低权限 Cookie 自动重放全部请求，三份响应（原始/低权限/无 Cookie）并排比对筛越权端点。自定义鉴权头 `X-Admin: true` 直接注入。Intruder 遍历资源 ID + Comparer 比对两账号响应。高危场景: 文件下载参数/订单查询/配置修改接口。
+**自动化检测**: python 双会话重放——抓全部请求（代理日志/爬虫清单），分别用高权限/低权限 Cookie 重放，响应差异比对（状态码/长度/关键词）筛越权端点。自定义鉴权头 `X-Admin: true` 直接注入。资源 ID 遍历用 python fuzz 模板（web-methodology §7.3）参数位循环omparer 比对两账号响应。高危场景: 文件下载参数/订单查询/配置修改接口。
 
 ## §3 SPA 前端鉴权绕过
 

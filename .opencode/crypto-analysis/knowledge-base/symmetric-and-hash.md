@@ -112,7 +112,7 @@ def padding_oracle_block(oracle, prev_block, cipher_block, block=16):
 
 **假阳性校验**（末字节 0x01 时）: padding \x02\x02 也会让末字节探测返回 valid——命中后再把倒数第二字节 ^1 翻转复验，仍 valid 才是真 \x01。
 
-**CBC-R（用 padding oracle 加密任意明文）**: 随机选末密文块 → oracle 解出它的 intermediate → prev_ct = intermediate ⊕ 目标明文块（该块解密即目标）→ 以 prev_ct 为新末块迭代向前，首块即 IV。解密 oracle 与加密能力等价。工具层: padbuster `-plaintext` 参数（web-crypto-attacks.md §2.2）。
+**CBC-R（用 padding oracle 加密任意明文）**: 随机选末密文块 → oracle 解出它的 intermediate → prev_ct = intermediate ⊕ 目标明文块（该块解密即目标）→ 以 prev_ct 为新末块迭代向前，首块即 IV。解密 oracle 与加密能力等价。HTTP 场景: 把上面 oracle 参数换成 requests 回调（发伪造密文→按响应状态码/长度差异判断 padding 是否合法），完整封装代码见 web-crypto-attacks.md §2.2。
 
 ## 5. 哈希长度扩展攻击
 

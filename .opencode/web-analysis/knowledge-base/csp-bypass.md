@@ -178,7 +178,7 @@ add_header Content-Security-Policy "default-src 'self'" always;
 | 方法 | 适用场景 | 操作 |
 |------|---------|------|
 | 去掉 CSP content 属性 | `<meta>` 标签声明 CSP | `<meta http-equiv="Content-Security-Policy" id="c">` — 去掉 content 属性 |
-| 中间人修改响应头 | 可控代理/本地文件 | 用 Burp/mitmproxy 删除 CSP 响应头 |
+| 中间人修改响应头 | 可控代理/本地文件 | mitmproxy 脚本删 CSP 响应头（`mitmdump --set flow_response_header_del=content-security-policy` 或 addon 脚本） |
 | 保持 `'unsafe-eval'` | CSP 同时允许 eval | 通过 `eval()` / `Function()` 执行修改后的代码，不受哈希校验 |
 | 重新计算哈希 | 可修改 CSP 声明本身 | `echo -n '脚本内容' \| openssl dgst -sha256 -binary \| base64` 得到新哈希，更新 CSP |
 

