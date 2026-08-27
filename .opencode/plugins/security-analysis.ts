@@ -77,6 +77,57 @@ const nodeBinPath: { path: string | null; isCached: boolean } = {
  * darwin/linux 注入 <dir>/bin（node 与 npm/npx 软链同目录，shebang 自洽）;
  * win 注入 <dir> 根目录（npm.cmd 优先同目录 node.exe，官方已内置兜底）。
  */
+/**
+ * 固定目录类工具的 PATH 注入（adb 等 DirRecipe 产物）; null = 本机已有，不注入。
+ *
+ * 不变量: tools/<dir>/ 存在 ⟺ 安装时 PATH 无该工具（detect_tools skip 分支清理残留维护）。
+ * 目录内含 marker 文件即注入该目录本身（adb/fastboot 等官方布局平铺在目录内）。
+ */
+function resolveToolDirPath(
+  dirName: string,
+  marker: string,
+  sessionID: string,
+): string | null {
+  const dir = join(homedir(), "bw-security-analysis", "tools", dirName);
+  const markerFile = process.platform === "win32" ? `${marker}.exe` : marker;
+  try {
+    if (existsSync(join(dir, markerFile))) {
+      debugLog(`resolveToolDirPath(${dirName}): 注入 ${dir}`, sessionID);
+      return dir;
+    }
+    debugLog(
+      `resolveToolDirPath(${dirName}): 无 ${markerFile}（本机已有或未安装），不注入`,
+      sessionID,
+    );
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// android-platform-tools 注入路径缓存: 首次解析后固定（工具安装/清理发生在会话外的 install.sh）
+const androidPlatformToolsPath: { path: string | null; isCached: boolean } = {
+  path: null,
+  isCached: false,
+};
+
+/** android-platform-tools（adb/fastboot）目录的 PATH 注入; null = 本机已有 adb，不注入。 */
+function resolveAndroidPlatformToolsPath(sessionID: string): string | null {
+  if (androidPlatformToolsPath.isCached) {
+    return androidPlatformToolsPath.path;
+  }
+  try {
+    androidPlatformToolsPath.path = resolveToolDirPath(
+      "android-platform-tools",
+      "adb",
+      sessionID,
+    );
+    return androidPlatformToolsPath.path;
+  } finally {
+    androidPlatformToolsPath.isCached = true;
+  }
+}
+
 function resolveNodeBinPath(sessionID: string): string | null {
   if (nodeBinPath.isCached) {
     return nodeBinPath.path;
@@ -1017,14 +1068,16 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           const venvBin = dirname(pythonCmd);
           const toolBin = join(homedir(), "bw-security-analysis", "bin");
           const nodeBin = resolveNodeBinPath(sessionID);
+          const adbBin = resolveAndroidPlatformToolsPath(sessionID);
           debugLog(
-            `shell.env PATH 注入: venvBin=${venvBin} toolBin=${toolBin} nodeBin=${nodeBin ?? "(本机 node 合格, 不注入)"}`,
+            `shell.env PATH 注入: venvBin=${venvBin} toolBin=${toolBin} nodeBin=${nodeBin ?? "-"} adbBin=${adbBin ?? "-"}`,
             sessionID,
           );
           // filter(Boolean) 过滤空值，避免末尾分隔符(空 PATH 条目会被解释为当前目录，有 PATH injection 风险)
           // delimiter 跨平台: POSIX=':' Windows=';'（与 constants.ts 的 Windows 支持一致）
           const pathEntries = [venvBin, toolBin];
           if (nodeBin) pathEntries.push(nodeBin);
+          if (adbBin) pathEntries.push(adbBin);
           output.env.PATH = [...pathEntries, process.env.PATH]
             .filter(Boolean)
             .join(delimiter);

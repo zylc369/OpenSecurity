@@ -171,6 +171,20 @@ class NodeRecipe:
 
 
 @dataclass
+class DirRecipe:
+    """直链归档 → 内容平铺解压到 TOOLS_SRC_DIR/<dest>/（官方文件布局原样，PATH 由 plugin 注入）。
+
+    适用: 官方 zip 内含顶层目录（如 platform-tools/）但要求落点是跨平台固定目录名的工具。
+    不变式: <dest>/ 目录存在 ⟺ 安装时 PATH 无该工具（skip 分支清理残留维护，同 NodeRecipe）。
+    """
+    name: str
+    urls: dict[str, str] = field(default_factory=dict)  # 平台键前缀（darwin/linux/win）→ 直链
+    dest: str = ""                                      # TOOLS_SRC_DIR 下固定目录名
+    marker: str = ""                                    # 目录内标志性文件（幂等/plugin 探测，win 自动补 .exe）
+    strip_top: bool = True                              # True=剥掉归档顶层目录，内容平铺
+
+
+@dataclass
 class DockerRecipe:
     """容器工具配方（调研见 knowledge-base/docker-toolbox.md）。
 
@@ -213,7 +227,7 @@ _GO_ALL = {
     "win-amd64": "windows|win,amd64|x86_64|win64|x64",
 }
 
-INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | PrebuiltRecipe | NodeRecipe] = [
+INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | PrebuiltRecipe | NodeRecipe | DirRecipe] = [
     # ── Web 扫描（go 单二进制） ──
     ReleaseRecipe(name="nuclei", repo="projectdiscovery/nuclei", plats=_GO_ALL, bins=["nuclei"]),
     ReleaseRecipe(name="dalfox", repo="hahwul/dalfox", plats=_GO_ALL, bins=["dalfox"]),
@@ -266,6 +280,12 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | P
     ReleaseRecipe(name="xray", repo="chaitin/xray", tag="1.9.11", plats=_GO_ALL, bins=["xray"]),
     # ── 运行时层（目录结构安装: node + npm + npx） ──
     NodeRecipe(version="22.14.0"),
+    # ── Android platform-tools（adb/fastboot; 腾讯云镜像，google 直链需翻墙） ──
+    DirRecipe(name="adb", urls={
+        "darwin": "https://mirrors.cloud.tencent.com/AndroidSDK/platform-tools-latest-darwin.zip",
+        "linux": "https://mirrors.cloud.tencent.com/AndroidSDK/platform-tools-latest-linux.zip",
+        "win": "https://mirrors.cloud.tencent.com/AndroidSDK/platform-tools-latest-windows.zip",
+    }, dest="android-platform-tools", marker="adb"),
     # ── 预编译层（macOS 工具链产物，随 git 仓库走） ──
     PrebuiltRecipe(name="class-dump", source="tools/class-dump"),
     PrebuiltRecipe(name="ldid", source="tools/ldid"),
@@ -378,6 +398,10 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | P
 
 
 # ─── 工具清单 ────────────────────────────────────────────
+_AUTO_HINT = "自动安装: bash .opencode/install.sh 或 python control/backend/services/detect_tools.py install --tool {name}"
+_WEB = ["web-analysis"]
+_BIN = ["binary-analysis"]
+
 EXTERNAL_TOOLS: list[ToolField] = [
     ToolField(
         name="ida_pro",
@@ -425,12 +449,7 @@ EXTERNAL_TOOLS: list[ToolField] = [
         required=True,
         version_cmd=["version"],
         description="Android Debug Bridge",
-        install_hint="adb 未找到。安装: brew install --cask android-platform-tools (macOS)",
-        platform_install_hint={
-            "darwin": "brew install --cask android-platform-tools",
-            "linux":  "sudo apt install adb",
-            "win32": "从 https://developer.android.com/tools/releases/platform-tools 下载",
-        },
+        install_hint=_AUTO_HINT.format(name="adb"),
     ),
     ToolField(
         name="otool",
@@ -463,11 +482,6 @@ EXTERNAL_TOOLS: list[ToolField] = [
 ]
 
 # ── 自动安装层工具（INSTALLABLE_TOOLS 覆盖; 安装方式 = install.sh / detect_tools.py install） ──
-_AUTO_HINT = "自动安装: bash .opencode/install.sh 或 python control/backend/services/detect_tools.py install --tool {name}"
-_WEB = ["web-analysis"]
-_BIN = ["binary-analysis"]
-
-
 def _auto(name: str, agents: list[str], desc: str, ver: list[str] | None = None) -> ToolField:
     return ToolField(name=name, agents=agents, required=False, description=desc,
                      version_cmd=ver or [], install_hint=_AUTO_HINT.format(name=name))
@@ -877,6 +891,8 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                 return self._install_prebuilt(recipe, force)
             if isinstance(recipe, NodeRecipe):
                 return self._install_node(recipe, force)
+            if isinstance(recipe, DirRecipe):
+                return self._install_dir(recipe, force)
             return InstallResult(name=recipe.name, status="failed", detail="未知配方类型")
         except Exception as exc:  # noqa: BLE001 —— 安装器兜底: 单工具失败不中断整体
             return InstallResult(name=recipe.name, status="failed", detail=f"{type(exc).__name__}: {exc}")
@@ -1105,6 +1121,58 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         if ver >= self.NODE_MIN:
             return f"PATH 已有 node {out} + npm（>= 18.17 满足 npm 10）"
         return None  # 老版本: 不跳过，BIN_DIR 装 v22（plugin PATH 序 toolBin 在前，遮蔽老 node）
+
+    # ── 直链归档 → 固定目录（官方布局原样） ──
+
+    def _install_dir(self, r: DirRecipe, force: bool) -> InstallResult:
+        """adb 类工具: PATH 无命令 → 下载官方 zip 内容平铺到 TOOLS_SRC_DIR/<dest>/。"""
+        dest = os.path.join(TOOLS_SRC_DIR, r.dest)
+        if not force:
+            if shutil.which(r.name):
+                # 本机已有（brew/SDK）: 清理残留，维护"目录存在 ⟺ PATH 无该工具"（plugin 据此注入）
+                if os.path.isdir(dest):
+                    shutil.rmtree(dest)
+                return InstallResult(r.name, "skipped", f"PATH 已有 {r.name}（{shutil.which(r.name)}）; 已清理历史残留")
+            marker = r.marker + (".exe" if os.name == "nt" else "")
+            if os.path.isdir(dest) and os.path.exists(os.path.join(dest, marker)):
+                return InstallResult(r.name, "skipped", f"{dest} 已解包")
+
+        syst = _plat_key().split("-")[0]
+        url = r.urls.get(syst) or r.urls.get(syst.split("-")[0])
+        if not url:
+            return InstallResult(r.name, "failed", f"平台 {_plat_key()} 无下载直链")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "dl.zip")
+            self._write(self._download(url), path)
+            extract_dir = os.path.join(tmp, "x")
+            with zipfile.ZipFile(path) as zf:
+                zf.extractall(extract_dir)
+                # Python zipfile 不恢复可执行位——按 external_attr 恢复（0 则兜底 755，否则 adb 无法执行）
+                for zi in zf.infolist():
+                    if zi.is_dir():
+                        continue
+                    mode = (zi.external_attr >> 16) & 0o7777
+                    if mode == 0:
+                        mode = 0o755
+                    out = os.path.join(extract_dir, zi.filename)
+                    if os.path.exists(out):
+                        os.chmod(out, mode)
+            if os.path.isdir(dest):
+                shutil.rmtree(dest)
+            os.makedirs(dest, exist_ok=True)
+            # strip_top: 归档顶层单一目录 → 其内容平铺到 dest
+            src = extract_dir
+            if r.strip_top:
+                entries = [e for e in os.listdir(extract_dir) if not e.startswith("__MACOSX")]
+                if len(entries) == 1 and os.path.isdir(os.path.join(extract_dir, entries[0])):
+                    src = os.path.join(extract_dir, entries[0])
+            for e in os.listdir(src):
+                shutil.move(os.path.join(src, e), os.path.join(dest, e))
+            marker = r.marker + (".exe" if os.name == "nt" else "")
+            if not os.path.exists(os.path.join(dest, marker)):
+                return InstallResult(r.name, "failed", f"解包后未找到 {marker}")
+        return InstallResult(r.name, "installed", f"官方目录 → {dest}（plugin 注入 PATH）")
 
     def _install_prebuilt(self, r: PrebuiltRecipe, force: bool) -> InstallResult:
         """仓库内预编译二进制 → 拷贝 BIN_DIR。"""
