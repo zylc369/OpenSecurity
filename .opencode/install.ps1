@@ -1,6 +1,8 @@
 # OpenSecurity 一键安装 (Windows / PowerShell)
 # 用法: powershell -ExecutionPolicy Bypass -File .opencode\install.ps1
-# 逻辑全在 detect_py_deps.py install（跨平台），此脚本只负责找到 Python 并启动它。
+# 逻辑在 detect_py_deps.py install（python 依赖）+ detect_tools.py install（外部工具）。
+# 两层都是必需层: python 依赖失败立即中断; 工具层单项失败不中断其余安装，
+# 但只要有失败，以非零退出码结束（重装命令见输出末尾汇总）。
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -27,5 +29,10 @@ if ($args.Count -gt 0) {
 }
 
 $Script = Join-Path $ScriptDir "control\backend\services\detect_py_deps.py"
+& $Python $Script install
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Write-Host "[*] === 安装外部工具（单项失败不中断，失败汇总在末尾） ===" -ForegroundColor Cyan
+$Script = Join-Path $ScriptDir "control\backend\services\detect_tools.py"
 & $Python $Script install
 exit $LASTEXITCODE

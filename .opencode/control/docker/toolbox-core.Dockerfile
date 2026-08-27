@@ -16,7 +16,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     exploitdb netexec wpscan \
     sox imagemagick mupdf-tools boolector qemu-system-x86 icoutils \
     pcapfix xfsprogs cryptsetup btrfs-progs \
-    dsniff gdb gdbserver maven openjdk-21-jdk-headless smtp-user-enum upx-ucl \
+    dsniff gdb gdbserver maven openjdk-21-jdk-headless smtp-user-enum upx-ucl bloodhound \
     ruby ruby-dev rubygems-integration build-essential binutils-multiarch \
     gdb-multiarch qemu-user libc6-amd64-cross \
     wordlists \

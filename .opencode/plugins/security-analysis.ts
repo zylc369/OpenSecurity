@@ -1,11 +1,12 @@
 import {
   readFileSync,
+  readdirSync,
   statSync,
   existsSync,
   unlinkSync,
 } from "fs";
 import { join, dirname, delimiter } from "path";
-import { tmpdir } from "os";
+import { tmpdir, homedir } from "os";
 import * as yaml from "js-yaml";
 import type { Plugin } from "@opencode-ai/plugin";
 import type { Event } from "@opencode-ai/sdk";
@@ -60,6 +61,50 @@ import { McpManager } from "./lib/mcp-manager";
 // 根据 agent 名获取脚本目录；不在映射表中时返回 undefined
 function getScriptDir(agentName: string | undefined): string | undefined {
   return AGENT_SCRIPT_DIRS[agentName || ""] || undefined;
+}
+
+const nodeBinPath: { path: string | null; isCached: boolean } = {
+  path: null,
+  isCached: false,
+};
+
+/**
+ * node 官方目录的 PATH 注入路径; null = 本机 node 合格，不注入。
+ *
+ * 不变量: tools/node/node-v* 存在 ⟺ 安装器判定本机 node 不可用
+ * （PATH 无 node 或版本 < 18.17 时 detect_tools 才解包; 本机 node 合格则目录不存在，
+ *  NodeRecipe skip 分支会清理残留维护此不变量）。
+ * darwin/linux 注入 <dir>/bin（node 与 npm/npx 软链同目录，shebang 自洽）;
+ * win 注入 <dir> 根目录（npm.cmd 优先同目录 node.exe，官方已内置兜底）。
+ */
+function resolveNodeBinPath(sessionID: string): string | null {
+  if (nodeBinPath.isCached) {
+    return nodeBinPath.path;
+  }
+  const nodeRoot = join(homedir(), "bw-security-analysis", "tools", "node");
+  try {
+    const verDir = readdirSync(nodeRoot).find((e) => /^node-v/.test(e));
+    if (!verDir) {
+      debugLog(
+        `resolveNodeBinPath: 目录内无 node-v*（本机 node 合格）: ${nodeRoot}`,
+        sessionID,
+      );
+      return null;
+    }
+    const base = join(nodeRoot, verDir);
+    const bin = process.platform === "win32" ? base : join(base, "bin");
+    debugLog(`resolveNodeBinPath: 注入 ${bin}`, sessionID);
+    nodeBinPath.path = bin;
+    return bin;
+  } catch {
+    debugLog(
+      `resolveNodeBinPath: 目录不存在（本机 node 合格）: ${nodeRoot}`,
+      sessionID,
+    );
+    return null;
+  } finally {
+    nodeBinPath.isCached = true;
+  }
 }
 
 function getCompactionContext(agentName: string): string {
@@ -967,11 +1012,20 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         const pythonCmd = getPythonCmd();
         if (pythonCmd) {
           output.env.PYTHON_CMD = pythonCmd;
-          // PATH: 前置 venv/bin，使 venv 的 CLI 工具(sage 等)直接可用
+          // PATH: 前置 venv/bin（venv CLI 工具 sage/sqlmap 等）+ ~/bw-security-analysis/bin
+          // （detect_tools.py 自动安装的外部工具: nuclei/ffuf/bkcrack/wrapper 等）
           const venvBin = dirname(pythonCmd);
+          const toolBin = join(homedir(), "bw-security-analysis", "bin");
+          const nodeBin = resolveNodeBinPath(sessionID);
+          debugLog(
+            `shell.env PATH 注入: venvBin=${venvBin} toolBin=${toolBin} nodeBin=${nodeBin ?? "(本机 node 合格, 不注入)"}`,
+            sessionID,
+          );
           // filter(Boolean) 过滤空值，避免末尾分隔符(空 PATH 条目会被解释为当前目录，有 PATH injection 风险)
           // delimiter 跨平台: POSIX=':' Windows=';'（与 constants.ts 的 Windows 支持一致）
-          output.env.PATH = [venvBin, process.env.PATH]
+          const pathEntries = [venvBin, toolBin];
+          if (nodeBin) pathEntries.push(nodeBin);
+          output.env.PATH = [...pathEntries, process.env.PATH]
             .filter(Boolean)
             .join(delimiter);
         }

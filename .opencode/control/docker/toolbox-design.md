@@ -64,7 +64,7 @@ macOS Docker Desktop 的容器经 VPNKit NAT 出网，实测行为：
 
 > 标记说明: **[实测]** = 本机跑通功能链; **[包确认]** = apt 包存在于 kali-rolling 且属同机制（文件 I/O 型），未逐个跑功能——风险低但如实标注。
 >
-> 不在表中的四个边缘项: outguess/stegdetect（kali 已移除包，需源码 make 层，未实测）/ aeskeyfind（同源码层）/ vmss2core（官网渠道不稳）——均维持手动，低频不阻塞。
+> 不在表中的四个边缘项: outguess/stegdetect（kali 已移除包，需源码 make 层，未实测）/ aeskeyfind（同源码层）——均维持手动，低频不阻塞。
 
 | 工具 | 容器来源 | 实测证据 | 备注 |
 |------|---------|---------|------|
@@ -190,5 +190,4 @@ docker run --rm -i --name "$NAME" \
 2. detect_tools.py 增 `DockerRecipe` + `--image` 分层路由 + docker_manager 收口登记 KNOWN_IMAGES
 3. wrapper 生成器（§6 蓝本: 路径重写/trap 清理/wordlists 挂载）
 4. EXTERNAL_TOOLS 注册（scan 面可见 available）
-5. tool-dependency-index.md 三分区重排: 自动安装（二进制）/ 容器化（本清单 ✓ 类）/ 手动（仅剩 §3.3 的 9 项）
-6. 知识库正文同步: 手动清单中 §3.1 工具的"外部工具（安装方式）"标注改为直接可用的容器路径口径（正文命令不变——wrapper 透明的核心价值）
+5. 知识库正文同步: 手动清单中 §3.1 工具的"外部工具（安装方式）"标注改为直接可用的容器路径口径（正文命令不变——wrapper 透明的核心价值）

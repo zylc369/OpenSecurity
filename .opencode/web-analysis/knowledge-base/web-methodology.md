@@ -368,6 +368,8 @@ httpx -u http://target -tech-detect -silent
 
 ### 7.1 漏洞扫描器选型（xray vs nuclei）
 
+> xray 是长亭的 Web 漏洞扫描器命令（社区版，已装 1.9.11——被动代理扫描/语义分析误报低是它的强项）。nuclei 同样已装，模板驱动、通用性强。
+
 | 场景 | 选择 | 原因 |
 |---|---|---|
 | 已知 CVE 验证 | nuclei | 模板库更全 |
@@ -376,7 +378,7 @@ httpx -u http://target -tech-detect -silent
 | 批量 PoC | nuclei | 批量性能好 |
 | SQLi 深度 | xray | sqldet 引擎更准 |
 
-xray 插件: xss/sqldet/cmd-injection(含 SSTI)/dirscan/path-traversal/xxe/upload/brute-force/jsonp/ssrf/baseline/redirect/crlf-injection + 高级版 struts/shiro/fastjson/thinkphp；POC 引擎 phantasm + chaitin/xray-plugins；快扫 `--plugins sqldet,cmd-injection,xxe,ssrf`；HTTPS 被动需 genca。
+xray 的内置检测模块: xss/sqldet/cmd-injection(含 SSTI)/dirscan/path-traversal/xxe/upload/brute-force/jsonp/ssrf/baseline/redirect（"插件"指其内部检测模块，非安装件）/crlf-injection + 高级版 struts/shiro/fastjson/thinkphp；POC 引擎 phantasm + chaitin/xray-plugins；快扫 `--plugins sqldet,cmd-injection,xxe,ssrf`；HTTPS 被动需 genca。
 
 ### 7.2 nuclei 缩范围与模板提取
 

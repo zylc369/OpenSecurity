@@ -17,7 +17,7 @@
 ## §2 angr 核心
 
 `Project(bin, auto_load_libs=False)` → `entry_state/blank_state(addr=)/full_init_state(args=)` → `simulation_manager` → `explore(find=, avoid=)` → `found[0].solver.eval(sym, cast_to=bytes)`。
-- claripy: `BVS("x", 64)` / `BVV` / `solver.add(约束)` / `eval` / `eval_upto(sym, 10)`
+- claripy（angr 的约束求解前端，`import claripy`，符号量/约束/求解都经它）: `BVS("x", 64)` 建符号量 / `BVV(0x10, 64)` 具体值 / `state.solver.add(约束)` 加约束 / `state.solver.eval(sym)` 求解 / `eval_upto(sym, 10)` 取前 10 组解
 - 符号输入: stdin=`entry_state(stdin=sym)`（逐字节 0x20-0x7e 约束）; argv=`full_init_state(args=['./bin', sym])`; 文件=`SimFile` + `fs={}`
 - find/avoid 可用地址或 stdout 内容 lambda（`b"Correct" in s.posix.dumps(1)`，PIE 用）
 - **坑**: 反汇编器与 angr 的 PIE 加载基址不同（Ghidra 默认 0x100000 vs angr 0x400000）——搬地址前先对基址; 函数名可能是伪造符号（`__stack_chk_fail` 未必是真 stack_chk_fail，自定义函数可冒名）——不要按名字假设语义

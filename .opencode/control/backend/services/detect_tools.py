@@ -42,6 +42,14 @@ BIN_DIR = os.path.join(CACHE_DIR, "bin")        # 二进制 + wrapper（插件�
 TOOLS_SRC_DIR = os.path.join(CACHE_DIR, "tools")  # git clone / jar 存放
 
 
+def _opencode_root() -> str:
+    """OPENCODE_ROOT 推导: 环境变量 → 从本文件路径回溯（backend/services → .opencode）。"""
+    env = os.environ.get("OPENCODE_ROOT")
+    if env:
+        return env
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+
 def _plat_key() -> str:
     """当前平台键: darwin-arm64 / darwin-amd64 / linux-arm64 / linux-amd64 / win-amd64。"""
     mach = platform.machine().lower()
@@ -124,6 +132,7 @@ class ReleaseRecipe:
     entry: str = ""                 # tree kind: 解压后入口脚本相对路径
     jar_kw: str = "jar"             # jar kind: 资产匹配关键词
     prereq: str = ""                # "java": 需 java 运行时
+    tag: str = ""                   # 固定版本 tag（空=latest; repo 的 latest 被其他工具占用时必须指定，如 chaitin/xray）
     excl: str = ""                  # 额外排除关键词（逗号分隔）
     src_names: dict[str, str] = field(default_factory=dict)  # bin名 → 归档内实际文件名
 
@@ -150,6 +159,18 @@ class UrlRecipe:
 
 
 @dataclass
+class NodeRecipe:
+    """Node.js 运行时配方（目录结构安装: node + npm + npx 三 wrapper）。
+
+    npm 是目录树（lib/node_modules/npm），单文件 bins 机制装不了——
+    解包整个官方归档到 TOOLS_SRC_DIR/node/，BIN_DIR 下生成三个 wrapper。
+    版本锁 LTS（npm 10 要求 node >= 18.17）。
+    """
+    version: str
+    name: str = "node"
+
+
+@dataclass
 class DockerRecipe:
     """容器工具配方（调研见 knowledge-base/docker-toolbox.md）。
 
@@ -162,6 +183,17 @@ class DockerRecipe:
     net_host: bool = False           # True: --network host（仅 Linux 宿主有意义）
     long_running: bool = False       # True: 长任务——wrapper 必须收到 --wrapper-timeout 才运行
     extra_args: list[str] = field(default_factory=list)  # 追加 docker run 参数
+
+
+@dataclass
+class PrebuiltRecipe:
+    """随仓库携带的预编译二进制（macOS Xcode/clang 编译产物，放 .opencode/tools/）。
+
+    适用: 必须 macOS 工具链编译、容器无法构建的工具（class-dump/optool 类 Mach-O 工具）。
+    安装 = 拷贝到 BIN_DIR + chmod。
+    """
+    name: str
+    source: str                       # 相对 OPENCODE_ROOT 的二进制路径
 
 
 @dataclass
@@ -181,7 +213,7 @@ _GO_ALL = {
     "win-amd64": "windows|win,amd64|x86_64|win64|x64",
 }
 
-INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe] = [
+INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | PrebuiltRecipe | NodeRecipe] = [
     # ── Web 扫描（go 单二进制） ──
     ReleaseRecipe(name="nuclei", repo="projectdiscovery/nuclei", plats=_GO_ALL, bins=["nuclei"]),
     ReleaseRecipe(name="dalfox", repo="hahwul/dalfox", plats=_GO_ALL, bins=["dalfox"]),
@@ -231,7 +263,15 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe] = 
         "linux-amd64": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
         "win-amd64": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
     }, bins=["ffmpeg", "ffprobe"]),
-    # ── 容器层（编译类; docker-toolbox.md §3.1 实测清单） ──
+    ReleaseRecipe(name="xray", repo="chaitin/xray", tag="1.9.11", plats=_GO_ALL, bins=["xray"]),
+    # ── 运行时层（目录结构安装: node + npm + npx） ──
+    NodeRecipe(version="22.14.0"),
+    # ── 预编译层（macOS 工具链产物，随 git 仓库走） ──
+    PrebuiltRecipe(name="class-dump", source="tools/class-dump"),
+    PrebuiltRecipe(name="ldid", source="tools/ldid"),
+    PrebuiltRecipe(name="insert_dylib", source="tools/insert_dylib"),
+    PrebuiltRecipe(name="optool", source="tools/optool"),
+    # ── 容器层（编译类; toolbox-design.md §3.1 实测清单） ──
     DockerRecipe(name="steghide", image="opensecurity/toolbox-core",
                  dockerfile="control/docker/toolbox-core.Dockerfile"),
     DockerRecipe(name="stegseek", image="opensecurity/toolbox-core", long_running=True,
@@ -323,6 +363,8 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe] = 
     DockerRecipe(name="qemu-riscv64", image="opensecurity/toolbox-core",
                  dockerfile="control/docker/toolbox-core.Dockerfile"),
     DockerRecipe(name="upx", image="opensecurity/toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile"),
+    DockerRecipe(name="bloodhound", image="opensecurity/toolbox-core",
                  dockerfile="control/docker/toolbox-core.Dockerfile"),
     DockerRecipe(name="smtp-user-enum", image="opensecurity/toolbox-core",
                  dockerfile="control/docker/toolbox-core.Dockerfile"),
@@ -457,6 +499,19 @@ EXTERNAL_TOOLS.extend([
     _auto("btrfs", _BIN, "btrfs 文件系统检查（subvolume/快照）"),
     _auto("qemu-riscv64", _BIN, "riscv64 ELF 用户态模拟运行"),
     _auto("upx", _BIN, "UPX 脱壳（upx -d）", ["--version"]),
+    _auto("xray", _WEB, "Web 漏洞扫描器（被动代理/语义分析; GitHub 1.9.11）"),
+    ToolField(name="class-dump", agents=["mobile-analysis"], required=False,
+              version_cmd=[], description="ObjC 类信息导出（Mach-O）",
+              install_hint="自动安装（预编译二进制）"),
+    ToolField(name="ldid", agents=["mobile-analysis"], required=False,
+              version_cmd=[], description="iOS 伪签名/entitlements",
+              install_hint="自动安装（预编译二进制）"),
+    ToolField(name="insert_dylib", agents=["mobile-analysis"], required=False,
+              version_cmd=[], description="Mach-O 动态库注入（LC_LOAD_DYLIB）",
+              install_hint="自动安装（预编译二进制）"),
+    ToolField(name="optool", agents=["mobile-analysis"], required=False,
+              version_cmd=[], description="Mach-O load command 编辑（注入/卸载 dylib）",
+              install_hint="自动安装（预编译二进制）"),
     _auto("wasm-objdump", _BIN, "WASM 反汇编（wabt 套件）"),
     _auto("ysoserial", _WEB, "Java 反序列化 gadget 链生成（需 java）"),
     _auto("rsactftool", _BIN, "RSA 攻击聚合"),
@@ -497,6 +552,7 @@ EXTERNAL_TOOLS.extend([
     _auto("gdb", _BIN, "arm64 ELF 原生调试（容器; amd64 走 qemu-gdb）"),
     _auto("gdb-pwndbg", _BIN, "带 pwndbg 的 gdb（堆调试: heap/vis_heap_chunks/tcache）"),
     _auto("gdbserver", _BIN, "远程调试服务端（容器）"),
+    _auto("bloodhound", _BIN, "AD 关系图谱分析（容器; 采集端 nxc --bloodhound / azurehound）"),
     _auto("smtp-user-enum", _WEB + _BIN, "SMTP 用户枚举（VRFY/EXPN/RCPT）"),
     _auto("marshalsec", _BIN, "Java 反序列化链生成（容器, JDK21 编译）"),
     _auto("ghidra-headless", _BIN, "Ghidra 无头分析（full 层容器）"),
@@ -817,6 +873,10 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                 return self._install_url(recipe, force)
             if isinstance(recipe, DockerRecipe):
                 return self._install_docker(recipe, force)
+            if isinstance(recipe, PrebuiltRecipe):
+                return self._install_prebuilt(recipe, force)
+            if isinstance(recipe, NodeRecipe):
+                return self._install_node(recipe, force)
             return InstallResult(name=recipe.name, status="failed", detail="未知配方类型")
         except Exception as exc:  # noqa: BLE001 —— 安装器兜底: 单工具失败不中断整体
             return InstallResult(name=recipe.name, status="failed", detail=f"{type(exc).__name__}: {exc}")
@@ -853,7 +913,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             return InstallResult(r.name, "skipped", f"平台 {plat} 无配方")
         if r.kind == "jar":
             return self._install_jar(r, force)
-        assets, tag = self._gh_assets(r.repo)
+        assets, tag = self._gh_assets(r.repo, r.tag)
         cands = self._match_assets(assets, r.plats[plat].split(","), r.excl)
         if not cands:
             return InstallResult(r.name, "failed", f"{r.repo}@{tag} 无匹配资产（plats={r.plats.get(plat)}）")
@@ -871,7 +931,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         return InstallResult(r.name, "failed", last_err or "全部候选资产无 bins")
 
     def _install_jar(self, r: ReleaseRecipe, force: bool) -> InstallResult:
-        assets, tag = self._gh_assets(r.repo)
+        assets, tag = self._gh_assets(r.repo, r.tag)
         asset = self._match_assets(assets, [r.jar_kw], r.excl)[0] if self._match_assets(assets, [r.jar_kw], r.excl) else None
         if not asset:
             return InstallResult(r.name, "failed", f"{r.repo}@{tag} 无 jar 资产")
@@ -970,6 +1030,93 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         asset = url.rsplit("/", 1)[-1]
         self._place_from_archive(r, self._download(url), asset)
         return InstallResult(r.name, "installed", f"{asset} → {', '.join(r.bins)}")
+
+    # ── 预编译层 ──
+
+    # ── Node.js 运行时（目录结构安装） ──
+
+    def _install_node(self, r: NodeRecipe, force: bool) -> InstallResult:
+        """解包官方归档到 TOOLS_SRC_DIR/node/，BIN_DIR 生成 node/npm/npx wrapper。"""
+        if not force:
+            skip = self._node_skip_reason()
+            if skip:
+                # 本机 node 合格: 清理历史残留（tools/node 目录 + bin/ 三个 wrapper）
+                # —— 保证"tools/node 目录存在 ⟺ 本机 node 不可用"，plugin 据此决定是否注入 PATH
+                stale = os.path.join(TOOLS_SRC_DIR, "node")
+                if os.path.isdir(stale):
+                    shutil.rmtree(stale)
+                for b in ("node", "npm", "npx"):
+                    p = self._bin_path(b)
+                    if os.path.exists(p):
+                        os.remove(p)
+                return InstallResult("node", "skipped", skip + "; 已清理历史残留")
+            if os.path.isdir(os.path.join(TOOLS_SRC_DIR, "node")):
+                return InstallResult("node", "skipped", "tools/node 官方目录已解包")
+
+        syst, arch = _plat_key().split("-")
+        arch = {"amd64": "x64", "arm64": "arm64"}.get(arch, arch)
+        if syst == "win":
+            asset = f"node-v{r.version}-win-{arch}.zip"
+            node_bin = "node.exe"
+            npm_cli = os.path.join("node_modules", "npm", "bin", "npm-cli.js")
+        else:
+            asset = f"node-v{r.version}-{syst}-{arch}.tar.gz"
+            node_bin = os.path.join("bin", "node")
+            npm_cli = os.path.join("lib", "node_modules", "npm", "bin", "npm-cli.js")
+        plat_dir = asset[:-(".zip" if syst == "win" else ".tar.gz").__len__()]
+
+        url = f"https://nodejs.org/dist/v{r.version}/{asset}"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, asset)
+            self._write(self._download(url), path)
+            dest = os.path.join(TOOLS_SRC_DIR, "node")
+            if os.path.isdir(dest):
+                shutil.rmtree(dest)
+            os.makedirs(dest, exist_ok=True)
+            if asset.endswith(".zip"):
+                with zipfile.ZipFile(path) as zf:
+                    zf.extractall(dest)
+            else:
+                subprocess.run(["tar", "-xzf", path, "-C", dest], check=True)
+            root = os.path.join(dest, plat_dir)
+            for rel in (node_bin, npm_cli):
+                if not os.path.exists(os.path.join(root, rel)):
+                    return InstallResult("node", "failed", f"归档内未找到 {rel}")
+
+        # 官方目录原样使用（不生成 wrapper）: darwin/linux 的 bin/ 内 node 与 npm/npx 软链同目录
+        # （shebang #!/usr/bin/env node 在同目录命中）; win 的 npm.cmd 优先同目录 node.exe（官方兜底）。
+        # PATH 注入由 plugin shell.env 完成: 检测本目录存在 → 注入 bin/（posix）或根目录（win）。
+        inst_dir = os.path.join(TOOLS_SRC_DIR, "node", plat_dir)
+        return InstallResult("node", "installed", f"v{r.version} LTS 官方目录 → {inst_dir}（plugin 注入 PATH）")
+
+    # npm 10（v22 LTS 配套）要求的最低 node 版本; 更老的 node 会被跳过逻辑静默接受导致 npm install 失败
+    NODE_MIN = (18, 17, 0)
+
+    def _node_skip_reason(self) -> str | None:
+        """PATH 有 node+npm 且版本 >= 18.17 才跳过; 老版本返回 None（继续装 v22 到 BIN_DIR，PATH 遮蔽老 node）。"""
+        node, npm = shutil.which("node"), shutil.which("npm")
+        if not (node and npm):
+            return None
+        try:
+            out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=15).stdout.strip()
+            ver = tuple(int(x) for x in out.lstrip("v").split(".")[:3])
+        except (ValueError, subprocess.SubprocessError):
+            return f"PATH node 版本不可解析，装 v22 到 {BIN_DIR}"
+        if ver >= self.NODE_MIN:
+            return f"PATH 已有 node {out} + npm（>= 18.17 满足 npm 10）"
+        return None  # 老版本: 不跳过，BIN_DIR 装 v22（plugin PATH 序 toolBin 在前，遮蔽老 node）
+
+    def _install_prebuilt(self, r: PrebuiltRecipe, force: bool) -> InstallResult:
+        """仓库内预编译二进制 → 拷贝 BIN_DIR。"""
+        if not force and os.path.exists(self._bin_path(r.name)):
+            return InstallResult(r.name, "skipped", "BIN_DIR 已存在")
+        src = os.path.join(_opencode_root(), r.source)
+        if not os.path.isfile(src):
+            return InstallResult(r.name, "failed", f"预编译产物缺失: {r.source}（需 macOS 环境执行 tools/build-class-dump.sh 重建）")
+        os.makedirs(BIN_DIR, exist_ok=True)
+        shutil.copyfile(src, self._bin_path(r.name))
+        self._chmodx(self._bin_path(r.name))
+        return InstallResult(r.name, "installed", f"{r.source} → BIN_DIR")
 
     # ── 容器层 ──
 
@@ -1093,18 +1240,26 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         for b in r.bins:
             found = self._find_file(tmp, r.src_names.get(b, b))
             if not found:
-                raise RuntimeError(f"归档 {asset} 内未找到 {b}")
+                # 归档内唯一文件时按目标名落盘（上游命名带平台后缀的场景，如 xray_darwin_arm64）
+                import os as _os
+                files = [_os.path.join(dp, f) for dp, _, fs in _os.walk(tmp) for f in fs]
+                if len(files) == 1:
+                    found = files[0]
+                else:
+                    raise RuntimeError(f"归档 {asset} 内未找到 {b}")
             dst = self._bin_path(b)
             shutil.copyfile(found, dst)
             self._chmodx(dst)
 
-    def _gh_assets(self, repo: str) -> tuple[list[str], str]:
-        req = urllib.request.Request(_GH_API.format(repo=repo), headers=_UA)
+    def _gh_assets(self, repo: str, tag: str = "") -> tuple[list[str], str]:
+        url = (_GH_API.format(repo=repo) if not tag
+               else f"https://api.github.com/repos/{repo}/releases/tags/{tag}")
+        req = urllib.request.Request(url, headers=_UA)
         with urllib.request.urlopen(req, timeout=30) as resp:
             d = json.loads(resp.read().decode())
         assets = [a["name"] for a in d.get("assets", [])]
         if not assets:
-            raise RuntimeError(f"{repo} 最新 release 无二进制资产")
+            raise RuntimeError(f"{repo}@{tag or 'latest'} 无二进制资产")
         return assets, d["tag_name"]
 
     @staticmethod
@@ -1284,7 +1439,12 @@ def _main() -> int:
             mark = {"installed": "+", "skipped": "*", "failed": "-"}[r.status]
             print(f"[{mark}] {r.name:20s} {r.status:10s} {r.detail}")
         print(f"[*] 完成: 安装 {ok} / 跳过 {skip} / 失败 {len(fail)}")
-        return 0  # 工具层是可选增强，失败不返回非零（install.sh 语义）
+        if fail:
+            print("[!] 以下工具安装失败（知识库命令依赖它们，修复后单独重装）:")
+            for r in fail:
+                print(f"    python control/backend/services/detect_tools.py install --tool {r.name}")
+            return 1
+        return 0
 
     # scan
     if args.agent == "all":

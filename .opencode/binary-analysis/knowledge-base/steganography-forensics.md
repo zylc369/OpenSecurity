@@ -19,7 +19,11 @@ python2 lsb.py extract 0.png out.data <hexkey>  # cloacked-pixel 加密 LSB（zs
 - 两张相似图 → Image Combiner **and/or/xor 三算法 × RGB 通道全试**（差异显形）; 除文件大小外完全相同的两张图 → 盲水印（BlindWaterMark 脚本 py2/3 不通用/PuzzleSolver 四模式/单张图也可能藏）
 - BMP 分析前先转 PNG 再 zsteg（格式转换有时直接揭示）
 - 帧数完全平方数的 GIF → 调色板编码; 帧间细微差异 → 帧差分（§6）
-- 在线一把梭 aperisolve.fr（多算法并排: LSB/EOF/steghide/exif——steghide 全失败时的在线备选）; 小众工具: PixelJihad（在线有密码隐写）/OurSecret/DeEgger Embedder（extract files）/silenteye（识别: 放大后行列不对齐的小灰块; 默认密码 silenteye）
+- 在线多算法并排 aperisolve.fr（本地 steghide/zsteg 都没检出时）——HTTP API 可直接调用:
+```bash
+HASH=$(curl -s -X POST "https://aperisolve.fr/upload" -F "image=@stego.png" | python3 -c "import sys,json;print(json.load(sys.stdin)['submission_hash'])")
+sleep 30; curl -s "https://aperisolve.fr/result/$HASH" | python3 -m json.tool   # binwalk/exiftool/zsteg/steghide/位平面等 12 算法结果
+```; 小众工具: PixelJihad（在线有密码隐写）/OurSecret/DeEgger Embedder（extract files）/silenteye（识别: 放大后行列不对齐的小灰块; 默认密码 silenteye）
 
 ## §1 PNG 结构层
 

@@ -140,7 +140,7 @@ def md5_padding(msg_len, block=64):
 **易感性速查**: MD5/SHA-1/SHA-256/SHA-512（Merkle-Damgård）可扩展; SHA-3/Keccak（海绵）、HMAC-*（双哈希）、BLAKE2、截断哈希（缺内部状态位）**不可**扩展。
 
 ```python
-# hashpumpy 用法 (标注依赖)
+# hashpumpy: 哈希长度扩展攻击库（$PYTHON_CMD 环境已装）
 import hashpumpy
 new_mac, new_msg = hashpumpy.hashpump(original_mac, original_msg, append, original_key_length)
 ```

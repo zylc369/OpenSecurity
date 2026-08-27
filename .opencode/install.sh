@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # OpenSecurity 一键安装 (macOS / Linux)
 # 用法: bash .opencode/install.sh
-# 逻辑全在 detect_py_deps.py install（跨平台），此脚本只负责找到 Python 并启动它。
+# 逻辑在 detect_py_deps.py install（python 依赖）+ detect_tools.py install（外部工具）。
+# 两层都是必需层: python 依赖失败立即中断; 工具层单项失败不中断其余安装，
+# 但只要有失败，本脚本以非零退出码结束（重装命令见输出末尾汇总）。
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,4 +28,9 @@ if [[ $# -gt 0 ]]; then
     exit 1
 fi
 
-exec "$PYTHON" "${SCRIPT_DIR}/control/backend/services/detect_py_deps.py" install
+# 1. Python 依赖（必需层: 失败即中断）
+"$PYTHON" "${SCRIPT_DIR}/control/backend/services/detect_py_deps.py" install
+
+# 2. 外部工具（必需层: 单项失败不中断其余，但整体失败 → 非零退出码）
+echo "[*] === 安装外部工具（单项失败不中断，失败汇总在末尾） ==="
+"$PYTHON" "${SCRIPT_DIR}/control/backend/services/detect_tools.py" install

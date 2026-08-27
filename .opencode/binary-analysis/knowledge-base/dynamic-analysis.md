@@ -248,6 +248,8 @@ macOS（Mach-O）/iOS/Swift/ObjC 首选。速查: `breakpoint set -r "check.*"` 
 
 ## 调试自动化: r2pipe 循环爆破与 GDB one-liner
 
+> radare2 是逆向框架（命令名 `r2`）; r2pipe 是 python 库（`import r2pipe`，$PYTHON_CMD 环境已装），用管道驱动 r2 做自动化。
+
 r2pipe 驱动 radare2调试模式做逐字符 oracle 爆破（改寄存器→重启→跑→判输出循环）。备选实现: frida spawn+断点循环（onLeave 改返回值→kill→respawn→比对输出）或 $IDAT dbg 脚本循环:
 ```python
 import r2pipe

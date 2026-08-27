@@ -9,7 +9,7 @@
 - **勒索 key 恢复方法论**: 先验 zip 完整性→strings 快逆向定模式（AES-256-OFB+IV 前置典型）→Volatility Linux 插件失败即转 raw 扫描→锚串（enc_key.bin 路径）定位+页对齐 32B 候选→**魔术字节当 key oracle**（解多文件首块验 %PDF/PK/89PNG，多签名共过才留）→恢复数对账 zip 清单→metadata flag 当诱饵处理（全库 rg 唯一性复核）
 - **内存样本两层解密**: 减 0x32→超长循环 XOR key（可达数百字节 ASCII art）; 勿信 strings 表（红鲱鱼），提取真实二进制逆向; key 藏样本 data 段大段可打印文本
 - **LUKS 主密钥**: 内存搜 AES 密钥: python 生成候选 key 的扩展密钥前 32 字节（AES key schedule），在 dump 中二进制搜索命中偏移 检测 AES key schedule 结构→`cryptsetup luksAddKey --master-keyfile`→开卷。伴生 rsakeyfind/aesfix。适用 LUKS/dm-crypt/FileVault/BitLocker
-- **VMware 快照**: `vmss2core（VMware 内存转 raw——官网下载件） -W snap.vmss snap.vmem` → memory.dmp
+- **VMware 快照**: volatility 3 原生支持 VMware 快照层——`$(dirname $PYTHON_CMD)/vol -f snap.vmem windows.info` 直接分析（.vmss 元数据文件需与 .vmem 同目录）
 
 ## §2 加密卷与 VM
 

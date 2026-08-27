@@ -16,13 +16,16 @@
 | ObjC Bridge | `frida-objc-bridge` |
 | Swift Bridge | `frida-swift-bridge` |
 
-这意味着：使用 `session.create_script(source)` 注入纯 JS 字符串时，全局对象 `Java`、`ObjC`、`Swift` **不存在**（`typeof Java === "undefined"`）。
+**受影响场景（分界线）**:
+- **直接调用 frida python SDK**（`import frida` 后 `session.create_script(js字符串)` 注入）→ `Java`/`ObjC`/`Swift` **不存在**（`typeof Java === "undefined"`）——这就是下方方案二要用 Compiler 把 bridge 编译进脚本的原因
+- **frida CLI（`frida -l hook.js` / REPL）不受影响**——frida CLI（python 包 frida-tools）自带 bridges/ 目录（java.js/objc.js/swift.js），目标进程需要 bridge 时 CLI 自动把源码回传注入（按需加载协议），全程零 node/npm
 
 ---
 
 ## 方案一：frida CLI（最简单）
 
-直接使用 `frida` 命令行加载 JS 脚本，无需任何额外步骤：
+直接使用 `frida` 命令行加载 JS 脚本，无需任何额外步骤（**不需要 node**——bridge 由 frida CLI 自动加载，见上方"变化背景"的分界说明; node/npm 只服务方案二的编译链）。
+CLI 也能自动化: `-l` 加载 / `-e` 执行代码 / `-O` 选项文件 / console.log 走 stdout 可捕获——单发 hook + 收日志场景不需要方案二。方案二不可替代处是**进程内双向控制**（`script.on('message')` 回调收结构化数据、send/recv 双向通信、运行时重建脚本、与 pwntools 等库联动编排）：
 
 ```bash
 # Java Hook — REPL 内置 Java bridge，直接用
@@ -42,7 +45,7 @@ Java.perform(function() {
 
 ---
 
-## 方案二：Python SDK + Compiler（推荐用于自动化）
+## 方案二：Python SDK + Compiler（进程内控制: 消息回调/双向通信/与其他 python 库联动）
 
 ### 前置条件
 
@@ -52,11 +55,14 @@ Java.perform(function() {
 ### 项目初始化（首次）
 
 ```bash
+# 新建目录存放 bridge 依赖（名字随意，以 frida-project 为例）
 mkdir -p $TASK_DIR/frida-project && cd $TASK_DIR/frida-project
 npm init -y
 npm install frida-java-bridge
-# 如需 ObjC Bridge: npm install frida-objc-bridge
+# 如需 ObjC Bridge，那么使用这个命令安装依赖: npm install frida-objc-bridge
 ```
+
+> 后面 `compiler.build(..., project_root=...)` 的 `project_root` 就传执行过上面 `npm install` 的目录。
 
 ### TypeScript 脚本（显式 import）
 
@@ -237,7 +243,6 @@ def compile_java_hook(ts_source_code, ts_filename="hook.ts"):
 | `Error: Cannot find module 'frida-java-bridge'` | 项目目录缺少 npm 包 | 在 `project_root` 目录执行 `npm install frida-java-bridge` |
 | 编译后 `Java.available` 仍为 `false` | 目标进程无 Java VM（纯 native 进程） | 换用 attach 到含 Java VM 的进程 |
 | `bundle` 过大（> 1MB） | source map 未压缩 | 使用 `frida_compile` 的压缩选项 |
-| `npm install` 失败 | 无 Node.js 环境 | 安装 Node.js（`brew install node`） |
 
 ---
 
