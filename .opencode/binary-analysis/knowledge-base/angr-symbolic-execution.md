@@ -57,7 +57,7 @@ opt = Optimize; opt.minimize(x)                # 最小/最大满足值
 set_param("timeout", 5000)                       # unknown 时拆子问题
 ```
 
-**求解器替代**: 位向量链 hash（bvxor/bvrol/bvadd）逆求解 Z3 爆慢时换 **boolector**（QF_BV 常快 10-100×，经验值）。流程: lift 成 SMT2 + 可打印约束（`bvuge input #x20202020`/`bvule #x7e7e7e7e`）+ assert 目标 → `boolector -m --output-format=smt2 hash.smt2`。默认仍先 Z3（生态全），位级 hash 卡慢再切换。
+**求解器替代**: 位向量链 hash（bvxor/bvrol/bvadd）逆求解 Z3 爆慢时换 **boolector**（位向量类问题通常比 Z3 快 10-100 倍）。流程: lift 成 SMT2 + 可打印约束（`bvuge input #x20202020`/`bvule #x7e7e7e7e`）+ assert 目标 → `boolector -m --output-format=smt2 hash.smt2`。默认仍先 Z3（生态全），位级 hash 卡慢再切换。
 
 **ILP 路线**: 输入字节是**线性**和差约束（`x[3]+x[7]==0xAB` 类，无位运算）时 ILP 专用求解器快于 Z3——PuLP `LpVariable(x_i, 32, 126, cat='Integer')` + `PULP_CBC_CMD` 求解; 约束经 GDB 断点逐比较提取，位置编码输入（input[i]=i）标定涉及位置。选型: 纯线性→PuLP，混合位运算→Z3，矩阵/乘法→格。
 

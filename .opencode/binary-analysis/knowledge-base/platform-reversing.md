@@ -34,7 +34,7 @@ eBPF: bpftool prog list / dump xlated（反汇编）/ dump jited（原生码）;
 
 ## §5 跨环境执行与确定性密钥
 
-- **GLIBC 符号版本 patch**: 字符串（GLIBC_2.25→2.27）+ **版本 hash 槽**双改（objdump -p 看 hash; ld.so 双重校验）→ qemu-riscv64 -L sysroot
+- **GLIBC 符号版本 patch**: 字符串（GLIBC_2.25→2.27）+ **版本 hash 槽**双改（objdump -p 看 hash; ld.so 双重校验）→ qemu-riscv64 -L sysroot 运行异架构 ELF（qiling 覆盖部分架构）
 - **小众 ISA**: help banner 常留自定义 opcode 文档（作者调试残留）先 strings; C-SKY（国产 TBox 常见）: IDA 插件/Ghidra 模块/csky-abiv2 工具链/qemu-csky
 - **APK 确定性密钥反模式**: key=SHA-256(META-INF/CERT.RSA 证书)[:16] 离线可提; 审计 getSignature+MessageDigest 组合
 
@@ -45,7 +45,7 @@ NAND 网络: 函数完备——真值表 2^n 重建+模式识别（NOT=双输入
 
 ## §7 WASM 与小程序
 
-WASM: wasm2c（转 C 最可读）/wasm-decompile/Ghidra 插件/DevTools。模型: 线性内存+间接调用 table。攻击面: 边界检查整型溢出/间接调用类型混淆（C/C++/Rust 来源模式照旧）。**文本级 patch**: `wasm2wat` → 编辑 WAT（翻转 i64.lt_s→i64.gt_s/改常量）→ `wat2wasm` 重打包——游戏类"证明生成与走子质量独立"时 patch minimax 让 AI 变差而证明仍有效; 比 wasm2c 重编译轻量。**运行时内存 patch（games-and-vms-2）**: Node instantiate 后 `new DataView(instance.exports.memory.buffer).setInt32(偏移, 值, true)` 直接改游戏状态（连胜计数/胜率 100%）——改运行时状态而非二进制，免懂完整逻辑; 变量偏移用 `wasm-objdump -x` 或搜已知常量定位。
+WASM: wasm2c（转 C 最可读）/wasm-decompile/Ghidra 插件/DevTools。模型: 线性内存+间接调用 table。攻击面: 边界检查整型溢出/间接调用类型混淆（C/C++/Rust 来源模式照旧）。**文本级 patch**: `wasm2wat` → 编辑 WAT（翻转 i64.lt_s→i64.gt_s/改常量）→ `wat2wasm` 重打包——游戏类"证明生成与走子质量独立"时 patch minimax 让 AI 变差而证明仍有效; 比 wasm2c 重编译轻量。**运行时内存 patch（games-and-vms-2）**: Node instantiate 后 `new DataView(instance.exports.memory.buffer).setInt32(偏移, 值, true)` 直接改游戏状态（连胜计数/胜率 100%）——改运行时状态而非二进制，免懂完整逻辑; 变量偏移用 ``wasm-objdump -x` 或搜已知常量定位。
 微信小程序: 缓存 Windows `WeChat Files\Applet\` / macOS `~/Library/Containers/com.tencent.xinWeChat/.../Applet/` / Android `appbrand/pkg/`; wxappUnpacker（旧版 JS+WXML）/ **unveilr（新版字节码）**; 产出 grep https://|flag|secret。
 
 ## §8 硬件与高级架构

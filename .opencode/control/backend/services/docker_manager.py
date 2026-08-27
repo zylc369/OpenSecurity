@@ -63,6 +63,16 @@ KNOWN_CONTAINERS: list[KnownContainer] = [
 
 KNOWN_IMAGES: list[KnownImage] = [
     KnownImage(
+        name="opensecurity/toolbox-core",
+        description="安全工具箱 core 层（steg/取证/爆破/hashcat-CPU/nxc 等 22 项, ~6GB）",
+        size_hint="~6.2GB",
+    ),
+    KnownImage(
+        name="opensecurity/toolbox-full",
+        description="工具箱 full 层（core + ghidra + metasploit, ~10GB）",
+        size_hint="~9.8GB",
+    ),
+    KnownImage(
         name="neo4j:5",
         description="Neo4j 5.x 社区版",
         size_hint="~988MB",

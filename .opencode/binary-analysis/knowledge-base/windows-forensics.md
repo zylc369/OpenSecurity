@@ -17,7 +17,7 @@
 
 ## §3 NTFS 深化
 
-- **ADS**: `fls -r img | grep ":"`（条目 `66-128-4: file:stream`）→ `istat img 66` 看 $DATA 命名属性 → `icat img 66-128-4` 抽; 活系统 `dir /r`/`Get-Content -Stream`; Zone.Identifier 是溯源第一站; pytsk3 遍历 type==NTFS_DATA 且 name!="(default)"
+- **ADS**: Sleuth Kit `fls -r img | grep ":"`（条目 `66-128-4: file:stream`）→ `istat img 66` 看 $DATA 命名属性 → `icat img 66-128-4` 抽; 活系统 `dir /r`/`Get-Content -Stream`; Zone.Identifier 是溯源第一站; pytsk3 遍历 type==NTFS_DATA 且 name!="(default)"
 - **timestomping**: SI（0x10，可改）早于 FN（0x30，系统维护）=回拨; 文件名 UTF-16LE——`strings -el $MFT` 必跑
 - MFT offset 定向 dump 删除文件见 `disk-memory-forensics.md` §3
 
@@ -31,7 +31,7 @@
 
 ## §5 内存凭证顺序
 
-clipboard（CF_UNICODETEXT 最近复制——最先跑）→ mimikatz 插件（wdigest 明文）→ hashdump（hivelist 定位偏移）→ printkey → memdump -p + strings（**`-e l` UTF-16LE 必跑**，Windows 宽字符 ASCII strings 漏一半）→ netscan/pstree/dlllist。实战: truecryptsummary 直取 TC 密码; wireshark 进程→memdump+foremost 分离 pcap。UEsD 内存扫 ZIP 见 §4。**无内存镜像只有 config 蜜罐目录时**: mimikatz 离线解密 `lsadump::sam /sam:SAM /system:SYSTEM`（SAM/SYSTEM 文件放 mimikatz 目录，输出 NTLM 哈希再破解）。
+内存取证插件序（`$(dirname $PYTHON_CMD)/vol -f mem.raw`）: windows.clipboard（CF_UNICODETEXT 最近复制——最先跑）→ windows.hashdump / windows.cachedump（凭据哈希）→ windows.dumpfiles --pid <lsass PID> dump 出 lsass.dmp 后 **`$(dirname $PYTHON_CMD)/pypykatz lsa minidump lsass.dmp`**（提取 wdigest 明文/NTLM/DPAPI——mimikatz 插件是 vol2 专属，vol3 用 pypykatz）→ windows.registry.printkey → windows.memmap --pid <PID> --dump + strings（**`-e l` UTF-16LE 必跑**，Windows 宽字符 ASCII strings 漏一半）→ windows.netscan/pstree/dlllist。实战: TrueCrypt 密码 vol2 有 truecryptsummary 插件、vol3 无官方——dump 全内存后 python 按 TC 密钥结构（find 设备句柄+头部 magic 'TRUE'）搜索搜索或 strings 找挂载密码; wireshark 进程→memmap dump+`$(dirname $PYTHON_CMD)/binwalk` 分离 pcap。UEsD 内存扫 ZIP 见 §4。**无内存镜像只有 config 蜜罐目录时**: `$(dirname $PYTHON_CMD)/pypykatz registry local --sam SAM --system SYSTEM`（提取 NTLM 哈希; mimikatz 在目标机 Windows 上运行）。
 
 ## §6 杂项五则
 

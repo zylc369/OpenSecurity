@@ -12,8 +12,6 @@ zsteg -a image.png                              # PNG/BMP 全平面自动扫（L
 zsteg 1.png -E b1,r,lsb,xy > out.bin            # 指定通道提取; 栈报错 "stack level too deep" 时 --msb 或 -o xY 换扫描顺序
 steghide extract -sf image.jpg                  # JPEG 通用提取（info 子命令交互查有无嵌入）
 stegseek image.jpg /usr/share/wordlists/rockyou.txt   # steghide 密码爆破（比 stegcracker 快）
-outguess -k pass -r stego.jpg out.txt           # outguess 提取（-d 写入; PPM/PNM/JPEG 载体）
-stegbreak -r rules.ini -f dict.txt -r p img.jpg # jphide 密码爆破（与 stegdetect -t jopi 配套）
 python3 $SHARED_DIR/scripts/stego_bit_planes.py img.png -o planes/   # R/G/B×bit0-7 位平面渲染（项目脚本）
 python2 lsb.py extract 0.png out.data <hexkey>  # cloacked-pixel 加密 LSB（zsteg 见乱码 hex 时试; AES 加密需密钥）
 ```
@@ -21,7 +19,7 @@ python2 lsb.py extract 0.png out.data <hexkey>  # cloacked-pixel 加密 LSB（zs
 - 两张相似图 → Image Combiner **and/or/xor 三算法 × RGB 通道全试**（差异显形）; 除文件大小外完全相同的两张图 → 盲水印（BlindWaterMark 脚本 py2/3 不通用/PuzzleSolver 四模式/单张图也可能藏）
 - BMP 分析前先转 PNG 再 zsteg（格式转换有时直接揭示）
 - 帧数完全平方数的 GIF → 调色板编码; 帧间细微差异 → 帧差分（§6）
-- 在线一把梭 aperisolve.fr（多算法并排: LSB/EOF/steghide/outguess/exif）; 小众工具: PixelJihad（在线有密码隐写）/OurSecret/DeEgger Embedder（extract files）/silenteye（识别: 放大后行列不对齐的小灰块; 默认密码 silenteye）
+- 在线一把梭 aperisolve.fr（多算法并排: LSB/EOF/steghide/exif——steghide 全失败时的在线备选）; 小众工具: PixelJihad（在线有密码隐写）/OurSecret/DeEgger Embedder（extract files）/silenteye（识别: 放大后行列不对齐的小灰块; 默认密码 silenteye）
 
 ## §1 PNG 结构层
 
@@ -45,12 +43,12 @@ while pos < len(data):
 | CRC 字段藏数据 | 各 chunk CRC 是可读 ASCII | 拼接 CRC 字节 |
 | 自定义 chunk | 类型非标准集（如 scRT） | 提取 data（可能 XOR 分层加密，见 §8） |
 | Fireworks 私有块 | exiftool Software=Adobe Fireworks CS6 | Fireworks 开图层（version-sensitive，已停产） |
-| APNG 多帧 | 数据含 acTL（后 4B=帧数） | `apngdis image.apng` 或 python apng 库; 查看器只显默认帧 |
+| APNG 多帧 | 数据含 acTL（后 4B=帧数） | PIL APNG 逐帧: `im = Image.open(f); im.seek(n)` 或 python apng 库; 查看器只显默认帧 |
 | 签名/chunk 大小写损坏 | §1 解析器按 offset 报错（chunk 长度/CRC） | dd 补 8B 签名; idat→IDAT（首字母大写=critical，小写被当 ancillary 跳过）|
 | IDAT 异常小块 | §1 解析器列块: 倒数第二块未满（<65524）后还有小 IDAT | 多余小块 data 单独 `zlib.decompress`（剔除 4B length+4B type+4B CRC）——正常块写满才开新块 |
 | BMP 宽高修复 | BMP 显示尺寸与 bfSize 对不上 | 头部修复三路: ①`(bfSize-bfOffBits)//channel//已知宽=真实高`（channel=biBitCount/8）反推宽/高/方根三元组全存; ②删文件头存 `.data` 后 GIMP raw 打开手调宽高; ③同法适用一切"无头像素流"（相机 ARW/mspaint dump 改 .data） |
-| GIF 帧间时间轴 | 动画无视觉异常但帧 delay 只有两三种值 | `identify -format "%s %T\n" x.gif` 列每帧 delay，两值映射 0/1 转 ASCII |
-| GIF 逐帧 comment | strings 见 GIF89a 后跟异常 hex | `identify -format "%s %c\n" x.gif` 逐帧提 comment（可藏 RSA key 分片）|
+| GIF 帧间时间轴 | 动画无视觉异常但帧 delay 只有两三种值 | 逐帧 delay: `identify -format "%s %T\n" x.gif`（PIL 等价: im.info["duration"]），两值映射 0/1 转 ASCII |
+| GIF 逐帧 comment | strings 见 GIF89a 后跟异常 hex | 逐帧 comment: `identify -format "%s %c\n" x.gif`; PIL 等价 im.info.get("comment") |
 
 ## §2 图像位平面与频域
 
@@ -65,11 +63,11 @@ while pos < len(data):
 - **JPEG 缩略图掩码**: `exiftool -b -ThumbnailImage` 抽缩略图，暗像素 (x,y) 索引主图 OCR 文本 text_lines[y][x]（选字密码）
 - **JPEG 单 bit 翻转爆破**: 8×size 全候选; 缩略图/解码预筛+tesseract OCR; `0xFF` 后必跟 `0x00`/marker——违反处即损坏点
 - **窄图行式二进制**: 图宽 7-8 像素 = 每行一个字符的强信号（7-bit/8-bit ASCII，行内亮=1 暗=0）; 7 宽行左补 0; 红通道/亮度阈值 128 都试
-- **BF 图片隐写 bftools**: 像素色值经查表映射回 Brainfuck 指令（Braincopter: PNG 像素→8 指令; Brainloller: 色轮旋转方向→指令+转向）。解码: `bftools decode braincopter flag.png` / `decode brainloller` → 输出 BF 文本再解; `bftools decode -o out.txt` 落盘。识别: 图像无统计异常但题面暗示程序/指令、或图片由纯色块规则拼接
+- **BF 图片隐写**: 像素色值经查表映射回 Brainfuck 指令（Braincopter: PNG 像素→8 指令; Brainloller: 色轮旋转方向→指令+转向）。解码: PIL 读像素→按映射表转 BF 指令（python 十几行: `cmds = "".join(TABLE[p&7] for p in pixels)` + BF 解释器）或 bftools（见手动清单）→ 输出 BF 文本再解。识别: 图像无统计异常但题面暗示程序/指令、或图片由纯色块规则拼接
 
 ## §3 图像拼合与重建
 
-- **拼图重组**: 边缘差分相容矩阵+贪心（难加回溯）或 python 贪心/遗传自动求解（相容矩阵+回溯）; 位图 carve → `convert +append` 横拼 → gaps; 产物可能再叠 ROT13。**碎纸条高速变体**: 每条左右缘编码二进制 bitmask（暗像素=1 逐 y 位移位）→ 相邻边 XOR+popcount（Hamming）贪心拼接——100 条毫秒级
+- **拼图重组**: 边缘差分相容矩阵+贪心（难加回溯）或 python 贪心/遗传自动求解（相容矩阵+回溯）; 位图 carve → PIL 横拼: `Image.new("RGB",(w*n,h)).paste`→ python 贪心求解; 产物可能再叠 ROT13。**碎纸条高速变体**: 每条左右缘编码二进制 bitmask（暗像素=1 逐 y 位移位）→ 相邻边 XOR+popcount（Hamming）贪心拼接——100 条毫秒级
 - **QR tile 重排**: finder pattern 三角锚定+timing pattern 定向优先; 小网格（3×3/4×4）全排列×zbarimg 爆破; tile 带旋转时先结构锚定。**无索引变体补集**: ①分块编号藏目录名——目录名像随机串时 `base64 -d` 解出数字索引（MDAx→001），按索引排序拼接免结构分析; ②有索引但大网格时用 codeword 约束回溯代替全排列——按 QR spec 每个 payload 长度找不变像素（finder/timing/alignment 先固定约 50%），剩余块在像素约束下回溯。**1px 列碎片剪枝**: V1 format string 仅 32 合法值（ECC×mask）——列 8 与 32 值集匹配先过滤，剩余少量再全排列。**大图批量 tile 扫描**: PIL crop 按网格切块 → 每块 `resize((500,500))` 放大后 pyzbar 才识别（小块分辨率不足 zbar 不识别）; `Image.ANTIALIAS` 需 pillow≤9.5.0（新版已移除该常量改 `Image.LANCZOS`）。定位角缺失时手画三个 7×7 回字补全（左上/右上/左下）
 - **像素坐标链**: R=数据/G,B=下一坐标（变体 G*256+B 宽图）; G/B 通道小数值结构化分布是识别信号
 - **RGB 文本像素点合成**: 纯文本每行 `R,G,B` 十进制值（无图片结构）——行数做整数分解猜宽高（x*y=行数，逐因子对试），PIL `putpixel((i,j),(r,g,b))` 重建; 长度先修成平方数也是信号
@@ -86,20 +84,20 @@ while pos < len(data):
 
 ## §4 音频
 
-**三板斧（按序）**: ①频谱图 `sox x.wav -n spectrogram -o spec.png`（文本/QR 常在 2-15kHz; Sonic Visualiser 可调窗长） ②样本 LSB `stegolsb wavsteg -r -i a.wav -o out.bin -n 2 -b 1000`（显式信号如 SSTV 可能是诱饵——找到一种编码后仍查 LSB） ③DeepSound（WAV 载文件+AES; `deepsound2john.py` 提 hash→john 爆破）。
+**三板斧（按序）**: ①频谱图 `sox x.wav -n spectrogram -o spec.png`（文本/QR 常在 2-15kHz; Sonic Visualiser 可调窗长） ②样本 LSB——python 内联（wave 标准库: `w=wave.open("a.wav"); data=w.readframes(w.getnframes()); bits="".join(str(b>>1&1) for b in data)` 按位深度 pack 成字节; -n 2 即 bit1 位平面）（显式信号如 SSTV 可能是诱饵——找到一种编码后仍查 LSB） ③DeepSound（WAV 载文件+AES; `deepsound2john.py` 提 hash→john 爆破）。
 
 - **MP3 载体 MP3Stego**: `encode -E hidden.txt -P pass in.wav out.mp3` 写入 / `decode -X -P pass stego.mp3` 提取——MP3 帧层隐写，WAV 三板斧全部无效。密码常在文件 strings/ID3 tag 里给到; 识别: WAV 分析无果且为 MP3 即转 MP3Stego。旧工具 Silenteye 同类（WAV/BMP LSB+AES，GUI）。**爆破坑: MP3Stego 错密码同样产出文件——不能用"有无输出"当判据，须逐个打开检查内容**（脚本爆破每密码存不同输出名再验）; SilentEye 解密失败时换音质 low/high × AES128/256 四组合试。立体声音轨摩斯: Audacity 分离立体声到单声道（Shift+M）后独奏第一轨。DeepSound 同类工具; 摩斯音频自适应解码 morsecode.world/international/decoder/audio-decoder-adaptive.html
 - **波形目测**: 高低/长短双形态直接映射 01 或 Morse 点划（位数为 7 倍数→7 位一组转 ASCII; 长短空→Morse 再栅栏）
 
 - **双轨差分**: 两近似音轨反相相减显形: `sox -m t0.wav "|sox t1.wav -p vol -1" diff.wav` → gain -n -3 → 高分辨频谱 `-X 2000 -Y 1000 -z 100 -h` → `sinc 5000-12000` 滤带。陷阱: metadata 诱饵 flag / 声道标签造假 / 窄时间窗
-- **DTMF 标准+自定义**: 标准 `sox → multimon-ng -t raw -a DTMF`（# 后常八进制 ASCII）; 自定义频率先 showspectrumpic 目测等距网格→按窗 rfft 双峰→行列键值→变长数字转 ASCII（2-3 位贪心 32≤v≤126）。**双层变体**: DTMF 解出的数字串再走 T9 多击键盘（'44'=h、'7777'=s; 停顿分隔同键连击）
+- **DTMF 标准+自定义**: `sox → multimon-ng -t raw -a DTMF`（# 后常八进制 ASCII）; 自定义频率先 showspectrumpic 目测等距网格→按窗 rfft 双峰→行列键值→变长数字转 ASCII（2-3 位贪心 32≤v≤126）。**双层变体**: DTMF 解出的数字串再走 T9 多击键盘（'44'=h、'7777'=s; 停顿分隔同键连击）
 - **手工编码四式**: FFT 主频→音名（A4=440）首字母拼词; MIDI note_on/off pitch 对 `chr(on+off)`/`(on<<4)|off`/XOR 全试; 两种波形形态=bit; exiftool comment 下划线分隔 0-7 数字=八进制→常叠 base64。**音阶度数变体**: 转写的音符序列按大调音阶度数（D 大调 D=0..C#=6）当 nibble，相邻音符对 `(n1<<4)|n2` 一字符——已知 flag 前后缀校准映射。**bytebeat 生成音乐**: 单行 C 风格表达式含 `t` 变量+%|&^>><< 位运算+8bit 输出即 bytebeat 签名——贴在线解释器（wry.me/bytebeat）播放，曲名即答案
 - **高采样率 SSTV 手工解调**: 48/96kHz 标准解码器失败→arccos+diff 算瞬时频率 `freq=diff(arccos(clip(data)))*rate/2π`，1500-2300Hz 线性映灰度
 - **图像 FFT 频域**: fftshift+fft2 幅度谱 log(1+|F|); 同心环×固定角度集=bit 位（峰=0 无峰=1）; 阈值按频谱目测
 
 ## §5 视频与变换域
 
-- **时域聚合三式**: 帧累加 `np.maximum` 全帧合成（闪烁位置拼图）/ 帧平均浮点累加+N（噪声掩盖内容显形，暗则 ImageOps.equalize）/ 音频倒放（`sox reverse`/`ffmpeg -af areverse`，含糊语调必试）
+- **时域聚合三式**: 帧累加 `np.maximum` 全帧合成（闪烁位置拼图）/ 帧平均浮点累加+N（噪声掩盖内容显形，暗则 ImageOps.equalize）/ 音频倒放（`sox reverse`/ `ffmpeg -af areverse``，含糊语调必试）
 - **JPEG XL TOC 置换**: TOC 的 Lehmer 置换控制渐进收敛顺序，完整解码不可见; 每 1KB 截断→djxl 解码→与终态比对记 tile 收敛 offset→tile_id 序列=flag
 - **Arnold Cat Map**: 方形图+直方图正常但均匀噪声→迭代 (2x+y,x+y) mod N 直到复原（周期整除 3N，大图先解析周期）; 区别于种子置换（无周期靠 seed）
 - **MJPEG FFD9 尾部信道**: 按 \xff\xd8 分帧，每帧 EOI 后附加字节拼接; 解码器遇 FFD9 即停
@@ -111,15 +109,15 @@ while pos < len(data):
 ## §6 通用容器与交织
 
 - **结束标记后 overlay**: PNG IEND / JPEG FFD9 / GIF Trailer / PDF %%EOF 之后皆可疑; 附加区头部魔术被合法签名覆盖时手工改回目标格式魔术（7z=`37 7A BC AF 27 1C`）
-- **多流视频容器**: 视频第一步永远 `ffprobe -hide_banner` 枚举全部流; flag 常在 0:1（`ffmpeg -map 0:1`）; 默认流是诱饵、第二流常用冷门编码
+- **多流视频容器**: 视频第一步永远 `ffprobe -hide_banner` 枚举全部流; flag 常在 0:1; 默认流是诱饵、第二流常用冷门编码
 - **两层交织**: 双扩展名（.ppnngg）/偶奇字节提出双 PNG 头→先剥字节层，产物横向条纹→再剥扫描行层
 - **GIF 帧差分+Morse**: `compare -fuzz 10%` 揭示单像素修改，点大小/间隔映射 Morse
 - **GIF 调色板编码**: 帧数完全平方→每帧=1 像素，`gif.getpalette()[0]` 亮度定黑白
-- **渐进 PNG 逐层 XOR**: 自定义 chunk（scRT）多字节 XOR 层层嵌套; `xortool -c ff`（图像最频字节 0xFF）; 嵌套 matryoshka 配递增语义 key（layer2/layer3）
+- **渐进 PNG 逐层 XOR**: 自定义 chunk（scRT）多字节 XOR 层层嵌套; ``$(dirname $PYTHON_CMD)/xortool` -c ff`（图像最频字节 0xFF）; 嵌套 matryoshka 配递增语义 key（layer2/layer3）
 
 ## §7 文档类
 
-**PDF 检查清单**: strings 明文 → exiftool 全字段 → pdfimages -all + zsteg -a（LSB 可能在 bit5） → 编辑器查遮盖矩形（删黑块露 QR） → FlateDecode 流 zlib 解压搜 → Link 注释 URI 的 `\{` `\}` 转义还原（pikepdf） → `mutool clean -d` 全解压 → %%EOF 后附加数据 → pdftotext -layout 不可见分隔符 → 模糊图 Wiener 反卷积（skimage wiener+高斯 PSF σ≈3）→ 矢量矩形 QR（内容流 re 算子中心渲染）→ 末层常是 ROT18。
+**PDF 检查清单**: strings 明文 → exiftool 全字段 → `zsteg -a img.png`（LSB 可能在 bit5） → 编辑器查遮盖矩形（删黑块露 QR） → FlateDecode 流 zlib 解压搜 → Link 注释 URI 的 `\{` `\}` 转义还原（pikepdf） → pymupdf 处理（`import fitz`）/ `mutool clean -d` 全解压 → %%EOF 后附加数据 → pdftotext -layout 不可见分隔符 → 模糊图 Wiener 反卷积（skimage wiener+高斯 PSF σ≈3）→ 矢量矩形 QR（内容流 re 算子中心渲染）→ 末层常是 ROT18。
 
 **SVG**: ①微坐标隐藏图形——坐标大量小数聚集极小区间，scale(200,200)+translate 放大 ②动画 keyTimes/values 两色交替=二进制、间隔比 t:3t=Morse 点划。
 

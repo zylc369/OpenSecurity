@@ -250,7 +250,7 @@ const poll = setInterval(() => {
 ### 2.2 黑盒下的攻击面枚举
 
 **泄露路径速查**（按命中率优先）:
-`/robots.txt`（Disallow 即入口）｜`/.git/HEAD` 存在则 `githacker --brute` 恢复全仓库（含 stash/分支）｜`/.svn/entries`｜`/.DS_Store`｜`/crossdomain.xml`｜`/.env`（DB 密码/API key）｜`/composer.json`·`/package.json`（依赖+版本）｜`/.htaccess`｜`/config.php`｜`/phpinfo.php`（环境全量泄露: 路径/扩展/环境变量）。
+`/robots.txt`（Disallow 即入口）｜`/.git/HEAD` 存在则 `git 泄露恢复（内联: 已有 .git 目录时 `git log -p` 审计 + 对象手工恢复; 无目录时按 knowledge 正文的 git 对象 zlib 解压三式重建） --brute` 恢复全仓库（含 stash/分支）｜`/.svn/entries`｜`/.DS_Store`｜`/crossdomain.xml`｜`/.env`（DB 密码/API key）｜`/composer.json`·`/package.json`（依赖+版本）｜`/.htaccess`｜`/config.php`｜`/phpinfo.php`（环境全量泄露: 路径/扩展/环境变量）。
 **备份文件**: `/www.zip`·`/backup.zip` 整站｜`index.php.bak`·`~`·`.swp`（Vim swap 有前导点变体）｜备份扩展枚举 `-e bak,old,zip,tar.gz,sql`。
 **JS 线索**: 引用的 script 全拉，搜 `fetch(`/`axios.`/`password`/`token`/`admin`/`debug`——混淆 JS 只搜字符串不需读懂。
 **HTML 线索**: `<!--注释-->`/`<input type=hidden>`/`<form action>` 暴露接口。
@@ -382,7 +382,7 @@ xray 插件: xss/sqldet/cmd-injection(含 SSTI)/dirscan/path-traversal/xxe/uploa
 
 ```bash
 nuclei -u T -t cves/ -tags CVE-2021-44228    # 秒级
-nuclei -u T -t cves/ -tags tomcat            # 产品定向（nuclei 为附录工具; 单 CVE 验证按模板 raw 字段转 curl 手动复现）
+nuclei -u T -t cves/ -tags tomcat            # 产品定向（模板匹配后按 raw 字段转 curl 复现确认）
 nuclei -u T -t cves/ -severity critical,high # 1-3 分钟
 grep -rl "apache 2.4.49" ~/nuclei-templates/http/cves/   # 内容搜模板
 ```
@@ -417,7 +417,7 @@ def fuzz(tmpl, words, headers=None, filt=lambda r: r.status_code != 404):
 
 **vhost 枚举**（Host 头占位）: `fuzz("http://IP/", vhosts, headers={"Host": "{F}.target.com"})`，响应长度/状态与基线比对判命中。
 
-**XSS 专项**: dalfox 为附录工具（盲打/waf-evasion 引擎）; 常规 XSS fuzz 用上方模板+payload 字典。
+**XSS 专项**: `dalfox url "http://T/?q=test"`（--blind 回调 / --waf-evasion / --mining-dom）
 
 **老版本后门速查**: vsftpd 2.3.4（用户名 :) 结尾→TCP 6200 shell）/ proftpd 1.3.3c / unreal-ircd 3.2.8.1（源码后门）——banner 版本命中先试后门。**Bazaar .bzr 泄露**: bzr check 报错含缺失文件路径→wget 循环重建仓库→bzr log/diff 翻全部修订（删除的凭据可恢复; .git/.hg/.svn 同理）。**.idea/workspace.xml** 等 IDE 项目文件泄露结构/配置。
 
@@ -425,7 +425,7 @@ def fuzz(tmpl, words, headers=None, filt=lambda r: r.status_code != 404):
 
 ### 7.4 侦察与端口扫描工具链
 
-> 本节为附录工具生态（go 工具族——高速无状态扫描/SAN 批量/渲染爬虫无 python 等价，见 tool-dependency-index 附录）。**项目内最小替代路径**: 子域→`curl "https://crt.sh/?q=%25.target.com&output=json"`（证书 SAN）+ dnspython 爆破; 存活探测→python 线程池模板（§7.3）; 端口→nmap（附录）; 历史 URL→`curl "http://web.archive.org/cdx/search/cdx?url=*.target.com*&output=json&limit=500"`; JS 端点→web_render.py（playwright 渲染后 grep）; 测绘→FOFA/Shodan API curl。环境具备 go 工具族时用下方管道效率更高。
+> 本节为扫描工具生态（高速无状态扫描/SAN 批量/渲染爬虫）。**项目内最小替代路径**: 子域→`curl "https://crt.sh/?q=%25.target.com&output=json"`（证书 SAN）+ dnspython 爆破; 存活探测→python 线程池模板（§7.3）; 端口→nmap; 历史 URL→`curl "http://web.archive.org/cdx/search/cdx?url=*.target.com*&output=json&limit=500"`; JS 端点→web_render.py（playwright 渲染后 grep）; 测绘→FOFA/Shodan API curl。环境具备 go 工具族时用下方管道效率更高。
 
 **端口扫描三件分工**: naabu（SYN 高并发快 10×，非 root 自动 CONNECT，`-top-ports 100/1000`，端口发现首选）→ nmap 深度（`-sV` 版本 `--version-intensity 9` 精确/`-O` OS 指纹/`-A` 组合/600+ NSE; UDP 慢限定 `-sU -p 53,161,500`）; masscan 大规模（/16+ 异步无状态 `--rate 10000`，需 root，nmap XML 兼容输出）。
 **fscan 内网优先**: 单二进制 scp 即用/600 线程/内置 10 服务弱口令爆破/POC（MS17-010·Redis 未授权·WebLogic·Struts2 兼容 xray POC）/利用动作直接打（Redis 写公钥）/NetBIOS 域控识别/国产 CMS·OA 指纹; `-nopoc` 与 `-nobr` 独立开关，`-m ssh/ms17010` 单模块，`-pa` 追加端口。同族 gogo（500 并发 `--filter`）。nikto: `-Tuning` 数字（1上传 2默认文件 3信息泄露 4注入 6DoS 8命令执行 9SQLi; `x6` 排除 DoS）/`-no404` 减误报。服务指纹: fingerprintx（51 协议 `--json`，`naabu -silent | fingerprintx`）/nerva。

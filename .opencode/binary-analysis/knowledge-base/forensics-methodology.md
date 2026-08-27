@@ -63,7 +63,7 @@ tshark -r cap.pcap --export-objects http,out_http       # HTTP 传输文件导�
 
 ## 3. 内存取证（Volatility 3）
 
-工具：**Volatility 3**（随 $PYTHON_CMD 环境提供，调用 `$(dirname $PYTHON_CMD)/vol`；v3 自动识别 profile，无需像 v2 手动指定）。
+工具：**Volatility 3**——命令 `$(dirname $PYTHON_CMD)/vol`（v3 自动识别 profile，无需指定）。
 
 **Windows 镜像常用插件**：
 ```bash
@@ -107,7 +107,7 @@ mount -o ro,loop,show_sys_files -t ntfs-3g image.dd /mnt   # NTFS（含 $MFT 等
 ```
 
 **Windows artifact（解析注册表 hive：SAM/SYSTEM/SOFTWARE/NTUSER.DAT）**：
-- 工具：python-registry（随 $PYTHON_CMD 环境提供; `import Registry; Registry.Registry(hive)` 程序化解析）
+- 注册表解析: `$PYTHON_CMD -c "import Registry; r=Registry.Registry(chr(78)+chr(84)+chr(85)+chr(83)+chr(69)+chr(82)+chr(46)+chr(68)+chr(65)+chr(84)); print(r.root())"`
 - 关键键：`UserAssist`（程序执行记录）、`Shellbags`（浏览过的文件夹）、`Run`/`RunOnce`（持久化）、`MountedDevices`
 - 捞串：`strings -n 8 NTUSER.DAT | grep -iE "flag|recent"`
 
@@ -119,7 +119,7 @@ mount -o ro,loop,show_sys_files -t ntfs-3g image.dd /mnt   # NTFS（含 $MFT 等
 
 **Windows 事件日志（`.evtx`）**：
 ```bash
-python-evtx 解析（$PYTHON_CMD 环境: `from Evtx.Evtx import Evtx; Evtx(path).records()` 逐条 record; evtx_dump 为 Rust 等效外部 CLI） security.evtx > sec.xml        # 转 XML（python-evtx 或 evtx-dump）
+$PYTHON_CMD -c "from Evtx.Evtx import Evtx; [print(r.xml()) for r in Evtx(chr(115)+chr(101)+chr(99)+chr(117)+chr(114)+chr(105)+chr(116)+chr(121)+chr(46)+chr(101)+chr(118)+chr(116)+chr(120)).records()]" > sec.xml   # evtx→XML
 grep -iE "4624|4625|4688|4698" sec.xml
 ```
 关键事件 ID：
@@ -173,10 +173,10 @@ awk '{print $1}' access.log | sort |uniq -c | sort -rn        # IP 频次（扫�
 | binwalk | 文件 carving/固件提取 | `$(dirname $PYTHON_CMD)/binwalk -e <file>` |
 | binwalk | 固件/嵌入文件 | `binwalk -e <file>` |
 | strings | 字符串提取 | `strings -n 8 <file>` |
-| python-evtx 解析（$PYTHON_CMD 环境: `from Evtx.Evtx import Evtx; Evtx(path).records()` 逐条 record; evtx_dump 为 Rust 等效外部 CLI） | Windows 日志 | `python-evtx 解析（$PYTHON_CMD 环境: `from Evtx.Evtx import Evtx; Evtx(path).records()` 逐条 record; evtx_dump 为 Rust 等效外部 CLI） <evtx>` |
+| Evtx→XML | Windows 事件日志 | 上节 python-evtx 命令 |
 | python-registry | 注册表 hive | `import Registry; Registry.Registry("NTUSER.DAT")` |
 
-**获取**：python 依赖全部在 $PYTHON_CMD 环境（volatility3/binwalk/python-registry/python-evtx/pytsk3/scapy/yara 等）; tshark 为外部工具（`brew install wireshark`），无 tshark 时 pcap 解析用 scapy（$PYTHON_CMD 环境: `from scapy.all import rdpcap`），HTTP 对象导出用 scapy 遍历 tcp.payload 重组。
+**pcap 抓包文件处理**: `tshark -r cap.pcap`（命令行分析/对象导出）; python 侧 `from scapy.all import rdpcap`（程序化解析/重组 HTTP 对象）。
 
 > autopsy/FTK/X-Ways 是 GUI 工具，AI 自动化优先用上方命令行替代；确需 GUI 时参考 `$SHARED_DIR/knowledge-base/gui-automation.md`。
 

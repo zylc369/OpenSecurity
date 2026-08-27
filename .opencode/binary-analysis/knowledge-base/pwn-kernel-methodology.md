@@ -25,7 +25,7 @@ gcc -static -o exploit exploit.c
 find . | cpio -o --format=newc | gzip > ../rootfs.cpio.gz
 
 # qemu 启动（典型参数）
-qemu-system-x86_64 -kernel bzImage -initrd rootfs.cpio.gz \
+qemu-system-x86_64（内核题启动文件系统+init 脚本: `-kernel vmlinux -initrd rootfs.cpio -append "console=ttyS0" -nographic`） -kernel bzImage -initrd rootfs.cpio.gz \
   -append "console=ttyS0 root=/dev/ram quiet" -nographic -m 128M
 # 如需调试加: -s（gdbserver :1234）-S（暂停启动）
 ```

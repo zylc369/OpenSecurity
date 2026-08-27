@@ -8,12 +8,12 @@
 - **GIMP 帧缓冲扫描**（Volatility 失败兜底）: 按 RGB×显示器宽（1920/1366/1280/1024）当 stride 渲染 raw 像素——曾显示的桌面/浏览器截图显形; Python 批扫启发式 `10<mean<245 且 std>20`
 - **勒索 key 恢复方法论**: 先验 zip 完整性→strings 快逆向定模式（AES-256-OFB+IV 前置典型）→Volatility Linux 插件失败即转 raw 扫描→锚串（enc_key.bin 路径）定位+页对齐 32B 候选→**魔术字节当 key oracle**（解多文件首块验 %PDF/PK/89PNG，多签名共过才留）→恢复数对账 zip 清单→metadata flag 当诱饵处理（全库 rg 唯一性复核）
 - **内存样本两层解密**: 减 0x32→超长循环 XOR key（可达数百字节 ASCII art）; 勿信 strings 表（红鲱鱼），提取真实二进制逆向; key 藏样本 data 段大段可打印文本
-- **LUKS 主密钥**: `aeskeyfind mem.elf` 检测 AES key schedule 结构→`cryptsetup luksAddKey --master-keyfile`→开卷。伴生 rsakeyfind/aesfix。适用 LUKS/dm-crypt/FileVault/BitLocker
-- **VMware 快照**: `vmss2core -W snap.vmss snap.vmem` → memory.dmp
+- **LUKS 主密钥**: 内存搜 AES 密钥: python 生成候选 key 的扩展密钥前 32 字节（AES key schedule），在 dump 中二进制搜索命中偏移 检测 AES key schedule 结构→`cryptsetup luksAddKey --master-keyfile`→开卷。伴生 rsakeyfind/aesfix。适用 LUKS/dm-crypt/FileVault/BitLocker
+- **VMware 快照**: `vmss2core（VMware 内存转 raw——官网下载件） -W snap.vmss snap.vmem` → memory.dmp
 
 ## §2 加密卷与 VM
 
-- **TrueCrypt/VeraCrypt 识别**: 无魔术/高熵/尺寸 512 倍数/上下文线索; 挂载 `veracrypt -t -p pw vol.tc /mnt`（keyfile 加 -k; 旧 TC 加 --truecrypt）; 隐藏卷=第二密码; cryptsetup `--type tcrypt` 等价
+- **TrueCrypt/VeraCrypt 识别**: 无魔术/高熵/尺寸 512 倍数/上下文线索; VeraCrypt 容器密码爆破: `hashcat -m 13721 容器文件 字典`（--veracrypt-pim 指定 PIM） -t -p pw vol.tc /mnt`（keyfile 加 -k; 旧 TC 加 --truecrypt）; 隐藏卷=第二密码; cryptsetup `--type tcrypt` 等价
 - **OVA/VMDK**: OVA=TAR; **VMDK 7z 直读免挂载**（按路径抽 SAM/SYSTEM/NTUSER.DAT）; split sparse 需 grain directory→grain table→grain 手工遍历
 - **VMDK/镜像关键文件**: config/{SAM,SYSTEM,SOFTWARE}、Users/*/NTUSER.DAT、AppData
 
@@ -22,11 +22,11 @@
 | 文件系统 | 删除机制 | 恢复路径 |
 |---|---|---|
 | NTFS | MFT 记录 0x16 标志翻转 | mftparser --offset 定向 dump $DATA; resident<700B 内联; windows.mftscan 兜底 |
-| FAT16/32 | 目录项首字节 0xE5+簇标 free | `fls -r -d` + `icat` 按簇链取; 空闲簇（FAT entry==0）扫描拼 data 区——boot sector 布局: bps@11/spc@13/reserved@14/nfats@16/rootent@17/spf@22 → data_start=root_dir+root_entries×32 |
+| FAT16/32 | 目录项首字节 0xE5+簇标 free | `fls -r -d img` + `icat img inode`（删除恢复: 目录项还在时） |
 | ext2/3/4 | 目录项移除，inode 孤立 | `e2fsck -y` 接回 /lost+found; debugfs `lsdel`; extundelete; ext2 无日志最可靠 |
 | XFS | — | inode 内联 extent [startoff,startblock,blockcount] 直读 dd; `xfs_db -r -c 'inode N' -c print'`; 超 4 extent 走 B+tree |
 | BTRFS | CoW 快照保留 | `btrfs subvolume list`→`mount -o subvol=@backup`; btrfs-find-root 找孤儿子卷 |
-| APFS | CoW 快照 | 扫 `APSB` magic（-16 偏移读 XID）→`icat -f apfs -B <快照块>` 跨 XID 读同 inode 取投毒前值 |
+| APFS | CoW 快照 | 扫 `APSB` magic（-16 偏移读 XID）→ `icat -f apfs -B <快照块> img inode` 跨 XID 读同 inode 取快照值 |
 | ZFS | label 可被清零 | strings 找 nvlist 残留→Fletcher4 重算修复→PBKDF2 参数 GPU 爆破（PyOpenCL ~24k/s） |
 
 - **RAID 5**: 双盘 XOR 恢复第三盘 `bytes(a^b)`; 布局四型（left/right×a/symmetric）用 PGM 可视化判 parity 旋转; mdadm --build 仅 RAID0——RAID5 用 fusepy 自实现块映射; XFS 只读挂载加 `norecovery`

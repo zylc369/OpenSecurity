@@ -248,7 +248,7 @@ macOS（Mach-O）/iOS/Swift/ObjC 首选。速查: `breakpoint set -r "check.*"` 
 
 ## 调试自动化: r2pipe 循环爆破与 GDB one-liner
 
-r2pipe 驱动 radare2 调试模式做逐字符 oracle 爆破（改寄存器→重启→跑→判输出循环）:
+r2pipe 驱动 radare2调试模式做逐字符 oracle 爆破（改寄存器→重启→跑→判输出循环）。备选实现: frida spawn+断点循环（onLeave 改返回值→kill→respawn→比对输出）或 $IDAT dbg 脚本循环:
 ```python
 import r2pipe
 r2 = r2pipe.open('./binary', flags=['-d'])

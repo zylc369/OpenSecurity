@@ -96,7 +96,7 @@ frida-ps -H 127.0.0.1:6655
 
 ```bash
 # iOS 通过 USB 直连，无需端口转发
-# 需要安装 usbmuxd（macOS: brew install usbmuxd）
+# macOS 内建 usbmuxd 服务（无命令行工具，守护进程随系统运行）; Linux 需 usbmuxd 包
 
 # 验证连接
 frida-ps -U
