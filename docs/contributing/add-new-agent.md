@@ -171,7 +171,6 @@ permission:
 .opencode/<your-agent>/
 ├── README.md              # 工具脚本说明（参考 binary-analysis/README.md）
 ├── scripts/
-│   ├── registry.json      # 脚本注册表
 │   ├── initial_analysis.py  # 阶段 A 的初始分析流水线
 │   └── <其他脚本>.py
 └── knowledge-base/
@@ -180,7 +179,6 @@ permission:
 ```
 
 **最小内容**：
-- `scripts/registry.json`：空对象 `{}` 即可，后续沉淀脚本时填充
 - `scripts/initial_analysis.py`：实现阶段 A 的初始信息收集（输出 JSON）
 - `knowledge-base/analysis-planning.md`：列出场景分类和对应方案
 
@@ -415,12 +413,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
-### `.opencode/echo-analysis/scripts/registry.json`
-
-```json
-{}
 ```
 
 ### `.opencode/echo-analysis/README.md`

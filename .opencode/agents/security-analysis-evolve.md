@@ -65,7 +65,6 @@ $OPENCODE_ROOT/                              # 由插件注入，项目级 .open
 │       └── script-generation.md          # 脚本生成与沉淀规则
 ├── mobile-analysis/                      # 移动端工具与知识库
 │   ├── scripts/                          # 移动端特有脚本（Frida 管理、DEX dump 等）
-│   │   └── registry.json                 #   脚本注册表
 │   └── knowledge-base/                   # 移动端特有知识库（按需加载）
 │       ├── android-tools.md              #   APK 反编译工具
 │       ├── ios-tools.md                  #   IPA 分析工具
@@ -78,7 +77,6 @@ $OPENCODE_ROOT/                              # 由插件注入，项目级 .open
 │       └── cache-poisoning.md            #   Web Cache Poisoning 专题
 ├── ai-security-analysis/                 # AI 安全分析工具与知识库
 │   ├── scripts/                          # AI 安全分析脚本（LLM 模拟、客户端等）
-│   │   └── registry.json                 #   脚本注册表
 │   └── knowledge-base/                   # AI 安全知识库（按需加载）
 │       ├── llm-attack-methodology.md     #   LLM 攻击方法论
 │       ├── prompt-injection-patterns.md  #   提示注入模式
@@ -205,7 +203,7 @@ Plugin hooks:
 │                                                            │
 │ 基于 §3.1 定义的步骤，确认执行顺序：                          │
 │   - 涉及 3 个以上文件时必须先画出架构影响图                   │
-│   - 检查是否有遗漏的步骤（如 registry.json 更新）            │
+│   - 检查是否有遗漏的步骤                                   │
 │   - ⚠ 此阶段只能补充步骤，不能合并或删除 §3.1 的步骤        │
 └───────────────┬──────────────────────────────────────────┘
                 ↓

@@ -172,10 +172,6 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 
 通用：`IDA_DRY_RUN=1` 只预览不执行。
 
-### 沉淀脚本
-
-检查 `$AGENT_DIR/scripts/registry.json`。调用方式和参数模板见 `knowledge-base/templates.md`。
-
 ### GUI 自动化工具
 
 > 视觉驱动 GUI 自动化方案与脚本命令模板（gui_launch/gui_capture/gui_act/gui_verify 四脚本）详见 `$AGENT_DIR/knowledge-base/gui-automation.md`。

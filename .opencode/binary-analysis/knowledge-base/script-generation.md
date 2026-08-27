@@ -44,19 +44,7 @@ run_headless(_main)
 
 ## 沉淀流程
 
-新脚本执行成功后，保存到 `scripts/` 目录并更新 `registry.json`：
-
-```json
-{
-  "name": "<功能名>",
-  "file": "<功能名>.py",
-  "description": "<功能描述>",
-  "params": ["<参数列表>"],
-  "example_call": "<示例调用命令>",
-  "added_at": "<日期>",
-  "verified": true
-}
-```
+新脚本执行成功后，保存到 `scripts/` 目录（头部 docstring 写清用途/参数/示例调用），并把调用模板沉淀进 `knowledge-base/templates.md` 或对应专题知识文档。
 
 ## 编码规则（强制）
 

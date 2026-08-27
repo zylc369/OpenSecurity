@@ -165,9 +165,8 @@ When modifying agent prompts:
 2. **Reuse base layer**: Import from `_base.py` — `run_headless`, `log`, `JSONEncoder`, etc.
 3. **Pass args via env vars**: Don't use `sys.argv`. Use `IDA_*` environment variables (see `query.py`)
 4. **JSON output**: Write all results to the path specified by `IDA_OUTPUT`, don't print to stdout
-5. **Register**: Add idat scripts to `scripts/registry.json`
-6. **Document**: Describe the call signature and parameters in the corresponding agent's knowledge base or main prompt
-7. **Test**: Run a full analysis with a real sample
+5. **Document**: Describe the call signature and parameters in the corresponding agent's knowledge base or main prompt
+6. **Test**: Run a full analysis with a real sample
 
 ## Adding a Knowledge Base Document
 

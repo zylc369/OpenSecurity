@@ -198,7 +198,7 @@
 ## 追加整改 19（四组清理：docs 更新/env_cache 删除/OCR extract bug/pyproject 删除）
 
 - [x] docs 三文档过时机制描述更新（新机器配置指南 9 处含第 4 节重写；知识体系 4.2/4.3；介绍的工具拦截节）——detect_env/check-preinstall/env_cache 零残留
-- [x] ~/bw-security-analysis/env_cache.json 删除（退役机制孤儿，零消费方）；web registry.json 保留（现役脚本注册表）
+- [x] ~/bw-security-analysis/env_cache.json 删除（退役机制孤儿，零消费方）
 - [x] OCR 真机测试逮住并修复真 bug：routes/ocr.py 名字遮蔽（路由函数 extract 与 import 的方法 extract 同名 → 路由递归调自己 → TypeError 500）——OOP 化整改 11 埋的雷，当时复验漏了 extract 端点。修复后四端点全通（acquire ready/extract 中英+hex 正确/close 归零/reaper 30s 释放）；去空格渲染瑕疵为模型特性非 bug
 - [x] mcp-servers 三个 pyproject.toml 删除：零代码消费（mcp-manager 注释宣称读 import_names 实为撒谎注释）、依赖安装收口 detect_py_deps 唯一清单（三个 server 声明的依赖清单全覆盖核实）、server 由 venv python 直跑不经 pip install。不换 requirements.txt（那只是死文档换格式）
 - 回归：deps 19 + control 63 + 单元 54 + TS 18 全绿

@@ -18,7 +18,6 @@
 ├── update.py        # 更新操作（4 种操作类型）
 ├── README.md        # 本文件
 ├── scripts/         # 沉淀脚本 + 纯 Python 工具脚本
-│   ├── registry.json    # 沉淀脚本注册表（仅 idat 脚本）
 │   ├── initial_analysis.py  # 初始分析流水线
 │   ├── debug_dump.py        # 调试器 dump 脚本（PE/ELF）
 │   └── gui_verify.py        # GUI 自动化验证（纯 Python，不走 idat）

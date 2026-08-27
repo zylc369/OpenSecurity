@@ -303,7 +303,7 @@ Plugin 加载时确保 `~/bw-security-analysis/.venv` 存在且可用，失败�
 
 ### 工具脚本沉淀机制
 
-每次实战中如果生成了可复用的脚本（比如"针对 VMProtect 3.x 的 OEP 定位"），evolve Agent 会把它沉淀到 `scripts/` 并注册到 `registry.json`。下次遇到类似场景，Agent 直接调用沉淀脚本而不是从头构造。
+每次实战中如果生成了可复用的脚本（比如"针对 VMProtect 3.x 的 OEP 定位"），evolve Agent 会把它沉淀到 `scripts/`。下次遇到类似场景，Agent 直接调用沉淀脚本而不是从头构造。
 
 ### IDAPython 编码规范
 
