@@ -130,9 +130,8 @@ macOS Docker Desktop 的容器经 VPNKit NAT 出网，实测行为：
 
 | 镜像 | 内容 | 实测体积 | 构建耗时 |
 |------|------|---------|---------|
-| `opensecurity/toolbox-core` | §3.1 全部 + wordlists + qemu-user/gdb-multiarch + entrypoint 降权 | **5.21GB**（可再瘦: 去 --no-install-recommends 冗余） | 3.5 分钟 |
-| `opensecurity/toolbox-full` | core + ghidra + metasploit-framework | **9.07GB** | +2 分钟（1GB 下载） |
-| `opensecurity/toolbox-dotnet` | mcr.microsoft.com/dotnet/sdk + ilspycmd + de4dot 源码 build | 未实测（dotnet sdk 基镜像 ~700MB） | 未实测 |
+| `zylc369/opensecurity-toolbox-core` | §3.1 全部 + wordlists + qemu-user/gdb-multiarch + entrypoint 降权 | **5.21GB**（可再瘦: 去 --no-install-recommends 冗余） | 3.5 分钟 |
+| `zylc369/opensecurity-toolbox-full` | core + ghidra + metasploit-framework | **9.07GB** | +2 分钟（1GB 下载） |
 
 - 双架构: kali-rolling 与全部 apt 包均 arm64+amd64（Apple Silicon 原生跑，无模拟损耗）
 - 分层理由: full 换机多拉 4GB 且 ghidra/metasploit 低频; AI 按需 `--tool` 触发对应层
@@ -143,7 +142,7 @@ macOS Docker Desktop 的容器经 VPNKit NAT 出网，实测行为：
 ```sh
 #!/bin/sh
 # ~/bw-security-analysis/bin/steghide（由 detect_tools DockerRecipe 生成）
-TOOL=steghide; IMG=opensecurity/toolbox-core
+TOOL=steghide; IMG=zylc369/opensecurity-toolbox-core
 NAME="${TOOL}-$$-$(date +%s 2>/dev/null || echo x)"
 DIR="$(pwd)"
 # 参数路径重写: $PWD 前缀绝对路径 → /work 相对

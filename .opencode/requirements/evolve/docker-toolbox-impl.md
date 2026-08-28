@@ -6,7 +6,7 @@
 
 ## §2 技术方案
 
-- **双层镜像**: `opensecurity/toolbox-core`（§3.1 的 22 项 + wordlists + qemu-user/gdb-multiarch + entrypoint 降权，~5.3GB）/ `opensecurity/toolbox-full`（core + ghidra + metasploit，~9GB）。
+- **双层镜像**: `zylc369/opensecurity-toolbox-core`（§3.1 的 22 项 + wordlists + qemu-user/gdb-multiarch + entrypoint 降权，~5.3GB）/ `zylc369/opensecurity-toolbox-full`（core + ghidra + metasploit，~9GB）。
 - **Dockerfile 位置**: `control/docker/toolbox-core.Dockerfile`、`toolbox-full.Dockerfile`（full 以 core 为 FROM）。
 - **entrypoint 降权**: root 启动 → passwd 注入 u$PUID → setpriv 降权（uid 无关，报告陷阱②修法）。HOME=/tmp/home。
 - **DockerRecipe**（detect_tools.py 新配方类型）: `name/image/tool/wrapper 生成`。install 流程: docker 不存在→skip 提示; 镜像不存在→`docker build`（build 一次全层，非逐工具）; wrapper 落 BIN_DIR。

@@ -39,6 +39,7 @@ class KnownContainer:
     ports: list[str]           # 端口映射（如 ["7474:7474"]）
     env: list[str]             # 环境变量（如 ["NEO4J_AUTH=neo4j/neo4j_password"]）
     volumes: list[str]         # 卷映射（如 ["$DATA_DIR/neo4j:/data"]）
+    mem_limit: str = ""        # 容器内存上限（如 "2g"; 空=不限）
     auto_start: bool = True    # 是否允许控制台自动启动（False = 只能手动）
 
 
@@ -56,19 +57,26 @@ KNOWN_CONTAINERS: list[KnownContainer] = [
         image="neo4j:5",
         description="事件库（Graphiti）使用的 Neo4j 知识图谱存储",
         ports=["7474:7474", "7687:7687"],
-        env=["NEO4J_AUTH=neo4j/neo4j_password"],
+        env=[
+            "NEO4J_AUTH=neo4j/neo4j_password",
+            # JVM 显式配置（事件图谱小: heap 1g + pagecache 512m + offheap 余量 < 2g 上限）
+            "NEO4J_server_memory_heap_initial__size=512m",
+            "NEO4J_server_memory_heap_max__size=1g",
+            "NEO4J_server_memory_pagecache_size=512m",
+        ],
         volumes=["$DATA_DIR/db/events:/data"],  # $DATA_DIR 由 create_container 展开
+        mem_limit="2g",
     ),
 ]
 
 KNOWN_IMAGES: list[KnownImage] = [
     KnownImage(
-        name="opensecurity/toolbox-core",
+        name="zylc369/opensecurity-toolbox-core",
         description="安全工具箱 core 层（steg/取证/爆破/hashcat-CPU/nxc 等 22 项, ~6GB）",
         size_hint="~6.2GB",
     ),
     KnownImage(
-        name="opensecurity/toolbox-full",
+        name="zylc369/opensecurity-toolbox-full",
         description="工具箱 full 层（core + ghidra + metasploit, ~10GB）",
         size_hint="~9.8GB",
     ),
@@ -239,6 +247,9 @@ def create_container(spec: KnownContainer) -> tuple[bool, str]:
     for v in spec.volumes:
         args.append("-v")
         args.append(v.replace("$DATA_DIR", DATA_DIR))
+    if spec.mem_limit:
+        args.append(f"--memory={spec.mem_limit}")
+    args.append("--restart=unless-stopped")  # 常驻服务: Docker Desktop 重启后自动恢复
     args.append(spec.image)
     try:
         _run_docker(args, timeout=60)
@@ -347,7 +358,14 @@ def ensure_daemon_blocking(timeout: int = 180) -> None:
     system = platform.system()
     logger.info("启动 Docker daemon（%s）...", system)
     if system == "Darwin":
-        subprocess.run(["open", "-a", "Docker"], check=True)
+        # docker desktop start 同时处理 app 与 engine 两层，且等待 engine 就绪;
+        # open -a Docker 对"app 在运行而 engine 已停"（docker desktop stop 后 app 残留）是 no-op 救不回 engine
+        try:
+            subprocess.run(["docker", "desktop", "start"], capture_output=True, text=True, timeout=150)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            pass  # 无 desktop 子命令（旧版/OrbStack）→ 回落 open -a
+        if not is_daemon_running():
+            subprocess.run(["open", "-a", "Docker"], check=True)
     elif system == "Linux":
         if shutil.which("systemctl"):
             subprocess.run(["systemctl", "start", "docker"], check=False)
@@ -422,6 +440,17 @@ def ensure_neo4j_events_blocking() -> None:
             raise RuntimeError(f"docker pull {spec.image} 失败: {e}")
     ok, msg = create_container(spec)
     if not ok:
-        raise RuntimeError(f"容器 {spec.name} 创建失败: {msg}")
+        # engine 半就绪窗口: docker info 可用 ≠ containerd 就绪——
+        # 此刻旧容器（unless-stopped）可能正在自启导致 name 冲突 125，或列表短暂为空误判 not_exists
+        logger.warning("容器 %s 创建失败（%s），5s 后重采样重试...", spec.name, msg)
+        time.sleep(5)
+        status = get_container_status(spec.name)
+        if status == "running":
+            _wait_bolt()
+            logger.info("容器 %s 已就绪（旧容器自愈，bolt 可连）", spec.name)
+            return
+        ok, msg = create_container(spec)
+        if not ok:
+            raise RuntimeError(f"容器 {spec.name} 创建失败: {msg}")
     _wait_bolt()
     logger.info("容器 %s 已就绪（bolt 可连），数据目录: %s", spec.name, data_dir)
