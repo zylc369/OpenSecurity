@@ -27,6 +27,7 @@
 | 3 | `agents/crypto-analysis.md` | 阶段 A 路由表 +1 行 | 同上症状 → `rsa-attacks.md §4a` |
 | 4 | `crypto-analysis/knowledge-base/crypto-methodology.md` | §2 流程后 +执行纪律小节；§4 +int 上限提示 | 廉价实验优先（细则）+ 生成器自测先行（细则）；`sys.set_int_max_str_digits` |
 | 5 | `agents-rules/execution-discipline.md` | 纪律表 +1 行 | 廉价实验优先（通用版，一行） |
+| 6 | `crypto-analysis/knowledge-base/crypto-methodology.md` §5 | RSA 速查表 +1 行 | 环 RSA 指针行（审计周期 1 补充：`见 rsa-attacks.md §4a`） |
 
 **内容分工（防重复）**：通用纪律一行进共享片段；crypto 场景细则（含 nc 新实例风险）进 methodology；环 RSA 专属升级阶梯只存在于 §4a，methodology/路由表只指向不展开。
 
@@ -58,7 +59,7 @@
 - [ ] 新读者（AI）仅凭 §4a 可完成环 RSA 题攻击+解密，无需原题上下文
 - [ ] λ 陷阱醒目且给出可执行解法代码
 - [ ] 升级阶梯 4 级各有触发条件
-- [ ] 3 个路由入口（agent prompt 阶段 A、rsa-attacks §1、决策树）都能路由到 §4a
+- [ ] 3 个路由入口（agent prompt 阶段 A、rsa-attacks §1、决策树）都能路由到 §4a（审计后另有 methodology §5 第 4 入口）
 **回归验收**：
 - [ ] rsa-attacks.md 原有 §1-§13 内容零改动（除 §1 表和决策树的增量行）
 - [ ] crypto-methodology.md 原有章节零删改

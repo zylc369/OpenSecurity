@@ -99,6 +99,7 @@ import sys; sys.set_int_max_str_digits(1000000)
 | e 很小（3/5/7）+ m 小 | 直接开方 / Coppersmith | m < n^(1/e) 直接开 e 次方；否则 small_roots |
 | e 很小 + 多组 (c_i, n_i) 同明文 | Håstad broadcast | 需要 ≥ e 组 |
 | d 小（e 大，接近 n） | Wiener（d < n^0.25）/ Boneh-Durfee（d < n^0.292） | Wiener 用连分数；BD 用格 |
+| 密文是多项式、e ≈ N^n | 环 RSA 广义 Wiener | 见 `rsa-attacks.md` §4a（解密有 λ 陷阱） |
 | n1, n2 共因子 | `gcd(n1, n2)` | 多个 n 时两两 GCD |
 | 已知 p 的高/低 k 位 | Coppersmith partial factor | 已知 > n^0.25 位即可 |
 | 已知 d 的高/低 k 位 | partial key exposure | 已知 d 的 n^0.25 位即可 |

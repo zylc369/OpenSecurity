@@ -97,7 +97,7 @@
 
 ### 2.5 agent prompt 修改
 
-知识库索引表加 2 行（触发条件用 §2.4 同款描述）。prompt 总行数 141 → 143，远低于 450 行红线，无需瘦身（Phase 4.5 仍按流程执行检查）。
+知识库索引表加 2 行（触发条件用 §2.4 同款描述），另对既有 `classical-crypto.md` 索引行做行内触发词补齐（Bacon/双符号，不增行）。prompt 总行数 141 → 143，远低于 450 行红线，无需瘦身（Phase 4.5 仍按流程执行检查）。
 
 ## §3 实现规范
 
@@ -107,9 +107,9 @@
 |------|------|---------|
 | `crypto-analysis/knowledge-base/custom-cipher-structural-attacks.md` | 新建 | ~150 |
 | `crypto-analysis/knowledge-base/covert-carrier-decoding.md` | 新建 | ~160 |
-| `crypto-analysis/knowledge-base/crypto-methodology.md` | Edit ×3（路由×2 + 纪律×1 + 古典行触发词） | +10 |
+| `crypto-analysis/knowledge-base/crypto-methodology.md` | Edit ×3（路由×2 + 纪律×1 + 古典行触发词，触发行为行内替换不增行） | +3 |
 | `crypto-analysis/knowledge-base/classical-crypto.md` | Edit ×1（结构修复：§6 扩为 Bacon 唯一维护点） | +8 |
-| `agents/crypto-analysis.md` | Edit ×2（索引×2 行 + classical 行触发词） | +3 |
+| `agents/crypto-analysis.md` | Edit ×2（索引×2 行 + classical 行触发词，触发行为行内替换不增行） | +2 |
 
 > **结构修复记录**（实现期用户复核触发，2026-08-29）：原方案文件 2 含 Bacon 解码实现，与 `classical-crypto.md` §6 存量（3 行薄定义）形成"详细副本+薄副本"分裂结构，随迭代漂移。按"删掉后知识不损失=冗余副本须收口；删掉后触发丢失=索引保留"判据彻底收口：**解码（原理/代码/扩展值/整除检查）唯一归 classical §6；识别信号与 bit 串生产职责归文件 2 §3.1 + 引用**。本表为收口后的最终范围。
 
@@ -146,7 +146,7 @@
   - 依赖: 步骤 1、2
 
 步骤 5. 端到端审计与规则 12 自检
-  - 验证点: ① 全部交叉引用可达 ② grep 零禁用词覆盖 4 个改动文件
+  - 验证点: ① 全部交叉引用可达 ② grep 零禁用词覆盖 5 个改动文件（含 classical-crypto.md）
            ③ 规则 12 七问逐条回答并记录 ④ progress.md 完整
   - 依赖: 步骤 1-4
 ```
@@ -162,7 +162,7 @@
 **回归验收**：
 - [ ] 现有 12 个知识库文件零改动（除计划内：crypto-methodology.md +10 行、classical-crypto.md §6 结构修复 +8 行）
 - [ ] agent prompt 既有索引行、阶段 A/B/C 结构不变
-- [ ] 无禁用词泄漏（对 4 个改动文件 grep 验证）
+- [ ] 无禁用词泄漏（对 5 个改动文件 grep 验证，含结构修复涉及的 classical-crypto.md）
 
 **架构验收**：
 - [ ] 依赖方向合规：知识库文件不引用 `docs/`、不引用记忆库 id
