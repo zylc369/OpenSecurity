@@ -49,8 +49,15 @@ const ToolsSection: React.FC<Props> = ({ agents }) => {
   ];
 
   const entries = Object.entries(agents);
+  const total = entries.find(([k]) => k === "all")?.[1].length;
 
   return (
+    <Space direction="vertical" size={4} style={{ width: "100%" }}>
+      {total !== undefined && (
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          外部工具全量 {total} 个——下方按 agent 归属分组（同一工具可属于多个 agent，各组数字为该 agent 的可用集合而非全集）
+        </Typography.Text>
+      )}
     <Collapse
       defaultActiveKey={entries.filter(([, ts]) => ts.some((t) => !t.available && !t.skipped && t.required)).map(([k]) => k)}
       items={entries.map(([agent, tools]) => {
@@ -72,6 +79,7 @@ const ToolsSection: React.FC<Props> = ({ agents }) => {
         };
       })}
     />
+    </Space>
   );
 };
 

@@ -98,6 +98,9 @@ const PythonDepsSection: React.FC<Props> = ({ packages, venvPath, onRefresh }) =
 
   return (
     <Space direction="vertical" size={8} style={{ width: "100%" }}>
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        Python 依赖共 {packages.length} 个（{okCount} 可用）——全部 agent 共享清单，按需安装
+      </Typography.Text>
       {venvPath && (
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           虚拟环境：<Typography.Text code style={{ fontSize: 12 }}>{venvPath}</Typography.Text>

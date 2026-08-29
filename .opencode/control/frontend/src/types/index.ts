@@ -157,6 +157,8 @@ export interface SystemInfo {
   control_start_time: number;
   dev_mode: boolean;
   platform: string;
+  /** backend 代码在进程启动后变更过（清单/逻辑更新未生效）——提示重启 */
+  code_stale: boolean;
 }
 
 // ─── /api/heartbeats ──────────────────────────────────────

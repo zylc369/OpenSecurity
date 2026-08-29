@@ -58,7 +58,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     ruby rubygems-integration binutils-multiarch \
     gdb-multiarch qemu-user libc6-amd64-cross \
     wordlists \
-    socat stegsnow foremost aircrack-ng testdisk nikto \
+    socat stegsnow foremost aircrack-ng testdisk nikto ffmpeg \
     git wget curl file procps p7zip-full unzip xz-utils util-linux \
     && setcap -r /usr/lib/nmap/nmap 2>/dev/null || true \
     && rm -rf /var/lib/apt/lists/*

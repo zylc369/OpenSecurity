@@ -9,6 +9,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Alert,
   Layout,
   Anchor,
   Card,
@@ -117,6 +118,8 @@ const App: React.FC = () => {
   const scan = useScan();
   const models = useModels();
   const system = useSystem();
+  // backend 代码陈旧（进程启动后 .py 有变更）→ 黄条提示重启生效
+  const codeStale = system.data?.code_stale === true;
   const hardware = useHardware();
   const required = useRequiredStatus();
 
@@ -416,6 +419,14 @@ const App: React.FC = () => {
 
   return (
     <Layout style={{ minHeight: "100vh", background: "transparent" }}>
+      {codeStale && (
+        <Alert
+          type="warning"
+          showIcon
+          message="控制台后端代码已更新，当前进程仍在运行旧逻辑——重启后端后新清单/新功能生效"
+          banner
+        />
+      )}
       {/* 顶栏：通栏毛玻璃（sticky）。透明容器 + 自绘底色，解决 AntD Header 默认深蓝的老旧观感 */}
       <Header
         style={{

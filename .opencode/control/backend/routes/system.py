@@ -33,6 +33,9 @@ async def get_system_info() -> dict:
         "control_start_time": get_process_start_time(os.getpid()),
         "dev_mode": is_dev_mode(),
         "platform": f"{platform.system()} {platform.machine()}",
+        # backend 代码陈旧检测（指纹函数与 /api/health 同源——启动时冻结 vs 当前比对）
+        "code_stale": __import__("routes.health", fromlist=["x"])._code_fingerprint()
+                      != __import__("routes.health", fromlist=["x"])._BOOT_FINGERPRINT,
     }
 
 

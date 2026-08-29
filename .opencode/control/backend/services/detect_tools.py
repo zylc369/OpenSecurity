@@ -270,9 +270,12 @@ class PrebuiltRecipe:
 
     适用: 必须 macOS 工具链编译、容器无法构建的工具（class-dump/optool 类 Mach-O 工具）。
     安装 = 拷贝到 BIN_DIR + chmod。
+    platforms 默认 ["darwin"]: Mach-O 产物在 linux/win 上无法执行——
+    安装守卫跳过 + 检测层 ToolField 需同标 platforms（防假可用）。
     """
     name: str
     source: str                       # 相对 OPENCODE_ROOT 的二进制路径
+    platforms: list[str] = field(default_factory=lambda: ["darwin"])
 
 
 @dataclass
@@ -350,6 +353,10 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | P
     # ── RSA 大 N 分解（仅 linux/win 有预编译; mac 走 factordb/rsactftool 替代） ──
     ReleaseRecipe(name="yafu", repo="bbuhrow/yafu", plats={
         "linux-amd64": "linux,avx2", "win-amd64": "windows,avx2"}, bins=["yafu"]),
+    # ── Go 符号恢复（zip 单二进制; mac 资产是 x86_64 构建——arm64 mac 走 Rosetta 2 可跑） ──
+    ReleaseRecipe(name="GoReSym", repo="mandiant/GoReSym", plats={
+        "darwin-arm64": "mac", "darwin-amd64": "mac",
+        "linux-amd64": "linux", "win-amd64": "windows"}, bins=["GoReSym"]),
     # ── .NET 反编译（dotnet runtime 8 LTS + nuget nupkg net6.0 目标） ──
     DotnetRecipe(name="ilspycmd", nuget_name="ilspycmd", nuget_version="8.2.0.7535"),
     # ── 字典（$WORDLISTS_DIR 落点; 容器 wrapper 挂载 seclists → /usr/share/seclists） ──
@@ -359,11 +366,11 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | P
     WordlistRecipe(name="cn-dicts", target="cn", source="wordlists/cn"),
     # ── Windows 专用: Git Bash 运行时自举（写 opencode.json shell 键; 系统版优先，便携版兜底） ──
     GitBashRecipe(),
-    # ── 直链（非 GitHub 源） ──
-    UrlRecipe(name="ffmpeg", urls={
-        "linux-amd64": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
-        "win-amd64": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
-    }, bins=["ffmpeg", "ffprobe"]),
+    # ── ffmpeg（容器化: mac 无官方静态构建源，三平台统一走镜像 apt 版） ──
+    DockerRecipe(name="ffmpeg", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile"),
+    DockerRecipe(name="ffprobe", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile"),
     ReleaseRecipe(name="xray", repo="chaitin/xray", tag="1.9.11", plats=_GO_ALL, bins=["xray"]),
     # ── 运行时层（目录结构安装: node + npm + npx） ──
     NodeRecipe(version="22.14.0"),
@@ -527,12 +534,7 @@ EXTERNAL_TOOLS: list[ToolField] = [
         required=True,
         version_cmd=["--version"],
         description="APK 解包+反汇编工具",
-        install_hint="apktool 未找到。安装: brew install apktool (macOS)",
-        platform_install_hint={
-            "darwin": "brew install apktool",
-            "linux":  "sudo apt install apktool 或从 https://ibotpeaches.github.io/Apktool/install/ 下载",
-            "win32": "从 https://ibotpeaches.github.io/Apktool/install/ 下载（需要 Java）",
-        },
+        install_hint=_AUTO_HINT.format(name="apktool"),
     ),
     ToolField(
         name="jadx",
@@ -540,12 +542,7 @@ EXTERNAL_TOOLS: list[ToolField] = [
         required=True,
         version_cmd=["--version"],
         description="DEX→Java 反编译器",
-        install_hint="jadx 未找到。安装: brew install jadx (macOS)",
-        platform_install_hint={
-            "darwin": "brew install jadx",
-            "linux":  "从 https://github.com/skylot/jadx/releases 下载最新 release zip",
-            "win32": "从 https://github.com/skylot/jadx/releases 下载最新 release zip",
-        },
+        install_hint=_AUTO_HINT.format(name="jadx"),
     ),
     ToolField(
         name="adb",
@@ -564,24 +561,11 @@ EXTERNAL_TOOLS: list[ToolField] = [
         platforms=["darwin"],
     ),
     ToolField(
-        name="ldid",
-        agents=["mobile-analysis"],
-        required=False,
-        description="iOS 伪签名工具",
-        install_hint="ldid 未找到。安装: brew install ldid (macOS)",
-        platforms=["darwin"],
-    ),
-    ToolField(
         name="GoReSym",
         agents=["binary-analysis", "crypto-analysis"],
         required=False,
         description="Go 符号恢复工具",
-        install_hint="GoReSym 未找到。参考 https://github.com/mandiant/GoReSym",
-        platform_install_hint={
-            "darwin": "从 https://github.com/mandiant/GoReSym/releases 下载 darwin 版本",
-            "linux":  "从 https://github.com/mandiant/GoReSym/releases 下载 linux 版本",
-            "win32": "从 https://github.com/mandiant/GoReSym/releases 下载 windows 版本",
-        },
+        install_hint=_AUTO_HINT.format(name="GoReSym"),
     ),
 ]
 
@@ -619,25 +603,25 @@ EXTERNAL_TOOLS.extend([
     _auto("upx", _BIN, "UPX 脱壳（upx -d）", ["--version"]),
     _auto("xray", _WEB, "Web 漏洞扫描器（被动代理/语义分析; GitHub 1.9.11）"),
     ToolField(name="class-dump", agents=["mobile-analysis"], required=False,
-              version_cmd=[], description="ObjC 类信息导出（Mach-O）",
-              install_hint="自动安装（预编译二进制）"),
+              version_cmd=[], description="ObjC 类信息导出（Mach-O）", platforms=["darwin"],
+              install_hint="自动安装（预编译二进制，macOS 专用）"),
     ToolField(name="ldid", agents=["mobile-analysis"], required=False,
-              version_cmd=[], description="iOS 伪签名/entitlements",
-              install_hint="自动安装（预编译二进制）"),
+              version_cmd=[], description="iOS 伪签名/entitlements", platforms=["darwin"],
+              install_hint="自动安装（预编译二进制，macOS 专用）"),
     ToolField(name="insert_dylib", agents=["mobile-analysis"], required=False,
-              version_cmd=[], description="Mach-O 动态库注入（LC_LOAD_DYLIB）",
-              install_hint="自动安装（预编译二进制）"),
+              version_cmd=[], description="Mach-O 动态库注入（LC_LOAD_DYLIB）", platforms=["darwin"],
+              install_hint="自动安装（预编译二进制，macOS 专用）"),
     ToolField(name="optool", agents=["mobile-analysis"], required=False,
-              version_cmd=[], description="Mach-O load command 编辑（注入/卸载 dylib）",
-              install_hint="自动安装（预编译二进制）"),
+              version_cmd=[], description="Mach-O load command 编辑（注入/卸载 dylib）", platforms=["darwin"],
+              install_hint="自动安装（预编译二进制，macOS 专用）"),
     _auto("wasm-objdump", _BIN, "WASM 反汇编（wabt 套件）"),
     _auto("ysoserial", _WEB, "Java 反序列化 gadget 链生成（需 java）"),
     _auto("rsactftool", _BIN, "RSA 攻击聚合"),
     _auto("wesng", _BIN, "Windows 补丁缺失比对"),
     _auto("windapsearch", _BIN, "LDAP/AD 枚举"),
     _auto("regeorg", _BIN, "webshell 隧道（SOCKS）"),
-    _auto("ffmpeg", _BIN, "音视频处理（隐写频谱/帧提取）"),
-    _auto("ffprobe", _BIN, "音视频流/元数据分析"),
+    _auto("ffmpeg", _BIN, "音视频处理（隐写频谱/帧提取; 容器）"),
+    _auto("ffprobe", _BIN, "音视频流/元数据分析（容器）"),
     _auto("steghide", _BIN, "JPEG/BMP 隐写（容器）"),
     _auto("stegseek", _BIN, "steghide 高速爆破（容器+rockyou）"),
     _auto("hashcat", _BIN, "哈希破解（容器 PoCL CPU 模式）", ["-I"]),
@@ -749,14 +733,20 @@ class ToolsScanner:
                 if self._agent_has_tool(t, agent_name) and self._platform_matches(t)]
 
     def scan_all(self) -> dict[str, list[ToolStatus]]:
-        """所有 agent 的工具状态：{agent_name: [ToolStatus, ...]}。"""
+        """所有 agent 的工具状态：{agent_name: [ToolStatus, ...]}。
+
+        "all" 键 = 当前平台全部工具（scanner/前端全量视图用）——
+        不能依赖 t.agents 里出现 "all" 值（如 git-bash 是 win32-only，
+        mac/linux 上平台过滤后匹配为空，导致 all 恒为空列表的 bug）。
+        """
         table = self.scan_all_parallel()
-        all_agents: set[str] = set()
+        all_agents: set[str] = {"all"}
         for t in EXTERNAL_TOOLS:
             all_agents.update(t.agents)
         return {
             agent: [table[t.name] for t in EXTERNAL_TOOLS
-                    if self._agent_has_tool(t, agent) and self._platform_matches(t)]
+                    if (agent == "all" or self._agent_has_tool(t, agent))
+                    and self._platform_matches(t)]
             for agent in sorted(all_agents)
         }
 
@@ -1075,7 +1065,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         if force:
             return None
         if shutil.which(name):
-            return f"PATH 已有 {name}（brew/系统安装）"
+            return f"PATH 已有 {name}（已安装，跳过）"
         if bins and all(os.path.exists(self._bin_path(b)) for b in bins):
             return f"{BIN_DIR} 产物已齐全"
         return None
@@ -1212,8 +1202,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         plat = _plat_key()
         url = r.urls.get(plat)
         if not url:
-            hint = "brew install ffmpeg（macOS）" if plat.startswith("darwin") else ""
-            return InstallResult(r.name, "skipped", f"平台 {plat} 无直链配方{(' → ' + hint) if hint else ''}")
+            return InstallResult(r.name, "skipped", f"平台 {plat} 无直链配方（需为该平台补充 urls）")
         asset = url.rsplit("/", 1)[-1]
         self._place_from_archive(r, self._download(url), asset)
         return InstallResult(r.name, "installed", f"{asset} → {', '.join(r.bins)}")
@@ -1300,7 +1289,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         dest = os.path.join(TOOLS_SRC_DIR, r.dest)
         if not force:
             if shutil.which(r.name):
-                # 本机已有（brew/SDK）: 清理残留，维护"目录存在 ⟺ PATH 无该工具"（plugin 据此注入）
+                # 本机已有（系统/手动安装）: 清理残留，维护"目录存在 ⟺ PATH 无该工具"（plugin 据此注入）
                 if os.path.isdir(dest):
                     shutil.rmtree(dest)
                 return InstallResult(r.name, "skipped", f"PATH 已有 {r.name}（{shutil.which(r.name)}）; 已清理历史残留")
@@ -1346,7 +1335,9 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         return InstallResult(r.name, "installed", f"官方目录 → {dest}（plugin 注入 PATH）")
 
     def _install_prebuilt(self, r: PrebuiltRecipe, force: bool) -> InstallResult:
-        """仓库内预编译二进制 → 拷贝 BIN_DIR。"""
+        """仓库内预编译二进制 → 拷贝 BIN_DIR（平台不匹配跳过——Mach-O 跨平台不可执行）。"""
+        if r.platforms and sys.platform not in r.platforms:
+            return InstallResult(r.name, "skipped", f"平台 {sys.platform} 不适用（{'/'.join(r.platforms)} 专用）")
         if not force and os.path.exists(self._bin_path(r.name)):
             return InstallResult(r.name, "skipped", "BIN_DIR 已存在")
         src = os.path.join(_opencode_root(), r.source)

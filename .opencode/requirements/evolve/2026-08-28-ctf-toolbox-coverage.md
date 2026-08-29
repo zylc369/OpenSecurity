@@ -45,7 +45,8 @@
 | cn 精选字典 | WordlistRecipe source 模式 | git 仓库 `.opencode/wordlists/cn/`（安全设备 2.1M+Top 604K+登入账号 2.1M）复制到 wordlists/cn/ |
 | socat/outguess/stegsnow/foremost/aircrack-ng/testdisk/photorec/nikto | Dockerfile v1.1 apt + DockerRecipe | 明天限流重置后 build+push |
 | pycdc | Dockerfile v1.1 builder 阶段 cmake 编译 → final COPY | 同上 |
-| diec | Dockerfile v1.1 官方 Debian 13 deb（die_3.21_Debian_13_amd64.deb）+ DockerRecipe | mac arm64 只有 .pkg/linux 无 arm64 资产 → 容器统一三平台 |
+| diec | Dockerfile v1.1 官方 Debian 13 deb（die_3.21_Debian_13_amd64.deb）+ DockerRecipe | mac arm64 只有 .pkg/linux 无 arm64 资产 → 容器统一三平台（后撤销） |
+| ffmpeg/ffprobe | UrlRecipe → **DockerRecipe**（实施追加） | mac 无官方静态构建源（evermeet 直链 404 实测），UrlRecipe 仅 linux/win 导致 mac 降级提示 brew——违背跨平台原则; Dockerfile v1.1 apt ffmpeg 三平台统一（rw_path 挂载处理本地文件，实测 8.1.2 可用） |
 
 ### 2.2 $WORDLISTS_DIR 心智建设（用户指定）
 

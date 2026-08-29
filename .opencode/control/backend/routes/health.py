@@ -64,14 +64,31 @@ def _identity() -> dict:
     }
 
 
+def _code_fingerprint() -> tuple[int, float]:
+    """backend 代码指纹: (py 文件数, max mtime)。变更任一 .py → 指纹变。"""
+    import glob
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # backend/
+    files = glob.glob(os.path.join(base, "**", "*.py"), recursive=True)
+    return (len(files), max((os.path.getmtime(f) for f in files), default=0.0))
+
+
+# 进程启动时冻结的代码指纹——与当前指纹比对检测"代码已更新但进程未重启"
+_BOOT_FINGERPRINT = _code_fingerprint()
+
+
 @router.get("/health")
 @router.get("/api/health")
 async def health() -> JSONResponse:
-    """健康检查（/api/health 是前端轮询别名——vite dev 代理只转发 /api 前缀）。"""
+    """健康检查（/api/health 是前端轮询别名——vite dev 代理只转发 /api 前缀）。
+
+    code_stale=True: backend 代码在进程启动后变更过（清单/逻辑更新未生效）——
+    前端应提示重启控制台后端。
+    """
+    stale = _code_fingerprint() != _BOOT_FINGERPRINT
     if not model_loader.is_models_ready():
         return JSONResponse(
-            {"status": "loading", **_identity()},
+            {"status": "loading", "code_stale": stale, **_identity()},
             status_code=503,
             headers={"Retry-After": "5"},
         )
-    return JSONResponse({"status": "ok", **_identity()})
+    return JSONResponse({"status": "ok", "code_stale": stale, **_identity()})
