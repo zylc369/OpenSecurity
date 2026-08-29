@@ -98,7 +98,21 @@ def kasiski(ct, min_seq=3):
 
 ## 6. 培根（Bacon，5-bit）
 
-每 5 个符号一组，A/B 二选一 → 二进制 → 字母。常隐藏在两种字体/大小写里。
+每 5 个符号一组，A/B 二选一 → 二进制 → 字母。**本节是 Bacon 解码的唯一维护点**（原理/代码/扩展值）；行首词类社媒载体的识别信号见 `covert-carrier-decoding.md` §3.1。
+
+载体形态：两种字体/大小写、双符号序列、多行文本的行首词双集合。
+
+**从载体行产出 bit 串并解码**：
+
+```python
+def bacon(lines, one=("Old", "Only")):
+    # one: 二值符号集合之一的成员首词；其余行归另一类
+    bits = "".join("1" if l.split()[0].strip('.,') in one else "0" for l in lines)
+    return [int(bits[i:i+5], 2) for i in range(0, len(bits) - 4, 5)]
+```
+
+- **行数整除检查**：剔除空行/标签行/平台注入文本（如 "View all comments"）后总行数必须被 5 整除，不整除说明漏行或多行
+- **值 26-31 不是解码错误**——常用 base32 数字扩展（26-31 → '2'-'7'），载体文本常自含提示（"字母表之外的记号"类元话语）
 
 ## 7. Playfair / Hill / Affine / Rail-Fence / Atbash / Polybius
 

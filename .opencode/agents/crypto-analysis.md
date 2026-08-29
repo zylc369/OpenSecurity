@@ -110,13 +110,15 @@ permission:
 | `rsa-attacks.md` | RSA 题：共模/小 e 开方/Hastad 广播/Wiener/Boneh-Durfee/分解/Coppersmith/直接解 |
 | `lattice-attacks.md` | 格题：LLL/HNP/截断/隐含线性关系（`a*p+b*q` 等） |
 | `ecc-attacks.md` | 椭圆曲线：Smart(anomalous)/MOV/Pohlig-Hellman/invalid curve |
-| `classical-crypto.md` | 古典密码：替换/维吉尼亚/频率分析 |
+| `classical-crypto.md` | 古典密码：替换/维吉尼亚/频率分析/Bacon（双符号 5-bit，含载体行解码与 base32 扩展值） |
 | `symmetric-and-hash.md` | 对称+哈希：padding oracle/CBC bit flip/哈希长度扩展 |
 | `number-theory-construction.md` | 数论构造题：构造满足整除梅森数/模运算/位运算约束的输入 |
 | `prng-attacks.md` | PRNG 题目：MT19937 untemper/LCG 参数恢复/V8·Java·Ghidra 种子提取/时间种子 |
 | `exotic-algebra-attacks.md` | 冷门代数结构：辫群/热带半环/Paillier/FPE/Rabin/BIP39/OSS 伪造等 14 节路由表 |
 | `blockchain-attacks.md` | 区块链/智能合约：EIP-1967 槽位/ABI 编码绕过/Groth16 伪造/私钥泄漏模式/链上追踪 |
 | `fhe-attacks.md` | 全同态加密题目：HE 方案参数与攻击面 |
+| `custom-cipher-structural-attacks.md` | 自制分组密码（源码+大批明密文记录+加密盒）：组件弱点分解/积分攻击/GF(2) 求逆坑 |
+| `covert-carrier-decoding.md` | 隐蔽载体调查（仅 @handle/短语线索）：平台判存指纹/Bacon 型识别/base64url 排序坑/解码自检三问 |
 
 ---
 

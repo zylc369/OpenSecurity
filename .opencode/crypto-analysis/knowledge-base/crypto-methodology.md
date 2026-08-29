@@ -11,7 +11,7 @@
 | `n=p*q`、`e`、`c=pow(m,e,n)`；或给了 p/q 的 hint | RSA | `rsa-attacks.md` |
 | 多个 `a*p+b*q`、截断比特、近似值、HNP | 格（lattice） | `lattice-attacks.md` |
 | 椭圆曲线方程 `y²=x³+ax+b (mod p)`、点加法/标量乘、离散对数 `Q=kG` | ECC | `ecc-attacks.md` |
-| 凯撒/维吉尼亚/单表替换/无密钥、字母频率 | 古典 | `classical-crypto.md` |
+| 凯撒/维吉尼亚/单表替换/无密钥、字母频率；双符号序列/行首词两类收敛（Bacon 5-bit，解码见其 §6 唯一维护点） | 古典 | `classical-crypto.md` |
 | AES/DES、CBC/ECB/CTR/GCM、padding 报错、IV 可控 | 对称 | `symmetric-and-hash.md` |
 | MD5/SHA、`mac=hash(key∥msg)`、长度扩展 | 哈希 | `symmetric-and-hash.md` |
 | PRNG、随机数、状态恢复 | 伪随机 | `prng-attacks.md`（MT/V8/Java/LCG/种子审计/自制递推）；LCG 参数恢复另见 `symmetric-and-hash.md` §6 |
@@ -21,6 +21,8 @@
 | Kyber/ML-KEM、Dilithium、LWE/RLWE 公式、SIDH 辅助点映像 | PQC（后量子） | LWE→`lattice-attacks.md`（§5h PQC 实现泄漏）；SIDH→§5 ZQP 攻击速查（Castryck-Decru） |
 | 辫群/热带半环/Paillier/GM/OSS/Cayley-Purser/BB-84 模拟等冷门方案 | 异型代数结构 | `exotic-algebra-attacks.md`（不变量/残差/复制隔离/小群查表） |
 | `.sol`/Foundry(`foundry.toml`)/Hardhat、`pragma solidity`、`isSolved()`、RPC 端点 | 智能合约（blockchain） | `blockchain-attacks.md`（delegatecall/重入/access control/整数/签名/随机数/flash loan） |
+| 自制分组密码完整源码 + 大批 (明文, 密文) 记录 + 认证加密盒 | 自制密码结构攻击 | `custom-cipher-structural-attacks.md`（组件弱点分解/积分攻击/GF(2) 工程坑） |
+| 线索仅一个 `@handle`/短语，需从公开平台内容提取编码 | 隐蔽载体调查 | `covert-carrier-decoding.md`（平台判存指纹/Bacon 型识别/排序坑/自检三问） |
 
 **判断不清时**：把题目所有参数列出来，看"哪个参数异常"（e 太小/太大、hint 数量、比特长度关系）——异常点就是攻击方向。
 
@@ -38,6 +40,7 @@
 
 - **廉价实验优先**：存在秒级可跑、自带结果验证器的候选攻击（如连分数收敛子 + 判别式校验）时，先跑再推导——禁止先做"最坏情况界分析"论证可行性。秒级实验的期望成本比长推演低几个数量级，且实验结果能直接裁剪理论方向。长篇纯推演还有耗尽输出预算、导致整个回合报废的风险。
 - **生成器自测先行**：题目脚本含完整生成器（可本地复现实例）时，打线上前必须先本地自造实例端到端自测整条求解管线（攻击 → 解密 → flag 格式转换）。nc 类服务每次连接生成新实例，线上失败即丢失已破解状态；本地自测可同时拦截笔误级 bug 与数学级陷阱（如环 RSA 的 λ 陷阱，见 `rsa-attacks.md` §4a）两类问题。
+- **解码自检**：解码结果部分有意义部分无意义时，先怀疑编码参数（拼接顺序/分组对齐/符号映射）并显式消化源文本元提示，禁止把部分正确外推为全部正确（三问清单与参数空间见 `covert-carrier-decoding.md` §5）。在错误解码结果上做外部探测的成本比参数空间内重解高几个数量级。
 
 ## 3. SageMath 使用基础
 
