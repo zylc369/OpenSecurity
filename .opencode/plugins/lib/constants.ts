@@ -33,6 +33,13 @@ export const WORKSPACE_DIR = join(DATA_DIR, "workspace");
 export const TASK_SESSIONS_DIR = join(WORKSPACE_DIR, ".task_sessions");
 // 字典统一目录（WordlistRecipe 落点; shell.env 注入 $WORDLISTS_DIR; 容器 wrapper 挂载源）
 export const WORDLISTS_DIR = join(DATA_DIR, "wordlists");
+// 外部工具目录（detect_tools.py 的 CMD_DIR/TOOLS_HOME_DIR 对等落点）。
+// 必须经 DATA_DIR 派生（勿硬编码 homedir 拼接）——保持 env 覆盖/测试沙箱一致性。
+// 两者是 DATA_DIR 下的平级兄弟目录（无包含关系）:
+//   CMD  = 命令目录（可执行入口: wrapper + 单二进制，PATH 注入点，按名调用）
+//   HOME = 工具的家（本体文件: 运行时/克隆仓库/jar，如 node/、dotnet/、android-platform-tools/）
+export const TOOLS_CMD_DIR = join(DATA_DIR, "bin");
+export const TOOLS_HOME_DIR = join(DATA_DIR, "tools");
 
 export const LOGS_DIR = join(DATA_DIR, "logs");
 export const DEFAULT_LOG = join(LOGS_DIR, "plugin_debug.log");

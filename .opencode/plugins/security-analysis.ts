@@ -15,6 +15,8 @@ import {
   OPENCODE_ROOT,
   DATA_DIR,
   WORDLISTS_DIR,
+  TOOLS_CMD_DIR,
+  TOOLS_HOME_DIR,
   WORKSPACE_DIR,
   TASK_SESSIONS_DIR,
   LOGS_DIR,
@@ -89,7 +91,7 @@ function resolveToolDirPath(
   marker: string,
   sessionID: string,
 ): string | null {
-  const dir = join(homedir(), "bw-security-analysis", "tools", dirName);
+  const dir = join(TOOLS_HOME_DIR, dirName);
   const markerFile = process.platform === "win32" ? `${marker}.exe` : marker;
   try {
     if (existsSync(join(dir, markerFile))) {
@@ -133,7 +135,7 @@ function resolveNodeBinPath(sessionID: string): string | null {
   if (nodeBinPath.isCached) {
     return nodeBinPath.path;
   }
-  const nodeRoot = join(homedir(), "bw-security-analysis", "tools", "node");
+  const nodeRoot = join(TOOLS_HOME_DIR, "node");
   try {
     const verDir = readdirSync(nodeRoot).find((e) => /^node-v/.test(e));
     if (!verDir) {
@@ -243,6 +245,9 @@ async function buildEnvSection(
       envSection += `- Python ($PYTHON_CMD): ${pythonCmd}\n`;
       envSection += `- Python venv bin 目录（\`$PYTHON_CMD/bin\`, 已在 PATH 首位）: 完整路径是 \`${pythonCmd}/bin\`。内含 1000+ 可执行命令（sqlmap/dirsearch/frida/impacket 全家/secretsdump/one_gadget/ROPGadget/uncompyle6/vol 等），可直接按命令名调用，不必写完整路径\n`;
     }
+
+    // 外部工具目录（detect_tools 自动安装产物 + 容器 wrapper; shell.env 已注入 PATH）
+    envSection += `- 外部工具目录: 完整路径是 \`${TOOLS_CMD_DIR}\`（已在 PATH 中，venv 之后）。detect_tools 自动安装的工具（nuclei/ffuf/bkcrack/fscan/GoReSym/adb 等）和容器 wrapper（hashcat/stegseek/nmap/john/ffmpeg 等重型工具的 docker run 封装）都落在此目录——全部直接按命令名调用，不必写完整路径。容器 wrapper 会自动挂载当前工作目录（可读写）和 \`$WORDLISTS_DIR\`，宿主路径自动翻译成容器路径，当本机命令用即可\n`;
 
     // 字典统一目录（$WORDLISTS_DIR 与 shell.env 注入保持一致; 路径约定恒定）
     envSection += `- 字典目录 ($WORDLISTS_DIR): 完整路径是 \`${WORDLISTS_DIR}\`。子目录: seclists/（全集字典，docker容器 wrapper 自动挂载到 /usr/share/seclists）、rockyou.txt、cn/（中文精选: 安全设备默认口令/top 系列/登入账号）。使用字典时路径一律写 \`$WORDLISTS_DIR/xxx\`; 场景→字典选择详见 Read $OPENCODE_ROOT/binary-analysis/knowledge-base/wordlists-guide.md\n`;
@@ -1073,7 +1078,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           // PATH: 前置 venv/bin（venv CLI 工具 sage/sqlmap 等）+ ~/bw-security-analysis/bin
           // （detect_tools.py 自动安装的外部工具: nuclei/ffuf/bkcrack/wrapper 等）
           const venvBin = dirname(pythonCmd);
-          const toolBin = join(homedir(), "bw-security-analysis", "bin");
+          const toolBin = TOOLS_CMD_DIR;
           const nodeBin = resolveNodeBinPath(sessionID);
           const adbBin = resolveAndroidPlatformToolsPath(sessionID);
           debugLog(

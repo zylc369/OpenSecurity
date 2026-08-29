@@ -8,7 +8,7 @@
 
 注意：
   • IDA_PRO_HOME 通过 config_store 读（配置收口）
-  • 其他工具（apktool/jadx 等）通过 shutil.which 检测 PATH，未命中回落 BIN_DIR
+  • 其他工具（apktool/jadx 等）通过 shutil.which 检测 PATH，未命中回落 CMD_DIR
   • 自动安装产物落 ~/bw-security-analysis/bin（插件注入 PATH）/ tools/（源码与 jar）
 """
 from __future__ import annotations
@@ -38,8 +38,8 @@ from services import config_store  # noqa: E402 —— 自举后可见
 
 # 安装目录（与 detect_py_deps.CACHE_DIR 同值；刻意本地定义不 import，避免服务模块间耦合）
 CACHE_DIR = os.path.expanduser("~/bw-security-analysis")
-BIN_DIR = os.path.join(CACHE_DIR, "bin")        # 二进制 + wrapper（插件注入 PATH）
-TOOLS_SRC_DIR = os.path.join(CACHE_DIR, "tools")  # git clone / jar 存放
+CMD_DIR = os.path.join(CACHE_DIR, "bin")         # 命令目录: 可执行入口（wrapper+单二进制，插件注入 PATH）; 与 TOOLS_HOME_DIR 平级
+TOOLS_HOME_DIR = os.path.join(CACHE_DIR, "tools")  # 工具"家"目录: 克隆仓库/jar/运行时（node/dotnet/...），非源码
 WORDLISTS_DIR = os.path.join(CACHE_DIR, "wordlists")  # 字典统一落点（插件注入 $WORDLISTS_DIR; 容器 wrapper 挂载）
 
 
@@ -164,7 +164,7 @@ class NodeRecipe:
     """Node.js 运行时配方（目录结构安装: node + npm + npx 三 wrapper）。
 
     npm 是目录树（lib/node_modules/npm），单文件 bins 机制装不了——
-    解包整个官方归档到 TOOLS_SRC_DIR/node/，BIN_DIR 下生成三个 wrapper。
+    解包整个官方归档到 TOOLS_HOME_DIR/node/，CMD_DIR 下生成三个 wrapper。
     版本锁 LTS（npm 10 要求 node >= 18.17）。
     """
     version: str
@@ -173,14 +173,14 @@ class NodeRecipe:
 
 @dataclass
 class DirRecipe:
-    """直链归档 → 内容平铺解压到 TOOLS_SRC_DIR/<dest>/（官方文件布局原样，PATH 由 plugin 注入）。
+    """直链归档 → 内容平铺解压到 TOOLS_HOME_DIR/<dest>/（官方文件布局原样，PATH 由 plugin 注入）。
 
     适用: 官方 zip 内含顶层目录（如 platform-tools/）但要求落点是跨平台固定目录名的工具。
     不变式: <dest>/ 目录存在 ⟺ 安装时 PATH 无该工具（skip 分支清理残留维护，同 NodeRecipe）。
     """
     name: str
     urls: dict[str, str] = field(default_factory=dict)  # 平台键前缀（darwin/linux/win）→ 直链
-    dest: str = ""                                      # TOOLS_SRC_DIR 下固定目录名
+    dest: str = ""                                      # TOOLS_HOME_DIR 下固定目录名
     marker: str = ""                                    # 目录内标志性文件（幂等/plugin 探测，win 自动补 .exe）
     strip_top: bool = True                              # True=剥掉归档顶层目录，内容平铺
 
@@ -189,10 +189,10 @@ class DirRecipe:
 class DotnetRecipe:
     """dotnet runtime + nuget 工具组合（.NET 生态 CLI 工具的本机跨平台方案）。
 
-    runtime 官方归档解压 TOOLS_SRC_DIR/dotnet/（官方目录原样，NodeRecipe 同模式；
+    runtime 官方归档解压 TOOLS_HOME_DIR/dotnet/（官方目录原样，NodeRecipe 同模式；
     多工具共享同一 runtime 目录，第二个 .NET 工具只装 nupkg 部分）。
-    nuget 包（nupkg=zip）取 tools/<net_target>/any/ 解包到 TOOLS_SRC_DIR/<name>/。
-    BIN_DIR wrapper: exec dotnet <name>.dll。net6.0 目标在 runtime 8（LTS→2026-11）roll-forward 可跑。
+    nuget 包（nupkg=zip）取 tools/<net_target>/any/ 解包到 TOOLS_HOME_DIR/<name>/。
+    CMD_DIR wrapper: exec dotnet <name>.dll。net6.0 目标在 runtime 8（LTS→2026-11）roll-forward 可跑。
     """
     name: str
     nuget_name: str                  # nuget 包名
@@ -238,7 +238,7 @@ class GitBashRecipe:
 
     opencode 在 Windows 默认 shell = PowerShell（vendor shell.ts: pwsh > powershell >
     GitBash > cmd），而 AI 命令语法（$VAR）/ sh wrapper / install.sh / sed 全依赖 bash
-    ——本配方下载最新 PortableGit（.7z.exe 自解压，无需 7-Zip）到 BIN_DIR/git-portable/
+    ——本配方下载最新 PortableGit（.7z.exe 自解压，无需 7-Zip）到 CMD_DIR/git-portable/
     （官方目录原样，约 300MB），并把项目级 opencode.json 的 shell 配置为便携版 bash.exe。
 
     不探测系统 Git（自己装自己的——版本统一、行为确定）;
@@ -253,7 +253,7 @@ class GitBashRecipe:
 class DockerRecipe:
     """容器工具配方（调研见 knowledge-base/docker-toolbox.md）。
 
-    wrapper 落 BIN_DIR: docker run（entrypoint 降权/卷挂载/路径重写/trap 防孤儿容器）。
+    wrapper 落 CMD_DIR: docker run（entrypoint 降权/卷挂载/路径重写/trap 防孤儿容器）。
     多工具共享镜像: image 相同的 recipe 只 build 一次（image_exists 幂等）。
     """
     name: str                        # 工具名（=容器内命令名）
@@ -269,7 +269,7 @@ class PrebuiltRecipe:
     """随仓库携带的预编译二进制（macOS Xcode/clang 编译产物，放 .opencode/tools/）。
 
     适用: 必须 macOS 工具链编译、容器无法构建的工具（class-dump/optool 类 Mach-O 工具）。
-    安装 = 拷贝到 BIN_DIR + chmod。
+    安装 = 拷贝到 CMD_DIR + chmod。
     platforms 默认 ["darwin"]: Mach-O 产物在 linux/win 上无法执行——
     安装守卫跳过 + 检测层 ToolField 需同标 platforms（防假可用）。
     """
@@ -846,8 +846,8 @@ class ToolsScanner:
         resolved = shutil.which(tool.name)
         if resolved:
             return resolved, True
-        # 回落: BIN_DIR 安装的二进制/wrapper（后端进程无插件注入的 PATH，需显式查）
-        bin_cand = os.path.join(BIN_DIR, tool.name + (".exe" if os.name == "nt" else ""))
+        # 回落: CMD_DIR 安装的二进制/wrapper（后端进程无插件注入的 PATH，需显式查）
+        bin_cand = os.path.join(CMD_DIR, tool.name + (".exe" if os.name == "nt" else ""))
         if os.path.isfile(bin_cand):
             return bin_cand, True
         return (tool.name, False)
@@ -899,8 +899,8 @@ _UA = {"User-Agent": "OpenSecurity-installer"}
 class ToolsInstaller:
     """INSTALLABLE_TOOLS 清单的安装器（幂等; 单工具失败不中断整体）。
 
-    产物布局: 二进制 → BIN_DIR; jar/克隆源码 → TOOLS_SRC_DIR/<name>/ + BIN_DIR wrapper。
-    幂等: PATH 已有同名命令 或 BIN_DIR 产物齐全 → 跳过（--force 重装）。
+    产物布局: 二进制 → CMD_DIR; jar/克隆仓库 → TOOLS_HOME_DIR/<name>/ + CMD_DIR wrapper。
+    幂等: PATH 已有同名命令 或 CMD_DIR 产物齐全 → 跳过（--force 重装）。
     """
 
     TIMEOUT = 120  # 单请求超时（秒）——大文件下载分块流式写
@@ -1067,15 +1067,15 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         if shutil.which(name):
             return f"PATH 已有 {name}（已安装，跳过）"
         if bins and all(os.path.exists(self._bin_path(b)) for b in bins):
-            return f"{BIN_DIR} 产物已齐全"
+            return f"{CMD_DIR} 产物已齐全"
         return None
 
     @staticmethod
     def _bin_path(bin_name: str) -> str:
-        """BIN_DIR 产物路径（Windows 自动补 .exe）。"""
+        """CMD_DIR 产物路径（Windows 自动补 .exe）。"""
         if os.name == "nt" and not bin_name.endswith(".exe") and "." not in bin_name:
             bin_name += ".exe"
-        return os.path.join(BIN_DIR, bin_name)
+        return os.path.join(CMD_DIR, bin_name)
 
     # ── GitHub Releases ──
 
@@ -1112,10 +1112,10 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         asset = self._match_assets(assets, [r.jar_kw], r.excl)[0] if self._match_assets(assets, [r.jar_kw], r.excl) else None
         if not asset:
             return InstallResult(r.name, "failed", f"{r.repo}@{tag} 无 jar 资产")
-        dst_dir = os.path.join(TOOLS_SRC_DIR, r.name)
+        dst_dir = os.path.join(TOOLS_HOME_DIR, r.name)
         os.makedirs(dst_dir, exist_ok=True)
         jar_path = os.path.join(dst_dir, asset)
-        wrapper = os.path.join(BIN_DIR, r.name)
+        wrapper = os.path.join(CMD_DIR, r.name)
         if os.path.exists(jar_path) and not force:
             if not os.path.exists(wrapper):  # jar 在而 wrapper 缺 → 补 wrapper
                 self._wrapper(r.name, ["java", "-jar", jar_path])
@@ -1126,8 +1126,8 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         return InstallResult(r.name, "installed", f"{asset} + wrapper")
 
     def _install_tree(self, r: ReleaseRecipe, url: str, asset: str) -> InstallResult:
-        """整归档解压到 TOOLS_SRC_DIR/<name>/，wrapper 指向 entry。"""
-        dst = os.path.join(TOOLS_SRC_DIR, r.name)
+        """整归档解压到 TOOLS_HOME_DIR/<name>/，wrapper 指向 entry。"""
+        dst = os.path.join(TOOLS_HOME_DIR, r.name)
         if os.path.isdir(dst) and os.path.exists(os.path.join(dst, r.entry)):
             return InstallResult(r.name, "skipped", "源码树已存在")
         data = self._download(url)
@@ -1151,7 +1151,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     # ── git / pip ──
 
     def _install_git(self, r: GitRecipe, force: bool) -> InstallResult:
-        dst = os.path.join(TOOLS_SRC_DIR, r.name)
+        dst = os.path.join(TOOLS_HOME_DIR, r.name)
         entry_abs = os.path.join(dst, r.entry)
         if r.pip_pkg:  # 包模式: 克隆后 pip install（console script 直接落 venv bin）
             if not force and shutil.which(r.name):
@@ -1163,7 +1163,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                            f"https://github.com/{r.repo}", dst])
             self._run([self._venv_python(), "-m", "pip", "install", "-q", dst])
             return InstallResult(r.name, "installed", f"clone {r.repo} + pip install")
-        wrapper = os.path.join(BIN_DIR, r.name)
+        wrapper = os.path.join(CMD_DIR, r.name)
         if os.path.exists(entry_abs) and not force:
             if not os.path.exists(wrapper):  # 克隆在而 wrapper 缺（历史失败残留）→ 只补 wrapper
                 self._install_git_wrapper(r, dst, entry_abs)
@@ -1212,13 +1212,13 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     # ── Node.js 运行时（目录结构安装） ──
 
     def _install_node(self, r: NodeRecipe, force: bool) -> InstallResult:
-        """解包官方归档到 TOOLS_SRC_DIR/node/，BIN_DIR 生成 node/npm/npx wrapper。"""
+        """解包官方归档到 TOOLS_HOME_DIR/node/，CMD_DIR 生成 node/npm/npx wrapper。"""
         if not force:
             skip = self._node_skip_reason()
             if skip:
                 # 本机 node 合格: 清理历史残留（tools/node 目录 + bin/ 三个 wrapper）
                 # —— 保证"tools/node 目录存在 ⟺ 本机 node 不可用"，plugin 据此决定是否注入 PATH
-                stale = os.path.join(TOOLS_SRC_DIR, "node")
+                stale = os.path.join(TOOLS_HOME_DIR, "node")
                 if os.path.isdir(stale):
                     shutil.rmtree(stale)
                 for b in ("node", "npm", "npx"):
@@ -1226,7 +1226,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                     if os.path.exists(p):
                         os.remove(p)
                 return InstallResult("node", "skipped", skip + "; 已清理历史残留")
-            if os.path.isdir(os.path.join(TOOLS_SRC_DIR, "node")):
+            if os.path.isdir(os.path.join(TOOLS_HOME_DIR, "node")):
                 return InstallResult("node", "skipped", "tools/node 官方目录已解包")
 
         syst, arch = _plat_key().split("-")
@@ -1245,7 +1245,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, asset)
             self._write(self._download(url), path)
-            dest = os.path.join(TOOLS_SRC_DIR, "node")
+            dest = os.path.join(TOOLS_HOME_DIR, "node")
             if os.path.isdir(dest):
                 shutil.rmtree(dest)
             os.makedirs(dest, exist_ok=True)
@@ -1262,14 +1262,14 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         # 官方目录原样使用（不生成 wrapper）: darwin/linux 的 bin/ 内 node 与 npm/npx 软链同目录
         # （shebang #!/usr/bin/env node 在同目录命中）; win 的 npm.cmd 优先同目录 node.exe（官方兜底）。
         # PATH 注入由 plugin shell.env 完成: 检测本目录存在 → 注入 bin/（posix）或根目录（win）。
-        inst_dir = os.path.join(TOOLS_SRC_DIR, "node", plat_dir)
+        inst_dir = os.path.join(TOOLS_HOME_DIR, "node", plat_dir)
         return InstallResult("node", "installed", f"v{r.version} LTS 官方目录 → {inst_dir}（plugin 注入 PATH）")
 
     # npm 10（v22 LTS 配套）要求的最低 node 版本; 更老的 node 会被跳过逻辑静默接受导致 npm install 失败
     NODE_MIN = (18, 17, 0)
 
     def _node_skip_reason(self) -> str | None:
-        """PATH 有 node+npm 且版本 >= 18.17 才跳过; 老版本返回 None（继续装 v22 到 BIN_DIR，PATH 遮蔽老 node）。"""
+        """PATH 有 node+npm 且版本 >= 18.17 才跳过; 老版本返回 None（继续装 v22 到 CMD_DIR，PATH 遮蔽老 node）。"""
         node, npm = shutil.which("node"), shutil.which("npm")
         if not (node and npm):
             return None
@@ -1277,16 +1277,16 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=15).stdout.strip()
             ver = tuple(int(x) for x in out.lstrip("v").split(".")[:3])
         except (ValueError, subprocess.SubprocessError):
-            return f"PATH node 版本不可解析，装 v22 到 {BIN_DIR}"
+            return f"PATH node 版本不可解析，装 v22 到 {CMD_DIR}"
         if ver >= self.NODE_MIN:
             return f"PATH 已有 node {out} + npm（>= 18.17 满足 npm 10）"
-        return None  # 老版本: 不跳过，BIN_DIR 装 v22（plugin PATH 序 toolBin 在前，遮蔽老 node）
+        return None  # 老版本: 不跳过，CMD_DIR 装 v22（plugin PATH 序 toolBin 在前，遮蔽老 node）
 
     # ── 直链归档 → 固定目录（官方布局原样） ──
 
     def _install_dir(self, r: DirRecipe, force: bool) -> InstallResult:
-        """adb 类工具: PATH 无命令 → 下载官方 zip 内容平铺到 TOOLS_SRC_DIR/<dest>/。"""
-        dest = os.path.join(TOOLS_SRC_DIR, r.dest)
+        """adb 类工具: PATH 无命令 → 下载官方 zip 内容平铺到 TOOLS_HOME_DIR/<dest>/。"""
+        dest = os.path.join(TOOLS_HOME_DIR, r.dest)
         if not force:
             if shutil.which(r.name):
                 # 本机已有（系统/手动安装）: 清理残留，维护"目录存在 ⟺ PATH 无该工具"（plugin 据此注入）
@@ -1335,28 +1335,28 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         return InstallResult(r.name, "installed", f"官方目录 → {dest}（plugin 注入 PATH）")
 
     def _install_prebuilt(self, r: PrebuiltRecipe, force: bool) -> InstallResult:
-        """仓库内预编译二进制 → 拷贝 BIN_DIR（平台不匹配跳过——Mach-O 跨平台不可执行）。"""
+        """仓库内预编译二进制 → 拷贝 CMD_DIR（平台不匹配跳过——Mach-O 跨平台不可执行）。"""
         if r.platforms and sys.platform not in r.platforms:
             return InstallResult(r.name, "skipped", f"平台 {sys.platform} 不适用（{'/'.join(r.platforms)} 专用）")
         if not force and os.path.exists(self._bin_path(r.name)):
-            return InstallResult(r.name, "skipped", "BIN_DIR 已存在")
+            return InstallResult(r.name, "skipped", "CMD_DIR 已存在")
         src = os.path.join(_opencode_root(), r.source)
         if not os.path.isfile(src):
             return InstallResult(r.name, "failed", f"预编译产物缺失: {r.source}（需 macOS 环境执行 tools/build-class-dump.sh 重建）")
-        os.makedirs(BIN_DIR, exist_ok=True)
+        os.makedirs(CMD_DIR, exist_ok=True)
         shutil.copyfile(src, self._bin_path(r.name))
         self._chmodx(self._bin_path(r.name))
-        return InstallResult(r.name, "installed", f"{r.source} → BIN_DIR")
+        return InstallResult(r.name, "installed", f"{r.source} → CMD_DIR")
 
     # ── .NET runtime + nuget 工具 ──
 
     def _install_dotnet(self, r: DotnetRecipe, force: bool) -> InstallResult:
         """runtime（共享目录）+ nupkg 工具 + wrapper。"""
         wrapper = self._bin_path(r.name)
-        dll = os.path.join(TOOLS_SRC_DIR, r.name, f"{r.name}.dll")
+        dll = os.path.join(TOOLS_HOME_DIR, r.name, f"{r.name}.dll")
         if not force and os.path.exists(wrapper) and os.path.exists(dll):
             return InstallResult(r.name, "skipped", "wrapper + dll 已存在")
-        dotnet_exe = os.path.join(TOOLS_SRC_DIR, "dotnet",
+        dotnet_exe = os.path.join(TOOLS_HOME_DIR, "dotnet",
                                   "dotnet.exe" if os.name == "nt" else "dotnet")
         # 1. runtime（共享: 已解包则跳过，多 .NET 工具只装一次）
         if not os.path.exists(dotnet_exe):
@@ -1364,7 +1364,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             if not url:
                 return InstallResult(r.name, "failed", f"平台 {_plat_key()} 无 runtime 直链")
             data = self._download(url)
-            dest = os.path.join(TOOLS_SRC_DIR, "dotnet")
+            dest = os.path.join(TOOLS_HOME_DIR, "dotnet")
             os.makedirs(dest, exist_ok=True)
             if url.endswith(".zip"):
                 with zipfile.ZipFile(io.BytesIO(data)) as zf:
@@ -1381,7 +1381,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         nupkg_url = r._NUGET_URL.format(name=r.nuget_name, ver=r.nuget_version)
         if not os.path.exists(dll):
             data = self._download(nupkg_url)
-            tool_dir = os.path.join(TOOLS_SRC_DIR, r.name)
+            tool_dir = os.path.join(TOOLS_HOME_DIR, r.name)
             os.makedirs(tool_dir, exist_ok=True)
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
                 prefix = f"tools/{r.net_target}/any/"
@@ -1405,8 +1405,8 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         # 3. wrapper: exec dotnet <name>.dll
         #     DOTNET_ROLL_FORWARD=LatestMajor: net6.0 目标 dll 在 runtime 8 上跨两个大版本
         #     前滚的必要条件（默认 Minor 只允许 6→7; 微软官方支持场景）
-        os.makedirs(BIN_DIR, exist_ok=True)
-        wpath = os.path.join(BIN_DIR, r.name)
+        os.makedirs(CMD_DIR, exist_ok=True)
+        wpath = os.path.join(CMD_DIR, r.name)
         body = ("#!/bin/sh\n"
                 "export DOTNET_ROLL_FORWARD=LatestMajor\n"
                 f'exec "{dotnet_exe}" "{dll}" "$@"\n')
@@ -1476,7 +1476,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         """Windows: 下载最新 PortableGit 便携版（按 CPU 架构）+ 写 shell 配置。"""
         if sys.platform != "win32":
             return InstallResult(r.name, "skipped", f"平台 {sys.platform} 无需 Git Bash")
-        portable_dir = os.path.join(BIN_DIR, "git-portable")
+        portable_dir = os.path.join(CMD_DIR, "git-portable")
         portable_bash = os.path.join(portable_dir, "bin", "bash.exe")
         if os.path.isfile(portable_bash) and not force:
             note = self._configure_opencode_shell(portable_bash)
@@ -1508,7 +1508,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     def _install_docker(self, r: DockerRecipe, force: bool) -> InstallResult:
         """容器工具: docker 缺失→skip 提示; 镜像缺→build（同镜像幂等一次）; 生成 wrapper。"""
-        wrapper = os.path.join(BIN_DIR, r.name)
+        wrapper = os.path.join(CMD_DIR, r.name)
         if not force and os.path.exists(wrapper):
             return InstallResult(r.name, "skipped", "wrapper 已存在")
         if not shutil.which("docker"):
@@ -1555,12 +1555,12 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     def _docker_wrapper(self, r: DockerRecipe) -> None:
         """docker run wrapper（docker-toolbox.md §6 蓝本: 唯一名+trap/降权/路径重写/wordlists）。"""
-        os.makedirs(BIN_DIR, exist_ok=True)
+        os.makedirs(CMD_DIR, exist_ok=True)
         net = "--network host " if r.net_host else ""
         extra = (" ".join(r.extra_args) + " ") if r.extra_args else ""
         # 统一 sh wrapper（Windows 走 Git Bash/WSL 执行——与 install.sh 同前提;
         # 历史 .cmd 分支已删: 双语言维护腐化快且无法实测，见 docker-toolbox.md）
-        path = os.path.join(BIN_DIR, r.name)
+        path = os.path.join(CMD_DIR, r.name)
         if r.long_running:
             longcheck = (
                 'if [ -z "$EXPLICIT_WT" ]; then\n'
@@ -1598,7 +1598,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     def _qemu_gdb_wrapper(self, r: DockerRecipe) -> None:
         """qemu gdbstub 调试 wrapper（docker-toolbox.md §4: binfmt ptrace 失效的唯一可行模式）。"""
-        path = os.path.join(BIN_DIR, r.name)
+        path = os.path.join(CMD_DIR, r.name)
         body = self._QEMU_TMPL.replace("{IMAGE}", r.image)
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(body)
@@ -1607,8 +1607,8 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     # ── 底层操作 ──
 
     def _place_from_archive(self, r, data: bytes, asset: str) -> None:
-        """归档/裸二进制 → 提取 r.bins 到 BIN_DIR（归档内递归按名查找）。"""
-        os.makedirs(BIN_DIR, exist_ok=True)
+        """归档/裸二进制 → 提取 r.bins 到 CMD_DIR（归档内递归按名查找）。"""
+        os.makedirs(CMD_DIR, exist_ok=True)
         lower = asset.lower()
         is_archive = any(lower.endswith(s) for s in
                          (".tar.gz", ".tgz", ".tar.xz", ".zip", ".gz"))
@@ -1713,12 +1713,12 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         os.chmod(path, mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     def _wrapper(self, name: str, argv: list[str], cwd: str = "", envp: str = "") -> None:
-        """生成 BIN_DIR sh wrapper，幂等覆盖; cwd 先 cd; envp 附加 PYTHONPATH。
+        """生成 CMD_DIR sh wrapper，幂等覆盖; cwd 先 cd; envp 附加 PYTHONPATH。
 
         统一 sh（Windows 走 Git Bash/WSL 执行——与 docker wrapper/install.sh 同前提，单语言维护）。
         """
-        os.makedirs(BIN_DIR, exist_ok=True)
-        path = os.path.join(BIN_DIR, name)
+        os.makedirs(CMD_DIR, exist_ok=True)
+        path = os.path.join(CMD_DIR, name)
         body = "#!/bin/sh\n"
         if cwd:
             body += f'cd "{cwd}"\n'
