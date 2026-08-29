@@ -23,6 +23,7 @@ def b2i(b):  # bytes -> int (大端)
 |------|--------|---------|
 | `e` 很小（3/5/7/17） | 小指数 | §2 直接开方 / §3 Hastad |
 | `e` 很大（接近 n） | d 很小 | §4 Wiener / §5 Boneh-Durfee |
+| 密文是 `t` 的多项式（商环 `Z_N[x]/(x^n-r)`），`e` ≈ `N^n` | 环 RSA 小 d | §4a 广义 Wiener |
 | 多组 `(c_i, n_i)` 同 `e` | 广播 | §3 Hastad |
 | 两组同 `n` 不同 `e` | 共模 | §6 共模 |
 | `n` 可分解 | factordb/特殊形 | §7 分解 |
@@ -82,6 +83,65 @@ print(bytes.fromhex(hex(m)[2:]))
 ```
 
 无 sage 时用 `owiener` 库：`pip install owiener; d = owiener.attack(e, n)`。
+
+## 4a. 环 RSA（多项式商环 Z_N[x]/(x^n-r)）+ 小私钥 d
+
+**何时用**：密文 `c` 是 `t` 的多项式（形如 `a*t^9 + b*t^8 + ... + k`）；加密在商环 `A = Z_N[x]/(x^n - r)`（多见 n=10、r=2）；脚本出现 `phi = (p^n - 1)*(q^n - 1)`、`e = inverse_mod(phi - d, phi)`（即 `e·d ≡ -1 (mod phi)`）、`d` 小于某 threshold 开方。此时 `e` 巨大（位数 ≈ n×N 位数）。
+
+**原理**：与 §4 同构，只做替换 `N → N^n`、`p+q → p^n+q^n`：`e·d + 1 = k·phi`，`phi = N^n + 1 - s`，`s = p^n + q^n`（`N^(n/2)` 量级），故 `k/d ≈ e/N^n`——连分数 `e/N^n` 收敛子里藏 `(k, d)`。纯收敛子仅当 p/q 比值小时保证命中（粗略界 `p/q ≲ (1.5·μ²)^0.2`，μ 为生成器里素数比上界），命不中走下方升级阶梯。
+
+```python
+# sage：连分数扫描（验证器是防收敛子误报的关键，不可省）
+def validate_kd(k, d, N, e, Nn, n, mu_max=1000):
+    if k <= 0 or d <= 0 or d > 2^(Nn.nbits()//4 + 64): return None  # d < ~(N^n)^0.25
+    num = e*d + 1
+    if num % k: return None
+    phi = num // k
+    s = Nn + 1 - phi                                   # s = p^n + q^n
+    if not (N^(n//2) < s < (mu_max^(n//2)+1) * N^(n//2)): return None
+    # p^n、q^n 是 z^2 - s*z + N^n = 0 的根（和=s、积=N^n）
+    disc = s*s - 4*Nn
+    if disc < 0 or not is_square(disc): return None
+    X = (s + isqrt(disc)) // 2
+    p = X.nth_root(n)                                  # 非完全 n 次幂抛 ValueError
+    if N % p: return None
+    return p, N//p, phi, d
+# 扫描：对 e/N^n 做连分数，逐收敛子 (k,d) 调 validate_kd；同时扫半收敛子
+# （相邻收敛子 (h_i,k_i)、(h_{i-1},k_{i-1}) 的线性组合 (r*h_i+h_{i-1}, r*k_i+k_{i-1})，r ≤ 64）
+```
+
+**λ 陷阱（解密必看）**：`(p^n-1)(q^n-1)` 通常**不是**商环单位群的真指数——`x^n - r` mod p 的不可约因子次数不必整除 n（实测 `x^10 - 2` mod 3 分解为 2 次 + 8 次因子，p^8-1 ∤ p^10-1）。直接 `c^(phi-d)` 解密有 ~30% 概率输出乱码。必须分解 `x^n - r` mod p、mod q 求 `λ = lcm(p^d_i - 1)`，用 `e^{-1} mod λ` 分别解密、对系数 CRT：
+
+```python
+# sage：可靠解密（n、r 按题替换）
+def ring_decrypt(p, q, e, coeffs, n=10, r=2):
+    parts = []
+    for pr in (p, q):
+        Rp = PolynomialRing(Zmod(pr), 'x'); xp = Rp.gen()
+        lam = lcm([pr^f.degree() - 1 for f, _ in (xp^n - r).factor()])
+        Aq = Rp.quotient(xp^n - r)
+        mp = Aq([Integer(c) for c in coeffs]) ^ inverse_mod(Integer(e), lam)
+        cs = [Integer(c) for c in mp.lift().list()]
+        cs += [Integer(0)] * (n - len(cs))
+        parts.append(cs)
+    return [Integer(CRT(parts[0][i], parts[1][i], p, q)) for i in range(n)]
+# 收尾：系数 → int(v).to_bytes(chunk,'big')（chunk=各系数最大字节数）拼接 → 去 PKCS7 padding
+# 必须重加密校验：环上 m^e == c
+```
+
+**升级阶梯**（按成本递增，先跑便宜的）：
+1. 纯收敛子扫描（秒级，先跑再想）
+2. 半收敛子（r ≤ 64）
+3. 网格猜 s：`M = N^n + 1 - w·N^(n//2)`，w 从 2 起、步长 ~1.5μ²，对 e/M 重跑扫描（覆盖 p/q ≲ 40）
+4. Boneh-Durfee 格：`f(x,y) = x·(N^n + 1 - y) - 1 (mod e)`，根 `(k, s)`，`X ≈ N^(n/4)/μ`、`Y ≈ μ^(n/2)·N^(n/2)`；信息量 XY ≈ e^0.75 落在 BD 可解区内
+
+**常见失败**：
+
+| 现象 | 原因 → 处理 |
+|------|------------|
+| 扫描全不过 | d 超纯收敛子界 → 升级阶梯 2/3/4 |
+| p·q == N 正确但解密乱码 | λ 陷阱 → 用上方 ring_decrypt |
+| `int(...)` 报 Exceeds the limit | Python ≥3.11 的 4300 位十进制上限 → `sys.set_int_max_str_digits(1000000)` |
 
 ## 5. Boneh-Durfee（d 较小但超 Wiener 界限）
 
@@ -217,6 +277,7 @@ e 很小?
 ├─ 单组 + m**e<n → 直接开方 (§2)
 ├─ m**e≥n → iroot(c+k*n, e) 遍历回绕 (§13) → 多组同 e → Hastad (§3)
 e 很大? → Wiener(§4) → 失败试 Boneh-Durfee(§5)
+密文是多项式 + e ≈ N^n? → 环 RSA 广义 Wiener (§4a，解密注意 λ 陷阱)
 同 n 多 e (gcd=1)? → 共模 (§6)
 gcd(e,phi)>1? → 指数约减/CRT 枚举 (§9a)
 n 特殊? → 分解 (§7 查表: 光滑/共享/结构化/受限数字/关系派生)

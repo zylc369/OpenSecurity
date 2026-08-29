@@ -45,6 +45,7 @@ permission:
 | 特征 | 类别 | 去读 |
 |------|------|------|
 | `n=p*q`、`e`、`c=pow(m,e,n)`、给出 p/q 相关 hint | RSA | `rsa-attacks.md` / `lattice-attacks.md` |
+| 密文是 `t` 的多项式（商环 `Z_N[x]/(x^n-r)`）、`e` ≈ `N^n` | 环 RSA（广义 Wiener） | `rsa-attacks.md` §4a |
 | 椭圆曲线方程、点运算、`G`/`Q`/离散对数 | ECC | `ecc-attacks.md` |
 | 线性关系 hint（`a*p+b*q`、截断比特、HNP）、多个近似值 | 格 | `lattice-attacks.md` |
 | 凯撒/维吉尼亚/替换/无密钥古典 | 古典 | `classical-crypto.md` |

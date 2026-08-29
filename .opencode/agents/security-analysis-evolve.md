@@ -1,5 +1,6 @@
 ---
 description: Security Analysis Agent 进化工程师 — 从实际分析复盘中发现高价值改进，经讨论确认后按严格质量流程实施。涵盖 IDA Pro 二进制逆向 + 移动端应用分析 + Web 安全分析。
+buwai-extension-id: security-analysis-evolve
 mode: all
 permission:
   task:
