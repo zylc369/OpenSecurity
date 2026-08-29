@@ -235,6 +235,7 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 | `malware-analysis.md` | 恶意软件分析（C2 协议族/RAT 家族取证/YARA 规则/内存注入检测/VBA·.NET 配置提取） |
 | `osint-techniques.md` | OSINT 情报收集（社交媒体追踪/地理定位/用户名枚举/WHOIS·Shodan·GitHub 挖掘） |
 | `steganography-forensics.md` | 隐写分析（图片/音频/文档载体/PNG·GIF 结构/QR/工具分诊表） |
+| `wordlists-guide.md` | 任何爆破/fuzz 需要字典时（$WORDLISTS_DIR 场景选型速查: 目录/密码/子域/payload） |
 | `network-forensics.md` | 网络流量取证（pcap 修复/TLS 解密/WiFi/DNS 隧道/协议重组/元数据信道） |
 | `disk-memory-forensics.md` | 磁盘与内存取证（文件系统恢复/RAID/加密容器/volatility 命令族/勒索处置） |
 | `windows-forensics.md` | Windows 取证（事件日志/注册表/ADS/timestomping/反取证/内存凭证顺序） |

@@ -22,9 +22,13 @@ if [[ -z "$PYTHON" ]]; then
     exit 1
 fi
 
-# 本脚本不接收参数（安装内容固定：全部必需依赖）
-if [[ $# -gt 0 ]]; then
-    echo "错误：install.sh 不接收参数（收到: $*）。" >&2
+# 参数: --force（透传给 detect_tools install——忽略幂等跳过强制重装，
+# wrapper 模板升级后批量重新生成时用）
+FORCE=""
+if [[ "${1:-}" == "--force" ]]; then
+    FORCE="--force"
+elif [[ $# -gt 0 ]]; then
+    echo "错误：install.sh 仅支持 --force 参数（收到: $*）。" >&2
     exit 1
 fi
 
@@ -33,4 +37,4 @@ fi
 
 # 2. 外部工具（必需层: 单项失败不中断其余，但整体失败 → 非零退出码）
 echo "[*] === 安装外部工具（单项失败不中断，失败汇总在末尾） ==="
-"$PYTHON" "${SCRIPT_DIR}/control/backend/services/detect_tools.py" install
+"$PYTHON" "${SCRIPT_DIR}/control/backend/services/detect_tools.py" install $FORCE

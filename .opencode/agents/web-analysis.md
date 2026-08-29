@@ -144,6 +144,7 @@ permission:
 | 文档 | 触发条件 |
 |------|---------|
 | `web-methodology.md` | 分析规划阶段（阶段 B）。白盒/黑盒分析流程、PHP 应用分析方法、Bot 类题目分析 |
+| `wordlists-guide.md`（$SHARED_DIR） | 任何爆破/fuzz 需要字典时（$WORDLISTS_DIR 场景选型速查: 目录/密码/子域/payload/中文设备口令） |
 | `web-vulnerabilities.md` | 识别到潜在漏洞类型时。XSS（含 Markdown 注入）、SSRF、iframe sandbox、Cookie 安全、开放重定向、Markdown 解析器安全测试方法论 |
 | `cache-poisoning.md` | 检测到缓存机制 / Vary 头 / 反向代理。含缓存中缓存渗出、Bot 请求头探测技术 |
 | `csp-bypass.md` | 检测到 CSP 头 / XSS 被 CSP 阻止 / PHP 应用 + 需要绕过安全头 |

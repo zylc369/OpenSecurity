@@ -14,6 +14,7 @@ import {
   PLUGIN_DIR,
   OPENCODE_ROOT,
   DATA_DIR,
+  WORDLISTS_DIR,
   WORKSPACE_DIR,
   TASK_SESSIONS_DIR,
   LOGS_DIR,
@@ -240,7 +241,11 @@ async function buildEnvSection(
     const pythonCmd = getPythonCmd();
     if (pythonCmd) {
       envSection += `- Python ($PYTHON_CMD): ${pythonCmd}\n`;
+      envSection += `- Python venv bin 目录（\`$PYTHON_CMD/bin\`, 已在 PATH 首位）: 完整路径是 \`${pythonCmd}/bin\`。内含 1000+ 可执行命令（sqlmap/dirsearch/frida/impacket 全家/secretsdump/one_gadget/ROPGadget/uncompyle6/vol 等），可直接按命令名调用，不必写完整路径\n`;
     }
+
+    // 字典统一目录（$WORDLISTS_DIR 与 shell.env 注入保持一致; 路径约定恒定）
+    envSection += `- 字典目录 ($WORDLISTS_DIR): 完整路径是 \`${WORDLISTS_DIR}\`。子目录: seclists/（全集字典，docker容器 wrapper 自动挂载到 /usr/share/seclists）、rockyou.txt、cn/（中文精选: 安全设备默认口令/top 系列/登入账号）。使用字典时路径一律写 \`$WORDLISTS_DIR/xxx\`; 场景→字典选择详见 Read $OPENCODE_ROOT/binary-analysis/knowledge-base/wordlists-guide.md\n`;
 
     // 编译器（用 getCompilerName 检测 PATH 中的编译器，只告知可用性，不注入完整路径）
     const compilerName = getCompilerName();
@@ -1063,6 +1068,8 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         const pythonCmd = getPythonCmd();
         if (pythonCmd) {
           output.env.PYTHON_CMD = pythonCmd;
+          // 字典统一目录（路径约定恒定，无条件注入——不依赖安装状态; AI 用 $WORDLISTS_DIR/xxx 引用字典）
+          output.env.WORDLISTS_DIR = WORDLISTS_DIR;
           // PATH: 前置 venv/bin（venv CLI 工具 sage/sqlmap 等）+ ~/bw-security-analysis/bin
           // （detect_tools.py 自动安装的外部工具: nuclei/ffuf/bkcrack/wrapper 等）
           const venvBin = dirname(pythonCmd);

@@ -11,7 +11,7 @@ strings -n 8 carrier.* | grep -iE "flag|pass|key"
 zsteg -a image.png                              # PNG/BMP 全平面自动扫（LSB 不只在 bit0，bit5 也常见）
 zsteg 1.png -E b1,r,lsb,xy > out.bin            # 指定通道提取; 栈报错 "stack level too deep" 时 --msb 或 -o xY 换扫描顺序
 steghide extract -sf image.jpg                  # JPEG 通用提取（info 子命令交互查有无嵌入）
-stegseek image.jpg /usr/share/wordlists/rockyou.txt   # steghide 密码爆破（比 stegcracker 快）
+stegseek image.jpg $WORDLISTS_DIR/rockyou.txt   # steghide 密码爆破（比 stegcracker 快）
 python3 $SHARED_DIR/scripts/stego_bit_planes.py img.png -o planes/   # R/G/B×bit0-7 位平面渲染（项目脚本）
 python2 lsb.py extract 0.png out.data <hexkey>  # cloacked-pixel 加密 LSB（zsteg 见乱码 hex 时试; AES 加密需密钥）
 ```

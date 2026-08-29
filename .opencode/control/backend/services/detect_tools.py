@@ -40,6 +40,7 @@ from services import config_store  # noqa: E402 —— 自举后可见
 CACHE_DIR = os.path.expanduser("~/bw-security-analysis")
 BIN_DIR = os.path.join(CACHE_DIR, "bin")        # 二进制 + wrapper（插件注入 PATH）
 TOOLS_SRC_DIR = os.path.join(CACHE_DIR, "tools")  # git clone / jar 存放
+WORDLISTS_DIR = os.path.join(CACHE_DIR, "wordlists")  # 字典统一落点（插件注入 $WORDLISTS_DIR; 容器 wrapper 挂载）
 
 
 def _opencode_root() -> str:
@@ -185,6 +186,70 @@ class DirRecipe:
 
 
 @dataclass
+class DotnetRecipe:
+    """dotnet runtime + nuget 工具组合（.NET 生态 CLI 工具的本机跨平台方案）。
+
+    runtime 官方归档解压 TOOLS_SRC_DIR/dotnet/（官方目录原样，NodeRecipe 同模式；
+    多工具共享同一 runtime 目录，第二个 .NET 工具只装 nupkg 部分）。
+    nuget 包（nupkg=zip）取 tools/<net_target>/any/ 解包到 TOOLS_SRC_DIR/<name>/。
+    BIN_DIR wrapper: exec dotnet <name>.dll。net6.0 目标在 runtime 8（LTS→2026-11）roll-forward 可跑。
+    """
+    name: str
+    nuget_name: str                  # nuget 包名
+    nuget_version: str               # 钉死版本
+    net_target: str = "net6.0"       # nupkg 内目标框架目录
+    runtime_version: str = "8.0.11"  # dotnet runtime 版本（LTS）
+
+    # 官方直链格式（三平台 200 已验）：tar.gz（posix）/ zip（win）
+    _RUNTIME_URL = "https://builds.dotnet.microsoft.com/dotnet/Runtime/{ver}/dotnet-runtime-{ver}-{plat}.{ext}"
+    _NUGET_URL = "https://www.nuget.org/api/v2/package/{name}/{ver}"
+
+    def runtime_url(self, plat_key: str) -> str | None:
+        """按平台键生成 runtime 直链; 无映射返回 None。"""
+        mapping = {"darwin-arm64": "osx-arm64", "darwin-amd64": "osx-x64",
+                   "linux-arm64": "linux-arm64", "linux-amd64": "linux-x64",
+                   "win-amd64": "win-x64"}
+        plat = mapping.get(plat_key)
+        if not plat:
+            return None
+        ext = "zip" if plat.startswith("win") else "tar.gz"
+        return self._RUNTIME_URL.format(ver=self.runtime_version, plat=plat, ext=ext)
+
+
+@dataclass
+class WordlistRecipe:
+    """字典下载配方（数据文件，非命令）。落点 WORDLISTS_DIR/<target>。
+
+    三源（互斥）: repo=git clone --depth 1（目录型）; url=直链下载（文件型）;
+    source=仓库内目录复制（随 git 走的精选数据，如 .opencode/wordlists/cn/）。
+    感知通道: 插件 shell.env 注入 $WORDLISTS_DIR; 容器 wrapper 自动挂载
+    wordlists/seclists → /usr/share/seclists（kali 惯例路径）。
+    """
+    name: str
+    target: str          # WORDLISTS_DIR 下落点（目录名或文件名）
+    repo: str = ""       # git clone 源（owner/repo）
+    url: str = ""        # 直链（文件型）
+    source: str = ""     # 仓库内相对路径（OPENCODE_ROOT 起，目录型）
+
+
+@dataclass
+class GitBashRecipe:
+    """Windows 专用: Git Bash 便携版自举（体系全部 sh 资产的执行前提）。
+
+    opencode 在 Windows 默认 shell = PowerShell（vendor shell.ts: pwsh > powershell >
+    GitBash > cmd），而 AI 命令语法（$VAR）/ sh wrapper / install.sh / sed 全依赖 bash
+    ——本配方下载最新 PortableGit（.7z.exe 自解压，无需 7-Zip）到 BIN_DIR/git-portable/
+    （官方目录原样，约 300MB），并把项目级 opencode.json 的 shell 配置为便携版 bash.exe。
+
+    不探测系统 Git（自己装自己的——版本统一、行为确定）;
+    按 CPU 架构选资产: win-amd64 → "PortableGit-*-64-bit.7z.exe"，win-arm64 → "*-arm64.7z.exe"
+    （资产名匹配 latest API，规避 tag→文件名版本号转换差异 windows.5→.5）。
+    """
+    name: str = "git-bash"
+    repo: str = "git-for-windows/git"
+
+
+@dataclass
 class DockerRecipe:
     """容器工具配方（调研见 knowledge-base/docker-toolbox.md）。
 
@@ -227,7 +292,7 @@ _GO_ALL = {
     "win-amd64": "windows|win,amd64|x86_64|win64|x64",
 }
 
-INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | PrebuiltRecipe | NodeRecipe | DirRecipe] = [
+INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | PrebuiltRecipe | NodeRecipe | DirRecipe | DotnetRecipe | WordlistRecipe] = [
     # ── Web 扫描（go 单二进制） ──
     ReleaseRecipe(name="nuclei", repo="projectdiscovery/nuclei", plats=_GO_ALL, bins=["nuclei"]),
     ReleaseRecipe(name="dalfox", repo="hahwul/dalfox", plats=_GO_ALL, bins=["dalfox"]),
@@ -272,6 +337,28 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | P
     GitRecipe(name="ajpshooter", repo="00theway/Ghostcat-CNVD-2020-10487", entry="ajpShooter.py"),
     GitRecipe(name="libcsearcher", repo="lieanu/LibcSearcher", entry="libcsearcher.py"),
     GitRecipe(name="ccupp", repo="WangYihang/ccupp", entry="pyproject.toml", pip_pkg=True),
+    GitRecipe(name="jwt_tool", repo="ticarpi/jwt_tool", entry="jwt_tool.py", req="requirements.txt"),
+    GitRecipe(name="weevely", repo="epinna/weevely3", entry="weevely.py", pip_pkg=True),
+    GitRecipe(name="sstv", repo="colaclanth/sstv", entry="sstv/__main__.py", pip_pkg=True),
+    GitRecipe(name="aleapp", repo="markmckinnon/ALEAPP", entry="aleapp.py", req="requirements.txt"),
+    GitRecipe(name="ileapp", repo="markmckinnon/iLEAPP", entry="ileapp.py", req="requirements.txt"),
+    # ── 内网综合扫描（go 单二进制; excl 排除 web/nolocal 变体，标准版 fscan_<ver>_<os>_<arch>） ──
+    ReleaseRecipe(name="fscan", repo="shadow1ng/fscan", plats={
+        "darwin-arm64": "mac,arm64", "darwin-amd64": "mac,x64",
+        "linux-arm64": "linux,arm64", "linux-amd64": "linux,x64",
+        "win-amd64": "windows,x64"}, excl="web,nolocal", bins=["fscan"]),
+    # ── RSA 大 N 分解（仅 linux/win 有预编译; mac 走 factordb/rsactftool 替代） ──
+    ReleaseRecipe(name="yafu", repo="bbuhrow/yafu", plats={
+        "linux-amd64": "linux,avx2", "win-amd64": "windows,avx2"}, bins=["yafu"]),
+    # ── .NET 反编译（dotnet runtime 8 LTS + nuget nupkg net6.0 目标） ──
+    DotnetRecipe(name="ilspycmd", nuget_name="ilspycmd", nuget_version="8.2.0.7535"),
+    # ── 字典（$WORDLISTS_DIR 落点; 容器 wrapper 挂载 seclists → /usr/share/seclists） ──
+    WordlistRecipe(name="seclists", target="seclists", repo="danielmiessler/SecLists"),
+    WordlistRecipe(name="rockyou", target="rockyou.txt",
+                   url="https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt"),
+    WordlistRecipe(name="cn-dicts", target="cn", source="wordlists/cn"),
+    # ── Windows 专用: Git Bash 运行时自举（写 opencode.json shell 键; 系统版优先，便携版兜底） ──
+    GitBashRecipe(),
     # ── 直链（非 GitHub 源） ──
     UrlRecipe(name="ffmpeg", urls={
         "linux-amd64": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
@@ -394,6 +481,23 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | P
                  dockerfile="control/docker/toolbox-full.Dockerfile"),
     DockerRecipe(name="msfvenom", image="zylc369/opensecurity-toolbox-full",
                  dockerfile="control/docker/toolbox-full.Dockerfile"),
+    # ── v1.1 增量: 网络基础/隐写补充/无线/取证/web 扫描/查壳/pyc 反编译 ──
+    DockerRecipe(name="socat", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile", net_host=True),
+    DockerRecipe(name="stegsnow", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile"),
+    DockerRecipe(name="foremost", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile"),
+    DockerRecipe(name="aircrack-ng", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile", long_running=True),
+    DockerRecipe(name="testdisk", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile", long_running=True),
+    DockerRecipe(name="photorec", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile", long_running=True),
+    DockerRecipe(name="nikto", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile", long_running=True),
+    DockerRecipe(name="pycdc", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile"),
 ]
 
 
@@ -571,6 +675,26 @@ EXTERNAL_TOOLS.extend([
     _auto("marshalsec", _BIN, "Java 反序列化链生成（容器, JDK21 编译）"),
     _auto("ghidra-headless", _BIN, "Ghidra 无头分析（full 层容器）"),
     _auto("msfvenom", _BIN, "payload 生成器（full 层容器）"),
+    _auto("socat", _BIN, "双向数据流/端口转发/反弹中继（容器）"),
+    _auto("stegsnow", _BIN, "snow 空格/TAB 隐写（容器）"),
+    _auto("foremost", _BIN, "按文件头雕刻分离（容器）"),
+    _auto("aircrack-ng", _BIN, "WPA 握手包爆破+无线全套（容器）"),
+    _auto("testdisk", _BIN, "磁盘分区恢复（容器）"),
+    _auto("photorec", _BIN, "被删文件雕刻恢复（容器）"),
+    _auto("nikto", _WEB, "web 服务器配置扫描（容器）"),
+    _auto("pycdc", _BIN, "Python 3.9+ pyc 反编译（容器编译）"),
+    _auto("fscan", _WEB + _BIN, "内网综合扫描: 端口+服务+弱口令+漏洞一键扫"),
+    _auto("yafu", _BIN, "RSA 大 N 本地分解 ECM/SIQS（linux/win; mac 用 rsactftool/factordb）"),
+    _auto("jwt_tool", _WEB, "JWT 解析/伪造/alg 混淆攻击/弱密爆破"),
+    _auto("weevely", _WEB, "加密混淆 Webshell 生成+管理（CLI）"),
+    _auto("sstv", _BIN, "SSTV 音频转图像（MISC 音频隐写）"),
+    _auto("aleapp", _BIN, "Android 取证工件解析（时间线/应用数据）"),
+    _auto("ileapp", _BIN, "iOS 取证工件解析"),
+    _auto("ilspycmd", _BIN, ".NET 反编译（dnSpy 的 CLI 等价; dotnet runtime 8）"),
+    ToolField(name="git-bash", agents=["all"], required=False, version_cmd=[],
+              description="Git Bash 运行时自举（仅 Windows: opencode shell 前提，系统版优先便携版兜底）",
+              platforms=["win32"],
+              install_hint="自动安装（Windows）: python control/backend/services/detect_tools.py install --tool git-bash"),
 ])
 
 
@@ -794,9 +918,36 @@ class ToolsInstaller:
     # wrapper 模板（占位 {NAME}/{IMAGE}/{NET}/{EXTRA}——shell 的 ${...} 不冲突）
     _WRAPPER_TMPL = r"""#!/bin/sh
 # Docker wrapper (auto-generated): {NAME} -> {IMAGE}
-DIR="$(pwd)"; NAME="{NAME}-$$-$RANDOM$RANDOM"
-# 参数中 $DIR 前缀绝对路径 → /work（容器视角）
-ARGS=""; for a in "$@"; do ARGS="$ARGS $(printf %s "$a" | sed "s|^$DIR|/work|")"; done
+# ── MSYS (Git Bash) 兼容 ──
+# 1) 禁用 MSYS 参数自动转换: 否则 -v 的容器侧路径 /work、/usr/share/... 会被改写成
+#    C:\Program Files\Git\work（Git Bash + docker 著名坑，挂载全烂）
+# 2) 挂载源转 Windows 形态: docker.exe（native 程序）不认 /c/Users/x 形态，cygpath -w 转 C:/Users/x
+#    （macOS/Linux 无 cygpath 且 uname 非 MINGW/MSYS → 分支不触发，行为不变）
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL="*"
+DIR="$(pwd)"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
+  command -v cygpath >/dev/null 2>&1 && DIR="$(cygpath -w "$DIR")"
+  ;; esac
+NAME="{NAME}-$$-$(date +%s)-$(od -An -N2 -tu2 /dev/urandom 2>/dev/null | tr -d " ")"
+# 参数中工作目录/字典目录前缀 → 容器视角路径
+# （AI 统一写 $WORDLISTS_DIR/xxx 一套心智，wrapper 自动重写——容器内无需该环境变量）
+# 多形式匹配: AI 传参可能是 $(pwd) 的 MSYS 形态、$WORDLISTS_DIR 的 Windows 形态、或 $HOME 形态
+# ⚠ 空模式防护: 变量为空（如 wrapper 在无 plugin 注入的手动终端跑）时 s|^|repl| 会给所有参数
+#   加前缀——必须动态构造 sed 表达式，空变量规则自动跳过
+WL_MSYS="$HOME/bw-security-analysis/wordlists"
+WL_WIN="$WL_MSYS"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
+  command -v cygpath >/dev/null 2>&1 && WL_WIN="$(cygpath -w "$WL_MSYS")"
+  ;; esac
+_rw_add() { [ -n "$2" ] && RW_SED="${RW_SED:+$RW_SED;}s|^$(printf %s "$2" | sed 's/[\\&|]/\\&/g')|$3|"; }
+RW_SED=""
+_rw_add w "$DIR" /work
+_rw_add wl "$WL_MSYS" /usr/share/wordlists-host
+_rw_add wlw "$WL_WIN" /usr/share/wordlists-host
+_rw_add envwl "$WORDLISTS_DIR" /usr/share/wordlists-host
+rw_path() { if [ -n "$RW_SED" ]; then printf %s "$1" | sed "$RW_SED"; else printf %s "$1"; fi; }
+ARGS=""; for a in "$@"; do ARGS="$ARGS $(rw_path "$a")"; done
 
 # ── 超时策略（长短任务分流）──
 # 短任务: 固定 1800s（30 分钟）; 长任务({LONGRUN}): 必须显式传 --wrapper-timeout <秒>
@@ -808,21 +959,25 @@ for a in "$@"; do
   if [ -n "$WT" ]; then CTIMEOUT="$a"; WT=""; continue; fi
   case "$a" in
     --wrapper-timeout) WT=1; EXPLICIT_WT=1 ;;
-    -w|-w[0-9]*) HAS_W=1; NEW_ARGS="$NEW_ARGS $(printf %s "$a" | sed "s|^$DIR|/work|")" ;;
+    -w|-w[0-9]*) HAS_W=1; NEW_ARGS="$NEW_ARGS $(rw_path "$a")" ;;
     --workload-profile) HAS_W=1; NEW_ARGS="$NEW_ARGS $a" ;;
-    *) NEW_ARGS="$NEW_ARGS $(printf %s "$a" | sed "s|^$DIR|/work|")" ;;
+    *) NEW_ARGS="$NEW_ARGS $(rw_path "$a")" ;;
   esac
 done
 {W3CHECK}
 ARGS="$NEW_ARGS"
 {LONGCHECK}
 trap 'docker kill "$NAME" 2>/dev/null' EXIT INT TERM
-WL="$HOME/bw-security-analysis/wordlists"
-[ -d "$WL" ] || WL=""
-WL_ARG=""; [ -n "$WL" ] && WL_ARG="-v $WL:/usr/share/wordlists-host:ro"
+# 挂载源用 Windows 形态（WL_WIN; MSYS 下已 cygpath 转换，docker.exe 只认此形态;
+# 非 MSYS 平台 WL_WIN = WL_MSYS 同值）。已知边界: 路径含空格（用户名 John Doe 类）时
+# unquoted 展开会碎——历史既有形态，修复需模板数组化重构（shebang bash + 数组），待 Windows 真机验证时一并做
+[ -d "$WL_MSYS" ] || WL_WIN=""
+WL_ARG=""; [ -n "$WL_WIN" ] && WL_ARG="-v $WL_WIN:/usr/share/wordlists-host:ro"
+# seclists 精确挂载到 kali 惯例路径（容器内工具/文档按 /usr/share/seclists 直接引用）
+SECL_ARG=""; [ -n "$WL_WIN" ] && [ -d "$WL_MSYS/seclists" ] && SECL_ARG="-v $WL_WIN/seclists:/usr/share/seclists:ro"
 # 容器内 timeout: 容器 1 号进程到时必死 → 容器退出 → --rm 生效（wrapper 被 SIGKILL 也不失联堆积）
 # 注: timeout 必须是 shell 子进程——entrypoint 的 env-exec 链下 "exec timeout" 形态有 coreutils bug
-{HASHCAT_ENV}exec docker run --rm -i --name "$NAME" {NET}{EXTRA} $HC_ENV \
+{HASHCAT_ENV}exec docker run --rm -i --name "$NAME" {NET}{EXTRA} $HC_ENV $SECL_ARG \
   -e PUID=$(id -u) -e PGID=$(id -g) \
   -v "$DIR":/work $WL_ARG -w /work \
   {IMAGE} sh -c "timeout \"$CTIMEOUT\" {NAME} \"\$@\"" _ $ARGS
@@ -833,9 +988,19 @@ WL_ARG=""; [ -n "$WL" ] && WL_ARG="-v $WL:/usr/share/wordlists-host:ro"
 # 用法: qemu-gdb <binary> [gdb 参数...]  例: qemu-gdb ./pwn -ex "break main" -ex c
 # 架构路由: arm64 ELF（容器同架构）→ gdb 直接调（ptrace 原生可用）
 #           amd64 ELF → qemu gdbstub（binfmt 下 ptrace 失效的唯一可行模式; 动态自动 -L sysroot）
+# MSYS (Git Bash) 兼容: 禁自动路径转换（防 -w /work 被改写）+ 挂载源转 Windows 形态（同 _WRAPPER_TMPL）
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL="*"
 BIN="${1:-./a.out}"; shift
 case "$BIN" in /*) ;; *) BIN="./$BIN" ;; esac
-DIR="$(pwd)"; NAME="qemu-gdb-srv-$$"; PROBE="qemu-gdb-probe-$$"
+DIR="$(pwd)"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
+  command -v cygpath >/dev/null 2>&1 && DIR="$(cygpath -w "$DIR")"
+  ;; esac
+# 容器名唯一性三重保证（与 _WRAPPER_TMPL 同标准）: PID + epoch + urandom
+_rand_suffix() { od -An -N2 -tu2 /dev/urandom 2>/dev/null | tr -d " "; }
+NAME="qemu-gdb-srv-$$-$(date +%s)-$(_rand_suffix)"
+PROBE="qemu-gdb-probe-$$-$(date +%s)-$(_rand_suffix)"
 trap 'docker kill "$NAME" 2>/dev/null' EXIT INT TERM
 FILEOUT=$(docker run --rm --name "$PROBE" -e PUID=$(id -u) -e PGID=$(id -g) -v "$DIR":/work -w /work {IMAGE} sh -c "file $BIN")
 ARCH=$(echo "$FILEOUT" | grep -oE 'x86-64|aarch64|ARM' | head -1)
@@ -893,6 +1058,12 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                 return self._install_node(recipe, force)
             if isinstance(recipe, DirRecipe):
                 return self._install_dir(recipe, force)
+            if isinstance(recipe, DotnetRecipe):
+                return self._install_dotnet(recipe, force)
+            if isinstance(recipe, WordlistRecipe):
+                return self._install_wordlist(recipe, force)
+            if isinstance(recipe, GitBashRecipe):
+                return self._install_gitbash(recipe, force)
             return InstallResult(name=recipe.name, status="failed", detail="未知配方类型")
         except Exception as exc:  # noqa: BLE001 —— 安装器兜底: 单工具失败不中断整体
             return InstallResult(name=recipe.name, status="failed", detail=f"{type(exc).__name__}: {exc}")
@@ -1185,6 +1356,162 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         shutil.copyfile(src, self._bin_path(r.name))
         self._chmodx(self._bin_path(r.name))
         return InstallResult(r.name, "installed", f"{r.source} → BIN_DIR")
+
+    # ── .NET runtime + nuget 工具 ──
+
+    def _install_dotnet(self, r: DotnetRecipe, force: bool) -> InstallResult:
+        """runtime（共享目录）+ nupkg 工具 + wrapper。"""
+        wrapper = self._bin_path(r.name)
+        dll = os.path.join(TOOLS_SRC_DIR, r.name, f"{r.name}.dll")
+        if not force and os.path.exists(wrapper) and os.path.exists(dll):
+            return InstallResult(r.name, "skipped", "wrapper + dll 已存在")
+        dotnet_exe = os.path.join(TOOLS_SRC_DIR, "dotnet",
+                                  "dotnet.exe" if os.name == "nt" else "dotnet")
+        # 1. runtime（共享: 已解包则跳过，多 .NET 工具只装一次）
+        if not os.path.exists(dotnet_exe):
+            url = r.runtime_url(_plat_key())
+            if not url:
+                return InstallResult(r.name, "failed", f"平台 {_plat_key()} 无 runtime 直链")
+            data = self._download(url)
+            dest = os.path.join(TOOLS_SRC_DIR, "dotnet")
+            os.makedirs(dest, exist_ok=True)
+            if url.endswith(".zip"):
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    zf.extractall(dest)
+            else:
+                with tarfile.open(fileobj=io.BytesIO(data)) as t:
+                    try:
+                        t.extractall(dest, filter="data")
+                    except TypeError:
+                        t.extractall(dest)  # noqa: S202 —— 官方 runtime 归档
+            if not os.path.exists(dotnet_exe):
+                return InstallResult(r.name, "failed", "runtime 解包后未找到 dotnet 可执行")
+        # 2. nupkg（zip 格式; nuget v2 对 HEAD 404 但 GET 正常）
+        nupkg_url = r._NUGET_URL.format(name=r.nuget_name, ver=r.nuget_version)
+        if not os.path.exists(dll):
+            data = self._download(nupkg_url)
+            tool_dir = os.path.join(TOOLS_SRC_DIR, r.name)
+            os.makedirs(tool_dir, exist_ok=True)
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                prefix = f"tools/{r.net_target}/any/"
+                members = [m for m in zf.namelist() if m.startswith(prefix)]
+                if not members:
+                    return InstallResult(r.name, "failed",
+                                         f"nupkg 无 {prefix} 目标（检查 net_target）")
+                for m in members:
+                    rel = m[len(prefix):]
+                    if not rel:
+                        continue
+                    out = os.path.join(tool_dir, rel)
+                    if m.endswith("/"):
+                        os.makedirs(out, exist_ok=True)
+                        continue
+                    os.makedirs(os.path.dirname(out), exist_ok=True)
+                    with zf.open(m) as src, open(out, "wb") as fh:
+                        shutil.copyfileobj(src, fh)
+            if not os.path.exists(dll):
+                return InstallResult(r.name, "failed", f"nupkg 解包后未找到 {r.name}.dll")
+        # 3. wrapper: exec dotnet <name>.dll
+        #     DOTNET_ROLL_FORWARD=LatestMajor: net6.0 目标 dll 在 runtime 8 上跨两个大版本
+        #     前滚的必要条件（默认 Minor 只允许 6→7; 微软官方支持场景）
+        os.makedirs(BIN_DIR, exist_ok=True)
+        wpath = os.path.join(BIN_DIR, r.name)
+        body = ("#!/bin/sh\n"
+                "export DOTNET_ROLL_FORWARD=LatestMajor\n"
+                f'exec "{dotnet_exe}" "{dll}" "$@"\n')
+        with open(wpath, "w", encoding="utf-8", newline="\n") as f:
+            f.write(body)
+        self._chmodx(wpath)
+        return InstallResult(r.name, "installed",
+                             f"runtime {r.runtime_version} + {r.nuget_name} {r.nuget_version} → wrapper")
+
+    # ── 字典 ──
+
+    def _install_wordlist(self, r: WordlistRecipe, force: bool) -> InstallResult:
+        """字典三源: repo 克隆 / url 下载 / 仓库内目录复制 → WORDLISTS_DIR/<target>。"""
+        dest = os.path.join(WORDLISTS_DIR, r.target)
+        if not force:
+            if r.url:  # 文件型: 存在且非空
+                if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+                    return InstallResult(r.name, "skipped", f"{dest} 已存在")
+            elif os.path.isdir(dest) and os.listdir(dest):  # 目录型: 非空
+                return InstallResult(r.name, "skipped", f"{dest} 已存在")
+        os.makedirs(WORDLISTS_DIR, exist_ok=True)
+        if r.repo:
+            if not shutil.which("git"):
+                return InstallResult(r.name, "failed", "git 命令不存在")
+            if os.path.isdir(dest):
+                shutil.rmtree(dest)
+            self._run(["git", "clone", "--depth", "1",
+                       f"https://github.com/{r.repo}", dest])
+            return InstallResult(r.name, "installed", f"clone {r.repo} → {dest}")
+        if r.url:
+            data = self._download(r.url)
+            self._write(data, dest)
+            return InstallResult(r.name, "installed",
+                                 f"下载 {len(data) // 1048576}MB → {dest}")
+        if r.source:
+            src = os.path.join(_opencode_root(), r.source)
+            if not os.path.isdir(src):
+                return InstallResult(r.name, "failed", f"仓库内源缺失: {r.source}")
+            if os.path.isdir(dest):
+                shutil.rmtree(dest)
+            shutil.copytree(src, dest)
+            return InstallResult(r.name, "installed", f"复制 {r.source} → {dest}")
+        return InstallResult(r.name, "failed", "repo/url/source 三源均未配置")
+
+    # ── Windows Git Bash 自举 ──
+
+    @staticmethod
+    def _configure_opencode_shell(bash_exe: str) -> str:
+        """写项目级 opencode.json 的 shell 键（JSON 合并保留其他键）。返回结果描述。"""
+        path = os.path.join(_opencode_root(), "opencode.json")
+        cfg: dict = {}
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    cfg = json.load(fh)
+            except (json.JSONDecodeError, OSError):
+                cfg = {}
+        if cfg.get("shell") == bash_exe:
+            return f"shell 已配置为 {bash_exe}"
+        cfg["shell"] = bash_exe
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        return f"已写入 opencode.json: shell = {bash_exe}"
+
+    def _install_gitbash(self, r: GitBashRecipe, force: bool) -> InstallResult:
+        """Windows: 下载最新 PortableGit 便携版（按 CPU 架构）+ 写 shell 配置。"""
+        if sys.platform != "win32":
+            return InstallResult(r.name, "skipped", f"平台 {sys.platform} 无需 Git Bash")
+        portable_dir = os.path.join(BIN_DIR, "git-portable")
+        portable_bash = os.path.join(portable_dir, "bin", "bash.exe")
+        if os.path.isfile(portable_bash) and not force:
+            note = self._configure_opencode_shell(portable_bash)
+            return InstallResult(r.name, "skipped", f"便携版已就绪; {note}")
+        plat = _plat_key()   # win-amd64 / win-arm64
+        kw = {"win-amd64": ["portablegit", "64-bit"],
+              "win-arm64": ["portablegit", "arm64"]}.get(plat)
+        if not kw:
+            return InstallResult(r.name, "failed", f"平台 {plat} 无 PortableGit 资产映射")
+        assets, tag = self._gh_assets(r.repo, "")
+        cands = self._match_assets(assets, kw, "")
+        if not cands:
+            return InstallResult(r.name, "failed", f"{r.repo}@{tag} 无匹配资产（kw={kw}）")
+        url = _GH_DL.format(repo=r.repo, tag=tag, asset=cands[0])
+        with tempfile.TemporaryDirectory(prefix="gitbash-") as tmp:
+            sfx = os.path.join(tmp, "portable-git.exe")
+            self._write(self._download(url), sfx)
+            if os.path.isdir(portable_dir):
+                shutil.rmtree(portable_dir)
+            result = subprocess.run([sfx, "-o", portable_dir, "-y"],
+                                    capture_output=True, text=True, timeout=900)
+        if result.returncode != 0 or not os.path.isfile(portable_bash):
+            tail = (result.stderr or "").strip()[-150:]
+            return InstallResult(r.name, "failed", f"PortableGit 自解压失败: {tail}")
+        note = self._configure_opencode_shell(portable_bash)
+        return InstallResult(r.name, "installed", f"{cands[0]} → {portable_dir}; {note}")
 
     # ── 容器层 ──
 

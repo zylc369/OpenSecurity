@@ -31,6 +31,8 @@ export const DATA_DIR =
   process.env.DATA_DIR || join(homedir(), "bw-security-analysis");
 export const WORKSPACE_DIR = join(DATA_DIR, "workspace");
 export const TASK_SESSIONS_DIR = join(WORKSPACE_DIR, ".task_sessions");
+// 字典统一目录（WordlistRecipe 落点; shell.env 注入 $WORDLISTS_DIR; 容器 wrapper 挂载源）
+export const WORDLISTS_DIR = join(DATA_DIR, "wordlists");
 
 export const LOGS_DIR = join(DATA_DIR, "logs");
 export const DEFAULT_LOG = join(LOGS_DIR, "plugin_debug.log");

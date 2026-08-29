@@ -8,12 +8,12 @@
 FROM kalilinux/kali-rolling AS builder
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    openjdk-21-jdk-headless maven build-essential \
+    openjdk-21-jdk-headless maven build-essential cmake \
     ruby ruby-dev rubygems-integration \
     git wget curl \
     && rm -rf /var/lib/apt/lists/*
 
-# gems（纯 ruby）+ marshalsec（mvn 编译）+ pwndbg（venv 装依赖）
+# gems（纯 ruby）+ marshalsec（mvn 编译）+ pwndbg（venv 装依赖）+ pycdc（cmake 编译）
 RUN gem install one_gadget seccomp-tools zsteg --no-document \
     && git clone --depth 1 https://github.com/mbechler/marshalsec /opt/marshalsec \
     && cd /opt/marshalsec \
@@ -23,6 +23,12 @@ RUN gem install one_gadget seccomp-tools zsteg --no-document \
     && cd /opt/pwndbg && ./setup.sh > /dev/null 2>&1 || true \
     ; rm -rf /opt/pwndbg/.git
 
+# pycdc（Python 3.9+ pyc 反编译; 独立层——失败只重跑本步）
+RUN git clone --depth 1 https://github.com/zrax/pycdc /opt/pycdc \
+    && cmake -S /opt/pycdc -B /opt/pycdc/build -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /opt/pycdc/build --parallel "$(nproc)" \
+    ; rm -rf /opt/pycdc/.git
+
 # ── final: 运行时 ──
 FROM kalilinux/kali-rolling
 
@@ -30,6 +36,9 @@ FROM kalilinux/kali-rolling
 COPY --from=builder /var/lib/gems /var/lib/gems
 COPY --from=builder /usr/local/bin/one_gadget /usr/local/bin/seccomp-tools /usr/local/bin/zsteg /usr/local/bin/zsteg-mask /usr/local/bin/zsteg-reflow /usr/local/bin/
 COPY --from=builder /opt/marshalsec /opt/marshalsec
+# pycdc/pycdas: Python 3.9+ pyc 反编译（uncompyle6 只到 3.8）
+COPY --from=builder /opt/pycdc/build/pycdc /usr/local/bin/pycdc
+COPY --from=builder /opt/pycdc/build/pycdas /usr/local/bin/pycdas
 COPY --from=builder /opt/pwndbg /opt/pwndbg
 
 # ── 工具清单（toolbox-design.md 实测/包确认; 陷阱修法已吸收）──
@@ -49,6 +58,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     ruby rubygems-integration binutils-multiarch \
     gdb-multiarch qemu-user libc6-amd64-cross \
     wordlists \
+    socat stegsnow foremost aircrack-ng testdisk nikto \
     git wget curl file procps p7zip-full unzip xz-utils util-linux \
     && setcap -r /usr/lib/nmap/nmap 2>/dev/null || true \
     && rm -rf /var/lib/apt/lists/*
