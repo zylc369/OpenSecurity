@@ -1327,6 +1327,10 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             const session = ctx.sessionManager.get(sessionID);
             const flowId = session?.flowId;
 
+            // 取消可能武装中的冷却恢复定时器——否则定时器到期会对已删除的
+            // session 发恢复消息（孤儿定时器变体，maybeResumeAnalysis 重校验兜底外的显式清理）
+            session?.clearPendingResume();
+
             flushTimeline(sessionID);
             ctx.sessionManager.delete(sessionID);
             // 必须删持久化映射文件：sessionManager.delete 只清内存 Map，

@@ -11,7 +11,7 @@ import { ctx } from "./context";
 import { debugLog } from "./logging";
 import { SessionData } from "./session-manager";
 import StringUtils from "./string-utils";
-import { getAllConfig } from "./control-config";
+import { getAllConfig, refreshConfig } from "./control-config";
 
 // ─── 完成标记（动态生成 + 精确匹配）──────────────────────────────
 //
@@ -41,26 +41,33 @@ function generateCompletionMarker(): string {
 // 避免反复发送同一文本导致 LLM 习惯性"皮掉"、不再继续分析。
 // 模板内的 __COMPLETION_MARKER__ 占位符会在 getResumePrompt() 中
 // 被替换为本次动态生成的 marker（同一条 prompt 内所有占位符共用同一个 marker）。
+const RESUME_PROMPT_PART1 =
+  "**没有想法就找想法，没有思路就找思路，没有方案就找方案，继续做、继续想、继续分析直到完成，不要告诉我你不行！**";
 const RESUME_PROMPTS: string[] = [
   `你之前的分析是否已经完成了？**你必须要如实回答和执行**：\n` +
     `- 如果已经完成：请直接输出最终结论，然后在最后一行精确输出这个标记（原样复制，不要修改）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
-    `- 如果尚未完成：不论任何原因只要未完成，你都必须自主继续分析，不要停下来向我提问，因为我没有任何想法，但是我需要你给我解决问题。你复盘一下之前的分析内容、结果，然后继续分析，直到完成为止。未完成的情况下绝对不允许输出 ${COMPLETION_MARKER_PLACEHOLDER} 标记。`,
+    `- 如果尚未完成：不论任何原因只要未完成，你都必须自主继续分析，不要停下来向我提问，因为我没有任何想法，但是我需要你给我解决问题。你复盘一下之前的分析内容、结果，然后继续分析，直到完成为止。未完成的情况下绝对不允许输出 ${COMPLETION_MARKER_PLACEHOLDER} 标记。\n\n` +
+    `${RESUME_PROMPT_PART1}`,
 
   `请确认此前的分析工作是否已经全部完成。**必须如实回答并严格执行**：\n` +
     `- 若已完成：直接给出最终结论，并在末尾单独一行原样输出该标记（切勿改动）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
-    `- 若未完成：无论出于何种原因，都必须自行接着分析下去，不得向我提问，因为我没有任何想法，但是我需要你给我解决问题，你解决问题你才有意义。你先回顾之前的分析内容与结论，再继续推进直至全部完成。未完成时严禁输出 ${COMPLETION_MARKER_PLACEHOLDER}。`,
+    `- 若未完成：无论出于何种原因，都必须自行接着分析下去，不得向我提问，因为我没有任何想法，但是我需要你给我解决问题，你解决问题你才有意义。你先回顾之前的分析内容与结论，再继续推进直至全部完成。未完成时严禁输出 ${COMPLETION_MARKER_PLACEHOLDER}。\n\n` +
+    `${RESUME_PROMPT_PART1}`,
 
   `你先前的分析完成了吗？**务必如实回答并照做**：\n` +
     `- 已完成的话：请直接产出最终结论，随后在最后一行一字不差地输出以下标记（不得修改）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
-    `- 尚未完成的话：不管什么原因，你都要自主把分析继续下去，不要停下来问我，因为我没有任何想法，但是我需要你给我解决问题，你想想接下来怎么办。你梳理一下已有的分析内容与结果，接着往下做，直到真正完成。只要还没完成，就绝对不可以输出 ${COMPLETION_MARKER_PLACEHOLDER}。`,
+    `- 尚未完成的话：不管什么原因，你都要自主把分析继续下去，不要停下来问我，因为我没有任何想法，但是我需要你给我解决问题，你想想接下来怎么办。你梳理一下已有的分析内容与结果，接着往下做，直到真正完成。只要还没完成，就绝对不可以输出 ${COMPLETION_MARKER_PLACEHOLDER}。\n\n` +
+    `${RESUME_PROMPT_PART1}`,
 
   `请判断此前的分析是否已结束。**你必须诚实回答并按以下执行**：\n` +
     `- 已结束：请直接陈述最终结论，并在最后一行精确地原样输出这个标记（不要做任何修改）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
-    `- 未结束：任何情况下只要还没做完，都得自主继续分析，不允许停下来征求我的意见，因为我没有任何想法，但是我需要你给我解决问题，你多想想。请你复盘此前分析的内容和结果，然后继续，直到彻底完成。尚未完成时绝不允许输出 ${COMPLETION_MARKER_PLACEHOLDER}。`,
+    `- 未结束：任何情况下只要还没做完，都得自主继续分析，不允许停下来征求我的意见，因为我没有任何想法，但是我需要你给我解决问题，你多想想。请你复盘此前分析的内容和结果，然后继续，直到彻底完成。尚未完成时绝不允许输出 ${COMPLETION_MARKER_PLACEHOLDER}。\n\n` +
+    `${RESUME_PROMPT_PART1}`,
 
   `分析任务完成了吗？**请如实回答并严格执行如下要求**：\n` +
     `- 倘若已完成：直接输出最终结论，最后单独一行原样复制此标记（一字不改）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
-    `- 倘若未完成：不论任何缘由，你都必须独立继续分析，切勿来询问我，因为我没有任何想法，但是我需要你给我解决问题，不要罢工。你回顾前面的分析内容与结果，继续推进直到完成。在未完成时，绝不可输出 ${COMPLETION_MARKER_PLACEHOLDER}。`,
+    `- 倘若未完成：不论任何缘由，你都必须独立继续分析，切勿来询问我，因为我没有任何想法，但是我需要你给我解决问题，不要罢工。你回顾前面的分析内容与结果，继续推进直到完成。在未完成时，绝不可输出 ${COMPLETION_MARKER_PLACEHOLDER}。\n\n` +
+    `${RESUME_PROMPT_PART1}`,
 ];
 
 // 记录上一次使用的恢复提示词索引，保证本次与上次不重复，缓解 LLM 对同一提示词"皮掉"的问题。
@@ -167,7 +174,8 @@ async function getLastAssistantText(sessionID: string): Promise<string | null> {
   }
 }
 
-/** 发送 resume prompt 并记录状态。从 maybeResumeAnalysis 和冷却 setTimeout 回调两处调用。
+/** 发送 resume prompt 并记录状态。仅从 maybeResumeAnalysis 调用（冷却 setTimeout 回调
+ *  也改为重入 maybeResumeAnalysis 全量校验，不再直接调用此处）。
  *  内部通过 get 获取最新 session——setTimeout 回调可能延迟很久，闭包捕获的 session 可能已失效。 */
 async function sendResume(session: SessionData): Promise<void> {
   const sessionID = session.sessionID;
@@ -206,7 +214,10 @@ async function sendResume(session: SessionData): Promise<void> {
   );
 }
 
-export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
+export async function maybeResumeAnalysis(
+  sessionID: string,
+  viaCooldownTimer = false,
+): Promise<void> {
   try {
     // 全局开关：默认启用；仅当值严格为 "0" 或 tolower 后 "false" 才禁用。
     // 放在最前面（requireSecurityAgent 之前）——禁用时零开销，不查 session。
@@ -271,8 +282,12 @@ export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
 
     const wasAborted = await checkLastMessageAborted(sessionID);
     if (wasAborted) {
+      // 用户中断 = 明确的停止意图。必须同时取消冷却定时器——否则冷却分支
+      // 此前武装的 pendingResumeTimer 会在几秒后到期发恢复消息，
+      // 出现"用户按 Esc 后分析仍被复活"（定时器盲发绕过中断检测）。
+      const cleared = session.clearPendingResume();
       debugLog(
-        `session.idle: 跳过恢复 — 用户手动中断, sessionID=${sessionID}`,
+        `session.idle: 跳过恢复 — 用户手动中断${cleared ? "，已取消冷却定时器" : ""}, sessionID=${sessionID}`,
         sessionID,
       );
       return;
@@ -322,21 +337,32 @@ export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
     );
     if (sinceLastResume >= 0 && sinceLastResume < cooldown) {
       const wait = cooldown - sinceLastResume;
+      // 定时器到期重入却再次进入冷却分支，只可能是武装后窗口内又发生过一次
+      // sendResume（lastResumeAt 前移、cooldown 随 resumeCount 变大）。wait > 0
+      // 且 sinceLastResume 随墙钟单调增长，重武装链必然有限次收敛，不是死循环。
+      // 此处打点留痕，便于事后审计异常长的重武装链。
       debugLog(
-        `session.idle: 冷却中，${Math.ceil(wait / 1000)}s 后恢复 sessionID=${sessionID}（backoff=${cooldown / 1000}s resumeCount=${session.resumeCount}）`,
+        `session.idle: 冷却中，${Math.ceil(wait / 1000)}s 后恢复 sessionID=${sessionID}` +
+          `（backoff=${cooldown / 1000}s resumeCount=${session.resumeCount}${viaCooldownTimer ? " viaCooldownTimer" : ""}）`,
         sessionID,
       );
       session.clearPendingResume();
       session.pendingResumeTimer = setTimeout(() => {
         if (session.pendingResumeTimer) {
-          // 恢复定时器还在的情况下，再发送恢复消息
           session.pendingResumeTimer = null;
-          sendResume(session).catch((e) => {
-            debugLog(
-              `session.idle: 冷却恢复异常 sessionID=${sessionID} error=${e}`,
-              sessionID,
-            );
-          });
+          // 到期后不直接 sendResume——盲发会绕过中断/开关/完成标记/session 存活
+          // 检查（冷却窗口内用户按 Esc、关开关、删除 session 都会被无视）。
+          // 改为刷新配置后重走完整校验：此时 sinceLastResume ≈ cooldown，
+          // 不会再进入冷却分支（无重入死循环），校验通过即正常发送；
+          // 校验不通过（中断/关开关/已完成/session 已删）则静默终止。
+          refreshConfig()
+            .then(() => maybeResumeAnalysis(sessionID, true))
+            .catch((e) => {
+              debugLog(
+                `session.idle: 冷却恢复异常 sessionID=${sessionID} error=${e}`,
+                sessionID,
+              );
+            });
         }
       }, wait);
       return;
