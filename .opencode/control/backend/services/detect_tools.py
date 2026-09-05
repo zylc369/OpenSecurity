@@ -640,6 +640,20 @@ def installable_tools() -> "list":
                  dockerfile="control/docker/toolbox-core.Dockerfile"),  # gem 需 ruby>=3, 系统 ruby 过老
     GitRecipe(name="phpggc", repo="s0md3v/phpggc", entry="phpggc", py=False, prereq_cmd="php",
               platforms=("linux",)),  # mac 无系统 php → 同名 DockerRecipe 兜底（mac/win）
+    PkgToolRecipe(name="sox"),
+    PkgToolRecipe(name="identify", pkg_brew="imagemagick", pkg_linux="imagemagick"),
+    PkgToolRecipe(name="convert", pkg_brew="imagemagick", pkg_linux="imagemagick"),
+    PkgToolRecipe(name="mutool", pkg_brew="mupdf", pkg_linux="mupdf-tools"),
+    DockerRecipe(name="boolector", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile"),
+    PkgToolRecipe(name="qemu-system-x86_64", pkg_brew="qemu", pkg_linux="qemu-system-x86"),
+    PkgToolRecipe(name="wrestool", pkg_brew="icoutils", pkg_linux="icoutils"),
+    SrcRecipe(name="pcapfix", repo="Rup0rt/pcapfix", build_sys="autotools", bins=["pcapfix"]),
+    PkgToolRecipe(name="xfs_db", pkg_brew="", pkg_linux="xfsprogs"),
+    PkgToolRecipe(name="cryptsetup", pkg_brew="", pkg_linux="cryptsetup"),
+    GemRecipe(name="zsteg"),
+    PkgToolRecipe(name="arpspoof", pkg_brew="dsniff", pkg_linux="dsniff", net_host=True),
+    PkgToolRecipe(name="gdb"),
     # qemu-gdb 原生编排（docker-toolbox.md §4 语义原样; 架构判断跟随宿主而非固定容器）
 ScriptRecipe(name="qemu-gdb", body=r"""#!/bin/sh
 # 跨架构 gdb 调试（原生: 系统 file/qemu/gdb 编排）
@@ -689,20 +703,6 @@ sleep 1
 exec "$GDB" -q "$BIN" -ex "set architecture $ELF_N" -ex "target remote :$PORT" "$@"
 """,
              prereq_cmds=["file", "gdb"]),
-    PkgToolRecipe(name="sox"),
-    PkgToolRecipe(name="identify", pkg_brew="imagemagick", pkg_linux="imagemagick"),
-    PkgToolRecipe(name="convert", pkg_brew="imagemagick", pkg_linux="imagemagick"),
-    PkgToolRecipe(name="mutool", pkg_brew="mupdf", pkg_linux="mupdf-tools"),
-    DockerRecipe(name="boolector", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    PkgToolRecipe(name="qemu-system-x86_64", pkg_brew="qemu", pkg_linux="qemu-system-x86"),
-    PkgToolRecipe(name="wrestool", pkg_brew="icoutils", pkg_linux="icoutils"),
-    SrcRecipe(name="pcapfix", repo="Rup0rt/pcapfix", build_sys="autotools", bins=["pcapfix"]),
-    PkgToolRecipe(name="xfs_db", pkg_brew="", pkg_linux="xfsprogs"),
-    PkgToolRecipe(name="cryptsetup", pkg_brew="", pkg_linux="cryptsetup"),
-    GemRecipe(name="zsteg"),
-    PkgToolRecipe(name="arpspoof", pkg_brew="dsniff", pkg_linux="dsniff", net_host=True),
-    PkgToolRecipe(name="gdb"),
     GitRecipe(name="gdb-pwndbg", repo="pwndbg/pwndbg", entry="gdb", py=False, setup="setup.sh",
               platforms=("linux",)),  # 官方已弃 macOS（setup.sh 拒跑）→ mac/win 落下行 docker
     DockerRecipe(name="gdb-pwndbg", image="zylc369/opensecurity-toolbox-core",
@@ -2173,10 +2173,30 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             shutil.copyfile(found, dst)
             self._chmodx(dst)
 
+    @staticmethod
+    def _github_token() -> str:
+        """GitHub API 认证（防未认证 60 次/小时配额耗尽——冷装一次全量会打满）。
+        优先 GITHUB_TOKEN 环境变量，兜底 gh auth token（已登录 gh 的机器零配置）。"""
+        tok = os.environ.get("GITHUB_TOKEN")
+        if tok:
+            return tok
+        try:
+            rr = subprocess.run(["gh", "auth", "token"], capture_output=True,
+                                text=True, timeout=10)
+            if rr.returncode == 0 and rr.stdout.strip():
+                return rr.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return ""
+
     def _gh_assets(self, repo: str, tag: str = "") -> tuple[list[str], str]:
         url = (_GH_API.format(repo=repo) if not tag
                else f"https://api.github.com/repos/{repo}/releases/tags/{tag}")
-        req = urllib.request.Request(url, headers=_UA)
+        headers = dict(_UA)
+        tok = self._github_token()
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=30) as resp:
             d = json.loads(resp.read().decode())
         assets = [a["name"] for a in d.get("assets", [])]
