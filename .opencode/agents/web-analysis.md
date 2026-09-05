@@ -185,6 +185,7 @@ permission:
 | `subdomain-takeover.md` | 子域接管（14 服务商指纹/CNAME·NS·MX 认领/影响评估） |
 | `web-privesc.md` | Web 提权（Mass Assignment/端点·方法·Header·Cookie 越权/SPA 前端绕过） |
 | `china-products-attacks.md` | 国产 CMS·OA·中间件攻击速查（泛微/WebLogic/ThinkPHP/Fastjson/Shiro 产品→漏洞映射） |
+| `llm-perception-verification.md` | **任何把 OCR（glm-ocr）或 ASR（whisper）输出当作结论依据之前必须先读**——含幻觉签名判定与强制交叉验证流程，未验证的感知输出不得采信 |
 
 ### 通用知识库（$SHARED_DIR/knowledge-base/）
 

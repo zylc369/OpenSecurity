@@ -443,3 +443,21 @@ def fuzz(tmpl, words, headers=None, filt=lambda r: r.status_code != 404):
 
 **CDN 绕过取真实 IP**: 多地 ping 判定 → 未 CDN 子域名+C 段 hosts 验证 / 国外冷门 DNS（209.244.0.3/9.9.9.9/208.67.222.222 等）解析 / 历史 DNS（dnsdb.io/threatbook/netcraft/viewdns）/ SMTP 邮件头泄露源站（注册或找回密码触发发信看原文头）/ Discuz downremoteimg SSRF 探测 / phpinfo 探针。hosts 绑定验证后直打 IP 无视 WAF/CC。
 **GitHub 凭据 dork**: `site:github.com smtp @target.com` / `site:github.com smtp password` / `site:github.com password ftp` / `site:github.com 内部`——翻目标员工误提交的邮件/数据库/FTP 配置。
+
+## §9. 流量取证：协议变体完备性清单（pcap 深挖前置步骤）
+
+深挖 pcap 中任一协议之前，必须先完成该协议的**全变体枚举**——只分析"常见类型"会系统性漏掉错误类/控制类报文携带的独立信息源（如 ICMP 错误包引用的"原始数据报"字段：引用内容可以是从未以正常包出现的隐藏数据，32 个引用 × 100B 即 3KB 级暗信道）。
+
+**第 1 步 全景**：`tshark -r x.pcap -q -z io,phs`（协议分层统计）+ 帧数对账：各协议帧数之和 = 总帧数，任何"未归类"帧都要解释。
+
+**第 2 步 逐层 type/code 直方图**（覆盖该层全部变体，不只看高频值）：
+- ICMP：`tshark -r x.pcap -Y icmp -T fields -e icmp.type -e icmp.code | sort | uniq -c`——重点：type 3/5/11 等错误类，其 payload = IP 头 + 原始数据报前 8-128B，是**独立于正常流量的信息源**；引用包可能对应"捕获过滤器漏掉的数据"
+- TCP：flags 全组合分布（`-e tcp.flags`），罕见组合（SYN+FIN 等）单独审查
+- HTTP：全部方法与状态码分布；UDP：全部 dst port × payload 首 2 字节
+- DNS：全部 qtype/rcode
+
+**第 3 步 异常变体深挖**：对每个非预期变体，逐字节解码（scapy 直取 payload），对比"同内容正常包"验证引用忠实性（引用与真包逐字节一致的=索引/标记信道；不一致的=独立数据信道）。
+
+**第 4 步 元数据二值性检查**：可疑子序列（如某协议的重复/标记包序列）的时间戳/序号/长度字段若呈严格二值分布（如 ts mod N 只取两值），按每包 1 bit 提取位流，尝试直接二进制、BCD、7/8-bit 分组、正反序四种解码。
+
+**判读**：帧数对账有缺口、或某错误类变体的引用内容指向 pcap 中不存在的包 → 存在隐藏信道，优先深挖。

@@ -133,6 +133,7 @@ class ReleaseRecipe:
     entry: str = ""                 # tree kind: 解压后入口脚本相对路径
     jar_kw: str = "jar"             # jar kind: 资产匹配关键词
     prereq: str = ""                # "java": 需 java 运行时
+    java_min: int = 0               # java 主版本下限（如 ghidra 12.x 需 21; 0=不校验）
     tag: str = ""                   # 固定版本 tag（空=latest; repo 的 latest 被其他工具占用时必须指定，如 chaitin/xray）
     excl: str = ""                  # 额外排除关键词（逗号分隔）
     src_names: dict[str, str] = field(default_factory=dict)  # bin名 → 归档内实际文件名
@@ -153,10 +154,21 @@ class GitRecipe:
 
 @dataclass
 class UrlRecipe:
-    """直链下载配方（非 GitHub 源，如 ffmpeg 静态构建）。"""
+    """直链下载配方（非 GitHub 源，如 ffmpeg 静态构建）。
+
+    name: str
+    urls: dict[str, str]  平台键 → 直链
+    bins: list[str]       归档内提取产物（多 bin 一次解出，如 ffmpeg+ffprobe）
+    src_names: dict[str, str]  bin名 → 归档内实际文件名（win .exe / 特殊命名如 exiftool(-k).exe）
+    entries: dict[str, str]    平台键 → entry（非空=该平台整树安装，保持目录布局;
+                               适用于依赖相对目录结构的产物，如 exiftool perl 脚本依赖同级 lib/）
+    """
+
     name: str
     urls: dict[str, str] = field(default_factory=dict)  # 平台键 → 直链
     bins: list[str] = field(default_factory=list)       # 归档内提取产物
+    src_names: dict[str, str] = field(default_factory=dict)
+    entries: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -250,6 +262,26 @@ class GitBashRecipe:
 
 
 @dataclass
+class JdkRecipe:
+    """Temurin JDK 便携运行时配方（ Adoptium API 免版本直链，三平台 tar.gz/zip，
+    零 root 零系统侵入，落 TOOLS_HOME_DIR/jdk/）。消费方（ghidra 等 java 工具）的
+    wrapper 注入 JAVA_HOME 指向此目录；不生成 bin wrapper（避免遮蔽系统 java）。
+    同 DotnetRecipe 先例: 共享目录，多 java 工具只装一次。
+    """
+    feature: int = 21          # LTS 特性版本（21/25...）
+    name: str = "jdk"
+
+    def url(self, plat_key: str) -> str | None:
+        syst, arch = plat_key.split("-")
+        os_map = {"darwin": "mac", "linux": "linux", "win": "windows"}.get(syst)
+        arch_map = {"amd64": "x64", "arm64": "aarch64"}.get(arch)
+        if not os_map or not arch_map:
+            return None
+        return (f"https://api.adoptium.net/v3/binary/latest/{self.feature}/ga/"
+                f"{os_map}/{arch_map}/jdk/hotspot/normal/eclipse")
+
+
+@dataclass
 class DockerRecipe:
     """容器工具配方（调研见 knowledge-base/docker-toolbox.md）。
 
@@ -295,7 +327,7 @@ _GO_ALL = {
     "win-amd64": "windows|win,amd64|x86_64|win64|x64",
 }
 
-INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | PrebuiltRecipe | NodeRecipe | DirRecipe | DotnetRecipe | WordlistRecipe] = [
+INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | PrebuiltRecipe | NodeRecipe | DirRecipe | DotnetRecipe | WordlistRecipe | JdkRecipe] = [
     # ── Web 扫描（go 单二进制） ──
     ReleaseRecipe(name="nuclei", repo="projectdiscovery/nuclei", plats=_GO_ALL, bins=["nuclei"]),
     ReleaseRecipe(name="dalfox", repo="hahwul/dalfox", plats=_GO_ALL, bins=["dalfox"]),
@@ -366,11 +398,23 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | P
     WordlistRecipe(name="cn-dicts", target="cn", source="wordlists/cn"),
     # ── Windows 专用: Git Bash 运行时自举（写 opencode.json shell 键; 系统版优先，便携版兜底） ──
     GitBashRecipe(),
-    # ── ffmpeg（容器化: mac 无官方静态构建源，三平台统一走镜像 apt 版） ──
-    DockerRecipe(name="ffmpeg", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="ffprobe", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
+    # ── ffmpeg/ffprobe（便携静态构建: win=gyan.dev / linux=johnvansickle 双架构 /
+    #     mac-arm=osxexperts 原生 / mac-x64+ffprobe-arm(Rosetta)=evermeet——同 GoReSym 先例。
+    #     ffprobe 与 ffmpeg 同包（win/linux），独立 recipe 会重下载一次——一次性代价可接受）──
+    UrlRecipe(name="ffmpeg", urls={
+        "darwin-arm64": "https://www.osxexperts.net/ffmpeg71arm.zip",
+        "darwin-amd64": "https://evermeet.cx/ffmpeg/ffmpeg-9.0.1.zip",
+        "linux-amd64": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
+        "linux-arm64": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz",
+        "win-amd64": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+    }, bins=["ffmpeg"]),  # win 归档内 ffmpeg.exe 由 _find_file 的 nt .exe 分支自动匹配
+    UrlRecipe(name="ffprobe", urls={
+        "darwin-arm64": "https://evermeet.cx/ffmpeg/ffprobe-9.0.1.zip",  # x86_64 构建，Rosetta 2 运行
+        "darwin-amd64": "https://evermeet.cx/ffmpeg/ffprobe-9.0.1.zip",
+        "linux-amd64": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
+        "linux-arm64": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz",
+        "win-amd64": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+    }, bins=["ffprobe"]),  # win .exe 同上自动匹配
     ReleaseRecipe(name="xray", repo="chaitin/xray", tag="1.9.11", plats=_GO_ALL, bins=["xray"]),
     # ── 运行时层（目录结构安装: node + npm + npx） ──
     NodeRecipe(version="22.14.0"),
@@ -418,8 +462,17 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | P
                  dockerfile="control/docker/toolbox-core.Dockerfile"),
     DockerRecipe(name="tshark", image="zylc369/opensecurity-toolbox-core",
                  dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="exiftool", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
+    # ── exiftool（便携: unix=官方 perl 树（脚本依赖同级 lib/，整树安装）/
+    #     win=官方 standalone 单 exe。sourceforge 镜像，/download 尾段非文件名→asset 覆盖）──
+    UrlRecipe(name="exiftool", urls={
+        "darwin-arm64": "https://sourceforge.net/projects/exiftool/files/Image-ExifTool-13.59.tar.gz/download",
+        "darwin-amd64": "https://sourceforge.net/projects/exiftool/files/Image-ExifTool-13.59.tar.gz/download",
+        "linux-amd64": "https://sourceforge.net/projects/exiftool/files/Image-ExifTool-13.59.tar.gz/download",
+        "linux-arm64": "https://sourceforge.net/projects/exiftool/files/Image-ExifTool-13.59.tar.gz/download",
+        "win-amd64": "https://sourceforge.net/projects/exiftool/files/exiftool-13.59_64.zip/download",
+    }, bins=["exiftool"], entries={p: "exiftool" for p in
+        ("darwin-arm64", "darwin-amd64", "linux-amd64", "linux-arm64")},
+       src_names={"exiftool": "exiftool(-k).exe"}),  # win 走单文件提取分支
     DockerRecipe(name="x86_64-w64-mingw32-gcc", image="zylc369/opensecurity-toolbox-core",
                  dockerfile="control/docker/toolbox-core.Dockerfile"),
     DockerRecipe(name="nasm", image="zylc369/opensecurity-toolbox-core",
@@ -484,8 +537,15 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | P
                  dockerfile="control/docker/toolbox-core.Dockerfile"),
     DockerRecipe(name="marshalsec", image="zylc369/opensecurity-toolbox-core",
                  dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="ghidra-headless", image="zylc369/opensecurity-toolbox-full",
-                 dockerfile="control/docker/toolbox-full.Dockerfile"),
+    # ── ghidra-headless（便携: 官方单一 zip 三平台通用。
+    #     替代 full 层容器（镜像数 GB → 便携 zip 一次性 ~570MB 且零容器开销）。
+    #     JDK 由 JdkRecipe 便携供给（prereq java_min 21; wrapper 注入 JAVA_HOME））──
+    JdkRecipe(feature=21),
+    ReleaseRecipe(name="ghidra-headless", repo="NationalSecurityAgency/ghidra", kind="tree",
+                  plats={p: "PUBLIC" for p in
+                         ("darwin-arm64", "darwin-amd64", "linux-amd64", "linux-arm64", "win-amd64")},
+                  entry="support/analyzeHeadless", bins=["ghidra-headless"],
+                  prereq="java", java_min=21),
     DockerRecipe(name="msfvenom", image="zylc369/opensecurity-toolbox-full",
                  dockerfile="control/docker/toolbox-full.Dockerfile"),
     # ── v1.1 增量: 网络基础/隐写补充/无线/取证/web 扫描/查壳/pyc 反编译 ──
@@ -620,8 +680,8 @@ EXTERNAL_TOOLS.extend([
     _auto("wesng", _BIN, "Windows 补丁缺失比对"),
     _auto("windapsearch", _BIN, "LDAP/AD 枚举"),
     _auto("regeorg", _BIN, "webshell 隧道（SOCKS）"),
-    _auto("ffmpeg", _BIN, "音视频处理（隐写频谱/帧提取; 容器）"),
-    _auto("ffprobe", _BIN, "音视频流/元数据分析（容器）"),
+    _auto("ffmpeg", _BIN, "音视频处理（隐写频谱/帧提取; 便携静态构建）"),
+    _auto("ffprobe", _BIN, "音视频流/元数据分析（便携静态构建）"),
     _auto("steghide", _BIN, "JPEG/BMP 隐写（容器）"),
     _auto("stegseek", _BIN, "steghide 高速爆破（容器+rockyou）"),
     _auto("hashcat", _BIN, "哈希破解（容器 PoCL CPU 模式）", ["-I"]),
@@ -634,7 +694,7 @@ EXTERNAL_TOOLS.extend([
     _auto("searchsploit", _WEB, "exploit-db 离线检索（容器）"),
     _auto("wpscan", _WEB, "WordPress 扫描（容器，DB 预热）"),
     _auto("tshark", _BIN, "pcap 深度解析（容器）"),
-    _auto("exiftool", _BIN, "元数据读写（容器）"),
+    _auto("exiftool", _BIN, "元数据读写（便携官方构建）"),
     _auto("one_gadget", _BIN, "libc execve gadget 搜索（容器+multiarch）"),
     _auto("seccomp-tools", _BIN, "seccomp BPF 反汇编（容器）"),
     _auto("phpggc", _WEB, "PHP 反序列化链生成（容器）"),
@@ -657,7 +717,7 @@ EXTERNAL_TOOLS.extend([
     _auto("bloodhound", _BIN, "AD 关系图谱分析（容器; 采集端 nxc --bloodhound / azurehound）"),
     _auto("smtp-user-enum", _WEB + _BIN, "SMTP 用户枚举（VRFY/EXPN/RCPT）"),
     _auto("marshalsec", _BIN, "Java 反序列化链生成（容器, JDK21 编译）"),
-    _auto("ghidra-headless", _BIN, "Ghidra 无头分析（full 层容器）"),
+    _auto("ghidra-headless", _BIN, "Ghidra 无头分析（官方便携 zip，需 JDK）"),
     _auto("msfvenom", _BIN, "payload 生成器（full 层容器）"),
     _auto("socat", _BIN, "双向数据流/端口转发/反弹中继（容器）"),
     _auto("stegsnow", _BIN, "snow 空格/TAB 隐写（容器）"),
@@ -1050,6 +1110,8 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                 return self._install_dir(recipe, force)
             if isinstance(recipe, DotnetRecipe):
                 return self._install_dotnet(recipe, force)
+            if isinstance(recipe, JdkRecipe):
+                return self._install_jdk(recipe, force)
             if isinstance(recipe, WordlistRecipe):
                 return self._install_wordlist(recipe, force)
             if isinstance(recipe, GitBashRecipe):
@@ -1083,8 +1145,10 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         skip = self._already(r.name, r.bins, force)
         if skip:
             return InstallResult(r.name, "skipped", skip)
-        if r.prereq == "java" and not shutil.which("java"):
-            return InstallResult(r.name, "skipped", "需要 java 运行时（未检测到）")
+        if r.prereq == "java":
+            jerr = self._java_check(getattr(r, "java_min", 0))
+            if jerr:
+                return InstallResult(r.name, "skipped", jerr)
         plat = _plat_key()
         if r.kind != "jar" and plat not in r.plats:
             return InstallResult(r.name, "skipped", f"平台 {plat} 无配方")
@@ -1116,43 +1180,59 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         os.makedirs(dst_dir, exist_ok=True)
         jar_path = os.path.join(dst_dir, asset)
         wrapper = os.path.join(CMD_DIR, r.name)
+        # java 解析: 便携 tools/jdk 优先（绝对路径硬编码进 wrapper，无系统 java 的机器也能跑）
+        javabin, _ = self._resolve_java()
+        java_argv = [javabin, "-jar", jar_path] if javabin else ["java", "-jar", jar_path]
         if os.path.exists(jar_path) and not force:
             if not os.path.exists(wrapper):  # jar 在而 wrapper 缺 → 补 wrapper
-                self._wrapper(r.name, ["java", "-jar", jar_path])
+                self._wrapper(r.name, java_argv)
                 return InstallResult(r.name, "installed", "补生成 wrapper（jar 已存在）")
             return InstallResult(r.name, "skipped", f"jar 已存在 {asset}")
         self._write(self._download(_GH_DL.format(repo=r.repo, tag=tag, asset=asset)), jar_path)
-        self._wrapper(r.name, ["java", "-jar", jar_path])
+        self._wrapper(r.name, java_argv)
         return InstallResult(r.name, "installed", f"{asset} + wrapper")
 
-    def _install_tree(self, r: ReleaseRecipe, url: str, asset: str) -> InstallResult:
-        """整归档解压到 TOOLS_HOME_DIR/<name>/，wrapper 指向 entry。"""
+    def _install_tree(self, r: ReleaseRecipe, url: str, asset: str, data: bytes | None = None,
+                      entry: str = "") -> InstallResult:
+        """整归档解压到 TOOLS_HOME_DIR/<name>/，wrapper 指向 entry（默认取 r.entry）。"""
+        entry = entry or r.entry
         dst = os.path.join(TOOLS_HOME_DIR, r.name)
-        if os.path.isdir(dst) and os.path.exists(os.path.join(dst, r.entry)):
+        if os.path.isdir(dst) and os.path.exists(os.path.join(dst, entry)):
             return InstallResult(r.name, "skipped", "源码树已存在")
-        data = self._download(url)
+        if data is None:
+            data = self._download(url)
         extract_dir = tempfile.mkdtemp(prefix=f"inst-{r.name}-")
         self._extract(data, asset, extract_dir)
         # 归档可能带顶层目录 → 取包含 entry 的根
         src_root = extract_dir
-        if not os.path.exists(os.path.join(src_root, r.entry)):
+        if not os.path.exists(os.path.join(src_root, entry)):
             for d in os.listdir(extract_dir):
-                if os.path.exists(os.path.join(extract_dir, d, r.entry)):
+                if os.path.exists(os.path.join(extract_dir, d, entry)):
                     src_root = os.path.join(extract_dir, d)
                     break
-        if not os.path.exists(os.path.join(src_root, r.entry)):
+        if not os.path.exists(os.path.join(src_root, entry)):
             return InstallResult(r.name, "failed", f"归档内未找到入口 {r.entry}")
         shutil.copytree(src_root, dst, dirs_exist_ok=True)
-        entry_abs = os.path.join(dst, r.entry)
-        os.chmod(entry_abs, 0o755)
-        self._wrapper(r.name, [entry_abs])
+        entry_abs = os.path.join(dst, entry)
+        self._chmodx(entry_abs)
+        # zip/tar 提取可能丢失执行位: 入口内部调用的 .sh（如 ghidra launch.sh）也要可执行
+        for dp, _dn, fns in os.walk(dst):
+            for fn in fns:
+                if fn.endswith(".sh"):
+                    self._chmodx(os.path.join(dp, fn))
+        exports = None
+        if getattr(r, "prereq", "") == "java":
+            _jb, jhome = self._resolve_java()
+            if jhome:
+                exports = {"JAVA_HOME": jhome}  # 便携 tools/jdk 优先，系统 java 兜底
+        self._wrapper(r.name, [entry_abs], exports=exports)
         return InstallResult(r.name, "installed", f"{asset} → wrapper {r.name}")
 
     # ── git / pip ──
 
     def _install_git(self, r: GitRecipe, force: bool) -> InstallResult:
         dst = os.path.join(TOOLS_HOME_DIR, r.name)
-        entry_abs = os.path.join(dst, r.entry)
+        entry_abs = os.path.join(dst, entry)
         if r.pip_pkg:  # 包模式: 克隆后 pip install（console script 直接落 venv bin）
             if not force and shutil.which(r.name):
                 return InstallResult(r.name, "skipped", f"PATH 已有 {r.name}")
@@ -1203,8 +1283,14 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         url = r.urls.get(plat)
         if not url:
             return InstallResult(r.name, "skipped", f"平台 {plat} 无直链配方（需为该平台补充 urls）")
-        asset = url.rsplit("/", 1)[-1]
-        self._place_from_archive(r, self._download(url), asset)
+        tail = url.rsplit("/", 1)[-1]
+        # sourceforge 等 "/download" 尾段非真实文件名 → 取倒数第二段推断扩展名
+        asset = tail if tail != "download" else url.rsplit("/", 2)[-2]
+        data = self._download(url)
+        entry = r.entries.get(plat, "")
+        if entry:  # 整树安装（保持目录布局; entry 依赖相对路径的产物，按平台指定）
+            return self._install_tree(r, url, asset, data=data, entry=entry)
+        self._place_from_archive(r, data, asset)
         return InstallResult(r.name, "installed", f"{asset} → {', '.join(r.bins)}")
 
     # ── 预编译层 ──
@@ -1506,6 +1592,84 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     # ── 容器层 ──
 
+    @staticmethod
+    def _java_check(min_major: int) -> str | None:
+        """java 存在性+主版本检查。返回跳过原因; None=通过。
+
+        优先便携 tools/jdk/（_resolve_java），无则查系统 java。
+        min_major>0 时校验主版本（如 ghidra 12.x 需 JDK 21+——版本不足时装出的是
+        运行时必挂的残骸，必须在安装期拦截）。
+        """
+        javabin, _home = ToolsInstaller._resolve_java()
+        if not javabin:
+            return "需要 java 运行时（未检测到; install.sh 会自动装便携 Temurin）"
+        if min_major <= 0:
+            return None
+        try:
+            rr = subprocess.run([javabin, "-version"], capture_output=True, text=True, timeout=15)
+            ver = (rr.stderr or rr.stdout).split('"')[1] if '"' in (rr.stderr or rr.stdout) else ""
+            major = int(ver.split(".")[0]) if ver else 0
+            if major and major < min_major:
+                return f"需要 JDK {min_major}+（当前 {ver}，重跑 install.sh 自动装便携版）"
+        except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
+            pass  # 解析失败不阻塞（存在性已过; 运行时问题交给工具自身报错）
+        return None
+
+    @staticmethod
+    def _resolve_java() -> tuple[str | None, str | None]:
+        """解析 java 可执行: ①便携 tools/jdk/（含一层版本目录容错）②系统 PATH。
+
+        返回 (java_bin, java_home); 无则 (None, None)。
+        """
+        home = os.path.join(TOOLS_HOME_DIR, "jdk")
+        java_name = "java.exe" if os.name == "nt" else "java"
+        if os.path.isdir(home):
+            cands = [home] + [os.path.join(home, d) for d in os.listdir(home)
+                              if os.path.isdir(os.path.join(home, d))]
+            for root in cands:
+                jb = os.path.join(root, "bin", java_name)
+                if os.path.exists(jb):
+                    return jb, root
+        sysjava = shutil.which("java")
+        if sysjava:
+            return sysjava, os.path.dirname(os.path.dirname(sysjava))
+        return None, None
+
+    # ── JDK 便携运行时 ──
+
+    def _install_jdk(self, r: JdkRecipe, force: bool) -> InstallResult:
+        """Adoptium 免版本直链 → 解包 TOOLS_HOME_DIR/jdk/（共享，已装则跳过）。"""
+        java_name = "java.exe" if os.name == "nt" else "java"
+        dest = os.path.join(TOOLS_HOME_DIR, "jdk")
+        marker = None
+        if os.path.isdir(dest):
+            jb, _ = self._resolve_java()
+            if jb and not force:
+                return InstallResult(r.name, "skipped", f"便携 JDK 已存在（{jb}）")
+        url = r.url(_plat_key())
+        if not url:
+            return InstallResult(r.name, "skipped", f"平台 {_plat_key()} 无 Adoptium 配方")
+        asset = "jdk.zip" if url.endswith(".zip") else ("jdk.tar.gz" if "windows" not in url else "jdk.zip")
+        data = self._download(url)  # Adoptium API 302 → 实际归档
+        tmp = tempfile.mkdtemp(prefix="inst-jdk-")
+        self._extract(data, asset, tmp)
+        # 归档顶层为 jdk-21.x.x+jdk/ 类目录 → 平铺进 dest（幂等重建）
+        if os.path.isdir(dest):
+            shutil.rmtree(dest)
+        # 递归找 bin/java（macOS Temurin 为 <顶>/Contents/Home/bin/java 多层嵌套）
+        java_name = "java.exe" if os.name == "nt" else "java"
+        roots = []
+        for dp, _dn, fn in os.walk(tmp):
+            if java_name in fn and dp.endswith("bin"):
+                roots.append(os.path.dirname(dp))
+                break
+        if not roots:
+            return InstallResult(r.name, "failed", "解包后未找到 bin/java")
+        os.makedirs(dest, exist_ok=True)
+        shutil.copytree(roots[0], dest, dirs_exist_ok=True)
+        return InstallResult(r.name, "installed",
+                             f"Temurin {r.feature} → {dest}（JAVA_HOME 由消费方 wrapper 注入）")
+
     def _install_docker(self, r: DockerRecipe, force: bool) -> InstallResult:
         """容器工具: docker 缺失→skip 提示; 镜像缺→build（同镜像幂等一次）; 生成 wrapper。"""
         wrapper = os.path.join(CMD_DIR, r.name)
@@ -1712,8 +1876,10 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         mode = os.stat(path).st_mode
         os.chmod(path, mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    def _wrapper(self, name: str, argv: list[str], cwd: str = "", envp: str = "") -> None:
-        """生成 CMD_DIR sh wrapper，幂等覆盖; cwd 先 cd; envp 附加 PYTHONPATH。
+    def _wrapper(self, name: str, argv: list[str], cwd: str = "", envp: str = "",
+                 exports: dict[str, str] | None = None) -> None:
+        """生成 CMD_DIR sh wrapper，幂等覆盖; cwd 先 cd; envp 附加 PYTHONPATH;
+        exports 追加任意环境变量（如 ghidra 的 JAVA_HOME → 便携 JDK）。
 
         统一 sh（Windows 走 Git Bash/WSL 执行——与 docker wrapper/install.sh 同前提，单语言维护）。
         """
@@ -1724,6 +1890,10 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             body += f'cd "{cwd}"\n'
         if envp:
             body += f'export PYTHONPATH="{envp}:$PYTHONPATH"\n'
+        for k, v in (exports or {}).items():
+            body += f'export {k}="{v}"\n'
+            if k == "JAVA_HOME":  # jdk bin 优先于系统（便携优先路由）
+                body += 'export PATH="$JAVA_HOME/bin:$PATH"\n'
         body += "exec " + " ".join(f'"{a}"' if " " in a else a for a in argv) + ' "$@"\n'
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(body)
