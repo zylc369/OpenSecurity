@@ -42,7 +42,7 @@ $WORDLISTS_DIR/
 | 10 万级全量 | `$WORDLISTS_DIR/seclists/Discovery/DNS/bitquark-subdomains-top100000.txt` |
 | 通用集合 | `... Discovery/DNS/namelist.txt` |
 
-### 密码爆破（hydra / hashcat / john / 容器 wrapper）
+### 密码爆破（hydra / hashcat / john，原生安装）
 
 | 场景 | 写法 |
 |---|---|
@@ -71,7 +71,9 @@ $WORDLISTS_DIR/
 | 通用 | `$WORDLISTS_DIR/seclists/Usernames/`（xato-net-10-million 系列按量取） |
 | 中文登入组合 | `$WORDLISTS_DIR/cn/login-creds/` |
 
-## 3. 容器内路径（hashcat/hydra/john 等 DockerRecipe wrapper）
+## 3. 容器内路径（仅适用于 docker wrapper 工具: stegseek/boolector 等）
+
+> hashcat/hydra/john/nmap 等为原生安装——直接用 `$WORDLISTS_DIR/...` 路径，本节不适用。
 
 宿主 `$WORDLISTS_DIR` 由 wrapper **自动挂载**进容器，两套路径等价:
 

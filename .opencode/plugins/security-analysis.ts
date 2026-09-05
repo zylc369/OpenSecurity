@@ -247,10 +247,10 @@ async function buildEnvSection(
     }
 
     // 外部工具目录（detect_tools 自动安装产物 + 容器 wrapper; shell.env 已注入 PATH）
-    envSection += `- 外部工具目录: 完整路径是 \`${TOOLS_CMD_DIR}\`（已在 PATH 中，venv 之后）。detect_tools 自动安装的工具（nuclei/ffuf/bkcrack/fscan/GoReSym/adb 等）和容器 wrapper（hashcat/stegseek/nmap/john/ffmpeg 等重型工具的 docker run 封装）都落在此目录——全部直接按命令名调用，不必写完整路径。容器 wrapper 会自动挂载当前工作目录（可读写）和 \`$WORDLISTS_DIR\`，宿主路径自动翻译成容器路径，当本机命令用即可\n`;
+    envSection += `- 外部工具目录: 完整路径是 \`${TOOLS_CMD_DIR}\`（已在 PATH 中，venv 之后）。多数工具为原生安装（brew/apt/官方便携包: hashcat(Metal GPU)/nmap/hydra/john/ffmpeg/tshark/ghidra 等），少量走 docker wrapper（stegseek/boolector/linux 文件系统族等）——全部直接按命令名调用，不必写完整路径。docker wrapper 会自动挂载当前工作目录（可读写）和 \`$WORDLISTS_DIR\`，宿主路径自动翻译成容器路径，当本机命令用即可\n`;
 
     // 字典统一目录（$WORDLISTS_DIR 与 shell.env 注入保持一致; 路径约定恒定）
-    envSection += `- 字典目录 ($WORDLISTS_DIR): 完整路径是 \`${WORDLISTS_DIR}\`。子目录: seclists/（全集字典，docker容器 wrapper 自动挂载到 /usr/share/seclists）、rockyou.txt、cn/（中文精选: 安全设备默认口令/top 系列/登入账号）。使用字典时路径一律写 \`$WORDLISTS_DIR/xxx\`; 场景→字典选择详见 Read $OPENCODE_ROOT/binary-analysis/knowledge-base/wordlists-guide.md\n`;
+    envSection += `- 字典目录 ($WORDLISTS_DIR): 完整路径是 \`${WORDLISTS_DIR}\`。子目录: seclists/（全集字典，docker wrapper 的工具自动挂载到 /usr/share/seclists; 原生工具直接用 \`$WORDLISTS_DIR\` 路径）、rockyou.txt、cn/（中文精选: 安全设备默认口令/top 系列/登入账号）。使用字典时路径一律写 \`$WORDLISTS_DIR/xxx\`; 场景→字典选择详见 Read $OPENCODE_ROOT/binary-analysis/knowledge-base/wordlists-guide.md\n`;
 
     // 编译器（用 getCompilerName 检测 PATH 中的编译器，只告知可用性，不注入完整路径）
     const compilerName = getCompilerName();

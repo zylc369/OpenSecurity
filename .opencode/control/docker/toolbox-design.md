@@ -1,3 +1,10 @@
+> **工具箱安装架构（三级回落）**:
+> ① PM 原生（mac=brew 自动 / linux=apt 手动一行提示）——hashcat/nmap/hydra/john/tshark/sleuthkit/msfvenom/文件系统族等主力工具
+> ② 官方便携包（ffmpeg/jdk/ghidra/exiftool/marshalsec jar）与源码编译（pycdc/pcapfix）
+> ③ docker 容器（本文档描述的机制）——仅用于: stegseek（Kali 源外无原生来源）、boolector（z3 已覆盖主力场景）、
+>    linux 文件系统族与 seccomp-tools 与 nxc 的 mac 侧（brew/gem/pip 不可得）
+> 本文档的 wrapper 机制仅适用于 ③ 中的容器工具; 其余工具为原生安装，直接调用。
+
 # Docker 工具箱: 容器化安装与 AI 调用可行性分析
 
 > 目的: 把"手动清单"中编译类工具迁入容器，AI 通过 PATH wrapper 无感调用。本文档基于 **20 项逐项实测**（非推演），实测环境: macOS Apple Silicon + Docker Desktop 29.7.2 + kalilinux/kali-rolling arm64。

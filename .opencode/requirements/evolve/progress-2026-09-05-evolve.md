@@ -51,3 +51,10 @@
 2. marshalsec → Git LFS ✓（.gitattributes 增 tools/*.jar 规则 + jar 已 staged 入 LFS）
 3. qemu-gdb → ScriptRecipe 原生编排 ✓（file 判架构+宿主优先匹配修 universal2 fat binary 双切片 bug、gdbstub+remote 语义同容器版、QEMU_SYSROOT 支持动态跨架构）; 同架构路径真机 rc=0 ✓; prereq=file/gdb 缺失给 PM 提示
 ## 最终 docker 残留: stegseek(Kali源可原生)+boolector(定案保留) — linux 仅 2 个
+
+## E7 文档同步完成
+- detect_tools._auto 37 处描述更新（原生化标注; 9 处"（容器…）"为真实保留容器的工具——stegseek/seccomp/one_gadget/steghide/gdbserver/xfs/cryptsetup/stegsnow/nxc-mac）
+- security-analysis.ts 环境段: "重型工具 docker 封装"→"多数原生+少量容器"如实描述; seclists 挂载说明限定范围
+- wordlists-guide.md: 密码爆破节去容器化; §3 容器路径章节限定为"仅 stegseek 等容器工具"
+- toolbox-design.md: 顶部补 v2 PM 化架构变更说明（三级回落+剩余容器清单）
+- 终检: binwalk-full 全库 0 残留; node --check/ts+py 语法全过
