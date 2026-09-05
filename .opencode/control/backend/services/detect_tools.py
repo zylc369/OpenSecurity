@@ -611,7 +611,10 @@ def installable_tools() -> "list":
     PkgToolRecipe(name="medusa", long_running=True, net_host=True),
     PkgToolRecipe(name="ncrack", long_running=True, net_host=True),
     PkgToolRecipe(name="binwalk"),  # 原 binwalk-full; PM 包名 binwalk
-    GitRecipe(name="nxc", repo="Pennyw0rth/NetExec", entry="netexec", pip_pkg=True),  # pip 装入 venv → nxc console script
+    GitRecipe(name="nxc", repo="Pennyw0rth/NetExec", entry="netexec", pip_pkg=True,
+              platforms=("linux",)),  # mac 无 rust wheel(aardwolf) 无 brew formula → 下方 docker
+    DockerRecipe(name="nxc", image="zylc369/opensecurity-toolbox-core", long_running=True,
+                 dockerfile="control/docker/toolbox-core.Dockerfile", net_host=True),
     PkgToolRecipe(name="searchsploit", pkg_brew="exploitdb", pkg_linux="exploitdb"),
     PkgToolRecipe(name="wpscan", long_running=True),  # apt 需 Kali 源
     PkgToolRecipe(name="fls", pkg_brew="sleuthkit", pkg_linux="sleuthkit"),
@@ -633,7 +636,8 @@ def installable_tools() -> "list":
     PkgToolRecipe(name="nasm"),
     PkgToolRecipe(name="r2", pkg_brew="radare2", pkg_linux="radare2"),
     PkgToolRecipe(name="one_gadget", pkg_brew="one_gadget", pkg_linux=""),  # apt 无 → linux docker
-    GemRecipe(name="seccomp-tools"),
+    DockerRecipe(name="seccomp-tools", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile"),  # gem 需 ruby>=3, 系统 ruby 过老
     GitRecipe(name="phpggc", repo="s0md3v/phpggc", entry="phpggc", py=False, prereq_cmd="php",
               platforms=("linux",)),  # mac 无系统 php → 同名 DockerRecipe 兜底（mac/win）
     # qemu-gdb 原生编排（docker-toolbox.md §4 语义原样; 架构判断跟随宿主而非固定容器）
@@ -693,13 +697,16 @@ exec "$GDB" -q "$BIN" -ex "set architecture $ELF_N" -ex "target remote :$PORT" "
                  dockerfile="control/docker/toolbox-core.Dockerfile"),
     PkgToolRecipe(name="qemu-system-x86_64", pkg_brew="qemu", pkg_linux="qemu-system-x86"),
     PkgToolRecipe(name="wrestool", pkg_brew="icoutils", pkg_linux="icoutils"),
-    SrcRecipe(name="pcapfix", repo="a13xela/pcapfix", build_sys="autotools", bins=["pcapfix"]),
+    SrcRecipe(name="pcapfix", repo="Rup0rt/pcapfix", build_sys="autotools", bins=["pcapfix"]),
     PkgToolRecipe(name="xfs_db", pkg_brew="", pkg_linux="xfsprogs"),
     PkgToolRecipe(name="cryptsetup", pkg_brew="", pkg_linux="cryptsetup"),
     GemRecipe(name="zsteg"),
     PkgToolRecipe(name="arpspoof", pkg_brew="dsniff", pkg_linux="dsniff", net_host=True),
     PkgToolRecipe(name="gdb"),
-    GitRecipe(name="gdb-pwndbg", repo="pwndbg/pwndbg", entry="gdb", py=False, setup="setup.sh"),  # 官方安装脚本
+    GitRecipe(name="gdb-pwndbg", repo="pwndbg/pwndbg", entry="gdb", py=False, setup="setup.sh",
+              platforms=("linux",)),  # 官方已弃 macOS（setup.sh 拒跑）→ mac/win 落下行 docker
+    DockerRecipe(name="gdb-pwndbg", image="zylc369/opensecurity-toolbox-core",
+                 dockerfile="control/docker/toolbox-core.Dockerfile"),  # mac/win 兜底
     PkgToolRecipe(name="gdbserver", pkg_brew="", pkg_linux="gdb"),  # brew gdb 无 gdbserver → mac docker
     PkgToolRecipe(name="e2fsck", pkg_brew="", pkg_linux="e2fsprogs"),  # mac 分析 linux fs → docker
     PkgToolRecipe(name="e2fsck64", pkg_brew="", pkg_linux="e2fsprogs"),
@@ -709,7 +716,7 @@ exec "$GDB" -q "$BIN" -ex "set architecture $ELF_N" -ex "target remote :$PORT" "
     PkgToolRecipe(name="qemu-riscv64", pkg_brew="qemu", pkg_linux="qemu-system-misc"),
     PkgToolRecipe(name="upx"),
     PkgToolRecipe(name="bloodhound", pkg_brew="bloodhound", pkg_linux="bloodhound"),  # apt 需 Kali
-    GitRecipe(name="smtp-user-enum", repo="punkave/smtp-user-enum", entry="smtp-user-enum.pl", py=False),  # 系统 perl
+    GitRecipe(name="smtp-user-enum", repo="pentestmonkey/smtp-user-enum", entry="smtp-user-enum.pl", py=False),  # 系统 perl
     PrebuiltRecipe(name="marshalsec", source="tools/marshalsec-0.0.3-SNAPSHOT-all.jar",
                  platforms=["darwin", "linux", "win"], jar=True, jar_cp=True),  # 预编译自包含 jar; 首参=主类
     # ── ghidra-headless（便携: 官方单一 zip 三平台通用。
@@ -732,6 +739,7 @@ exec "$GDB" -q "$BIN" -ex "set architecture $ELF_N" -ex "target remote :$PORT" "
     PkgToolRecipe(name="testdisk", long_running=True),
     PkgToolRecipe(name="photorec", pkg_brew="testdisk", pkg_linux="testdisk"),
     PkgToolRecipe(name="nikto", long_running=True),
+    PkgToolRecipe(name="cmake"),  # SrcRecipe(cmake 类) 的构建前置; brew/apt 均有
     SrcRecipe(name="pycdc", repo="zrax/pycdc", build_sys="cmake", bins=["pycdc", "pycdas"]),
 ]
     return _INSTALLABLE_TOOLS
@@ -1443,7 +1451,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                                  f"需要 {r.prereq_cmd} 运行时（linux: {PM_PREFIX or '<PM>'} install -y {r.prereq_cmd}; "
                                  f"mac: brew install {r.prereq_cmd}）")
         dst = os.path.join(TOOLS_HOME_DIR, r.name)
-        entry_abs = os.path.join(dst, entry)
+        entry_abs = os.path.join(dst, r.entry)
         if r.pip_pkg:  # 包模式: 克隆后 pip install（console script 直接落 venv bin）
             if not force and shutil.which(r.name):
                 return InstallResult(r.name, "skipped", f"PATH 已有 {r.name}")
@@ -1466,9 +1474,9 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             shutil.rmtree(dst)
         self._run(["git", "clone", "--depth", "1",
                    f"https://github.com/{r.repo}", dst])
+        self._run_git_setup(r, dst)  # setup 可能生成入口（如 pwndbg setup.sh 生成 ./gdb）——先跑再校验
         if not os.path.exists(entry_abs):
-            return InstallResult(r.name, "failed", f"克隆后未找到入口 {r.entry}")
-        self._run_git_setup(r, dst)
+            return InstallResult(r.name, "failed", f"克隆/构建后未找到入口 {r.entry}")
         self._install_git_wrapper(r, dst, entry_abs)
         return InstallResult(r.name, "installed", f"clone {r.repo} + wrapper")
 
@@ -1478,7 +1486,12 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             return
         sp = os.path.join(dst, r.setup)
         self._chmodx(sp)
-        self._run([sp], cwd=dst)
+        saved = os.getcwd()
+        os.chdir(dst)
+        try:
+            self._run([f"./{r.setup}"])
+        finally:
+            os.chdir(saved)
 
     def _install_git_wrapper(self, r: GitRecipe, dst: str, entry_abs: str) -> None:
         """生成 wrapper（+ 可选 requirements 安装）。"""
@@ -1942,14 +1955,19 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         if os.path.isdir(dst):
             shutil.rmtree(dst)
         self._run(["git", "clone", "--depth", "1", f"https://github.com/{r.repo}", dst])
-        if r.build_sys == "cmake":
-            self._run(["cmake", "."], cwd=dst)
-        else:
-            cfg = os.path.join(dst, "configure")
-            if os.path.exists(cfg):
-                self._chmodx(cfg)
-                self._run([cfg], cwd=dst)
-        self._run(["make", "-j{}".format(os.cpu_count() or 2)], cwd=dst)
+        saved = os.getcwd()
+        os.chdir(dst)
+        try:
+            if r.build_sys == "cmake":
+                self._run(["cmake", "."])
+            else:
+                cfg = os.path.join(dst, "configure")
+                if os.path.exists(cfg):
+                    self._chmodx(cfg)
+                    self._run([f"./{r.setup or 'configure'}"] if False else ["./configure"])
+            self._run(["make", "-j{}".format(os.cpu_count() or 2)])
+        finally:
+            os.chdir(saved)
         os.makedirs(CMD_DIR, exist_ok=True)
         placed = []
         for b in r.bins:
