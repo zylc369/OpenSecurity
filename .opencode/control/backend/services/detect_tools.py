@@ -150,6 +150,10 @@ class GitRecipe:
     module: str = ""                # 非空=包布局（wrapper: cd 克隆目录 && python -m <module>）
     envp: str = ""                  # module 模式下额外 PYTHONPATH 相对路径（如 src-layout 的 src）
     pip_pkg: bool = False           # True=克隆后 pip install <目录>（依赖+console script 落 venv bin）
+    platforms: tuple[str, ...] = () # 平台前缀门控（空=全平台; 如 ("linux",) 仅 linux——
+                                    #   其他平台回落同名 docker 配方，见 install_all 同名去重）
+    setup: str = ""                 # 克隆后先执行的构建脚本（如 pwndbg setup.sh）
+    prereq_cmd: str = ""            # 入口运行所需解释器（如 php）——缺失即 failed 给手动提示
 
 
 @dataclass
@@ -308,6 +312,10 @@ class PrebuiltRecipe:
     name: str
     source: str                       # 相对 OPENCODE_ROOT 的二进制路径
     platforms: list[str] = field(default_factory=lambda: ["darwin"])
+    jar: bool = False                 # True: 产物是自包含 jar → 拷 TOOLS_HOME_DIR +
+                                      #   java wrapper（便携 JDK 优先; 三平台可跑）
+    jar_cp: bool = False              # True: jar 无 Main-Class（marshalsec 类）→ -cp 模式，
+                                      #   调用方首参为主类（对齐上游 README 用法）
 
 
 @dataclass
@@ -327,7 +335,166 @@ _GO_ALL = {
     "win-amd64": "windows|win,amd64|x86_64|win64|x64",
 }
 
-INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | PrebuiltRecipe | NodeRecipe | DirRecipe | DotnetRecipe | WordlistRecipe | JdkRecipe] = [
+# ── 包管理器层（Phase 0 强制检查; install_all 最先执行）─────────────────────
+# 各 PM 安装命令前缀（子命令与非交互参数不统一: pacman 无 install 用 -S --noconfirm，
+# apk 用 add 且默认非交互，zypper 用长参数——故存"完整前缀"而非 PM 名）。
+_PM_INSTALL_PREFIX = {
+    "apt": "sudo apt install -y",
+    "apt-get": "sudo apt-get install -y",
+    "dnf": "sudo dnf install -y",
+    "yum": "sudo yum install -y",
+    "pacman": "sudo pacman -S --noconfirm",
+    "apk": "sudo apk add",
+    "zypper": "sudo zypper --non-interactive install",
+}
+PM_PREFIX: str = ""   # linux 命中的完整安装命令前缀（check_package_manager 赋值; 空=非 linux/未检）
+
+
+def check_package_manager() -> None:
+    """平台包管理器强制检查（全量工具箱哲学: 清单必含 PM 源工具，PM 是硬前置）。
+
+    darwin: 必须 brew（brew install 是自动安装法; brew 本身只此一次需用户手动装）
+    linux:  依序检测 apt→apt-get→dnf→yum→pacman→apk→zypper，命中 → PM_PREFIX 全局赋值
+    win:    跳过（win 走便携包/docker）
+    失败 → sys.exit 报错不继续（幂等: 用户装完重跑）。
+    """
+    global PM_PREFIX
+    syst = platform.system().lower()
+    if syst == "darwin":
+        if not shutil.which("brew"):
+            sys.exit(
+                "错误[macOS]: 必须先安装 Homebrew（工具箱的 mac 自动安装依赖它）:\n"
+                '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com'
+                '/Homebrew/install/HEAD/install.sh)"\n'
+                "  装完后重跑 install.sh，将自动完成全部工具安装")
+    elif syst == "linux":
+        for pm, prefix in _PM_INSTALL_PREFIX.items():
+            if shutil.which(pm):
+                PM_PREFIX = prefix
+                return
+        sys.exit("错误[linux]: 未找到受支持的包管理器"
+                 "(apt/apt-get/dnf/yum/pacman/apk/zypper)，无法继续")
+    # windows: 无操作
+
+
+@dataclass
+class ManualItem:
+    """一条手动检测项: which 检测目标 + 提醒行里的包名（不同 PM 包名偶有差异时覆盖）。"""
+    command: str          # which 检测的命令名
+    pkg: str = ""         # 安装包名（空 = 与 command 同名）
+
+
+@dataclass
+class ManualCheck:
+    """手动安装检测（当前仅 linux 需要——apt/yum 需密码无法自动执行）。
+
+    一个结构持多条命令 → 缺失子集天然合并成一行安装命令（输出用 PM_PREFIX 拼装，
+    无聚合特判）。mac 有 brew 即全自动，无需此结构。
+    """
+    platforms: tuple[str, ...] = ("linux",)
+    items: list[ManualItem] = field(default_factory=list)
+    note: str = ""        # 附加说明（如"个别包需 Kali 源"）
+
+
+def run_manual_checks(checks: list[ManualCheck]) -> None:
+    """批量 which 检测 → 缺失合并一行报错退出。幂等: 用户执行后重跑即过。"""
+    syst = platform.system().lower()
+    prefix = {"darwin": "darwin", "linux": "linux", "windows": "win"}.get(syst, syst)
+    for chk in checks:
+        if prefix not in chk.platforms:
+            continue
+        missing = [(i.command, i.pkg or i.command) for i in chk.items
+                   if not shutil.which(i.command)]
+        if missing:
+            seen_pkgs: list[str] = []
+            for _c, p in missing:      # 多命令同包（fls/icat/istat→sleuthkit）去重保序
+                if p not in seen_pkgs:
+                    seen_pkgs.append(p)
+            pkgs = " ".join(seen_pkgs)
+            cmds = ",".join(c for c, _p in missing)
+            lines = [f"错误[linux]: 缺 {len(missing)} 个需手动安装的工具（命令: {cmds}）:",
+                     f"  {PM_PREFIX} {pkgs}",
+                     "  （需要 sudo 密码，无法自动执行; 完成后重跑 install.sh 自动续装）"]
+            if chk.note:
+                lines.append(f"  注: {chk.note}")
+            sys.exit("\n".join(lines))
+
+
+@dataclass
+class PkgToolRecipe:
+    """包管理器源工具: mac=brew 自动安装 / linux=进 ManualCheck 手动提醒 / win=docker 回落。
+
+    目标: docker 里 PM 能装的全部迁到 PM（最大程度消解 wrapper 问题——PM 产物落
+    系统 PATH，无 wrapper）。pkg_brew/pkg_linux 为空表示该平台 PM 无此包 → 该平台
+    回落 docker（嵌入字段合成 DockerRecipe，行为与原容器配方一致）。
+    包名与命令名不一致的工具（tshark←wireshark、msfvenom←metasploit、
+    x86_64-w64-mingw32-gcc←apt: gcc-mingw-w64-x86-64）在此显式声明。
+    """
+    name: str
+    pkg_brew: str = ""    # 空=brew 无此包（mac 回落 docker）; 特殊名显式写
+    pkg_linux: str = ""   # 空=linux PM 无此包（回落 docker）; 特殊名显式写
+    # docker 回落字段（仅当对应平台 PM 不可用时使用）
+    image: str = "zylc369/opensecurity-toolbox-core"
+    dockerfile: str = "control/docker/toolbox-core.Dockerfile"
+    long_running: bool = False
+    net_host: bool = False
+
+    def docker_spec(self) -> "DockerRecipe":
+        return DockerRecipe(name=self.name, image=self.image,
+                            dockerfile=self.dockerfile,
+                            long_running=self.long_running, net_host=self.net_host)
+
+
+@dataclass
+class GemRecipe:
+    """ruby gem 工具（zsteg/seccomp-tools 类）。
+
+    mac: 系统 ruby/gem（--user-install 免 sudo 装入 ~/.gem，wrapper 指向真实 bin）。
+    linux: ruby 经手动清单提供（install_all 静态补 ruby 检测项）。
+    """
+    name: str
+    gem: str = ""              # gem 名（空=同名）
+
+
+@dataclass
+class SrcRecipe:
+    """源码编译工具（无预编译产物、PM 无包: pycdc/pcapfix 类）。
+
+    build_sys: "cmake" | "autotools"; 产物 bins 从构建树递归定位到 CMD_DIR。
+    前置: gcc/make（CLT 或 PM）; cmake 类工具另需 cmake（PkgToolRecipe 提供）。
+    """
+    name: str
+    repo: str
+    build_sys: str = "cmake"   # cmake: cmake . && make | autotools: ./configure && make
+    bins: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ScriptRecipe:
+    """内联编排脚本配方（无产物下载——纯组合宿主已有工具，如 qemu-gdb）。
+
+    body 写入 CMD_DIR/<name> + chmod; prereq_cmds 缺任一 → failed 给 PM 安装提示。
+    适用: 组合调试/联动类工具（价值在编排逻辑而非二进制）。
+    """
+    name: str
+    body: str
+    prereq_cmds: list[str] = field(default_factory=list)
+
+
+_INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | PrebuiltRecipe | NodeRecipe | DirRecipe | DotnetRecipe | WordlistRecipe | JdkRecipe | PkgToolRecipe] | None = None
+
+
+def installable_tools() -> "list":
+    """INSTALLABLE_TOOLS 的惰性构建入口。
+
+    封装为函数的原因: 清单内配方可引用 PM_PREFIX 等"检测后才有值"的全局变量
+    （check_package_manager 必先于本函数调用——install_all 已保证; 直接调用的
+    消费方需自行先跑 check）。模块级缓存避免重复构建。
+    """
+    global _INSTALLABLE_TOOLS
+    if _INSTALLABLE_TOOLS is not None:
+        return _INSTALLABLE_TOOLS
+    _INSTALLABLE_TOOLS = [
     # ── Web 扫描（go 单二进制） ──
     ReleaseRecipe(name="nuclei", repo="projectdiscovery/nuclei", plats=_GO_ALL, bins=["nuclei"]),
     ReleaseRecipe(name="dalfox", repo="hahwul/dalfox", plats=_GO_ALL, bins=["dalfox"]),
@@ -430,38 +597,27 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | P
     PrebuiltRecipe(name="insert_dylib", source="tools/insert_dylib"),
     PrebuiltRecipe(name="optool", source="tools/optool"),
     # ── 容器层（编译类; toolbox-design.md §3.1 实测清单） ──
-    DockerRecipe(name="steghide", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
+    PkgToolRecipe(name="steghide", pkg_brew="", pkg_linux="steghide"),  # brew 核心已移除 → mac docker
     DockerRecipe(name="stegseek", image="zylc369/opensecurity-toolbox-core", long_running=True,
                  dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="john", image="zylc369/opensecurity-toolbox-core", long_running=True,
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="hashcat", image="zylc369/opensecurity-toolbox-core", long_running=True,
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="nmap", image="zylc369/opensecurity-toolbox-core", long_running=True,
-                 dockerfile="control/docker/toolbox-core.Dockerfile", net_host=True),
-    DockerRecipe(name="hydra", image="zylc369/opensecurity-toolbox-core", long_running=True,
-                 dockerfile="control/docker/toolbox-core.Dockerfile", net_host=True),
-    DockerRecipe(name="medusa", image="zylc369/opensecurity-toolbox-core", long_running=True,
-                 dockerfile="control/docker/toolbox-core.Dockerfile", net_host=True),
-    DockerRecipe(name="ncrack", image="zylc369/opensecurity-toolbox-core", long_running=True,
-                 dockerfile="control/docker/toolbox-core.Dockerfile", net_host=True),
-    DockerRecipe(name="binwalk-full", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="nxc", image="zylc369/opensecurity-toolbox-core", long_running=True,
-                 dockerfile="control/docker/toolbox-core.Dockerfile", net_host=True),
-    DockerRecipe(name="searchsploit", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="wpscan", image="zylc369/opensecurity-toolbox-core", long_running=True,
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="fls", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="icat", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="istat", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="tshark", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
+    PkgToolRecipe(name="john", pkg_brew="john-jumbo", long_running=True),  # apt: john
+    PkgToolRecipe(name="hashcat", long_running=True),  # mac=brew(Metal) / linux=apt 手动
+    # hashcat win: 官方便携 .7z（自带 dll+内核+rules; 资产名带版本→动态 latest 匹配;
+    # 与上行同名按平台择一——install_all 同名去重，先 installed 者占名）
+    ReleaseRecipe(name="hashcat", repo="hashcat/hashcat", kind="tree",
+                  plats={"win-amd64": ".7z"}, entry="hashcat.exe", bins=["hashcat"]),
+    PkgToolRecipe(name="nmap", long_running=True, net_host=True),
+    PkgToolRecipe(name="hydra", long_running=True, net_host=True),
+    PkgToolRecipe(name="medusa", long_running=True, net_host=True),
+    PkgToolRecipe(name="ncrack", long_running=True, net_host=True),
+    PkgToolRecipe(name="binwalk"),  # 原 binwalk-full; PM 包名 binwalk
+    GitRecipe(name="nxc", repo="Pennyw0rth/NetExec", entry="netexec", pip_pkg=True),  # pip 装入 venv → nxc console script
+    PkgToolRecipe(name="searchsploit", pkg_brew="exploitdb", pkg_linux="exploitdb"),
+    PkgToolRecipe(name="wpscan", long_running=True),  # apt 需 Kali 源
+    PkgToolRecipe(name="fls", pkg_brew="sleuthkit", pkg_linux="sleuthkit"),
+    PkgToolRecipe(name="icat", pkg_brew="sleuthkit", pkg_linux="sleuthkit"),
+    PkgToolRecipe(name="istat", pkg_brew="sleuthkit", pkg_linux="sleuthkit"),
+    PkgToolRecipe(name="tshark", pkg_brew="wireshark", pkg_linux="tshark"),  # 包名跨 PM 不同
     # ── exiftool（便携: unix=官方 perl 树（脚本依赖同级 lib/，整树安装）/
     #     win=官方 standalone 单 exe。sourceforge 镜像，/download 尾段非文件名→asset 覆盖）──
     UrlRecipe(name="exiftool", urls={
@@ -473,70 +629,89 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | P
     }, bins=["exiftool"], entries={p: "exiftool" for p in
         ("darwin-arm64", "darwin-amd64", "linux-amd64", "linux-arm64")},
        src_names={"exiftool": "exiftool(-k).exe"}),  # win 走单文件提取分支
-    DockerRecipe(name="x86_64-w64-mingw32-gcc", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="nasm", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="r2", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="one_gadget", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="seccomp-tools", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="phpggc", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="qemu-gdb", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="sox", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="identify", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="convert", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="mutool", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
+    PkgToolRecipe(name="x86_64-w64-mingw32-gcc", pkg_brew="mingw-w64", pkg_linux="gcc-mingw-w64-x86-64"),
+    PkgToolRecipe(name="nasm"),
+    PkgToolRecipe(name="r2", pkg_brew="radare2", pkg_linux="radare2"),
+    PkgToolRecipe(name="one_gadget", pkg_brew="one_gadget", pkg_linux=""),  # apt 无 → linux docker
+    GemRecipe(name="seccomp-tools"),
+    GitRecipe(name="phpggc", repo="s0md3v/phpggc", entry="phpggc", py=False, prereq_cmd="php",
+              platforms=("linux",)),  # mac 无系统 php → 同名 DockerRecipe 兜底（mac/win）
+    # qemu-gdb 原生编排（docker-toolbox.md §4 语义原样; 架构判断跟随宿主而非固定容器）
+ScriptRecipe(name="qemu-gdb", body=r"""#!/bin/sh
+# 跨架构 gdb 调试（原生: 系统 file/qemu/gdb 编排）
+# 用法: qemu-gdb <binary> [gdb 参数...]  例: qemu-gdb ./pwn -ex "break main" -ex c
+# 架构路由: ELF 架构 == 宿主架构 → gdb 直调（原生 ptrace）
+#           跨架构 → qemu-<arch> -g <port> gdbstub + gdb target remote
+# 动态跨架构二进制需目标根文件系统: export QEMU_SYSROOT=/path/to/sysroot（静态二进制无需）
+BIN="${1:-./a.out}"; shift
+case "$BIN" in /*) ;; *) BIN="./$BIN" ;; esac
+GDB="${QEMU_GDB:-gdb}"; command -v "$GDB" >/dev/null 2>&1 || GDB=gdb-multiarch
+FILEOUT=$(file "$BIN" 2>/dev/null)
+HOSTARCH=$(uname -m)
+# 宿主/ELF 架构归一（arm64==aarch64, x86_64/amd64==x86-64）
+_norm() { case "$1" in arm64|aarch64|ARM) echo aarch64;; x86_64|amd64|x86-64) echo x86-64;; *) echo "$1";; esac; }
+HOST_N=$(_norm "$HOSTARCH")
+# universal2 双架构 fat binary 时 file 会列出多个切片——宿主架构优先匹配
+case "$HOST_N" in
+  aarch64) HPAT='aarch64|arm64|ARM';;
+  x86-64) HPAT='x86-64|x86_64';;
+  *) HPAT='';;
+esac
+if [ -n "$HPAT" ] && echo "$FILEOUT" | grep -qE "$HPAT"; then
+  ELF_N="$HOST_N"
+else
+  ELFARCH=$(echo "$FILEOUT" | grep -oE 'x86-64|x86_64|aarch64|arm64|ARM' | head -1)
+  ELF_N=$(_norm "$ELFARCH")
+fi
+[ -z "$ELF_N" ] && { echo "qemu-gdb: 无法识别架构: $BIN" >&2; exit 1; }
+if [ "$ELF_N" = "$HOST_N" ]; then
+  exec "$GDB" -q "$BIN" "$@"
+fi
+# 跨架构: qemu-user gdbstub
+case "$ELF_N" in
+  x86-64) QEMU_BIN=qemu-x86_64; QEMU_PKG="qemu-user(apt)/qemu(brew)";;
+  aarch64) QEMU_BIN=qemu-aarch64; QEMU_PKG="qemu-user(apt)/qemu(brew)";;
+  *) echo "qemu-gdb: 架构 $ELF_N 无 qemu-user 映射" >&2; exit 1;;
+esac
+command -v "$QEMU_BIN" >/dev/null 2>&1 || { echo "qemu-gdb: 缺 $QEMU_BIN（$QEMU_PKG）" >&2; exit 1; }
+PORT=$((20000 + RANDOM % 20000))
+LARG=""
+echo "$FILEOUT" | grep -q "statically" || { [ -n "$QEMU_SYSROOT" ] && LARG="-L $QEMU_SYSROOT" || \
+  echo "qemu-gdb: 动态二进制未设 QEMU_SYSROOT（尝试裸跑; 依赖库加载失败时 export QEMU_SYSROOT=目标sysroot）" >&2; }
+"$QEMU_BIN" $LARG -g "$PORT" "$BIN" &
+QPID=$!
+trap 'kill $QPID 2>/dev/null' EXIT INT TERM
+sleep 1
+exec "$GDB" -q "$BIN" -ex "set architecture $ELF_N" -ex "target remote :$PORT" "$@"
+""",
+             prereq_cmds=["file", "gdb"]),
+    PkgToolRecipe(name="sox"),
+    PkgToolRecipe(name="identify", pkg_brew="imagemagick", pkg_linux="imagemagick"),
+    PkgToolRecipe(name="convert", pkg_brew="imagemagick", pkg_linux="imagemagick"),
+    PkgToolRecipe(name="mutool", pkg_brew="mupdf", pkg_linux="mupdf-tools"),
     DockerRecipe(name="boolector", image="zylc369/opensecurity-toolbox-core",
                  dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="qemu-system-x86_64", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="wrestool", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="pcapfix", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="xfs_db", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="cryptsetup", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="zsteg", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="arpspoof", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile", net_host=True),
-    DockerRecipe(name="gdb", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="gdb-pwndbg", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="gdbserver", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="e2fsck", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="e2fsck64", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="debugfs", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="mkfs.ext4", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="btrfs", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="qemu-riscv64", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="upx", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="bloodhound", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="smtp-user-enum", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="marshalsec", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
+    PkgToolRecipe(name="qemu-system-x86_64", pkg_brew="qemu", pkg_linux="qemu-system-x86"),
+    PkgToolRecipe(name="wrestool", pkg_brew="icoutils", pkg_linux="icoutils"),
+    SrcRecipe(name="pcapfix", repo="a13xela/pcapfix", build_sys="autotools", bins=["pcapfix"]),
+    PkgToolRecipe(name="xfs_db", pkg_brew="", pkg_linux="xfsprogs"),
+    PkgToolRecipe(name="cryptsetup", pkg_brew="", pkg_linux="cryptsetup"),
+    GemRecipe(name="zsteg"),
+    PkgToolRecipe(name="arpspoof", pkg_brew="dsniff", pkg_linux="dsniff", net_host=True),
+    PkgToolRecipe(name="gdb"),
+    GitRecipe(name="gdb-pwndbg", repo="pwndbg/pwndbg", entry="gdb", py=False, setup="setup.sh"),  # 官方安装脚本
+    PkgToolRecipe(name="gdbserver", pkg_brew="", pkg_linux="gdb"),  # brew gdb 无 gdbserver → mac docker
+    PkgToolRecipe(name="e2fsck", pkg_brew="", pkg_linux="e2fsprogs"),  # mac 分析 linux fs → docker
+    PkgToolRecipe(name="e2fsck64", pkg_brew="", pkg_linux="e2fsprogs"),
+    PkgToolRecipe(name="debugfs", pkg_brew="", pkg_linux="e2fsprogs"),
+    PkgToolRecipe(name="mkfs.ext4", pkg_brew="", pkg_linux="e2fsprogs"),
+    PkgToolRecipe(name="btrfs", pkg_brew="", pkg_linux="btrfs-progs"),
+    PkgToolRecipe(name="qemu-riscv64", pkg_brew="qemu", pkg_linux="qemu-system-misc"),
+    PkgToolRecipe(name="upx"),
+    PkgToolRecipe(name="bloodhound", pkg_brew="bloodhound", pkg_linux="bloodhound"),  # apt 需 Kali
+    GitRecipe(name="smtp-user-enum", repo="punkave/smtp-user-enum", entry="smtp-user-enum.pl", py=False),  # 系统 perl
+    PrebuiltRecipe(name="marshalsec", source="tools/marshalsec-0.0.3-SNAPSHOT-all.jar",
+                 platforms=["darwin", "linux", "win"], jar=True, jar_cp=True),  # 预编译自包含 jar; 首参=主类
     # ── ghidra-headless（便携: 官方单一 zip 三平台通用。
     #     替代 full 层容器（镜像数 GB → 便携 zip 一次性 ~570MB 且零容器开销）。
     #     JDK 由 JdkRecipe 便携供给（prereq java_min 21; wrapper 注入 JAVA_HOME））──
@@ -546,26 +721,20 @@ INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | P
                          ("darwin-arm64", "darwin-amd64", "linux-amd64", "linux-arm64", "win-amd64")},
                   entry="support/analyzeHeadless", bins=["ghidra-headless"],
                   prereq="java", java_min=21),
-    DockerRecipe(name="msfvenom", image="zylc369/opensecurity-toolbox-full",
-                 dockerfile="control/docker/toolbox-full.Dockerfile"),
+    PkgToolRecipe(name="msfvenom", pkg_brew="metasploit", pkg_linux="metasploit-framework",
+                  image="zylc369/opensecurity-toolbox-full",
+                  dockerfile="control/docker/toolbox-full.Dockerfile"),  # apt 需 Kali
     # ── v1.1 增量: 网络基础/隐写补充/无线/取证/web 扫描/查壳/pyc 反编译 ──
-    DockerRecipe(name="socat", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile", net_host=True),
-    DockerRecipe(name="stegsnow", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="foremost", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
-    DockerRecipe(name="aircrack-ng", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile", long_running=True),
-    DockerRecipe(name="testdisk", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile", long_running=True),
-    DockerRecipe(name="photorec", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile", long_running=True),
-    DockerRecipe(name="nikto", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile", long_running=True),
-    DockerRecipe(name="pycdc", image="zylc369/opensecurity-toolbox-core",
-                 dockerfile="control/docker/toolbox-core.Dockerfile"),
+    PkgToolRecipe(name="socat", net_host=True),
+    PkgToolRecipe(name="stegsnow", pkg_brew="", pkg_linux="stegsnow"),
+    PkgToolRecipe(name="foremost"),
+    PkgToolRecipe(name="aircrack-ng", long_running=True),
+    PkgToolRecipe(name="testdisk", long_running=True),
+    PkgToolRecipe(name="photorec", pkg_brew="testdisk", pkg_linux="testdisk"),
+    PkgToolRecipe(name="nikto", long_running=True),
+    SrcRecipe(name="pycdc", repo="zrax/pycdc", build_sys="cmake", bins=["pycdc", "pycdas"]),
 ]
+    return _INSTALLABLE_TOOLS
 
 
 # ─── 工具清单 ────────────────────────────────────────────
@@ -1076,17 +1245,44 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     # ── 对外入口 ──
 
     def install_all(self, force: bool = False, progress=None) -> list[InstallResult]:
-        """按清单顺序安装全部; progress(name) 回调用于 UI 进度。"""
+        """按清单顺序安装全部; progress(name) 回调用于 UI 进度。
+
+        Phase 0（逐工具循环前）: ①包管理器强制检查 ②linux 手动清单批量 which 检测
+        （缺失合并一行命令报错退出——幂等，用户执行后重跑即过）。
+        同名配方去重: 先 installed 者占名（如 hashcat: win 便携 UrlRecipe 与
+        mac/linux PkgToolRecipe 并存，按平台各自命中）。
+        """
+        check_package_manager()
+        tools = installable_tools()
+        manual = ManualCheck(
+            items=[ManualItem(r.name, r.pkg_linux)
+                   for r in tools if isinstance(r, PkgToolRecipe) and r.pkg_linux] + [
+                # 脚本生态运行时/构建链前置（GemRecipe/GitRecipe(prereq_cmd)/SrcRecipe(cmake) 的宿主依赖）
+                ManualItem("ruby", "ruby"),      # zsteg/seccomp-tools
+                ManualItem("php", "php"),        # phpggc
+                ManualItem("cmake", "cmake"),    # pycdc
+                ManualItem("git", "git"),        # 源码类克隆
+                ManualItem("gcc", "build-essential"),  # 源码编译
+                ManualItem("qemu-x86_64", "qemu-user"),  # qemu-gdb 跨架构用户态模拟
+            ],
+            note="个别安全工具仅在 Kali 源中（如 wpscan/netexec），Debian/Ubuntu 无对应包时跳过该项重跑即可")
+        run_manual_checks([manual])
         results: list[InstallResult] = []
-        for recipe in INSTALLABLE_TOOLS:
+        seen: set[str] = set()
+        for recipe in tools:
+            if recipe.name in seen:
+                continue
             if progress:
                 progress(recipe.name)
-            results.append(self.install_recipe(recipe, force=force))
+            res = self.install_recipe(recipe, force=force)
+            results.append(res)
+            if res.status == "installed":
+                seen.add(recipe.name)
         return results
 
     def install_tool(self, name: str, force: bool = False) -> InstallResult:
         """按名安装单个工具。"""
-        for recipe in INSTALLABLE_TOOLS:
+        for recipe in installable_tools():
             if recipe.name == name:
                 return self.install_recipe(recipe, force=force)
         return InstallResult(name=name, status="failed", detail="不在 INSTALLABLE_TOOLS 清单")
@@ -1102,6 +1298,14 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                 return self._install_url(recipe, force)
             if isinstance(recipe, DockerRecipe):
                 return self._install_docker(recipe, force)
+            if isinstance(recipe, PkgToolRecipe):
+                return self._install_pkgtool(recipe, force)
+            if isinstance(recipe, GemRecipe):
+                return self._install_gem(recipe, force)
+            if isinstance(recipe, SrcRecipe):
+                return self._install_src(recipe, force)
+            if isinstance(recipe, ScriptRecipe):
+                return self._install_script(recipe, force)
             if isinstance(recipe, PrebuiltRecipe):
                 return self._install_prebuilt(recipe, force)
             if isinstance(recipe, NodeRecipe):
@@ -1231,6 +1435,13 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     # ── git / pip ──
 
     def _install_git(self, r: GitRecipe, force: bool) -> InstallResult:
+        prefix = _plat_key().split("-")[0]
+        if r.platforms and prefix not in r.platforms:
+            return InstallResult(r.name, "skipped", f"平台 {prefix} 非本配方目标（回落 docker）")
+        if r.prereq_cmd and not shutil.which(r.prereq_cmd):
+            return InstallResult(r.name, "failed",
+                                 f"需要 {r.prereq_cmd} 运行时（linux: {PM_PREFIX or '<PM>'} install -y {r.prereq_cmd}; "
+                                 f"mac: brew install {r.prereq_cmd}）")
         dst = os.path.join(TOOLS_HOME_DIR, r.name)
         entry_abs = os.path.join(dst, entry)
         if r.pip_pkg:  # 包模式: 克隆后 pip install（console script 直接落 venv bin）
@@ -1257,8 +1468,17 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                    f"https://github.com/{r.repo}", dst])
         if not os.path.exists(entry_abs):
             return InstallResult(r.name, "failed", f"克隆后未找到入口 {r.entry}")
+        self._run_git_setup(r, dst)
         self._install_git_wrapper(r, dst, entry_abs)
         return InstallResult(r.name, "installed", f"clone {r.repo} + wrapper")
+
+    def _run_git_setup(self, r: GitRecipe, dst: str) -> None:
+        """可选克隆后构建脚本（如 pwndbg setup.sh; 幂等由脚本自身保证，失败抛出）。"""
+        if not r.setup:
+            return
+        sp = os.path.join(dst, r.setup)
+        self._chmodx(sp)
+        self._run([sp], cwd=dst)
 
     def _install_git_wrapper(self, r: GitRecipe, dst: str, entry_abs: str) -> None:
         """生成 wrapper（+ 可选 requirements 安装）。"""
@@ -1429,6 +1649,18 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         src = os.path.join(_opencode_root(), r.source)
         if not os.path.isfile(src):
             return InstallResult(r.name, "failed", f"预编译产物缺失: {r.source}（需 macOS 环境执行 tools/build-class-dump.sh 重建）")
+        if r.jar:  # 自包含 jar: 拷 tools/<name>/ + java -jar wrapper（跨平台）
+            javabin, _ = self._resolve_java()
+            if not javabin:
+                return InstallResult(r.name, "skipped", "需要 java（install.sh 会装便携 JDK）")
+            dst_dir = os.path.join(TOOLS_HOME_DIR, r.name)
+            os.makedirs(dst_dir, exist_ok=True)
+            jar_path = os.path.join(dst_dir, os.path.basename(r.source))
+            if r.jar_cp:
+                self._wrapper(r.name, [javabin, "-cp", jar_path])
+            else:
+                self._wrapper(r.name, [javabin, "-jar", jar_path])
+            return InstallResult(r.name, "installed", f"{r.source} + java wrapper")
         os.makedirs(CMD_DIR, exist_ok=True)
         shutil.copyfile(src, self._bin_path(r.name))
         self._chmodx(self._bin_path(r.name))
@@ -1670,6 +1902,128 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         return InstallResult(r.name, "installed",
                              f"Temurin {r.feature} → {dest}（JAVA_HOME 由消费方 wrapper 注入）")
 
+    # ── gem / 源码编译 ──
+
+    def _install_gem(self, r: GemRecipe, force: bool) -> InstallResult:
+        """gem install --user-install（免 sudo）→ wrapper 指向 ~/.gem 真实 bin。"""
+        if shutil.which(r.name):
+            self._remove_stale_wrapper(r.name)
+            return InstallResult(r.name, "skipped", f"PATH 已有 {r.name}")
+        if not shutil.which("gem"):
+            return InstallResult(r.name, "failed",
+                                 "需要 ruby/gem（linux: "
+                                 f"{PM_PREFIX or '<PM>'} install -y ruby; mac: brew install ruby）")
+        self._run(["gem", "install", "--user-install", "--no-document", r.gem or r.name])
+        # --user-install 落 ~/.gem/ruby/<ver>/bin/（三层; 用递归 glob 防层级差异）→ 定位真实 bin
+        import glob as _g
+        home = os.path.expanduser("~/.gem")
+        hits = sorted(_g.glob(os.path.join(home, "**", "bin", r.name), recursive=True)
+                      or _g.glob(os.path.join(home, "*", "bin", r.name)))
+        if not hits:
+            return InstallResult(r.name, "failed", "gem 安装后未在 ~/.gem 找到 bin")
+        self._wrapper(r.name, [hits[-1]])
+        return InstallResult(r.name, "installed", f"gem {r.gem or r.name} → {hits[-1]}")
+
+    def _install_src(self, r: SrcRecipe, force: bool) -> InstallResult:
+        """git clone → 构建（cmake|autotools）→ bins 递归定位到 CMD_DIR。"""
+        if shutil.which(r.name):
+            self._remove_stale_wrapper(r.name)
+            return InstallResult(r.name, "skipped", f"PATH 已有 {r.name}")
+        for tool in ("git", "gcc", "make"):
+            if not shutil.which(tool):
+                return InstallResult(r.name, "failed",
+                                     f"构建链缺 {tool}（mac: CLT; linux: {PM_PREFIX or '<PM>'} install -y build-essential）")
+        if r.build_sys == "cmake" and not shutil.which("cmake"):
+            return InstallResult(r.name, "failed",
+                                 f"需要 cmake（{PM_PREFIX or '<PM>'} install -y cmake / brew install cmake）")
+        dst = os.path.join(TOOLS_HOME_DIR, r.name)
+        if os.path.isdir(dst) and not force:
+            return InstallResult(r.name, "skipped", "源码树已存在")
+        if os.path.isdir(dst):
+            shutil.rmtree(dst)
+        self._run(["git", "clone", "--depth", "1", f"https://github.com/{r.repo}", dst])
+        if r.build_sys == "cmake":
+            self._run(["cmake", "."], cwd=dst)
+        else:
+            cfg = os.path.join(dst, "configure")
+            if os.path.exists(cfg):
+                self._chmodx(cfg)
+                self._run([cfg], cwd=dst)
+        self._run(["make", "-j{}".format(os.cpu_count() or 2)], cwd=dst)
+        os.makedirs(CMD_DIR, exist_ok=True)
+        placed = []
+        for b in r.bins:
+            found = self._find_file(dst, b)
+            if not found:
+                return InstallResult(r.name, "failed", f"构建产物未找到 {b}")
+            dst_bin = self._bin_path(b)
+            shutil.copyfile(found, dst_bin)
+            self._chmodx(dst_bin)
+            placed.append(b)
+        return InstallResult(r.name, "installed", f"build {r.repo} → {','.join(placed)}")
+
+    def _install_script(self, r: ScriptRecipe, force: bool) -> InstallResult:
+        """内联脚本 → CMD_DIR（prereq 缺失给精确安装提示）。"""
+        missing = [c for c in r.prereq_cmds if not shutil.which(c)]
+        if missing:
+            hint = {"darwin": f"brew install {' '.join(missing)}",
+                    "linux": f"{PM_PREFIX or 'sudo <PM> install -y'} {' '.join(missing)}"}.get(
+                        _plat_key().split('-')[0], "请安装: " + ' '.join(missing))
+            return InstallResult(r.name, "failed", f"缺 {'/'.join(missing)} → {hint}")
+        path = os.path.join(CMD_DIR, r.name)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(r.body)
+        self._chmodx(path)
+        return InstallResult(r.name, "installed", f"脚本 wrapper → {path}")
+
+    # ── 包管理器源工具 ──
+
+    def _install_pkgtool(self, r: PkgToolRecipe, force: bool) -> InstallResult:
+        """按平台分发: mac=brew 自动安装（失败回落 docker）/ linux=手动（Phase0 已保证
+        或单工具模式给命令提示）/ win 与"该平台 PM 无包"=docker 回落。"""
+        prefix = _plat_key().split("-")[0]
+        if shutil.which(r.name):
+            self._remove_stale_wrapper(r.name)
+            return InstallResult(r.name, "skipped", f"PATH 已有 {r.name}（系统/PM 安装）")
+        if prefix == "darwin" and r.pkg_brew:
+            try:
+                rr = subprocess.run(["brew", "install", r.pkg_brew],
+                                    capture_output=True, text=True, timeout=1800)
+            except subprocess.TimeoutExpired:
+                rr = None
+            if rr and rr.returncode == 0:
+                self._remove_stale_wrapper(r.name)
+                return InstallResult(r.name, "installed", f"brew install {r.pkg_brew}")
+            why = ((rr.stderr or rr.stdout or "超时").strip().splitlines() or ["?"])[-1][:120] if rr else "超时"
+            res = self._install_docker(r.docker_spec(), force)
+            return InstallResult(r.name, res.status,
+                                 f"brew 失败({why}) → {res.detail}")
+        if prefix == "linux" and r.pkg_linux:
+            # 全量路径下 Phase0 已拦截缺失; 走到这里通常是 --tool 单装 → 给出精确命令
+            return InstallResult(r.name, "failed",
+                                 f"需手动安装: {PM_PREFIX or 'sudo <包管理器> install -y'} {r.pkg_linux}"
+                                 "（完成后重跑 install.sh）")
+        return self._install_docker(r.docker_spec(), force)
+
+    def _remove_stale_wrapper(self, name: str) -> None:
+        """系统/PM 已提供真身时，清理 CMD_DIR 的陈旧 docker wrapper。
+
+        关键: CMD_DIR 在 PATH 首段，残留 wrapper 会永久遮蔽系统原生版
+        （性能陷阱实例: brew Metal hashcat 被容器 CPU 版遮蔽 17 倍差距）。
+        仅当"排除 CMD_DIR 后 PATH 仍能解析到真身"才清理。
+        """
+        w = self._bin_path(name)
+        if not os.path.exists(w):
+            return
+        exe = name + (".exe" if os.name == "nt" else "")
+        for d in os.environ.get("PATH", "").split(os.pathsep):
+            if not d or os.path.abspath(d or ".") == os.path.abspath(CMD_DIR):
+                continue
+            cand = os.path.join(d, exe)
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                os.remove(w)
+                return
+
     def _install_docker(self, r: DockerRecipe, force: bool) -> InstallResult:
         """容器工具: docker 缺失→skip 提示; 镜像缺→build（同镜像幂等一次）; 生成 wrapper。"""
         wrapper = os.path.join(CMD_DIR, r.name)
@@ -1868,6 +2222,10 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             inner = gzip.decompress(data)
             with open(os.path.join(dest, asset[:-3]), "wb") as f:
                 f.write(inner)
+        elif lower.endswith(".7z"):  # 官方 7z 归档（如 hashcat win 便携包）
+            import py7zr  # 声明于 detect_py_deps（PyPkgField），venv 必有
+            with py7zr.SevenZipFile(io.BytesIO(data)) as z:
+                z.extractall(dest)
         else:
             raise RuntimeError(f"不支持的归档类型 {asset}")
 
@@ -1952,7 +2310,7 @@ def install_all(force: bool = False) -> list[InstallResult]:
 
 
 def list_installable() -> list[str]:
-    return [r.name for r in INSTALLABLE_TOOLS]
+    return [r.name for r in installable_tools()]
 
 
 def _main() -> int:
