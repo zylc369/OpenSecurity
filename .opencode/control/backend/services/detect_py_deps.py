@@ -47,6 +47,8 @@ class PyPkgField:
     platforms: tuple[str, ...] = ()   # 空=全平台
     installer: str = "pip"        # pip / conda（conda 的不走 pip 白名单）
     conda_name: str = ""          # installer=conda 时的包名（空则用 pip_name）
+    version_spec: str = ""        # 安装时版本约束后缀（如 "<2"; 独立于 pip_name——
+                                  # pip_name 还被 importlib.metadata.version 复用，必须纯包名）
     version_via_import: bool = False  # True: 版本经 import 探测（pip 名与 distribution 不一致特例）
 
 
@@ -68,8 +70,9 @@ PYTHON_PACKAGES: list[PyPkgField] = [
                description="HTTP 客户端库，MCP→控制台通信"),
     PyPkgField(name="huggingface_hub", pip_name="huggingface_hub", agents=["all"],
                description="模型缓存扫描与下载（控制台模型资产页）"),
-    PyPkgField(name="mcp", pip_name="mcp", agents=["all"],
-               description="MCP 协议库，knowledge/events/ocr MCP server 依赖"),
+    PyPkgField(name="mcp", pip_name="mcp", agents=["all"], version_spec="<2",
+               description="MCP 协议库，knowledge/events/ocr server 依赖"
+                           "（钉 <2: 2.x 将 FastMCP 改名 MCPServer，server 均用 v1 API）"),
     PyPkgField(name="sentence_transformers", pip_name="sentence-transformers", agents=["all"],
                description="嵌入模型库，加载 BGE-M3 模型依赖"),
     PyPkgField(name="sse_starlette", pip_name="sse-starlette", agents=["all"],
@@ -502,6 +505,8 @@ def _run_install(dry_run: bool):
             _log(f"[+] {dep.name} 安装成功")
             continue
         pkg = dep.pip_name or dep.name
+        if dep.version_spec:
+            pkg += dep.version_spec
         _log(f"[*] pip install {pkg}...")
         result = subprocess.run([sys.executable, "-m", "pip", "install", pkg])
         if result.returncode != 0:

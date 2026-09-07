@@ -6,10 +6,17 @@ import { getPythonCmd } from "./venv";
 import { startControl } from "./control-manager";
 import { debugLog } from "./logging";
 
-// MCP server 定义：name → (server.py 路径, timeout)
+// MCP server 定义：项目内 server.py（script）或 venv 模块入口（module + moduleArgs）
 // 依赖安装收口在 detect_py_deps.py 唯一清单（server 由 venv python 直跑）
-// 这里不检测依赖——server.py 启动失败时错误从 stderr 捕获
-const MCP_SERVERS = [
+// 这里不检测依赖——启动失败时错误从握手失败的 stderr 捕获
+interface McpServerDef {
+  name: string;
+  timeout: number;
+  script?: string;        // 项目内 server.py（注册前 existsSync 检查）
+  module?: string;        // venv 内 `python -m <module>` 入口（第三方包自带 MCP server）
+  moduleArgs?: string[];  // -m 后参数
+}
+const MCP_SERVERS: McpServerDef[] = [
   {
     name: "knowledge",
     script: join(OPENCODE_ROOT, "mcp-servers", "knowledge", "server.py"),
@@ -25,7 +32,7 @@ const MCP_SERVERS = [
     script: join(OPENCODE_ROOT, "mcp-servers", "ocr", "server.py"),
     timeout: 60000, // 薄壳（模型在控制台），握手快；acquire 在 lifespan 内含首载余量
   },
-] as const;
+];
 
 export class McpManager {
   private client: OpencodeClient;
@@ -64,14 +71,25 @@ export class McpManager {
   }
 
   private async registerOne(
-    server: (typeof MCP_SERVERS)[number],
+    server: McpServerDef,
     venvPython: string,
   ): Promise<void> {
-    const { name, script, timeout } = server;
+    const { name, timeout } = server;
 
-    // 1. 检测 server.py 是否存在
-    if (!existsSync(script)) {
-      debugLog(`[McpManager] ${name} 跳过：server.py 不存在 ${script}`);
+    // 1. 构造启动命令: script=项目内 server.py（存在性检查）/ module=venv 内 python -m
+    let command: string[];
+    if (server.script) {
+      if (!existsSync(server.script)) {
+        debugLog(`[McpManager] ${name} 跳过：server.py 不存在 ${server.script}`);
+        return;
+      }
+      command = [venvPython, server.script];
+    } else if (server.module) {
+      // 模块型不预检（预检=每注册一次起子进程 import，开销回到被砍掉的 checkPackages 时代）;
+      // 包缺失 → 握手失败 stderr 捕获（与 script 型同哲学）
+      command = [venvPython, "-m", server.module, ...(server.moduleArgs ?? [])];
+    } else {
+      debugLog(`[McpManager] ${name} 跳过：script 与 module 均未定义`);
       return;
     }
 
@@ -87,7 +105,7 @@ export class McpManager {
           name,
           config: {
             type: "local" as const,
-            command: [venvPython, script],
+            command,
             // 字段名必须是 environment（opencode 运行时读 mcp.environment）。
             // 历史上误写 env 被静默丢弃 → DATA_DIR 从未注入 MCP 子进程，
             // 生产靠默认值巧合可用，测试沙箱 DATA_DIR 则泄漏到生产端口文件
@@ -97,7 +115,7 @@ export class McpManager {
           },
         },
       });
-      debugLog(`[McpManager] ${name} 注册成功：python=${venvPython} server=${script}（IPC 地址自行发现）`);
+      debugLog(`[McpManager] ${name} 注册成功：command=${command.join(" ")}（IPC 地址自行发现）`);
     } catch (e) {
       const errMsg = (e as Error)?.message ?? String(e);
       debugLog(`[McpManager] ${name} 注册失败：${errMsg}`);
