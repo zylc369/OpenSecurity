@@ -20,8 +20,13 @@
 | 移动端 | Frida 官方 | `frida.re/news`、`docs.frida.re` | curl HTML |
 | 综合索引 | CTFtime | `ctftime.org/writeups` | 搜索入口，按需定向下载 |
 | 题目归档 | ctf-archives | `github.com/sajjadium/ctf-archives` | 按赛事/年份浏览 |
+| 综合 AI 搜索 | CTF Base | `ctfbase.com` | webfetch 搜索（全文+向量混合检索，2053+ writeup 按 technique/tool 结构化索引，0.5-1.4s 出结果） |
+| 取证/Web/提权方法论 | HackingArticles | `hackingarticles.in` | curl HTML → BeautifulSoup |
+| HTB 渗透/取证 | 0xdf | `0xdf.gitlab.io` | 同上（500+ 机器，详尽度金标准） |
 
 **不在这张表里的来源**：优先用 webfetch 搜索，找到后按 §2 方法下载。
+
+CTF Base 按方向搜索的关键词映射：取证=`forensics`、Web=`web`、密码学=`crypto`、逆向=`reverse`、Pwn=`pwn`、移动端=`mobile`、AI 安全=`ai llm jailbreak prompt-injection`。
 
 ---
 

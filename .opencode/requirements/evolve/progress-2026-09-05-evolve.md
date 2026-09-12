@@ -5,13 +5,13 @@
 - Phase 4 ✅（执行计划+架构图）
 - Phase 4.5 ✅（web-analysis.md 展开 384 行 <450）
 - Phase 5 进行中：A1✅(llm-perception-verification.md 75行) A2✅(索引+触发规则) B1✅(web-methodology §9, 445→463行) B2✅(无清单记录关闭) E1✅(E1-portable-matrix.md 60工具矩阵)
-- 待做：E2(hashcat配方打样)→E3(wrapper路由)→E4(批量迁移)→E5(deps同步)→E6(whisper模型生命周期)→E7(文档同步)→E8(收尾验收)；A/B 的 §4 回归验证（需案例文件路径）
+- 待做：E2(hashcat配方打样)→E3(wrapper路由)→E4(批量迁移)→E5(deps同步)→~~E6(whisper模型生命周期)~~[2026-09-12 取消: whisper 库+模型已整体卸载]→E7(文档同步)→E8(收尾验收)；A/B 的 §4 回归验证（需案例文件路径）
 - Phase 6 未开始
 ## 关键定位信息（下会话直接用）
 - detect_tools 安装器：~/.opencode 安装脚本体系（python），装到 ~/bw-security-analysis/bin + tools/
 - wrapper 生成器：产出 "# Docker wrapper (auto-generated)" 头的 sh（60个）
 - deps 检测后端：控制台 python /api/deps
-- whisper 模型现状：~/.cache/whisper 运行时自下载（5个模型 6.8GB）
+- whisper 现状：库+模型已于 2026-09-12 全部卸载（openai-whisper pip 卸载、~/.cache/whisper 删除），项目不再依赖 ASR
 - brew hashcat 已装(7.1.2, Metal 373.7)——E8 迁移时卸载
 
 ## Phase 5 E2 完成（2026-09-05）
