@@ -22,3 +22,8 @@
 |------|------|---------|
 | portswigger-prototype-pollution.md | portswigger.net | 原型链污染: sources(URL/JSON/web message), sinks, gadgets, client-side检测, server-side检测, RCE(child_process.fork/execSync) |
 | portswigger-single-packet-attack.md | portswigger.net | 单包攻击: HTTP/2并发, 竞态条件, limit-overrun, last-byte sync, 方法论 |
+| PortSwigger_2026-08_CRLF-Powered-Desync-Attacks.md | portswigger.net | 头注入驱动desync: RQP, 浏览器驱动, HEAD+Range, HttpOnly窃取, cookie tossing, CDN-Cache-Control, reverse desync |
+| PortSwigger_2026-08_CSS-the-bomb-inside-your-inbox.md | portswigger.net | CSS攻击: hotwiring, label劫持, select键盘记录, 净化器绕过, CSSOM mutation, CSS gadgets, CSP全封外带 |
+| PortSwigger_2026-08_Whats-in-a-tag-name.md | portswigger.net | tag name藏payload: localName小写变换, part/classList数组, contenteditable |
+| PortSwigger_2026-08_HTTP-Terminator-AI-novel-research.md | portswigger.net | AI自动化研究: multipart/byteranges触发器, dangling-byte, protocol ruler, shared-parser confusion, status-line注入, Range缓存投毒 |
+| ASISCTF2026_Proxy-Dough.md | ctfbase.com (preview) | Cloudflare /cdn-cgi/image onerror=redirect 307 gadget, WHATWG vs PHP反斜杠差异, CSPT链 |
