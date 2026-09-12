@@ -47,6 +47,22 @@
 
 **补充**：全角/带圈 Unicode（`①②⑦.⓪.⓪.①`）｜hex/octal 字节（`0x7f.0x0.0x0.0x1`）｜开放重定向链/短链接（trusted.com 302 → 内网）｜CRLF 注入头（`/%0D%0AHost:%20169.254.169.254`）｜HTTPS 站 302 到 HTTP 降级｜多重 @（`http://a.com@b.com@c.com/`）PHP parse_url 取**最后一个** @ 后（c.com）而 libcurl 取**第一个** @ 后（b.com）——校验器与请求器分属两套解析时定向错位。
 
+### urljoin 可控 base（Python `urllib.parse.urljoin`）
+
+**触发场景**: `fetch(urljoin(base, resource))` 结构且 `base` 来自用户输入（session 值/请求参数），`resource` 为固定字符串。首层 `urljoin(API_BASE, account)` 中 account 可控即 base 可控。前提: `urlopen` 默认装 FileHandler，`file://` 可直接读。
+
+**三性质**（urljoin 属标准库 `urllib.parse`，无需安装; 性质由 RFC 3986 相对引用解析 + Python 的 `uses_relative` 列表决定，Python 3 全系一致）:
+
+| 性质 | 实例 | 结果 |
+|---|---|---|
+| 绝对 URL 直接替换 | `urljoin("https://x/api/", "file:///a/b")` | `file:///a/b`（scheme 不同直接返回后者） |
+| 同名段自反 | `urljoin("file:///a/b/permissions", "permissions")` | `file:///a/b/permissions`（relative 替换最后一段，同名=读回自身） |
+| 去尾拼接 | `urljoin("file:///tmp/users/x", "user/settings")` | `file:///tmp/users/user/settings`（= dirname(base.path) + relative） |
+
+**落点计算法**: relative 的每一段都落在 dirname(base.path) 之下。已知固定 resource（如 `user/settings`、`permissions`）时，反推 `base.path` 的取值使最终读取点对齐自己可控的写入路径（如上传接口能写的 `/tmp/users/<acct>/<name>` 两级路径）——先列上传可写路径集合，再解 base 使 `dirname(base)+resource` ∈ 该集合。
+
+**负知识**: `data:` 不在 Python `uses_relative` 列表 → `urljoin(data_url, relative)` **丢弃 base** 返回 relative 原文 → `urlopen` 报 `unknown url type`——data: URL 无法作为可控 base 使用。`file` 在 uses_relative 中，相对解析正常。
+
 ## 4. gopher:// 与 dict://
 
 格式：`gopher://HOST:PORT/_<URL编码数据>`（`_` 被丢弃）。编码 `\r`→%0D、`\n`→%0A、空格→%20；端点先解码一次则双重编码 `%250D%250A`。

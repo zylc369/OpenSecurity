@@ -98,6 +98,11 @@ GCS：V4 查 X-Goog-SignedHeaders 是否含 content-type；Resumable URL 权限�
 
 **二次渲染绕过**（imagecreatefrompng/jpeg/gif 重采样后写入 payload）: 渲染只重写像素数据——①上传含 payload 原图+渲染后产物**逐字节 diff 找未变区块**（PNG 的 PLTE/tRNS 辅助 chunk 常原样保留、IDAT 后半段部分场景不变），在不变区注入 ②GIF 动画多帧渲染只处理首帧——payload 写后续帧控制块 ③渲染函数抛错即不覆盖（畸形图头）时 payload 存活。核心思路: 比对"上传前 vs 渲染后"，凡未被程序重写的字节皆载体。
 
+**异常逃逸保留文件（免竞态，优于竞争条件）**: 清理逻辑（os.remove/unlink）写在 `except 窄异常类` 块内、且处理循环中存在能抛**同父类其他异常**的输入时，构造该输入使异常逃逸 → 服务端 500 → 清理不执行 → 同批**此前已写入**的文件永久化。无需时间窗口，一次请求稳定复现。
+- **Python JSON 逃逸面**: `try: json.loads(raw) except json.JSONDecodeError` 结构下——`UnicodeDecodeError`（ValueError 同父类、非 JSONDecodeError 子类）逃逸; 内容 `b'\xff'` 即触发。**必须奇数字节**: `b'\xff\xfe'` 被识别为 UTF-16-LE BOM → decode 成功 → 走 JSONDecodeError 被捕获。深嵌套 JSON（千层级）触发 `RecursionError` 同理逃逸。
+- **审计特征**: 源码 grep `except json.JSONDecodeError`、`except ValidationError` 等窄类型捕获 + 邻近 `os.remove`/清理循环; 多文件同批处理且按序写盘时，逃逸文件放**列表前面**（后面的炸弹文件触发异常，前面文件已 staged）。
+- **与竞争条件的关系**: 两者都解决"文件用后即删"，异常逃逸走控制流绕过（稳定），竞争条件走时间窗（概率），优先审计异常逃逸面。
+
 ## 10. WAF 绕过
 
 - 扩展 ASCII：`shell.php[0xcc]`（测试 0x7f/0x88/0xb0/0xc0/0xaa/0xe0/0xcc）——WAF 处理不一致、文件系统忽略
@@ -108,10 +113,10 @@ GCS：V4 查 X-Goog-SignedHeaders 是否含 content-type；Resumable URL 权限�
 > 术语: **multipart/form-data** = HTTP 文件上传的标准正文格式——请求头 `Content-Type: multipart/form-data; boundary=XXX`，正文用 `--XXX` 分隔成多段，每段自带字段名/文件名/Content-Type 小头再接内容。文件上传漏洞的解析差异（WAF 按段判断 vs 服务器按段落盘）都发生在这套结构里。
 - **multipart 层绕过族**（WAF 与容器解析差异）:
   - 垃圾数据填充: 主机 WAF 设校验大小上限（如 1M）——前 1M 填垃圾内容木马放尾部绕内容校验; 或垃圾数据放开头绕文件名校验; 或加长 Content-Disposition 参数值使 WAF 检测出错
-  - 双/多 filename: 重复 filename 字段; **IIS 多 Content-Disposition 取第一个**而部分 WAF 取最后一个——错位绕过（IIS6/7 实测）
-  - boundary 操纵: boundary= 后加空格/可处理字符; 请求头与实体 boundary 不一致（WAF 认为无意义数据跳过、宽松容器仍解析——Win2k3+IIS6+ASP 实测）
+  - 双/多 filename: 重复 filename 字段; **IIS（微软 Internet Information Services Web 服务器）6/7 取第一个 Content-Disposition**而部分 WAF 取最后一个——错位绕过
+  - boundary 操纵: boundary= 后加空格/可处理字符; 请求头与实体 boundary 不一致（WAF 认为无意义数据跳过、宽松容器仍解析——Windows Server 2003 + IIS 6 + ASP 环境为此行为）
   - 删实体 Content-Type: 整行删或只留 `c` 把 `.php` 拼到 c 后（`filename="x.png` 换行 `C.php"`）
-  - 文件名处插回车/换行; filename 换位置（IIS6.0 把 filename 放别处仍识别）
+  - 文件名处插回车/换行; filename 换位置（IIS 6.0（微软 Web 服务器）把 filename 放别处仍识别）
   - POST 改 GET: 规则"POST 才校验内容"时改方法
   - NTFS ADS: filename 匹配不当时 `shell.php::$DATA` 类流名绕过（见 §2 Win 特性）
   - 长文件名: 非字母数字（中文等）拉长文件名 `shell.asp;王王王...jpg` 超出 WAF 匹配窗口
