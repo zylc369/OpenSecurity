@@ -89,6 +89,7 @@
 
 
 ## N. 校验实现与协议走私增补
+- **Cloudflare Image Resizing 307 gadget**: 目标域开了图片转换（有 `/cdn-cgi/image/` 路径即开）时，`https://目标域/cdn-cgi/image/onerror=redirect/<source-url>` 在 source image 转换失败时返回 **307 Location 指向 source-url 本身**——从 allowlisted 域拿到方向可控重定向。约束: source-url 必须同 zone（子域可，跨 zone 忽略）。利用: ① SSRF 白名单按 host 过滤 + `follow_location` 开（PHP file_get_contents 默认跟 20 跳）时，Location 里塞反斜杠差异 URL（`http://白名单域\@127.0.0.1/api`——WHATWG 解析 `\` 当 `/` 判 host 在 zone 内放行 307，PHP 跟随后把 `\@` 前当 userinfo 连 127.0.0.1，绕 loopback REMOTE_ADDR 检查）; ② CSPT（客户端路径穿越）链: 307/308 保留 method/body/headers，`fetch(baseUrl + userInput)` 类前端把请求经 gadget 转发到任意子域（cookie 认证场景有效，Authorization 头浏览器跨源不转发）
 - **curl 重定向溢出**: CURLOPT_MAXREDIRS 超限后错误分支拿 CURLINFO_REDIRECT_URL 无校验再请求——重定向链恰好超限即打内网
 - **白名单正则未转义点**: `meepwntube.0x1337.space`（. 未转义）→ 注册 meepwntubex0x1337.space + A→127.0.0.1
 - **SNI 明文走私**: TLS ClientHello 的 SNI 是明文——对"解析原始字节"的服务（

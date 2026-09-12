@@ -256,3 +256,7 @@ factory 查 playerToInstance; 子合约地址 keccak256(rlp([parent,nonce]))[-20
 - **BTC peel chain**: mempool.space `api/tx/<TXID>`——**永远跟较大输出**; 整数金额=peel 信号
 - **ETH/混币器统计启发式**（etherscan account/txlist）: ①金额相关（输出≈输入-fee）②时间窗（输出跟随输入分钟/小时级）③扇出一进多出 ④**交易数分层: 5<n<100=中介钱包（追）; 1000+=交易所/水龙头（跳过）** ⑤整数 ETH 额
 - 工具: Etherscan API / Blockchair（多链）/ breadcrumbs.app（免费可视化）/ Chainalysis Reactor（商用）; Wei→ETH ÷1e18
+- **TRON/TRC-20 逐跳追踪**: ①判定链与首跳: `curl "https://apilist.tronscanapi.com/api/transaction-info?hash=<txid>"` → `trc20TransferInfo[]` 出 from/to/amount_str（USDT 最小单位 **6 位小数**，`2700000000`=2700 USDT; 主网 USDT 合约 `TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t`）②逐跳外发: `https://api.trongrid.io/v1/accounts/<addr>/transactions/trc20?contract_address=<USDT>&only_from=true&limit=200` ③选下一跳: 优先**金额与上一跳一致**的输出（金额跳变=汇聚/collector 钱包，聚合多笔后打包转发）
+- **OFAC SDN 筛查**（免 key、canonical）: `curl -o sdn.xml https://www.treasury.gov/ofac/downloads/sdn.xml` → 对每个 touched 地址 `grep <addr> sdn.xml`; 命中条目含制裁项目（如 CYBER3）与 `Digital Currency Address - TRX/ETH/BTC` 数字货币地址标识。商业归因（Chainalysis/Elliptic）只是它的镜像+增值
+- **停止规则（归因终点）**: 追到**带交易所标签的热钱包**（Tronscan/Etherscan 标签 + 交易数百万级）或 mixer 即停——此后输出与海量无关存款混同，下一笔外发与本资金无关。记录 deposit 回执（tx hash+时间+金额）为最后可归因状态，即为报告终点
+- **钱包侧取证（MetaMask）**: 拿到 12 词助记词（RDP 屏幕缓存/剪贴板/内存）→ `cast wallet derive '<12 词>' --accounts 1` 直接吐 m/44'/60'/0'/0/0 首地址（无需浏览器）; 地址即最终答案/关联锚点

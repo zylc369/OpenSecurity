@@ -20,13 +20,28 @@
 | 移动端 | Frida 官方 | `frida.re/news`、`docs.frida.re` | curl HTML |
 | 综合索引 | CTFtime | `ctftime.org/writeups` | 搜索入口，按需定向下载 |
 | 题目归档 | ctf-archives | `github.com/sajjadium/ctf-archives` | 按赛事/年份浏览 |
-| 综合 AI 搜索 | CTF Base | `ctfbase.com` | webfetch 搜索（全文+向量混合检索，2053+ writeup 按 technique/tool 结构化索引，0.5-1.4s 出结果） |
+| 综合 AI 搜索 | CTF Base | `api.ctfbase.com` | REST API 检索（网页版 `ctfbase.com` 为 JS 渲染，webfetch/curl 只返回 landing page 取不到结果），用法见下方「CTF Base API」 |
 | 取证/Web/提权方法论 | HackingArticles | `hackingarticles.in` | curl HTML → BeautifulSoup |
 | HTB 渗透/取证 | 0xdf | `0xdf.gitlab.io` | 同上（500+ 机器，详尽度金标准） |
 
 **不在这张表里的来源**：优先用 webfetch 搜索，找到后按 §2 方法下载。
 
-CTF Base 按方向搜索的关键词映射：取证=`forensics`、Web=`web`、密码学=`crypto`、逆向=`reverse`、Pwn=`pwn`、移动端=`mobile`、AI 安全=`ai llm jailbreak prompt-injection`。
+CTF Base API 的 category 合法值：取证=`forensics`、Web=`web`、密码学=`crypto`、逆向=`reverse`、Pwn=`pwn`、移动端=`mobile`。AI 安全无对应 category（传 `ai` 报 `Invalid category`），用 websearch 定向检索替代。
+
+### CTF Base API
+
+```bash
+# 搜索：免认证，limit 上限 50
+curl -s "https://api.ctfbase.com/api/v1/search?category=web&limit=50&offset=0"
+# 全文：仅 is_free=true 的条目免认证返回完整内容
+curl -s "https://api.ctfbase.com/api/v1/writeups/<id>/full"
+```
+
+search 返回 `results` 数组，每条含 `id`/`title`/`event`/`difficulty`/`description`/`tags`/`techniques`/`is_free`/`content_preview`。关键行为：
+
+- search 返回的 `date` 字段恒为 null；**发布日期编码在 id 前 8 位**（如 `20260829_asisctf2026_2048` = 2026-08-29），时间窗筛选按 id 前缀本地比较
+- 结果无排序参数，需 `offset` 递增全量翻页后本地筛；id 无日期前缀的条目无法判期，保守跳过
+- `content_preview` 仅 `is_free=true` 的条目有内容；`<id>/full` 返回的 `date` 字段有真实值，取全文后可精确复核日期
 
 ---
 

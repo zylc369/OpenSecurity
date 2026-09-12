@@ -65,6 +65,7 @@
 - **Chrome 密码**: Local State `os_crypt.encrypted_key`（b64→去 5B DPAPI 前缀→CryptUnprotectData）; Login Data password_value v10/v11 格式 nonce[3:15]/ct[15:-16]/tag[-16:] AES-GCM; Firefox 走 firepwd
 - **git 三式**: gitdumper 暴露 .git; squash 恢复 `git reflog --all`+`git fsck --unreachable --no-reflogs`（gc 前 2 周孤儿存活）→`git show <hash>:path`; 损坏 blob 单字节爆破（期望 SHA-1 在 tree 里已知，git hash-object 验证）
 - **KeePass v4**: 标准 keepass2john 不支持 KDBX4/Argon2——ivanmrsulja fork 或 keepass4brute; hashcat -m 13400; python 内联爬页面提词（requests+re 分词生成字典）; SSH key 在 Notes/附件字段
+- **KeePass master key 内存恢复**（CVE-2023-32784，KeePass 2.x < 2.54）: 有内存镜像/KeePass 进程 dump 时**优先于爆破**——密码逐字符以单字节 key XOR 后残留内存（每字符后跟其反序拷贝的特征模式），可恢复**除首字符外的完整密码**。工具: vdohney/keepass-dump-masterkey（`python3 dump-masterkey.py <dump>` 直接吐候选串）; 首字符枚举可打印 ASCII 补全。失败判据: dump 里特征模式不全（密码分片太碎）→ 回退 hashcat -m 13400 爆破
 - **pyrasite**: 运行中进程源码恢复——pyrasite-shell <PID> 注入（ptrace_scope），globals() 直接读 secret，func_code 用 uncompyle6（≤3.8）/pycdc（3.9+，先 marshal.dump 落盘）; /proc/PID/fd 见 deleted 标记即此场景
 - **Linux 攻击链四源**: auth.log "session opened"+.bash_history+`find /usr/bin -newer auth.log`+tshark tftp; 恶意样本常见 AES-ECB+同 key XOR 存 .enc
 

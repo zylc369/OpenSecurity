@@ -38,3 +38,8 @@ if (!mod) {
     // 等待 SO 加载后再 hook
 }
 ```
+
+### 4. 17.13+ 增量（Script.interrupt / Android 10 spawn 修复 / frida.aio 等）
+
+> 移动端相关的 17.13-17.18 增量变化已沉淀到通用知识库，见 `$SHARED_DIR/knowledge-base/frida-17x-api.md` "17.13+ 增量更新速查"。
+> 移动端日常分析建议保持 frida ≥17.16。

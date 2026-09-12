@@ -14,6 +14,9 @@
 | IV 可控 + CBC | CBC IV 注入/bit flip | §3 |
 | GCM 同 nonce 重用 | forbidden attack（keystream XOR + GHASH H 恢复） | §7 |
 | 定长头部恰占一个 CBC 块 | 头部块提升 IV 剥离 | §7 |
+| 只有 timing trace 记录、无在线 padding 反馈 | 离线 padding oracle 判读 | §4 |
+| 同 keystream 加密批量等长结构化记录 | many-time pad 模板 multiset-match | §13 |
+| 密码代码"像 AES/DES"但疑似魔改 / 自制 S-box | 线性化攻击（diff 识别 + GF(2) 解密钥） | §8 |
 | CTR + CRC 组合完整性 | CTR bitflip + CRC 线性同时修 | §7 |
 | 错误消息回显解密值 | 全零块读 intermediate 构造密文 | §7 |
 | 自定义密码 S-box 非双射 | 碰撞差分 4097 查询 | §8 |
@@ -114,6 +117,8 @@ def padding_oracle_block(oracle, prev_block, cipher_block, block=16):
 
 **CBC-R（用 padding oracle 加密任意明文）**: 随机选末密文块 → oracle 解出它的 intermediate → prev_ct = intermediate ⊕ 目标明文块（该块解密即目标）→ 以 prev_ct 为新末块迭代向前，首块即 IV。解密 oracle 与加密能力等价。HTTP 场景: 把上面 oracle 参数换成 requests 回调（发伪造密文→按响应状态码/长度差异判断 padding 是否合法），完整封装代码见 web-crypto-attacks.md §2.2。
 
+**离线 timing trace 判读（无在线 oracle）**: 题目只给记录好的时序数组 `{block, pad, guess, trial, elapsed_ns}`（无交互接口）。先对账 `记录数 == 块数 × 16 × 256 × trials` 确认是 Vaudenay 探测的全程记录。判读三步：① 每 (block, pad, guess) 聚合取 **min-of-trials**——OS 调度噪声单边（只会拖慢不会加快），最小值是真实执行时间的最小方差估计 ② 每 (block, pad) 在 256 个 guess 上取耗时 argmax——有效 padding 触发后续解析/MAC 检查显著更慢（实测 ~2.4×，赢家 z≈+14σ 且唯一）③ `J[16-p] = winner ^ p` 逐位恢复中间态，`P_i = J XOR C_{i-1}`。真实目标差距仅 ~2× 时需数千 trial/组 + Mann-Whitney 秩统计替代 argmax。
+
 ## 5. 哈希长度扩展攻击
 
 **何时用**：`mac = H(secret ∥ msg)`（secret 前置，无 HMAC），已知 `mac`、`len(secret)`、`msg`，无需 secret 可算出 `H(secret ∥ msg ∥ padding ∥ append)`。
@@ -203,6 +208,8 @@ for root, _ in eq.roots():
 - **S-box 质量评估（DDT/LAT）**: ddt[dx][dy] 统计 sbox[x]^sbox[x^dx]，非零 dx 行最大值=最大差分概率（8-bit 最优 4/256）; LAT 最大线性偏差。自定义 S-box 显著高于最优 → 截断差分/回旋镖可行。另查不动点/对合/代数次数
 - **减轮差分（Ascon/GIFT 类）**: 精确复现轮函数 → GF(2) 建线性层逆矩阵 → 逐位注入 diff 采样输出偏差 → (k0[i],k1[i]) 四类质心聚类分类密钥位（符号模式掩码处理位相关）→ 验证+低置信位补采样
 - **DES DFA**: 倒数第二轮单比特故障 → 末轮 S-box 差分约束 K16（每 box 6-bit 猜测多故障对取交集）→ 48-bit 子密钥 + 8 校验位暴力 → 回推主密钥
+- **魔改标准密码的 diff 识别 → 整体线性化**: 题目代码"看起来是 AES/DES"时先逐函数对拍标准参考实现——常见陷阱是 `SubBytes`/`SubWord` 恒等返回输入（唯一非线性组件被去除；其余 XOR/ShiftRows/MixColumns/密钥编排全 GF(2) 线性）。固定明文下整个密码坍缩为 `C(K) = A·K ⊕ b`：零密钥加密一次得 b；128 个单比特密钥分别加密、结果与 b 异或得 A 的各列；GF(2) 高斯消元解 `A·K = C_real ⊕ b` 恢复主密钥。求解脚本直接复用题目自身函数（保证前向与挑战一致）
+- **仿射 S-box 判据**: 对随机 `x, y` 验证 `S(x⊕y) == S(x)⊕S(y)⊕S(0)` 成立 → S 仿射 → 整个密码 `enc = L(working) ⊕ T(seed)`，线性映射 L 与密钥调度无关。同上单比特探针经验建 L，一组已知明文块恢复常数 T，免暴力（AES 的 S-box 特意非线性正是防此；提示语 "your sbox is affine" 直接点破）
 
 ## 9. 哈希协议缺陷
 
@@ -262,6 +269,7 @@ for root, _ in eq.roots():
 - **Z3 解代数混合流密码**: 递推只含模加/取模（如 enc[i]=(msg[i]+key[i%k]+enc[i-1])%128）→ 每步一个 Int 约束 + 可打印域 + 已知前缀锚，solver 同时恢复 key+明文，免结构分析
 - **位置参数化密钥流 oracle 化**: 密钥流=数学函数(seed+pos) 且 seed 在查询输入中可控 → 平移 seed 使服务端变任意位置解密 oracle，O(n·256) 恢复
 - **XOR 相邻字节自消去**: 输出=ct[i]^ct[i+1] 型 → 两密文差分消密钥流，一条已知明文恢复另一条全部明文
+- **模板 multiset-match（批量结构化记录的 many-time pad）**: 同 keystream 加密一批**等长**记录 + 明文是固定模板（literal 头/字段名 + 变量字段且字段值域是已知小目录）时，优于通用 crib-dragging：① literal 位 `K[pos] = C_i[pos] ⊕ literal[pos]` 直接恢复约三分之一密钥流（多条记录交叉验证）② 变量位逐位置暴力 K∈0..255 做 multiset 匹配——`{C_i[pos] ⊕ K : i 遍历全部记录}` 必须等于该字节位置上目录值全体的 multiset（无需知道哪条记录用了哪个目录值；目录为 n 值被 n 条记录双射使用时通常唯一）③ 歧义位（目录 multiset 在 XOR 下自闭包，如 {m,n,e,i,b,a} 对 ^0x0c 封闭）用 flag 字母表 `[A-Za-z0-9_{}]` 或语言合理性消解。记录数少于目录值数时留多候选跨位置联立
 - **多对一后处理泄密钥流**: 解密后经 RLE 解码/归一化/小写化再哈希比对 → RLE 同游程多合法编码使不同密文同哈希 → 相等响应泄 keystream[i]^k[j]，逐对差分+单字节定标重建全密钥流
 - **网络侧信道泄密钥**: hostname（gethostbyaddr 反查）/Host 头/TLS SNI 等协议字段明文携带程序取用的"机密"——先 pcap 抓运行期流量再静态逆向，密钥可能不在二进制内
 
@@ -271,6 +279,8 @@ for root, _ in eq.roots():
 ECB? → 找重复块 (§2)
 CBC + 想改明文位? → bit flip (§3)
 解密有 padding 合法/非法反馈? → padding oracle (§4)
+只有 timing trace 无交互? → 离线 padding oracle 判读 (§4)
+同 keystream 批量等长记录? → 模板 multiset-match (§13)
 mac=hash(key∥msg)? → 长度扩展 (§5)
 连续随机数? → LCG 恢复 (§6)
 ```

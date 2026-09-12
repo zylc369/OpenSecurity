@@ -173,6 +173,7 @@ permission:
 | `flutter-ssl-bypass.md` | 分析 Flutter 应用，需要绕过 SSL pinning 时 |
 | `mitm-methodology.md` | 需要拦截/篡改移动应用 HTTPS 通信时 |
 | `tls-traffic-interception.md` | 需要追踪 SSL 连接、识别 TLS 流量（与 MITM 配合） |
+| `mobile-firebase-backend.md` | 反编译出现 Firebase 特征（firebaseio.com/Firestore/App Check/Cloud Functions/google-services.json）时 |
 
 ### frida 17.x Bridge 核心规则
 

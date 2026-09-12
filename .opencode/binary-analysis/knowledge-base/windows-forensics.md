@@ -37,6 +37,16 @@
 
 回收站 $R=内容/$I=元数据（UTF-16 原路径+时间）; OEMInformation SupportURL=C2 后门 IOC; hosts 行尾空白藏数据（xxd tail）; .contact 的 `<c:Notes>`; 遥测 imprbeacons.dat（CIP/geo_*/COUNTRY）。WinZip AES: zip2john + hashcat -m 13600（-a 6 '?d?d?d?d' 混合）; ZipCrypto 场景用 bkcrack（见 disk-memory §4）。
 
+## §6a DFIR 高价值 artifact（SRUM/SNSS/搜索索引/RDP 缓存）
+
+> 常规日志/artifact 被清或答不上"外发流量/运行时长/已删浏览记录/屏幕内容"类问题时逐项检查。
+
+- **SRUM**（System Resource Usage Monitor，`C:\Windows\System32\SRU\SRUDB.dat`）: ESE 数据库，记录**每应用逐小时网络用量（发送/接收字节）与应用运行时长**。场景: 量化恶意样本外发数据量、还原样本执行时间窗。解析: KAPE 生态 `SrumECmd -f SRUDB.dat --rollFiles -z` 出 CSV（`SrumECmd_NetworkUsages_Output.csv` 按应用名 grep，如样本伪装名 `FTK_Imager.exe` 出现两次即两次外发）; 无 KAPE 时 `esedbexport`（libesedb）导表后 python 读。同一表中应用名重复=多时段记录，逐行累加。
+- **Chrome SNSS 会话文件**（`%LOCALAPPDATA%\Google\Chrome\User Data\<Profile>\Sessions\`，`Session_*`/`Tabs_*` 无扩展名）: **内容是 JSON**——python 直接 `json.load` 读 `entries[].url`。场景: History SQLite 被清/无恶意站记录时恢复访问过的页面（会话快照独立于 History）。工具: Chrome-History-SNSS-Parser（GitHub）; 手工: `strings -n 12 Session_* | grep -E "^https?://"` 快筛。
+- **Windows 搜索索引**（`C:\ProgramData\Microsoft\Search\Data\Applications\Windows\Windows.edb`，ESE 库）: 含已删文件的**文件名+路径+最后写时间**（索引滞后于删除）。场景: 文件被删且 MFT/USN 无果时。解析: SIDR（Search Index DB Reporter）或 ESEDatabaseView 导出; `esedbexport` 出表后查 SystemIndex_0A/_1A。
+- **RDP bitmap cache**（`%LOCALAPPDATA%\Microsoft\Terminal Server Client\Cache\Cache0000.bin` 等，magic `RDP8bmp`）: RDP 客户端持久缓存的会话 tile——**重建用户/攻击者在远程桌面看到过的屏幕内容**（凭证、助记词、文档）。解析: ANSSI `bmc-tools`（纯 python）: `python3 bmc-tools.py -s <cache目录> -d rdp_tiles -b -v` 出 tile 拼贴后目视翻查。取证包含 Terminal Server Client\Cache\ 目录必查。
+- **DPAPI-NG 剪贴板/应用加密数据**: Windows 10/11 对剪贴板等用 DPAPI-NG（比传统 DPAPI 多一层 wrap）。解密链: NirSoft **DataProtectionDecryptor**（`/ Windows / DPAPI-NG` 模式）从内存/注册表掏 master key 解出 **KEK（Key Encryption Key，密钥加密密钥）** → 对密文头部的封装密钥做 **AES Key Unwrap（RFC 3394）** 得 **CEK（Content Encryption Key，内容加密密钥）** → CEK 解正文。识别: 加密 blob 头含 `version`+`DPAPI-NG` 描述符（非 `DPAPI` 纯文本标记）。
+
 ## §7 关联文件
 
 - `forensics-methodology.md` — 总入口

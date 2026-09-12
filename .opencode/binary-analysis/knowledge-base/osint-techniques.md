@@ -117,6 +117,7 @@
 - DNS TXT/CNAME/MX/AXFR 子域检查 → 区域榨取三路（ECS/NSEC/IXFR）补充
 - 假服务 banner: 端口号≠服务——SYN 扫描只证开放; `nmap -sV -sC` 或 `nc host port` 读真 banner
 - `.DS_Store` 泄漏目录文件名: `curl -sO target/.DS_Store && python3 -m dsstore .DS_Store`（路径发现见 web-methodology §2.2）
+- 链上地址/交易哈希追踪（BTC peel/ETH 混币/TRON TRC-20/OFAC 筛查/停止规则）→ `$OPENCODE_ROOT/crypto-analysis/knowledge-base/blockchain-attacks.md` §12
 - Wayback CDX 通用: `web.archive.org/cdx/search/cdx?url=DOMAIN*&output=json`（Twitter 专项见 §1）
 - WAF 源站直连/证书搜源站 → waf-bypass.md
 

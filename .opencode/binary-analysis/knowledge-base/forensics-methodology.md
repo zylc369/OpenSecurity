@@ -19,6 +19,7 @@
 | 磁盘恢复/加密卷/内存 key/容器云/文件系统修复 | 磁盘内存进阶 | `disk-memory-forensics.md`（专项文件，本文件 §3-§4 是基础） |
 | Windows 事件ID/USN/ADS/反取证/MPLog | Windows 专项 | `windows-forensics.md` |
 | USB 外设/逻辑分析/显示信号/侧信道/3D 打印 | 硬件信号 | `hardware-signal-forensics.md` |
+| `.log` 含 `POST /v1/messages`（LLM API 网关日志） | AI 网关日志取证 | §6a |
 | 压缩包/混合 | 先解压分类，按内容类型分流 | — |
 
 **通用第一步（任何类型先做）**：
@@ -161,6 +162,59 @@ awk '{print $1}' access.log | sort |uniq -c | sort -rn        # IP 频次（扫�
    - 加壳处理：`packer-handling.md`
 
 **IOC 关联**：用 hash/字符串/C2 地址串联多处取证证据，还原完整攻击链。
+
+---
+
+## 6a. AI 网关日志取证（LLM 会话痕迹）
+
+> 素材是 LLM API 网关/代理的会话日志（AI 辅助开发/攻击的痕迹）时用本节。
+
+**识别信号**：
+- 日志含 `POST /v1/messages`（Anthropic）或 `/v1/chat/completions`（OpenAI 兼容网关）
+- 单文件体积大（多轮会话可达数十 MB）；JSON 结构含 `model`/`messages`/`tool_use` 字段
+
+**核心原理（Anthropic Messages API）**：该 API 无服务端会话状态——客户端每轮请求都要**回显完整对话历史**。因此**最后一个请求的 body 就是全量会话记录**：全部用户输入、assistant 回复、以及 assistant 发起的每个工具调用。只需解析最后一条请求，无需拼接中间轮次。
+
+**重建目标源码（重放工具调用）**：
+```python
+import json
+last_body = None
+for line in open("messages.log", encoding="utf-8", errors="ignore"):
+    line = line.strip()
+    if "v1/messages" not in line or not line.startswith("{"):
+        continue
+    try:                       # JSON-lines 网关日志: 每行一条请求记录
+        rec = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    body = rec.get("body") or rec.get("request_body") or rec
+    if isinstance(body, str):
+        try: body = json.loads(body)
+        except json.JSONDecodeError: continue
+    if isinstance(body, dict) and "messages" in body:
+        last_body = body        # Anthropic 回显特性: 只留最后一条即全量
+assert last_body, "未找到含 messages 数组的请求体"
+files = {}
+for msg in last_body["messages"]:               # content 是分块数组
+    for block in msg.get("content", []):
+        if block.get("type") != "tool_use":
+            continue
+        name, inp = block["name"], block["input"]
+        if name == "Write":                     # {file_path, content} → 建文件
+            files[inp["file_path"]] = inp["content"]
+        elif name == "Edit":                    # {file_path, old_string, new_string, replace_all}
+            fp, old, new = inp["file_path"], inp["old_string"], inp["new_string"]
+            n = -1 if inp.get("replace_all") else 1
+            files[fp] = files[fp].replace(old, new, n)
+for fp, content in files.items():
+    print(fp, len(content))
+```
+- 非 JSON-lines 格式（如 access log + 独立 body 文件）: 先 `grep -n "POST /v1/messages" messages.log` 定位，取最大 body 解析
+- 重放产物是**完整源码树含 baked-in 密钥**（硬编码 secret、S-box 种子、HKDF salt 常直接写在源码里）——先 grep `secret|key|salt|password` 再读文件
+- 工具名按实际 agent 而变：`Write/Edit` 是编码 agent 常见形态；其他日志可能是 `str_replace_editor`/`apply_patch` 等——先 `grep -o '"name": *"[a-z_]*"' messages.log | sort | uniq -c` 枚举工具名再写重放器
+- 非最后一条请求也可用于交叉验证（历史请求是会话前缀子集）
+
+**成功判据**：重建的文件树能通过语法检查/导入执行；密钥能解出嵌入数据。**失败排查**：工具调用有遗漏（日志截断/中间轮缺失）→ 对比相邻请求的 messages 数组长度找缺口。
 
 ---
 

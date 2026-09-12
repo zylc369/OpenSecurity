@@ -17,11 +17,11 @@
 | PRNG、随机数、状态恢复 | 伪随机 | `prng-attacks.md`（MT/V8/Java/LCG/种子审计/自制递推）；LCG 参数恢复另见 `symmetric-and-hash.md` §6 |
 | 构造满足整除/模运算/位运算约束的输入（非给密文求明文） | 数论构造题 | `number-theory-construction.md` |
 | circom/snarkjs/halo2 电路、Σ 协议、`c=H(transcript)` Fiat-Shamir | ZKP（零知识证明） | §5 ZQP 攻击速查（Fiat-Shamir 伪造/欠约束电路/Castryck-Decru SIDH） |
-| 加密/评估 oracle（SEAL/CKKS/BFV）、LWE 参数、噪声预算 | FHE（全同态加密） | `fhe-attacks.md`（方案识别/密钥恢复/galois/CKKS精度/oracle）；密钥恢复见 `lattice-attacks.md` |
+| 加密/评估 oracle（SEAL/CKKS/BFV）、LWE 参数、噪声预算 | FHE（全同态加密） | `fhe-attacks.md`（方案识别/密钥恢复/galois/CKKS精度/系数泄漏区间精炼/oracle）；密钥恢复见 `lattice-attacks.md` |
 | Kyber/ML-KEM、Dilithium、LWE/RLWE 公式、SIDH 辅助点映像 | PQC（后量子） | LWE→`lattice-attacks.md`（§5h PQC 实现泄漏）；SIDH→§5 ZQP 攻击速查（Castryck-Decru） |
 | 辫群/热带半环/Paillier/GM/OSS/Cayley-Purser/BB-84 模拟等冷门方案 | 异型代数结构 | `exotic-algebra-attacks.md`（不变量/残差/复制隔离/小群查表） |
 | `.sol`/Foundry(`foundry.toml`)/Hardhat、`pragma solidity`、`isSolved()`、RPC 端点 | 智能合约（blockchain） | `blockchain-attacks.md`（delegatecall/重入/access control/整数/签名/随机数/flash loan） |
-| 自制分组密码完整源码 + 大批 (明文, 密文) 记录 + 认证加密盒 | 自制密码结构攻击 | `custom-cipher-structural-attacks.md`（组件弱点分解/积分攻击/GF(2) 工程坑） |
+| 自制分组密码完整源码 + 大批 (明文, 密文) 记录 + 认证加密盒 | 自制密码结构攻击 | `custom-cipher-structural-attacks.md`（组件弱点分解/积分攻击/GF(2) 工程坑/公钥方案代数坍缩） |
 | 线索仅一个 `@handle`/短语，需从公开平台内容提取编码 | 隐蔽载体调查 | `covert-carrier-decoding.md`（平台判存指纹/Bacon 型识别/排序坑/自检三问） |
 
 **判断不清时**：把题目所有参数列出来，看"哪个参数异常"（e 太小/太大、hint 数量、比特长度关系）——异常点就是攻击方向。

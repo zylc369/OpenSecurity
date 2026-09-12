@@ -11,6 +11,7 @@
 | Java `Random.nextInt()` | Java LCG (48-bit) | §4 |
 | `s_{n+1}=a*s_n+c mod m` | LCG | §5 |
 | 种子含 time()/可控值/外部服务 | 种子审计 | §6 |
+| 出现 `0x9E3779B97F4A7C15` / SplitMix64 | SplitMix64 | §7 |
 | 自制递推（XOR/移位/CA/混沌） | 特殊 PRNG | §7 |
 | 无显式对错反馈但有求解/校验耗时 | 求解时间侧信道 | §8 |
 
@@ -59,6 +60,7 @@
 
 ## 7. 特殊/自制 PRNG
 
+- **SplitMix64**: 指纹常数 `0x9E3779B97F4A7C15`（黄金比例）；输出混合 `z = ((x^(x>>30))*C1); z = ((z^(z>>27))*C2); z ^ (z>>31)`（C1=0xBF58476D1CE4E5B9, C2=0x94D049BB133111EB）。两个可利用特性：① 状态推进只是 `state = (state + GOLDEN) mod 2^64`——**跳过 skip 步有闭式 `(state + skip*GOLDEN) mod 2^64`**，枚举种子时免迭代 ② 输出混合函数双射，完整输出可反解 state。CTF 形态：时间戳/小窗口种子驱动 RSA 素数生成——枚举窗口内全部种子，用 `abs(n - p_base*q_base)` 快速过滤（p = next_prime(p_base)，偏差 ≈ p_base·δq + q_base·δp ≈ 2^(bitlen/2) × 素数间隙上界；384-bit 素数平均间隙 ~2^8，阈值取 `2^(bitlen(p_base)+50)` 量级留足余量——随机种子的乘积差是全幅随机量，命中即真），再 `next_prime(p_base)*next_prime(q_base) == n` 终验
 - **GF(2) 线性族**: 只含 XOR/移位/旋转 → 输出=矩阵×种子 (mod 2)，单位向量逐列建矩阵 + 高斯消元（见 symmetric-and-hash.md §8）。输出字节折叠不破坏线性——ASCII top bit=0 是免费奇偶方程，字符集约束转 GF(2) 方程组零暴力解状态
 - **混沌 logistic map**: x_{n+1}=r·x(1-x)，r≈4 混沌但确定。种子 0-1 小数枚举（6-11 位精度 × 有意义基数），struct.pack("<f") 打包变体（4B/8B/[-2:]）。指纹: chaos/logistic/butterfly
 - **元胞自动机（Rule N）**: 规则号=真值表 → Bool 变量 + DNF 编码 + 符号推进 N 轮 + 输出约束，Z3 反演初始态（CA 非单射，多 preimage 用 push/pop 枚举）

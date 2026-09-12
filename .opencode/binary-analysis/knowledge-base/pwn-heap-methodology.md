@@ -83,6 +83,26 @@ poisoned_fd = key ^ target_addr  # 构造毒化 fd
 real_addr = encrypted_fd ^ (chunk_addr >> 12)
 ```
 
+## §2a 跨线程 tcache 双 free 盲区（多线程服务题）
+
+**场景**: pthread 多线程服务（主线程 + worker）中，一个线程 free 的对象被另一线程再 free/再分配——单线程的所有 tcache 假设全部失效。
+
+**机制**: `tcache_key` 是**进程级**静态变量（启动时 getrandom 8 字节，所有线程共享同一个 key）。free 时若 chunk 的 key 字段匹配 → 遍历**当前线程自己的** tcache 链查找该 chunk：
+- 找到 → 报 double free abort
+- **找不到（chunk 实际在另一线程的 tcache 链里）→ 静默放行，继续入当前线程的 tcache**
+
+结果：同一 chunk 同时存在于两个线程的 tcache，两边 malloc 都会返回它 → 免费的双引用/类型混淆（一边当结构体 A 用、一边当结构体 B 用），或一边 malloc 改 fd 毒化另一边的链。
+
+**利用步骤**:
+```
+1. 线程 A malloc 拿到 chunk X，通过漏洞让线程 B 持有 X 的悬垂指针（或反之）
+2. 线程 A free(X) → X 入 A 的 tcache（key 已写）
+3. 线程 B free(X) → key 匹配但 B 的链里没有 X → 检查通过 → X 又入 B 的 tcache
+4. A、B 各 malloc 一次 → 两线程拿到同一块内存
+```
+**限制**: tcache 满（7 个）后 free 溢出到 fastbin——不再走 tcache key 检查路径（fastbin 仅比对链头是否重复，跨链双引用需另行布局）; 需要跨线程的对象生命周期交叠（消息传递/共享数组型漏洞）。
+**防御现状**: 在 `tcache_get` 加 key 校验的补丁因性能被 glibc 上游拒绝——现行全部版本可用。
+
 ## §3 核心堆原语速查
 
 | 原语 | 输入要求 | 输出能力 | 版本边界 |
@@ -150,7 +170,7 @@ target_addr+0x08 放 fake size（如 0x40）→ 需保证 next chunk（+size 处
 
 **House of Orange**（2.23 经典）: top size 改小的合法值（页对齐+P 位）→ 大 malloc 触发 sysmalloc → 旧 top 入 unsorted → bk=_IO_list_all-0x10 → 整理时写 main_arena+0x68 到 _IO_list_all（与 smallbin[5] 重叠）→ 该处伪造 FILE → malloc error→abort→_IO_flush_all_lockp 触发。2.24 加 vtable 检查; 2.29 unsorted attack 失效。
 
-**House of Roman**（无泄漏场景）: 三段 partial overwrite——fd 低 2 字节→malloc_hook-0x23 / unsorted attack 在 hook 附近写 libc 地址材料 / hook 低 2 字节改 one_gadget（4bit 猜）——~1/4096/次。需 <2.34 hook 存在。
+**House of Roman**（无泄漏场景）: 三段 partial overwrite——fd 低 2 字节→malloc_hook-0x23 / unsorted attack 在 hook 附近写 libc 地址材料 / hook 低 2 字节改 one_gadget（4bit 猜）——~1/4096/次。需 <2.34 hook 存在; 2.34+ 的无泄漏场景改走**落点 E**（rtld 结构重定向，无版本限制）。
 
 **House of Pig**（2.31+）: largebin 写 _IO_list_all → fake FILE vtable=合法 _IO_str_jumps → _IO_str_overflow 内部 malloc → 触发 tcache stashing unlink 任意写 → __free_hook=system。
 
@@ -234,6 +254,44 @@ fake += p64(libc.sym['_IO_wfile_jumps'] + 0x18 - 0x58)  # +0xd8 vtable 偏移使
 - **攻击面扩大组合**: large_bin_attack 写 `global_max_fast`（扩大 fastbin 上限）或 `mp_.tcache_bins`（扩大 tcache 索引范围）→ 原本非法 size 区间变可用，fastbin/tcache poisoning 构造空间大增（如把 top chunk 当"合法 fastbin chunk"）。
 - **environ 泄漏栈地址**: libc `environ` 指针 → 栈上环境变量数组 → 任意读 environ 值即得栈地址 → 定位目标函数返回地址 → 任意写直接覆盖为 ROP chain。适用 Full RELRO + 无 hook（≥2.34）场景。
 
+### 落点 E：rtld 结构重定向（无泄漏调用/指针写族，全版本 glibc）
+**场景**: 无任何泄漏（blind/输出全关）+ 有 mmap 相对写（单字节越界写即可）。不依赖 hook/IO vtable，机制全在 ld.so，glibc 版本无关（House of Roman 需 <2.34，此族无此限制）。
+
+**三条机制基础**:
+1. **mmap 相对性**: ld.so/libc.so/大 malloc chunk 同属 mmap 区，相邻或恒定间距——相对写可达 ld.so 数据段（含 link_map、_rtld_global）。
+2. **l_addr 页对齐**: ELF 加载基址低 12 位恒 0，LSB 覆写 l_addr = 给所有"基址+偏移"计算加 0-255 偏移。
+3. **l_info LSB 重定向**: `l_info[DT_XXX]` 是指向 `.dynamic` 内 Elf64_Dyn 的指针（低 12 位不受 ASLR 影响）。LSB 覆写可让它指向同段内**其他** Elf64_Dyn。关键跳板: `DT_DEBUG` 条目的 d_ptr 指向 ld.so **可写内存**的 `_r_debug`——把任意 l_info 条目重定向到 DT_DEBUG 后，即可在可写内存**伪造任意 d_ptr 值**（不用知道任何基址）。
+
+**原语升级链**（自底向上，按需取用）:
+```
+① 程序循环: l_addr LSB += (_Exit@got - write@got) → _dl_fixup 把 write 的解析结果
+   写进 _Exit@got → _Exit 变 write（参数错位但返回不崩）→ GCC noreturn 级联使
+   构造函数返回后滑入 main/__libc_csu_init 重入 → 无限次字节写
+② 无泄漏调用任意符号: l_info[DT_STRTAB] → _r_debug 伪造字符串名（如换成
+   "_dl_x86_get_cpu_features"）→ 符号表查名阶段读攻击者串; 再把 ld 自身
+   l_info[DT_SYMTAB] 指到 ld GOT 后的可写区，伪造 Elf64_Sym.st_value 偏移
+   → 解析结果 = l_addr + 任意偏移 = 任意地址调用
+③ House of Blindness 调用（exit 触发）:
+   l_info[DT_FINI] → DT_DEBUG（析构地址 = l_addr + d_ptr）
+   l_addr = (target_fn - _r_debug) 有符号差 → 析构"地址"解析到 target_fn
+   同时 l_info[DT_FINI_ARRAY] 置 0（防次级析构炸链）
+   RDI 免费送: 析构经 __rtld_lock_unlock_recursive(_dl_load_lock) 调用，
+   rdi 恒为 ld.so 内 _dl_load_lock 地址 → 把 "/bin/sh" 写进去 → system 直接吃参
+   注意: _dl_load_lock+0x10 (_kind) 置 0xFF 让锁路径无害跳过
+④ 指针写原语: global_max_fast 覆写后用 _IO_str_overflow/_IO_str_finish 当
+   malloc/free（IO 内部缓冲分配释放），走 fastbin 越界写指针
+⑤ 任意 where/what 指针写: 伪造 link_map（放 _dl_load_lock 附近可写区）+
+   l_info[DT_JMPREL] 指向可写区伪造 Elf64_Rela（r_offset 定 where）+
+   伪造 symtab（st_value 定 what）→ 调 _dl_fixup = rel_write(where, what)
+⑥ symtab 指针注入: _IO_switch_to_backup_area 交换 _IO_read_base/_IO_save_base
+   → _IO_free_backup_area 释放 stale 引用 = 合法 double free; 改 chunk size
+   入 tcache; __open_memstream 取回该 chunk 并自动在 buffer+0x98 写入
+   buffer+0x110 的指针 → 一次拿到"内容含有效指针的 Elf64_Dyn"
+⑦ 终局: `mov rdx,[rdi+8]; mov [rsp],rax; call [rdx+0x20]` 型 gadget +
+   setcontext+61（rdi 指可控内存即迁栈 ROP，见落点 A setcontext 变体）
+```
+**版本信息**: 现代带 versioning 的 ELF 需先 `l_info[DT_VER]` 置空（用 local 符号绕过版本检查窗口期，边置零边避免解引用）。低 12 位常数性是一切 LSB 手法的前提——若目标开了任何破坏页对齐的加载方式则全族失效。
+
 ### 落点速查表（含触发条件）
 | 落点 | 版本 | 需知 | 触发 |
 |---|---|---|---|
@@ -243,6 +301,7 @@ fake += p64(libc.sym['_IO_wfile_jumps'] + 0x18 - 0x58)  # +0xd8 vtable 偏移使
 | **TLS_dtor_list** | ≥2.34 | TLS 地址+pointer guard | 线程退出/exit()——线程局部析构链 |
 | .fini_array | No/Partial RELRO | 二进制基址 | 正常退出 |
 | _dl_fini link_map 链 | 全版本 | ld.so 基址 | exit()（多字段伪造）|
+| **rtld l_info 重定向（leakless）** | 全版本 | **无需任何泄漏**——仅需 mmap 相对字节写 | exit()（DT_FINI 族）/ PLT 首次解析（_dl_fixup 族）|
 | 栈返回地址 | 总是 | 栈地址（environ 泄漏）| 函数返回 |
 
 ## §5 无 free 场景

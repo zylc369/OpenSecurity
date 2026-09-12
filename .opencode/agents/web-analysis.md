@@ -155,6 +155,7 @@ permission:
 | `js-obfuscation-patterns.md` | 分析 JS 逆向题/混淆代码时。不可见 Unicode 字符、tagged template 隐式调用、Function.call 空函数、原型链劫持、debug condition 副作用 |
 | `browser-debugging.md` | 需要浏览器自动化/远程调试时。CDP 核心 API、Playwright + CDP 模式、debug() API、常见陷阱 |
 | `client-side-attacks.md` | 有 admin bot + flag 在 bot 端。bfcache 污染、CSS trigram exfil、xsleak、iframe reparenting、connection pool |
+| `css-attacks.md` | 能注 CSS 不能注 JS 时（webmail 渲染/CSP 留 style-src）。CSS hotwiring、label 劫持、select 键盘记录、净化器绕过、CSSOM mutation、CSP 全封外带 |
 | `race-conditions.md` | 竞态条件（单包攻击/HTTP/2 并发）；原型链污染（sources/sinks/gadgets/RCE 链） |
 | `sqli-advanced.md` | SQL 注入实战（WAF 绕过全族/无列名/堆叠预处理/DNS OOB/写 shell/sqlmap 进阶） |
 | `xss-advanced.md` | XSS 进阶（DOM Clobbering/Shadow DOM/Unicode 折叠/Referer 泄漏/XS-Leak 组合） |
@@ -165,7 +166,7 @@ permission:
 | `file-upload.md` | 文件上传（upload-labs 全关绕过/解析漏洞/二次渲染/htaccess·user.ini/WAF 绕过） |
 | `deserialization.md` | 反序列化（Java/PHP/Python/.NET/Ruby/Node 全栈 POP 链/Phar/逃逸技巧族） |
 | `ssrf-advanced.md` | SSRF 进阶（IP 变体表/gopher 协议/云元数据/302 升级/Dict·FTP·LDAP 利用） |
-| `request-smuggling.md` | HTTP 请求走私（CL·TE 组合/h2c/HTTP2 伪头/降级翻译/缓存 desync） |
+| `request-smuggling.md` | HTTP 请求走私（CL·TE 组合/h2c/HTTP2 伪头/降级翻译/缓存 desync/头注入驱动 desync 与 RQP/dangling-byte/浏览器驱动蠕虫） |
 | `host-header-attacks.md` | Host 头攻击（密码重置投毒/缓存投毒/路由绕过/Web 缓存欺骗） |
 | `prototype-pollution.md` | 原型链污染（gadget 总表 EJS·Handlebars·Lodash/client side/沙箱逃逸） |
 | `jwt-attacks.md` | JWT 攻击（算法混淆/jwk·jku·kid 注入/None/爆破/Flask session） |

@@ -243,6 +243,9 @@ $PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py delete -s <session_id>
 | `carrier-construction-guide.md` | 构造注入载体时。高质量载体构造方法、质量标准、按类型策略、验证方法 |
 | `payload-effectiveness-evaluation.md` | 评估注入效果时。真实性评估维度、检查方法、评分卡、常见失败模式 |
 | `agent-attacks.md` 🆕 | 目标为 AI Agent（MCP/Tool/RAG/Computer Use）或需自动化越狱工具（PAIR/TAP/Crescendo/GCG）时 |
+| `mcp-attack-surface.md` 🆕 | 目标连接了 MCP server 时。注入位置清单、GhostSplice 跨通道拆分、缓存投毒链、host 脆弱性矩阵、检测信号 |
+| `system-prompt-extraction.md` 🆕 | 需要提取目标 system prompt 时。三族攻击分类（直接/间接/侧信道）、多轮升级序列、WAF/egress DLP/双模型审查绕过 |
+| `multimodal-jailbreak.md` 🆕 | 目标为视觉模型（VLM/MLLM）时。排版注入、子图切分、视觉推理链、元自适应攻击、实测决策事实 |
 
 ### 通用知识库（$SHARED_DIR/knowledge-base/）
 

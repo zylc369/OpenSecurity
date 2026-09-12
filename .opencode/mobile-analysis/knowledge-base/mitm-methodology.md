@@ -293,6 +293,9 @@ port 的大端序存储：
 | iptables DNAT 导致 app crash | 模拟器上 OUTPUT 链 DNAT 影响 perfetto_hprof 等系统组件，导致 SIGSEGV | 不要在模拟器上用 iptables DNAT；改用 Frida getaddrinfo+connect hook |
 | DNS redirect 后代理收不到连接 | getaddrinfo 返回 IPv6 (::1)，app 使用 IPv6 连接但 adb reverse 只处理 IPv4 | connect hook 必须处理 AF_INET6，将 IPv6 转为 IPv4 127.0.0.1（见 §3.4 模板） |
 | Memory.allocUtf8String 后 GC 回收 | 在 getaddrinfo hook 的 onEnter 中局部分配字符串，函数返回后可能被 GC | 预分配到全局变量：`var redirectStr = Memory.allocUtf8String("127.0.0.1")` |
+| Flutter bypass 已生效但 app 显示 "no internet"（非 SSL 错误） | app 在 Flutter 初始化前经 Java/WebView 层做连接检查，走 Android 证书链（API 24+ 不信任用户 CA）先被拒 | Flutter + Java 双层 hook 同时加载，详见 `$AGENT_DIR/knowledge-base/flutter-ssl-bypass.md` §8 |
+| iptables 重定向后 Burp 报 "Client request violates HTTP protocol" | app 发 raw TCP（无 CONNECT 握手），Burp 默认按显式代理处理 | Burp listener 开启 invisible proxying 模式 |
+| WebView 内页面不加载，其余流量正常 | flutter_inappwebview 插件注册 WebViewClient 子类，hook 父类无效 | 按完整类名单独 hook InAppWebViewClient，详见 `$AGENT_DIR/knowledge-base/flutter-ssl-bypass.md` §8 |
 
 ---
 

@@ -136,3 +136,19 @@ Interceptor.attach(targetAddr, {
 - [ ] 搜索 `Module.enumerateExports` → 替换为 `Process.getModuleByName(mod).enumerateExports()`
 - [ ] Python SDK 中使用了 `Java`/`ObjC`/`Swift`？→ 必须走 `frida.Compiler` 编译
 - [ ] Memory/Process/Interceptor/NativeFunction → 无需修改
+
+---
+
+## 17.13+ 增量更新速查（不影响 16→17 迁移，按需使用）
+
+| 版本 | 变化 | 分析场景 |
+|------|------|---------|
+| 17.14.0 | `Script.interrupt()` / `Script.terminate()` | hook 脚本死循环/失控时：interrupt 中止当前 JS 但脚本保持加载可继续；terminate 中止并卸载。REPL Ctrl-C 恢复、自动化脚本看门狗 |
+| 17.15.0 | `Process.getThreadById()` / `findThreadById()` / `getFunctionRange()` | 按线程 ID 精确取线程对象（免全量枚举）；getFunctionRange 在 stripped 二进制上取函数边界（无需符号） |
+| 17.15.2 | Android 10 spawn 修复 | Android 10 上 spawn 报 "remote connection error"（XOM 使 libstagefright execute-only）→ 升级即解决，无需绕 |
+| 17.15.5 | Android USAP 容忍；iOS 17.6+ 重启 CodeSegment | frida-server 偶发 attach 失败先查版本是否 ≥17.15.5 |
+| 17.16.0 | Python `frida.aio`（asyncio 绑定）；Interceptor 在模块卸载时自动丢弃 hook；spawn-gating 带 watchdog（挂起超时自动恢复，防系统级进程创建卡死）；arm64e attach 崩溃修复 | 自动化脚本可用 asyncio；so 动态卸载场景 hook 不再残留悬垂指针 |
+| 17.17.0+ | Barebone 后端（agent 以 Linux `.ko` / XNU kext 形态进内核），Android 上已启用 barebone backend 构建 | 内核级分析（Rootkit/内核模块逆向）时可选；常规 app 分析用不到 |
+| 17.18.0 | `Memory.scanSync` pattern 支持**首尾通配符**；`Frida.LanguageServer` API | 扫描 "?? 53 ?? 57" 类边缘通配 pattern 不再报错 |
+
+**升级建议**：移动端日常分析保持 ≥17.16（spawn 兼容性 + arm64e 修复集中于此区间）。

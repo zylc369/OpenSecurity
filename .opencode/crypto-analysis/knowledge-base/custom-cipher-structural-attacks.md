@@ -1,6 +1,7 @@
 # 自制分组密码结构攻击
 
-> 触发场景：样本提供自制分组密码的**完整源码**（非标准 AES/DES/ChaCha）+ **大批量结构化 (明文, 密文) 记录** + 一个待开启的**认证加密盒**。路线：组件弱点分解 → 积分攻击恢复密钥 → 开盒。
+> 触发场景（两类）：① 样本提供自制分组密码的**完整源码**（非标准 AES/DES/ChaCha）+ **大批量结构化 (明文, 密文) 记录** + 一个待开启的**认证加密盒**。路线：组件弱点分解 → 积分攻击恢复密钥 → 开盒（§1-§5）。
+> ② 自制**公钥**方案用多项式根乘法等可逆代数运算"加密"，公钥完整披露 → 代数坍缩直接除法恢复（§6）。
 >
 > 与 `rsa-attacks.md` 等标准方案攻击库互补：那些针对标准算法的参数误用，本文件针对攻击者可读到全部实现的自制算法。
 
@@ -147,3 +148,41 @@ stream = HMAC(ek, nonce + counter_le64) 循环拼接 # 与 ct 等长后 XOR
 ```
 
 密钥恢复后 `open_sealed(sealed, KEY)` 返回明文。明文形态预判：长度 32 字节且 hex 表示为 64 字符的目标数据（校验和自验证型目标的标准形态：64 hex + `sha256(64hex)[:16]` 拼接）。
+
+## 6. 自制公钥方案代数坍缩（多项式根乘法）
+
+**触发**：题目给"公钥加密"源码，加密 = 把明文字节作为根乘进多项式（`cipher_poly = pub * ∏(x - m_i)`），公钥多项式完整披露。识别细节：monic 多项式打印时常省略首项系数 1（"dropped coeff[-1]"型代码），解析时补回；Python 引用语义下 `public = public * root_poly` 只重绑定局部名——每个 chunk 实际都用同一个完整公开的公钥加密，而非累积。
+
+**为什么必破**：多项式乘法对除法封闭——已知公钥 `pub` 与密文多项式时，`quotient = cipher_poly / pub_poly` 是**精确整除**（monic ÷ monic 无分数运算），商的根就是明文字节值。私钥（生成 pub 的私有根集）与攻击无关。
+
+**流程**（每 chunk）：
+
+1. 解析输出文件：公钥 + 各 chunk 密文多项式（各补回隐含首系数 1）
+2. 多项式长除法（整数系数精确除，`numpy.polydiv` 或手写）
+3. 商（degree = 每 chunk 明文字节数）求根：根 ∈ [0, 255]（ASCII 字节）→ 试除 + synthetic deflation——Horner 求值为 0 即根、降次续求，毫秒级，无需四次方程求根公式：
+
+```python
+def int_roots(coeffs, lo=0, hi=255):
+    """求整数多项式在 [lo,hi] 内的全部根（synthetic deflation）."""
+    coeffs = list(coeffs); roots = []
+    while len(coeffs) > 1:
+        for r in range(lo, hi + 1):
+            val = 0
+            for c in coeffs: val = val * r + c        # Horner 求值
+            if val == 0:
+                roots.append(r)
+                new = [coeffs[0]]                      # 综合除法降次
+                for c in coeffs[1:-1]:
+                    new.append(new[-1] * r + c)
+                coeffs = new
+                break
+        else:
+            break
+    return roots
+```
+
+4. 实现附带的 order/置换字段（如 2-bit 打包的"排序后第 i 小根 ↔ 原始位置"映射）按 scatter 还原字节顺序；拼接全部 chunk 去 padding
+
+**拿题先查三点**：加密是否无随机性（同明文恒同密文）；公钥是否可原样重建；明文是否直接成为代数结构的元素（根/系数/指数）。三者齐 → 代数坍缩路线，无需攻私钥。
+
+**同类变体**：明文做指数（`c = g^m`，小 m 走 BSGS/离散对数）、明文做系数（低次多项式直接求根）、明文异或进种子。共性：**"加密 = 明文参与的可逆代数运算"，结构已知即可代数消去**。

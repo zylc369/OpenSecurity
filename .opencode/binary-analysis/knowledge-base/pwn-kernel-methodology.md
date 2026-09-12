@@ -242,6 +242,7 @@ madvise(page, PAGE_SIZE, MADV_DONTNEED);
 | **setxattr** | 任意大小+内容 kmalloc 临时缓冲（copy 后 free）; 配 userfaultfd 暂停在 alloc-free 之间做稳定竞态 |
 | **sk_buff** | sendto 喷 payload 全控、recvfrom 读回验证、网络时序配竞态 |
 | **msg_msg** | 大小灵活+MSG_COPY 无破坏读+**驻留不 free**（setxattr 立即 free 需竞态才驻留）|
+| **io_uring personality** | 每次注册分配一份 cred 拷贝（cred_jar）——精准 cred 喷射原语，池上限 65535（详见 §7f）|
 
 **对象大小表**（x86-64，版本相关）: seq_operations/shm_file_data 0x20→kmalloc-32; msg_msg 0x30+数据→64~4096; subprocess_info 0x60→96; timerfd_ctx 0x68→128; sk_buff head ~0xE0→专用; **cred 0xA8→cred_jar 专用（须 cross-cache）**; file 0x100→filp 专用; tty_struct 0x2B8/0x2e0→1024; pipe_buffer×16 0x280→1024; poll_list 0x10+变长。
 
@@ -281,6 +282,18 @@ ARM fcntl64 路径 set_fs(KERNEL_DS) 未恢复 USER_DS → 该线程 copy_from/t
 **eBPF verifier 漏洞完整利用链**: ④ 泄漏 kernel .text——bpf_map 元数据 vtable 指针（KASLR defeat）⑤ 任意读——corrupted btf 指针 + bpf_obj_get_info_by_fd ⑥ 劫持——init_pid_ns radix tree 搜当前 task_struct、map_get_next_key vtable 改 work_for_cpu_fn 执行 commit_creds(&init_cred); ALU sanitizer（Spectre 缓解）靠管理指针 offset 范围过 alu_limit。
 
 **内核审计三细节**: ① ioctl 可改模块全局 MaxBuffer（write 长度检查用它）→ 先抬阈值再溢出 ② tty_struct 劫持: magic(+0x00) 须 0x5401（paranoia 检查）、driver(+0x10) 须有效堆指针、ops(+0x18) 泄漏/劫持双用 ③ kmalloc 头体不匹配（kmalloc(len) 但 memcpy 头 0x40+体 len）→ 溢出覆盖邻 struct file 的 f_op → 假 vtable 经 fd 操作触发（老内核 kmalloc-256; 新内核 filp 专用须 cross-cache §6）。
+
+## §7f 2026 SLUB 新机制：CPU sheaf/barn、INIT_ON_ALLOC 双刃剑与 personality 喷射
+
+**CPU sheaf/barn 层**（新内核在 SLUB 之上新增的 per-CPU 快缓存）: 对象 free 优先落入本 CPU sheaf（容量小，典型 12 对象）而非旧 freelist——**cross-cache 的"释放回 buddy"步骤会被 sheaf 截胡**。回落旧层: 灌满 sheaf 后继续 free，触发 sheaf 向 SLUB 层 flush/migrate（写 exp 先探测 sheaf 容量 SHEAF_CAP，按"灌满→溢出"节奏安排释放序列; 单靠传统"绑核分配+换核释放"的旧 cross-cache 节奏未必够，需实测验证 flush 阈值）。
+
+**PCP（Per-CPU Page Set）**: 页从 SLUB 回收到 buddy 之间还有 per-CPU 页缓存——目标页可能滞留 PCP 未到 buddy，喷射端回收不到。对策: 大量高阶分配/释放排空 PCP，或加大目标对象的页级喷射量。
+
+**INIT_ON_ALLOC=1 双刃剑（"your fix is my exploit"）**: 清零机制阻止旧数据泄漏/复用，但"分配即清零"本身是**免费的把对象覆写为 0 的原语**——UAF 页回收后重分配为 cred 等敏感对象即全字段清零: uid/gid/euid 全 0 = 直接 root，无需任何写原语（与 §7d-3 ② binfmt loader 清零 uid 族同型，本条是分配器层的通用化）。
+- 后续坑: setresuid 等 syscall 检查 cred->user_ns（已被清零为 NULL → 失败/崩溃）→ 改走只检查 **cred->fsuid** 的路径: **fchmodat2()**（syscall 号 452，对 suid 文件 chmod 落地提权）。
+- **io_uring personality 喷射**: `io_uring_register(fd, IORING_REGISTER_PERSONALITY, 0, 0)` 每次注册经 prepare_creds() 创建一份当前 cred 拷贝（从 cred_jar 专用缓存分配，存入 ring ctx 的 personality 表）——比 fork 进程轻量的精准 cred 喷射原语，personality id 池上限 65535，配合页级回收让清零目标精准落位。
+
+**兼容性速查**: 老内核（无 sheaf）直接走 §6 cross-cache; 新内核 = sheaf 耗干 + PCP 排空 + §6 旧流程; INIT_ON_ALLOC 开启时优先评估"清零即覆写"路线（省去泄漏与写原语）。
 
 ## §8 关联文件
 

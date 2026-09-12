@@ -215,12 +215,88 @@ console.log("[+] Root bypass loaded (Java + Native layers)");
 
 ### iOS 越狱检测
 
-| 检测方法 | 分析位置 |
-|---------|---------|
-| 检查 Cydia | `FileManager.fileExists(atPath: "/Applications/Cydia.app")` |
-| 检查 SSH | 尝试连接 localhost:22 |
-| 检查 /bin/bash | `FileManager.fileExists(atPath: "/bin/bash")` |
-| 检查 fork | 检测能否 fork 子进程（沙箱限制） |
+检测分为三层：ObjC API 层（fileExists / canOpenURL）、libc 层（stat/access/fopen/fork/getppid）、dyld 层（加载镜像名扫描）。逐层覆盖才能稳定绕过。
+
+| 检测方法 | 分析位置 | 绕过 hook 点 |
+|---------|---------|------------|
+| 路径存在检查 | `FileManager.fileExists(atPath:)` 遍历 Cydia/Sileo/bash 清单 | `-[NSFileManager fileExistsAtPath:]` 返回 NO |
+| URL scheme 可达 | `UIApplication.canOpenURL` 探测 `cydia://`/`sileo://`/`zbra://`/`filza://` | `-[UIApplication canOpenURL:]` 对越狱 scheme 返回 NO |
+| dyld 镜像扫描 | `_dyld_get_image_name` 枚举找 MobileSubstrate/TweakInject | `_dyld_get_image_name` 返回值重写为良性名 |
+| fork 探测 | 非越狱沙箱禁止 fork（返回 -1），越狱后返回有效 PID | `fork` 返回值替换 -1 |
+| getppid 探测 | 正常父进程是 launchd(1)，越狱后可能不同 | `getppid` 返回值替换 1 |
+| libc 直接路径检查 | `stat`/`access`/`fopen` 检查同一路径清单 | `libsystem_kernel.dylib` 各导出 + 同样的路径过滤 |
+| /etc/passwd 异常 | 非 JB 设备该文件为默认内容 | 低频，按需 hook fopen |
+
+**Swift private 方法陷阱**：检测方法声明为 `private`（无 `@objc` thunk）时，ObjC selector 不可达，无法按类名 hook——改为 hook 它们调用的 OS 函数（上表第三列）。selector 被剥离/混淆的真实 app 同样适用此策略。
+
+**组合 drop-in 脚本**（覆盖两大 ObjC 检测 + 三个 libc 信号）：
+
+```javascript
+// frida -U -f com.target.app --no-pause -l ios-jb-bypass.js
+setTimeout(function () {
+    var blockedPaths = ['/Applications/Cydia.app', '/Applications/Sileo.app',
+        '/Applications/Zebra.app', '/Applications/Filza.app',
+        '/private/var/lib/apt/', '/private/var/lib/cydia/',
+        '/usr/bin/ssh', '/usr/libexec/sshd', '/bin/bash',
+        '/etc/apt/', '/var/lib/undecimus/', '/usr/share/jailbreak/'];
+    var blockedSchemes = ['cydia', 'sileo', 'zbra', 'filza', 'undecimus'];
+
+    // 1. NSFileManager.fileExistsAtPath: — 一个 hook 覆盖整个路径清单
+    var NSFM = ObjC.classes.NSFileManager;
+    Interceptor.attach(NSFM['- fileExistsAtPath:'].implementation, {
+        onEnter: function (args) {
+            var p = new ObjC.Object(args[2]).toString();
+            for (var i = 0; i < blockedPaths.length; i++) {
+                if (p.indexOf(blockedPaths[i]) === 0) { this.block = true; break; }
+            }
+        },
+        onLeave: function (retval) { if (this.block) retval.replace(0); }
+    });
+
+    // 2. UIApplication.canOpenURL: — URL scheme 检测
+    var UIApp = ObjC.classes.UIApplication;
+    Interceptor.attach(UIApp['- canOpenURL:'].implementation, {
+        onEnter: function (args) {
+            var u = new ObjC.Object(args[2]).toString();
+            for (var i = 0; i < blockedSchemes.length; i++) {
+                if (u.indexOf(blockedSchemes[i] + '://') === 0) { this.block = true; break; }
+            }
+        },
+        onLeave: function (retval) { if (this.block) retval.replace(0); }
+    });
+
+    // 3. fork/getppid 伪造（libsystem_kernel.dylib）
+    var kernLib = Process.findModuleByName('libsystem_kernel.dylib');
+    if (kernLib) {
+        var fork = kernLib.findExportByName('fork');
+        if (fork) Interceptor.attach(fork, {
+            onLeave: function (retval) { retval.replace(-1); }
+        });
+        var getppid = kernLib.findExportByName('getppid');
+        if (getppid) Interceptor.attach(getppid, {
+            onLeave: function (retval) { retval.replace(1); }
+        });
+    }
+
+    // 4. dyld 镜像名重写 — 检测只见良性库
+    var dyldLib = Process.findModuleByName('libdyld.dylib');
+    if (dyldLib) {
+        var dyld = dyldLib.findExportByName('_dyld_get_image_name');
+        if (dyld) Interceptor.attach(dyld, {
+            onLeave: function (retval) {
+                var name = retval.readCString();
+                if (name && /Substrate|TweakInject|frida|libtweakinject/.test(name)) {
+                    retval.replace(Memory.allocUtf8String('libSystem.B.dylib'));
+                }
+            }
+        });
+    }
+
+    console.log('[*] iOS JB bypass hooks armed');
+}, 500);
+```
+
+**识别"绕不过"的情形**：以上全部生效但 app 仍崩溃/退出 → 大概率是二进制完整性校验（对 `__TEXT` 段算 SHA-256 与硬编码值 memcmp）。此类不依赖文件存在或系统调用，需定位 memcmp 比较点直接 patch（改恒等）或在每个校验窗口前恢复原始字节。
 
 ---
 
@@ -243,7 +319,7 @@ console.log("[+] Root bypass loaded (Java + Native layers)");
 5. 结合 smali 精读 → jadx 不可读的部分
 ```
 
-###OLLVM / 控制流平坦化
+### OLLVM / 控制流平坦化
 
 **识别特征**:
 - 大量 switch/dispatcher 结构
@@ -259,6 +335,29 @@ console.log("[+] Root bypass loaded (Java + Native layers)");
 4. 使用 IDA Pro 的 HexRays 反编译 + 手动修正
 5. 如无法还原 → 使用动态分析（Frida Hook）绕过
 ```
+
+### 字符串混淆（String Encryption）运行时还原
+
+**识别特征**（jadx 反编译输出）：
+- 界面/逻辑字符串字面量消失，取而代之 `SomeDeobfuscator.getString(-548601664941L)` 形态调用
+- 常见混淆库：`com.joom.paranoid`（`Deobfuscator$app$Release.getString(long)`）、DexGuard 字符串加密（同类 long/short 参数模式）
+
+**还原方法**（无需逆向解密算法，直接调用解密器）：
+1. jadx 中收集所有传给 getString 的 long 参数值（grep 调用点）
+2. Frida 批量调用还原：
+
+```javascript
+Java.perform(function() {
+    var f = Java.use("com.joom.paranoid.Deobfuscator$app$Release");
+    // 替换为实际收集到的 long 值列表
+    var longs = [-548601664941, -3140818349, -28910622125, -308083496365, -338148267437];
+    for (var i = 0; i < longs.length; i++) {
+        console.log(longs[i] + " -> " + f.getString(longs[i]));
+    }
+});
+```
+
+**要点**：getString 是纯解密函数（输入 long → 输出明文），静态对照调用点上下文（哪个方法取了这个字符串）即可知道每条明文的用途。
 
 ---
 
@@ -495,7 +594,35 @@ Java native 方法无对应 Java_ 前缀符号 + JNI_OnLoad 存在 = RegisterNat
 2. **DEX 运行时 patch 重建**: native 经 /proc/self/maps+mprotect XOR patch DEX（仅 Dalvik<21）→ 从 .so 提 key+offset 对静态 DEX 同 patch + **重算 checksum/SHA-1** 再反编译
 3. **LocalBroadcastManager 破局**: 本地广播 adb 发不进——onReceive 体克隆内联进 onCreate+输出改 Log.d → apktool b 重打包 + debug keystore 签名 → logcat 看明文
 
+### Native 反检测 so 替换法
+
+**场景**：某个 .so 内的反 Frida/反 root 检测过强（高度混淆 + 字符串加密，静态无法分析、常见 bypass 脚本全部失效，app 启动即崩）。
+
+**思路**：不再绕过检测，直接把该 .so 换成空壳——检测代码根本不运行。
+
+**步骤**：
+1. 确认跑检测的是哪个 so：崩溃回溯中的 `base.apk!libxxx.so (offset ...)` 即检测载体
+2. 写空壳 stub.c：只含 `JNI_OnLoad` 返回 JNI_VERSION + 业务必需的 JNI 导出函数（签名保持，函数体直接 return）
+
+```c
+#include <jni.h>
+JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
+    return JNI_VERSION_1_6;
+}
+// 按 Ghidra 中原 so 的导出表，补齐同签名空实现，例如:
+// JNIEXPORT jstring JNICALL Java_com_xxx_stringFromJNI(JNIEnv *env, jobject t) { return (*env)->NewStringUTF(env, ""); }
+```
+
+3. NDK 按目标架构编译（arm64 示例，clang 在 `$NDK_HOME/toolchains/llvm/prebuilt/<host>/bin/` 下）：
+   `aarch64-linux-android24-clang stub.c -shared -fPIC -o libxxx.so`
+   → 替换 APK 中对应 `lib/<arch>/libxxx.so`
+4. 重签安装：`java -jar uber-apk-signer-1.3.0.jar -a app.apk` → `adb uninstall <pkg>` → `adb install app-aligned.apk`
+
+**代价**：被替换 so 中的业务逻辑（如 flag 校验、解密）一并失效——适用于"检测 so 与业务 so 分离"的 app；若同一 so 既检测又藏 flag，替换后需从另一个 so 或纯 Java 层继续分析。
+
 ### 动态三式
+
+> Firebase 相关的完整攻击面（RTDB/Firestore/App Check/签名伪造）见 `$AGENT_DIR/knowledge-base/mobile-firebase-backend.md`。
 
 - **Firebase Cloud Functions 直调**: 认证后 Frida 构造 payload（uid+值+时间戳）直调 getHttpsCallable("validateX")——AppCheck 信任客户端构造
 - **Frida 调类方法免抓包**: 秘密在方法里直接 Java.use 调，不用绕证书锁定
@@ -512,5 +639,5 @@ Java native 方法无对应 Java_ 前缀符号 + JNI_OnLoad 存在 = RegisterNat
 - **iOS 脱壳**: LC_ENCRYPTION_INFO cryptid=1=FairPlay → frida-ios-dump -H <IP> -p 22 / Clutch / bfdecrypt
 - **fat 二进制**: lipo -info / -thin arm64 -output
 - **注入**: DYLD_INSERT_LIBRARIES（hardened runtime/SIP 屏蔽系统件）; DYLD_PRINT_LIBRARIES 看加载
-- **越狱检测绕过**: Frida hook access——路径命中 Cydia//bin/sh//etc/apt//private/var/lib/apt 清单时 retval.replace(-1)
+- **越狱检测绕过**: 三向量完整 hook 集（NSFileManager/canOpenURL/dyld/fork/getppid）见上方「iOS 越狱检测」小节；libc access 层路径命中 Cydia//bin/sh//etc/apt 清单时 retval.replace(-1)
 - iOS 固件/平台其他主题见 binary-analysis platform-reversing.md
