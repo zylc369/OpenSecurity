@@ -86,6 +86,25 @@ sink：`pickle.loads/load`、`yaml.load`（无 SafeLoader）、`jsonpickle.decod
 RestrictedUnpickler 审计：白名单含 `eval/exec/__import__` 即仍可利用。
 **Celery 队列注入**（emerging-ctf CeleRace 链）: SSRF 打到内网 Redis 时可直接向 Celery broker 队列 LPUSH 恶意任务消息——Celery worker 取任务即反序列化执行（配 pickle 任务序列化时=RCE）; 链式利用: session 路径穿越拿权限→Redis SSRF→队列注入→worker 命令执行。
 
+### 受限 Unpickler 的指令级逃逸（禁 REDUCE / 禁字节 / 白名单模块三重防御下）
+
+适用: 服务端对 payload 做字节黑名单 + `pickletools.dis` 输出检查指令名 + `find_class` 白名单（仅 collections/sessionstore 等），且反序列化异常被 except 吞掉、stdout 被捕获回显。
+
+| 防御 | 逃逸原语 |
+|------|---------|
+| dis 输出禁 `REDUCE` | 全部改用 **OBJ 指令（opcode `o`）**。栈序: `MARK, callable（紧贴 MARK 之上第一个）, args..., o` → `callable(*args)`。误序症状: `'str' object is not callable`（args 位当 callable）/ `no MARK exists on stack`（多余 TUPLE 吃掉 MARK） |
+| find_class 白名单 | `find_class("collections", "__builtins__")`: 非主模块的 `__builtins__` 属性即 builtins 模块的 `__dict__`（普通 dict）。配 `collections._itemgetter`（= operator.itemgetter 类）下标取出 `bytes/list/open/print` 等一切内建 |
+| 字节级禁令（如禁 `.`=0x2E、`flag`、`os`） | 被禁字面量改 **INT 指令**构造: 值用十进制 ASCII 表示（`I46`+LF 字节表 46=0x2E，无裸 0x2E 字节），`MARK + I<num>+LF... + LIST` 成 int 列表，`bytes(int_list)` 服务端拼出完整路径; SHORT_BINUNICODE 的字符串必须逐个过禁词表 |
+| 禁 STOP（`.` 是 STOP opcode） | **截断流**: 不写 STOP，指令顺序执行完后流截断异常被服务端 except 吞掉。与"STOP 剥离链"互补（彼为单流多 reduce，此为免 STOP 存活） |
+
+要点:
+- `itemgetter`=**下标**（`obj[k]`）、`attrgetter`=**属性**（`obj.k`），不通用; `itemgetter("name")` 构造的 getter 必须再调用一次 `getter(bdict)` 才拿到目标对象（漏调症状: `list indices must be integers or slices, not str`）
+- Python 3.12 collections 可用引用: `_itemgetter`/`_sys`/`_collections_abc` 存在; `_operator`/`_heapq`/`_types` 不存在（operator 模块可经 `sys.modules` 下标取，但需先拿到 modules——`__builtins__` dict 路线通常更短）
+- 读文件免属性访问: `list(open(path))` 直接取行列表，绕开拿不到 `methodcaller("read")` 的问题
+- 生成器模式: `S(x)`=SHORT_BINUNICODE、`SG(m,n,memo)`=STACK_GLOBAL+BINPUT、调用=`MARK + callable + args + OBJ + BINPUT`、int 列表=`MARK + 多个 I<n>\n + LIST`，全链 memo 化复用中间对象
+
+调试法（目标服务吞异常、输出为空时）: 本地起同款环境（docker compose 附件）+ 不吞异常的复现脚本——`RestrictedUnpickler` 加 `find_class` 打印探针、traceback 写 stderr，定位断链后再打远程。
+
 ## 5. .NET
 
 **BinaryFormatter**：`ysoserial.exe -f BinaryFormatter -g TypeConfuseDelegate -c "whoami" -o base64`。

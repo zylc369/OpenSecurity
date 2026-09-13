@@ -102,9 +102,9 @@ permission:
 
 需要登录任何 Web 站点/平台才能继续时：
 
-- **浏览器自动化优先**（default: headless Chrome + CDP；Turnstile 出现 10s 未过 → headed + iframe 点击；交互卡死/缺凭证 → headed + 请用户手动完成后接管）。**完整决策树与操作流程见 `$AGENT_DIR/knowledge-base/platform-auth-strategy.md`**
-- **API 逆向只为登录后的程序化操作服务**（表单提交/批量查询），禁止为"完成登录"逆向前端超过 5 轮
-- **硬信号即升级**: sitekey 为生产密钥（非 `1x00000000000000000000AA` 测试族）/ `CAPTCHA failed validation` / 凭证猜测连败 3 次 → 停止重试，请用户协助
+- **执行浏览器操作**:
+  - 分流规则: 交互操作（登录/填表/浏览）→ **必须 `python $AGENT_DIR/scripts/browser_cdp.py start` 启动独立可 CDP 接管的 Chrome 再接管**（用户全程可见）; 纯后台任务（批量截图/渲染/探测）才用 headless launch。禁止 launch 有界面浏览器（脚本子进程随会话中止连坐关闭）、禁止 `open -na`/`nohup &` 临场启动
+  - **强制的前置阅读** `$AGENT_DIR/knowledge-base/browser-automation.md`: 启动参数与退出码语义（§1.2）、登录决策树/人机验证升级路径/API 逆向 5 轮上限（§2）、硬信号清单（§4）、提交后结果确认方法（§8）
 - **凭证类信息（email/密码/token/实例 URL）只有用户知道 → 直接问**，禁止猜超过 3 次
 - 登录是手段不是目的: 技术绕过成本 > 询问成本时必须升级求助；被指出方向问题后继续原路线 = 二次犯错
 
@@ -165,8 +165,7 @@ permission:
 | `attack-orchestration.md` | 需要多步骤/多窗口攻击编排时。控制器页面模式、postMessage 攻击、popup 存活机制、SSO/OAuth 回调安全审计 |
 | `bot-patterns.md` | 分析 Bot server.js 时。Bot 代码通用结构、单页/双页模式快速分类、安全决策分析（URL 验证、httpOnly、Docker Chromium 特性）、攻击链决策树 |
 | `js-obfuscation-patterns.md` | 分析 JS 逆向题/混淆代码时。不可见 Unicode 字符、tagged template 隐式调用、Function.call 空函数、原型链劫持、debug condition 副作用 |
-| `browser-debugging.md` | 需要浏览器自动化/远程调试时。CDP 核心 API、Playwright + CDP 模式、debug() API、常见陷阱 |
-| `platform-auth-strategy.md` | 需要登录任何 Web 站点/平台才能继续时。登录决策树（Playwright 自动登录优先）、执行模式选型、人机验证两类机制判别、硬信号清单 |
+| `browser-automation.md` | 需要打开网页/登录/浏览器自动化/远程调试/操作结果确认时。启动铁律与 browser_cdp.py 用法、三级探测链、登录决策树、人机验证判别、硬信号、CDP 核心 API、debug() API、常见陷阱、操作后确认方法论（持久信号优先） |
 | `client-side-attacks.md` | 有 admin bot + flag 在 bot 端。bfcache 污染、CSS trigram exfil、xsleak、iframe reparenting、connection pool |
 | `css-attacks.md` | 能注 CSS 不能注 JS 时（webmail 渲染/CSP 留 style-src）。CSS hotwiring、label 劫持、select 键盘记录、净化器绕过、CSSOM mutation、CSP 全封外带 |
 | `race-conditions.md` | 竞态条件（单包攻击/HTTP/2 并发）；原型链污染（sources/sinks/gadgets/RCE 链） |

