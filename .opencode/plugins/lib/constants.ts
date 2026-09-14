@@ -188,4 +188,7 @@ export const CONTROL_STARTUP_TIMEOUT_MS = 60_000;
 export const CONTROL_SCAN_TIMEOUT_MS = 90_000;
 
 /** IPC 就绪等待超时（毫秒）。控制台 spawn 后 IPC 通道可 connect 的时间 */
-export const CONTROL_IPC_READY_WAIT_MS = 8_000;
+export const CONTROL_IPC_READY_WAIT_MS = 45_000;
+// 2026/9/15 重建测试实测：全新 venv 冷启动（模型/graphiti 初始化）/health 503
+// 持续 ~23s——旧值 8s 会在 503 期超时误判"启动失败"（一次性 resolve，
+// 之后即使 200 也被 chat.message 永久拦截直到重启 opencode）。45s = 23s + 余量。

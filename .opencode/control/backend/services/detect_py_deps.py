@@ -68,6 +68,10 @@ PYTHON_PACKAGES: list[PyPkgField] = [
                description="数值计算库，embed 接口返回值"),
     PyPkgField(name="httpx", pip_name="httpx", agents=["all"],
                description="HTTP 客户端库，MCP→控制台通信"),
+    PyPkgField(name="anthropic", pip_name="anthropic", agents=["all"],
+               description="控制台 events 提取 LLM 客户端（llm_client 顶层 import，"
+                           "DeepSeek anthropic 兼容端点；曾靠旧依赖树巧合带入，"
+                           "venv 重建后缺失导致 events 提取崩——2026/9/15 重建测试发现）"),
     PyPkgField(name="huggingface_hub", pip_name="huggingface_hub", agents=["all"],
                description="模型缓存扫描与下载（控制台模型资产页）"),
     PyPkgField(name="mcp", pip_name="mcp", agents=["all"], version_spec="<2",

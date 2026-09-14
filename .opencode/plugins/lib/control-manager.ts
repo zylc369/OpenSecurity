@@ -52,11 +52,11 @@ function findVenvPython(): string | null {
   return null;
 }
 /** 检测控制台是否健康（IPC 请求 /health，仅 200 算健康）。
- *  2026/9/14 修正：此前 503（加载中）也算健康——导致 waitForIpcReady 在
- *  应用初始化未完成时就放行，startControl 返回 true 但 /api/config 等
- *  业务接口还答不了（退化成 fail-open 变体：消息照跑配置全空）。
- *  初始化期 503 由 waitForIpcReady 的轮询窗口（CONTROL_IPC_READY_WAIT_MS）
- *  如实等待到 200，超时则明确启动失败。 */
+ *  语义：运行期「服务完全可用」判定（ensureControlReady 的复核用）。
+ *  2026/9/14 修正：此前 503（加载中）也算健康——导致运行期复核放行
+ *  初始化卡死的实例（/api/config 答不了，退化成配置全空的 fail-open）。
+ *  初始化期的 503 由 waitForIpcReady 的「通道就绪」语义（200/503）覆盖，
+ *  两个函数语义分工见 waitForIpcReady 注释。 */
 export async function isControlHealthy(): Promise<boolean> {
   try {
     const resp = await controlFetch("/health", { timeoutMs: 3000 });
@@ -229,14 +229,26 @@ async function doStartControl(): Promise<boolean> {
 
 /**
  * 等待 IPC 通道就绪。
- * - 超时窗口内 /health 可达（200/503）→ 返回 true
+ * - 超时窗口内 /health 可答（200 或 503）→ 返回 true
  * - 超时 → 返回 false
+ *
+ * 2026/9/15 修正：此处语义是「IPC 通道就绪」（socket 通了），503（应用
+ * 初始化中）也算通道就绪——不能复用 isControlHealthy（仅 200 的运行期
+ * 严格语义）。实测全新 venv 冷启动 503 期 ~23s（> 旧 8s 窗口），若此处
+ * 只认 200 会在初始化期超时误判启动失败。
+ * 「服务完全可用」的严格判定由 ensureControlReady 的运行期复核负责
+ * （消息入口逐条检查，控制台完成初始化后自然放行）。
  */
 async function waitForIpcReady(timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (await isControlHealthy()) {
-      return true;
+    try {
+      const resp = await controlFetch("/health", { timeoutMs: 3000 });
+      if (resp.ok || resp.status === 503) {
+        return true;
+      }
+    } catch {
+      // connect 失败（进程未起）→ 继续轮询
     }
     await new Promise((r) => setTimeout(r, 500));
   }
