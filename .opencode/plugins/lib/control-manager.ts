@@ -20,11 +20,13 @@
  *   • 三阶段 waitFor（在 security-analysis.ts 的 chat.message 内调度）
  */
 import { spawn } from "child_process";
-import { existsSync } from "fs";
+import { closeSync, existsSync, openSync } from "fs";
 import {
   CONTROL_SCRIPT,
   CONTROL_STARTUP_TIMEOUT_MS,
   CONTROL_IPC_READY_WAIT_MS,
+  CONTROL_STDERR_LOG,
+  CONTROL_STDOUT_LOG,
   DATA_DIR,
   OPENCODE_ROOT,
   VENV_DIR,
@@ -49,14 +51,22 @@ function findVenvPython(): string | null {
   cachedVenvPython = null;
   return null;
 }
-
-/** 检测控制台是否健康（IPC 请求 /health，通 = 活）。 */
+/** 检测控制台是否健康（IPC 请求 /health，仅 200 算健康）。
+ *  2026/9/14 修正：此前 503（加载中）也算健康——导致 waitForIpcReady 在
+ *  应用初始化未完成时就放行，startControl 返回 true 但 /api/config 等
+ *  业务接口还答不了（退化成 fail-open 变体：消息照跑配置全空）。
+ *  初始化期 503 由 waitForIpcReady 的轮询窗口（CONTROL_IPC_READY_WAIT_MS）
+ *  如实等待到 200，超时则明确启动失败。 */
 export async function isControlHealthy(): Promise<boolean> {
   try {
     const resp = await controlFetch("/health", { timeoutMs: 3000 });
-    return resp.ok || resp.status === 503; // 503 是加载中，也算健康
+    if (!resp.ok) {
+      debugLog(`isControlHealthy 失败: /health HTTP ${resp.status}`);
+      return false;
+    }
+    return true;
   } catch {
-    return false;
+    return false; // 网络层失败日志由 controlFetch 内部记录
   }
 }
 
@@ -143,9 +153,17 @@ async function doStartControl(): Promise<boolean> {
   }
 
   // 3. spawn 控制台（detached:true + unref，让控制台脱离 opencode 生命周期）
+  //    stdio 落盘：stdout/stderr 追加写 logs/control-stdout.log / control-stderr.log。
+  //    exit 监听记录 (code, signal)——SIGKILL=外部强杀 / SIGTERM,SIGHUP=外部终止 /
+  //    code=1+stderr traceback=Python crash / code=0+control.log"心跳表空"=正常自杀。
+  //    unref 不影响 exit 事件派发（unref 只取消事件循环保活）。
+  let stdoutFd: number | null = null;
+  let stderrFd: number | null = null;
   try {
+    stdoutFd = openSync(CONTROL_STDOUT_LOG, "a");
+    stderrFd = openSync(CONTROL_STDERR_LOG, "a");
     const proc = spawn(python, [CONTROL_SCRIPT], {
-      stdio: ["ignore", "ignore", "ignore"],
+      stdio: ["ignore", stdoutFd, stderrFd],
       detached: true, // 关键：脱离父进程
       env: {
         ...process.env,
@@ -156,8 +174,41 @@ async function doStartControl(): Promise<boolean> {
       },
     });
     proc.unref(); // 让 opencode 事件循环不等待控制台
-    debugLog(`startControl: spawn pid=${proc.pid}`);
+    const pid = proc.pid;
+    // 数值时间戳（无时区歧义，仅用于差值计算；不出现在日志原文）
+    const bootAtMs = Date.now();
+    debugLog(
+      `startControl: spawn pid=${pid}（stderr→${CONTROL_STDERR_LOG}）`,
+    );
+    proc.on("exit", (code, signal) => {
+      const livedSec = ((Date.now() - bootAtMs) / 1000).toFixed(1);
+      let verdict: string;
+      if (signal === "SIGKILL") verdict = "外部强杀（kill -9）";
+      else if (signal === "SIGTERM" || signal === "SIGHUP")
+        verdict = `外部终止（${signal}，kill/终端挂断）`;
+      else if (code === 1)
+        verdict = "Python 异常退出（traceback 见 control-stderr.log）";
+      else if (code === 0)
+        verdict = "正常退出（若为自杀，control.log 应有『心跳表空』记录）";
+      else verdict = `未知退出形态（code=${code} signal=${signal}）`;
+      debugLog(
+        `startControl: 控制台进程退出 pid=${pid} 存活=${livedSec}s 判定=${verdict}`,
+      );
+      // fd 关闭放 exit 回调：进程生命周期内 fd 必须有效
+      try {
+        if (stdoutFd !== null) closeSync(stdoutFd);
+        if (stderrFd !== null) closeSync(stderrFd);
+      } catch {
+        /* fd 已失效（进程侧），忽略 */
+      }
+    });
   } catch (e) {
+    try {
+      if (stdoutFd !== null) closeSync(stdoutFd);
+      if (stderrFd !== null) closeSync(stderrFd);
+    } catch {
+      /* ignore */
+    }
     debugLog(`startControl: spawn 异常 ${(e as Error).message}`);
     return false;
   }

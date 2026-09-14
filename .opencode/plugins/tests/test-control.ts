@@ -109,10 +109,18 @@ await test("heartbeat: HEARTBEAT_INTERVAL_MS 与控制台超时协议配对", ()
 // 注意：control-config 通过 HTTP 调控制台，需要控制台运行
 
 await test("control-config: refreshConfig + getAllConfig", async () => {
-  // 假设控制台已运行（测试时手动启动或前一个测试启动）
-  await refreshConfig();
-  const configs = getAllConfig();
-  // 验证拿到配置（数量可能为 0 如果控制台未启动）
+  // 2026/9/14 起 refreshConfig fail-fast：控制台不可达直接抛异常。
+  // 控制台未启动 = 测试环境不具备 → 明确跳过（替代旧的"静默空配置"语义）。
+  try {
+    await refreshConfig();
+  } catch (e) {
+    console.log(
+      "跳过：控制台未运行（refreshConfig 已 fail-fast）:",
+      (e as Error).message,
+    );
+    return;
+  }
+  const configs = await getAllConfig(); // getAllConfig 是 async（此前缺 await，断言恒空转）
   if (Object.keys(configs).length > 0) {
     assert("DEEPSEEK_API_KEY" in configs, "应有 DEEPSEEK_API_KEY");
   }

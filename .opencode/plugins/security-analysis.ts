@@ -40,7 +40,10 @@ import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
 import TaskSessionPersistence from "./lib/task-session-persistence";
 import { getPythonCmd, getInstallHint, getCompilerName } from "./lib/venv";
-import { startControl } from "./lib/control-manager";
+import {
+  isControlHealthy,
+  startControl,
+} from "./lib/control-manager";
 import { controlFetch } from "./lib/control-http";
 import { refreshConfig, getCachedConfig } from "./lib/control-config";
 
@@ -334,6 +337,41 @@ const toolStartTimes = new Map<string, number>();
 //
 // ServiceRegistry 中 CONTROL_STARTUP_SERVICE 在 setup() 里 resolve（成功 or 失败），
 // chat.message 通过 waitFor(CONTROL_STARTUP_SERVICE) 等待。
+
+/**
+ * 统一的控制台可用性检查（启动门禁 + 运行期存活复核）。
+ *
+ * 两层语义：
+ *   1. waitFor(CONTROL_STARTUP_SERVICE)——启动期一次性门禁（setup 时 resolve，
+ *      之后状态永不回退，无法感知运行期死亡）
+ *   2. isControlHealthy()——实时 IPC /health probe，弥补第 1 层的盲区
+ *
+ * 返回 { ok: true } 或 { ok: false, error }。
+ * 调用方拿 error 走 reportErrorAndAbort（用户可见报错）。
+ * （2026/9/14 事故：控制台启动成功 10s 后死亡，service 仍 "success"，
+ *   resume prompt 的 chat.message 门禁全放行——用户已禁用恢复仍被注入 5+ 轮。）
+ */
+async function ensureControlReady(): Promise<{ ok: boolean; error?: string }> {
+  const controlStatus = await ctx.services.waitFor(CONTROL_STARTUP_SERVICE);
+  if (controlStatus.status === "failed") {
+    return {
+      ok: false,
+      error: controlStatus.error ?? "启动失败（未知原因）",
+    };
+  }
+  // 启动成功过 → 运行期存活复核。启动门禁只认 200（waitForIpcReady 已等到
+  // 200 才 resolve success），此后非 200 只可能是进程死亡——不存在"未就绪"。
+  // UDS 本机 probe 正常 <10ms；进程已死时 connect 立即 ECONNREFUSED，
+  // 不会等满 3s 超时。
+  if (!(await isControlHealthy())) {
+    return {
+      ok: false,
+      error:
+        "控制台进程运行期死亡（IPC /health 不可达：被 kill 或崩溃，详见 logs/control-stderr.log 与 plugin_debug.log 的退出判定）",
+    };
+  }
+  return { ok: true };
+}
 
 /**
  * 启动控制台并 resolve 到 ServiceRegistry。
@@ -769,6 +807,26 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       const { sessionID, agent } = input;
       let sessionData: SessionData | null = null;
       try {
+        // ── RECOVER-MODE 逃生舱（零依赖，最先执行）──
+        // 消息文本以 `>>>RECOVER-MODE<<<` 开头 → 跳过本 hook 的一切拦截
+        // （控制台可用性、环境检测、agent 检查等全部放行）。
+        // 用途：插件自身 BUG 把消息入口拦死时，用户仍有通道让 agent 继续工作
+        // （比如让 AI 修复插件代码）——该检查只依赖字符串前缀，不碰控制台/
+        // 配置/ServiceRegistry 等任何可坏依赖。
+        const firstText: string = (output?.parts ?? [])
+          .filter((p) => p?.type === "text")
+          .map((p) => (p as { text?: string }).text ?? "")
+          .join("\n");
+        if (firstText.trimStart().startsWith(">>>RECOVER-MODE<<<")) {
+          const s = ctx.sessionManager.get(sessionID);
+          s?.clearPendingResume(); // 清冷却定时器（RECOVER 消息 = 用户介入）
+          debugLog(
+            `chat.message: RECOVER-MODE 激活，跳过全部拦截 sessionID=${sessionID}`,
+            sessionID,
+          );
+          return;
+        }
+
         if (!agent) {
           // 无 agent 的消息 = 程序注入（session.idle 的错误回显走此路径，实测 8/8）。
           // 注入前置过 pendingErrorCallbackMessage 的话在此清除——该标记的设计消费点
@@ -815,16 +873,15 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         );
 
         // ★ 统一初始化等待：控制台 + 环境检测 ★
-        // 1. 等待控制台启动（成功或失败）
-        const controlStatus = await ctx.services.waitFor(
-          CONTROL_STARTUP_SERVICE,
-        );
-        if (controlStatus.status === "failed") {
+        // 1. 控制台可用性（启动门禁 + 运行期存活复核——启动成功后被 kill
+        //    的场景由 ensureControlReady 的 IPC probe 兜住，不再静默放行）
+        const controlReady = await ensureControlReady();
+        if (!controlReady.ok) {
           debugLog(
-            `chat.message: 控制台启动失败 agent=${agent} error=${controlStatus.error}`,
+            `chat.message: 控制台不可用 agent=${agent} error=${controlReady.error}`,
             sessionID,
           );
-          const errorMsg = `控制台启动失败：${controlStatus.error}`;
+          const errorMsg = `控制台不可用：${controlReady.error}`;
           await reportErrorAndAbort(
             ctx.client,
             sessionID,

@@ -43,6 +43,11 @@ export const TOOLS_HOME_DIR = join(DATA_DIR, "tools");
 
 export const LOGS_DIR = join(DATA_DIR, "logs");
 export const DEFAULT_LOG = join(LOGS_DIR, "plugin_debug.log");
+// 控制台子进程 stdout/stderr 落盘（spawn stdio 接管）。
+// 此前 stdio 三路 ignore 导致 crash traceback / kill 信号物理不可见——
+// 10-12 秒三连死事故（2026/9/14 22:25-22:31）无法定位根因的直接教训。
+export const CONTROL_STDOUT_LOG = join(LOGS_DIR, "control-stdout.log");
+export const CONTROL_STDERR_LOG = join(LOGS_DIR, "control-stderr.log");
 export const MAX_LOG_SIZE = 5 * 1024 * 1024;
 export const KEEP_SIZE = 2 * 1024 * 1024;
 

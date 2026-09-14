@@ -20,22 +20,20 @@ let cachedConfig: Record<string, string> | null = null;
 
 /**
  * 从控制台拉配置并缓存。
- * 失败时保留旧缓存（如果有），否则空对象。
+ * 失败（HTTP 非 ok / IPC 不可达）直接抛异常（fail-fast）——
+ * 调用方要么显式 catch 降级，要么让异常向上传播终止流程。
+ * 旧缓存保留（本次未刷新成功）。
+ * （2026/9/14 事故教训：此处曾静默吞异常返回空对象，导致消费方
+ *  无法区分"未配置"与"读不到"，RESUME_ANALYSIS_ENABLED fail-open 放行。）
  */
 export async function refreshConfig(): Promise<void> {
-  try {
-    const resp = await controlFetch("/api/config", { timeoutMs: 3000 });
-    if (!resp.ok) {
-      debugLog(`refreshConfig: HTTP ${resp.status}`);
-      return;
-    }
-    cachedConfig = await resp.json() as Record<string, string>;
-    debugLog(`refreshConfig: 拉到 ${Object.keys(cachedConfig).length} 项配置`);
-  } catch (e) {
-    debugLog(`refreshConfig 失败: ${(e as Error).message}`);
-    // 失败时保留旧缓存
-    if (!cachedConfig) cachedConfig = {};
+  const resp = await controlFetch("/api/config", { timeoutMs: 3000 });
+  if (!resp.ok) {
+    debugLog(`refreshConfig 失败: /api/config HTTP ${resp.status}`);
+    throw new Error(`refreshConfig 失败: /api/config HTTP ${resp.status}`);
   }
+  cachedConfig = await resp.json() as Record<string, string>;
+  debugLog(`refreshConfig: 拉到 ${Object.keys(cachedConfig).length} 项配置`);
 }
 
 /**
