@@ -31,8 +31,21 @@ def _get_cpu_info() -> dict:
     return {
         "physical_cores": psutil.cpu_count(logical=False) or 0,
         "logical_cores": psutil.cpu_count(logical=True) or 0,
-        "frequency_mhz": psutil.cpu_freq().max if psutil.cpu_freq() else None,
+        "frequency_mhz": _cpu_max_frequency_mhz(),
     }
+
+
+def _cpu_max_frequency_mhz() -> float | None:
+    """CPU 最大频率（MHz）；平台不支持频率查询时返回 None（前端隐藏该字段）。
+
+    已见失败模式：Apple Silicon macOS 无 sysctl(HW_CPU_FREQ)，
+    psutil.cpu_freq() 抛 FileNotFoundError；受限环境可能抛 OSError/NotImplementedError。
+    """
+    try:
+        freq = psutil.cpu_freq()
+    except (OSError, NotImplementedError):
+        return None
+    return freq.max if freq else None
 
 
 def _get_memory_info() -> dict:

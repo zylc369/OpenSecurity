@@ -360,7 +360,7 @@ const App: React.FC = () => {
   };
 
   // ─── 硬件 Popover ───
-  // CPU 频率 <1GHz 视为伪值不显示（Apple Silicon 上 psutil 返回 4MHz → "0GHz"）
+  // CPU 频率 <1GHz 视为伪值不显示；frequency_mhz 为 null（平台不支持查询）时同样不显示
   const cpuFreqGHz = hardware.data?.cpu.frequency_mhz
     ? hardware.data.cpu.frequency_mhz / 1000
     : 0;
