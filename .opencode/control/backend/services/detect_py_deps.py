@@ -602,7 +602,8 @@ def _main() -> int:
         usage="detect_py_deps.py <command> [options]\n\n"
               "子命令:\n"
               "  scan                    检测依赖状态\n"
-              "  install                安装全部必需依赖（venv + required 包）",
+              "  install                安装全部必需依赖（venv + required 包）\n"
+              "  fix-libomp             macOS libomp 去重（统一到 torch 副本，根治 OMP Error #15；幂等）",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
