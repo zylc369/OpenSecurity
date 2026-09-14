@@ -333,6 +333,75 @@ def one_click_installable() -> set[str]:
     }
 
 
+# ─── macOS libomp 去重（OMP Error #15 根治）──────────────────
+#
+# 背景：macOS 无系统级 OpenMP → pip wheel 各自携带 libomp.dylib（torch、
+# sklearn 等），conda 建环境时另装一份到 <venv>/lib/。macOS dyld 按
+# 「路径+UUID」判定镜像——不同构建的同名副本被当作独立库各自加载，
+# 第二份初始化时触发 OpenMP 的 duplicate-init 自杀保护：
+#   OMP: Error #15 → SIGABRT（进程秒崩，stderr 才能看到）
+# （Linux 无此问题：链接器按 soname 全局去重。）
+#
+# 方案：以 torch wheel 的副本为 canonical，把 venv 内其余 libomp.dylib
+# 副本替换为指向它的 symlink。不修改二进制 → 无 macOS 签名失效问题。
+# 幂等：已指向 canonical 的 symlink 跳过；pip 重装 wheel 会还原成真实
+# 文件（可能换构建），重跑本函数自愈。备份后缀 .condabak（仅首次，
+# 不覆盖以保留最早原始副本）。
+# 注意：KMP_DUPLICATE_LIB_OK=TRUE 无效——本环境实测 import 可过但
+# 并行计算 SIGSEGV（pytorch#83540 同报）。
+def _fix_macos_libomp():
+    """macOS: 统一 venv 内 libomp.dylib 到 torch 的副本。install 收尾自动跑。"""
+    if sys.platform != "darwin":
+        return
+    sp_dirs = [
+        d for d in (
+            os.path.join(VENV_DIR, "lib", f, "site-packages")
+            for f in os.listdir(os.path.join(VENV_DIR, "lib"))
+            if f.startswith("python")
+        ) if os.path.isdir(d)
+    ] if os.path.isdir(os.path.join(VENV_DIR, "lib")) else []
+    if not sp_dirs:
+        return
+    sp = sp_dirs[0]
+    canonical = os.path.join(sp, "torch", "lib", "libomp.dylib")
+    if not os.path.isfile(canonical):
+        return  # torch 未装，无从统一
+
+    # 候选副本：conda 区域 + site-packages 内除 torch 外的所有 libomp.dylib
+    candidates = [os.path.join(VENV_DIR, "lib", "libomp.dylib")]
+    torch_root = os.path.join(sp, "torch")
+    for root, _dirs, files in os.walk(sp):
+        if root == torch_root or root.startswith(torch_root + os.sep):
+            continue
+        if "libomp.dylib" in files:
+            candidates.append(os.path.join(root, "libomp.dylib"))
+
+    fixed = skipped = 0
+    for path in candidates:
+        if not os.path.exists(path) and not os.path.islink(path):
+            continue
+        # 幂等：已指向 canonical
+        if os.path.islink(path) and os.path.samefile(path, canonical):
+            skipped += 1
+            continue
+        backup = path + ".condabak"
+        if not os.path.exists(backup):
+            os.replace(path, backup)
+            _log(f"[libomp] 备份原副本 → {backup}")
+        else:
+            os.remove(path)  # 备份已在（上次修复留的），直接移除当前副本
+        rel = os.path.relpath(canonical, os.path.dirname(path))
+        os.symlink(rel, path)
+        fixed += 1
+        _log(f"[libomp] {path} → symlink → {rel}")
+
+    if fixed == 0 and skipped == 0:
+        _log("[libomp] 无重复副本，无需处理")
+    else:
+        _log(f"[libomp] 完成：统一 {fixed} 处，幂等跳过 {skipped} 处"
+             f"（canonical: {canonical}）")
+
+
 # ═══ 安装 ═════════════════════════════════════════════════
 
 
@@ -515,6 +584,9 @@ def _run_install(dry_run: bool):
 
     _log("[+] 必需依赖安装完成。")
 
+    # 2. macOS libomp 去重（根治 OMP Error #15 → SIGABRT；venv 重建后此处自动自愈）
+    _fix_macos_libomp()
+
     # 收尾提示（检测在控制台）
     _log("[*] === 后续检查 ===")
     _log("[*] 外部工具、Docker 镜像、模型、Python 依赖 完整状态")
@@ -543,10 +615,17 @@ def _main() -> int:
     inst.add_argument("--dry-run", action="store_true",
                       help="只打印将安装的清单，不执行")
 
+    fix = sub.add_parser("fix-libomp", help="macOS libomp 去重（统一 venv 内副本到 "
+                                            "torch 的 canonical，根治 OMP Error #15；幂等）")
+
     args = parser.parse_args()
 
     if args.command == "install":
         _run_install(dry_run=args.dry_run)
+        return 0
+
+    if args.command == "fix-libomp":
+        _fix_macos_libomp()
         return 0
 
     # scan
