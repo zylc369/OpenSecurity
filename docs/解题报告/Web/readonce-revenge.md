@@ -283,7 +283,7 @@ Keep-Alive: timeout=5
    `http://localhost:3000/note/fcd853bf159844178c34?note=fcd853bf159844178c34`；
 2. 点 Send。页面会转圈约 10 秒，随后显示 "The reviewer finished."。
 
-这 10 秒里服务器正在跑完整的机器人流程：创建本轮审查记录（生成审查编号与秘密随机数、从提交网址取出笔记编号）→ 拉起一个无头 Chromium 并把它的会话升级为管理员 → 机器人依次做完四件事（清单见本节末尾）→ **在最后打开的页面上固定停留 10 秒**（源码里的 `sleep(10000)`）→ 关闭浏览器。以上全部结束，服务器才返回响应，页面这时才显示结果。也就是说，转圈时间 ≈ 机器人的准备时间（零点几秒）+ 固定停留 10 秒 + 收尾；后面攻击链能利用的时间窗，也正是这 10 秒。
+这 10 秒里服务器正在跑完整的机器人流程：创建本轮审查记录（生成审查编号与秘密随机数、从提交网址取出笔记编号）→ 拉起一个无头 Chromium 并把它的会话升级为管理员 → 机器人依次做完四件事（清单见本节末尾）→ **在最后打开的页面上固定停留 10 秒**（源码里的 `sleep(10000)`）→ 关闭浏览器。以上全部结束，服务器才返回响应（并随即清空本轮审查记录），页面这时才显示结果。也就是说，转圈时间 ≈ 机器人的准备时间（零点几秒）+ 固定停留 10 秒 + 收尾；后面攻击链能利用的时间窗，也正是这 10 秒。
 
 **方式二：命令行**
 
@@ -365,6 +365,15 @@ http://localhost:3000/note/fcd853bf159844178c34?note=fcd853bf159844178c34
 [bot-req:main] GET http://localhost:3000/style.css
 ```
 
+日志里出现的这几个值先说明一下（后面会反复遇到）：
+
+- `rid`：本轮审查的编号，服务器生成的随机串，同一轮的所有请求都靠它核对（详解：3.5 字段表）；
+- `state`：同一轮的另一串秘密随机值，用于审查流程后段的核对（详解：3.5 字段表；使用场景：3.4 的 `/complete`、2.5 的检查 5）；
+- `secSite`、`secDest`：服务器打印的两个请求头值（`Sec-Fetch-Site`、`Sec-Fetch-Dest`），审查流程后段要用它们核对"请求是不是浏览器自己发起的"（详解：2.5 检查 4）；
+- `visited`、`prepared`、`approved`：本轮审查的三个状态标记（详解：`visited` 在 2.5 两次访问一节；`prepared` 在 3.4 就绪接口一节；`approved` 在 3.4 批准流程一节；字段表统一在 3.5）。
+
+它们都保存在服务器的"当前这轮审查"记录里，每轮重新生成；该轮 `/report` 请求发出 "The reviewer finished." 响应时（同一个处理函数的 `finally` 块里）整体清空，本轮所有字段随即失效（时间点细节见 3.5）。
+
 从创建笔记到机器人收工，涉及的人和请求如下（自上而下是一条完整时间线）：
 
 | # | 谁在发起 | 动作 | 端点与参数 | 源码位置 / 备注 |
@@ -385,26 +394,92 @@ http://localhost:3000/note/fcd853bf159844178c34?note=fcd853bf159844178c34
 
 ### 2.5 审查页的两次访问
 
-这一节没有网页操作版本：用浏览器直接打开审查页地址只会得到 403，因为你的浏览器没有管理员身份（`admin` 会话是第一道检查，也正是整条攻击链要"借"的东西）。下面用 curl 模拟不同身份的访问者。
+这一节无法通过你的浏览器打开网页并操作：用你的浏览器直接打开审查页地址只会得到 403，因为你的浏览器没有管理员身份（`admin` 会话是第一道检查，也正是整条攻击链要"借"的东西）。下面用 curl 模拟不同身份的访问者。
 
-审查页 `/reports/check` 是本题最核心的路由，源码里分成两个分支：
+审查页 `/reports/check` 是本题最核心的路由。完整源码如下（`src/server.js`，注释标出了每项检查对应的代码）：
 
 ```js
-if (currentReview.visited) {
-  // 渲染分支：全部检查通过才渲染笔记原文
-  const note = notes.get(currentReview.noteId);
-  if (!note) { 404 }
-  if (!policy(req) || !consumeReport(req)) { 403 }
-  res.render("review-document", { note });    // 原样输出 note.html
-  return;
-}
-// 标记分支：记录已访问、设置 view cookie，返回占位页
-currentReview.visited = true;
-res.cookie("view", id, { ... path: "/reports/check" });
-res.type("html").send("<!doctype html><title>Reviewer</title><p>Opening document.</p>");
+app.get("/reports/check", (req, res) => {
+  res.setHeader("Vary", "Cookie");  // 响应缓存按 cookie 分变体（配合 view cookie，见下文说明）
+
+  if (!req.session.admin) {                                           // 检查 1：admin 会话
+    res.status(403).type("text/plain").send("forbidden");
+    return;
+  }
+
+  const id = String(req.query.rid || "");
+  if (!currentReview || currentReview.id !== id) {                    // 检查 2：rid 匹配
+    res.status(404).type("text/plain").send("not found");
+    return;
+  }
+
+  if (currentReview.visited) {
+    // ===== 渲染分支 =====
+    const note = notes.get(currentReview.noteId);                     // 检查 3：笔记存在
+    if (!note) {
+      res.status(404).type("text/plain").send("not found");
+      return;
+    }
+
+    if (!policy(req) || !consumeReport(req)) {                        // 检查 4 + 检查 5 到 8
+      res.status(403).type("text/plain").send("forbidden");
+      return;
+    }
+
+    res.render("review-document", { note });                          // 全部通过：原样输出笔记 HTML
+    return;
+  }
+
+  // ===== 标记分支 =====
+  currentReview.visited = true;
+  res.cookie("view", id, { httpOnly: true, sameSite: "lax", path: "/reports/check" });
+  res.type("html").send("<!doctype html><title>Reviewer</title><p>Opening document.</p>");
+});
 ```
 
-- **首次访问**：返回一个占位页，同时设置 `view` cookie、把 `visited` 置为 true。注意两个数据的位置不同：`visited` 是**服务器端**字段（`currentReview` 对象的属性，存在服务器进程内存里）；`view` cookie 是发给**浏览器**的。浏览器页面上没有任何与它们对应的状态。
+检查 4 到 8 展开在两个辅助函数里：
+
+```js
+function policy(req) {                              // 检查 4：Fetch Metadata
+  return Object.entries({
+    "sec-fetch-site": "none",
+    "sec-fetch-dest": "document",
+  }).every(([header, expected]) => req.get(header) === expected);
+}
+
+function consumeReport(req) {
+  const id = String(req.query.rid || "");
+  const state = String(req.query.state || "");
+
+  if (
+    !currentReview
+    || currentReview.id !== id        // 再次确认 rid 与当前审查一致
+    || state !== currentReview.nonce  // 检查 5：state 匹配
+    || !currentReview.prepared        // 检查 6：机器人已就位
+    || !currentReview.approved        // 检查 7：审查已批准
+    || currentReview.used             // 检查 8：未被使用过
+  ) {
+    return false;
+  }
+
+  currentReview.used = true;          // 通过后立即置 true，同一轮审查不能再次渲染
+  return true;
+}
+```
+
+对这段源码的三点补充：
+
+1. **执行顺序**：检查 1、2 在路由开头，任何请求都要先过；之后按 `visited` 分流。渲染分支里检查 4 与 5 到 8 写在同一条 `if` 里，`||` 短路求值：`policy` 不满足就直接 403，不再执行 `consumeReport`；`consumeReport` 内部同样是逐项短路。
+2. **404 与 403 的分工**：编号对不上（检查 2）、笔记不存在（检查 3）返回 404（"目标不存在"）；身份或条件不满足（检查 1、4 到 8）返回 403（"目标存在但不允许"）。这也是给攻击者的信号：404 说明 rid 不对，403 说明 rid 对了但后面某项没满足。
+3. **`used` 与其它检查的性质不同**：其它检查只读取状态；`used` 在通过后会被立即置为 true（`consumeReport` 里 `return true` 之前），作用是同一轮审查的渲染只能发生一次。
+
+- **首次访问**：返回一个占位页，同时设置 `view` cookie、把 `visited` 置为 true。两个数据的存放位置与作用都不同：
+  - `visited` 是**服务器端**字段（`currentReview` 对象的属性，存在服务器进程内存里），它决定第二次访问走哪个分支；
+  - `view` cookie 是发给**浏览器**的，**值就是审查编号**（源码 `res.cookie("view", id, ...)` 里的 `id`；`id` 与 `rid` 是同一个值，见 3.5），生效范围限于 `/reports/check` 路径；**服务器代码不读取它**。它的作用是保证"第二次访问"一定到达服务器，机制分两层：
+    - **第一层，HTTP 缓存**：`GET` 响应可能被浏览器或中间代理缓存；后续相同请求如果命中缓存，浏览器直接使用缓存副本，不会发请求给服务器。
+    - **第二层，`Vary: Cookie`**：服务器给审查页响应加了 `Vary: Cookie` 头，含义是"缓存匹配时要包含请求的 Cookie 头"。也就是说，**Cookie 不同的请求即使 URL 完全相同，也属于不同的缓存条目，不能互相使用**（同一 URL 按请求头区分的不同缓存条目，缓存术语叫不同"变体"）。
+    - 两次访问因此分属不同变体：第一次不带 `view` cookie（变体 A），响应把 `view` 留给浏览器；第二次带上 `view`（变体 B）。第二次不会拿到第一次缓存的占位页，只能把请求真的发到服务器，服务器才有机会进入渲染分支（如果第二次命中了缓存副本，渲染分支就永远不会被执行）。
+    - 区分一下：这里讲的是 **HTTP 缓存**（存的是响应内容，`Vary` 是它的规则）；5.3 讲的 **BFCache** 是另一套机制（存的是整个页面的内存快照），两者互不相干，只是都会"跳过服务器"，所以本题的防线和攻击链都要分别处理它们。
 - **再次访问**：进入渲染分支。渲染模板 `review-document.ejs` 只有一行关键内容：`<%- note.html %>`，原样输出笔记 HTML，且响应没有任何 CSP。
 
 渲染分支要连续通过以下检查，缺一不可：
@@ -412,12 +487,12 @@ res.type("html").send("<!doctype html><title>Reviewer</title><p>Opening document
 | 检查 | 含义 | 数据来源 |
 |---|---|---|
 | `admin` 会话 | 访问者必须是管理员 | 机器人会话的 cookie |
-| `rid` 匹配 | 审查编号对得上 | 网址参数 |
+| `rid` 匹配 | 审查编号对得上 | 网址参数（产生与作用见 3.5） |
 | 笔记存在 | 提交网址里的 `note` 参数能查到笔记 | `POST /report` 时从提交网址提取并存入 |
 | `policy` | 请求头 `Sec-Fetch-Site: none` 且 `Sec-Fetch-Dest: document` | 这对请求头属于 Fetch Metadata（浏览器自动附加、标明请求来源的一组 `Sec-Fetch-*` 头，脚本伪造不了），只有"浏览器自己发起"的导航才会带 |
 | `state` 匹配 | 与服务器生成的秘密随机数一致 | 网址参数 |
 | `prepared` | 机器人已就位 | 机器人的第 3 件事自动置位 |
-| `approved` | 审查已批准 | 需要触发 `/complete` 接口（第三章讲） |
+| `approved` | 审查已批准 | `/complete` 接口置位（3.4 详讲） |
 | 未使用过 | 防止二次消费 | 服务器状态 |
 
 用 curl 手工访问即可看到这两项最容易观察的检查（先取一个管理员会话模拟机器人视角：`curl -si http://localhost:3000/reports/session -H "X-Bot-Token: local-bot-token"`，把响应里的 `sid` cookie 记作 `$ADMIN_COOKIE`；rid/state 从容器日志里抄）：
@@ -587,7 +662,9 @@ app.post("/reports/arm/:id", requireBot, (req, res) => {
 
 ### 3.5 本轮审查的状态字段
 
-服务器用全局变量 `currentReview` 保存"当前这轮审查"的全部状态。它在 `POST /report` 时创建，机器人流程结束后清空：
+服务器用全局变量 `currentReview` 保存"当前这轮审查"的全部状态。它在 `POST /report` 时创建；清空发生在同一个请求的处理函数里：机器人流程结束后发送 "The reviewer finished." 响应（或异常返回 "Review failed"），随后 `finally` 块执行 `currentReview = null`，本轮全部字段失效、下一轮提交从此可被接受。
+
+表里第一行的 `id` 就是全文反复出现的 `rid`（同一个值的两个写法，来自 `const id = randomId(12)`，24 个十六进制字符）。它随本轮审查一起创建，随后以网址参数（`?rid=...`）或路径参数（`/reports/arm/:id`）的形式在请求之间传递。作用有两条：把同一轮审查的各请求（check、arm、review、complete）绑定在一起核对；以及作为不可预测的随机值，防止他人构造出针对某一轮的请求。审查结束后它随 `currentReview` 一起清空，下一轮重新生成。
 
 | 字段 | 创建时 | 谁在什么时候修改 |
 |---|---|---|
@@ -1026,7 +1103,8 @@ docker logs -f readonce-revenge-challenge-1
 | URL | Uniform Resource Locator，即网址 |
 | JSON | JavaScript Object Notation，一种文本数据格式 |
 | iframe | HTML 里"在页面中嵌入另一个页面"的标签 |
-| nonce | number used once，一次性随机数：服务器生成，用来证明内容或请求出自服务器 |
+| nonce | number used once，一次性随机数：服务器生成，用来证明内容或请求出自服务器（本题每轮审查会生成两个随机值：`rid` 与 `state`，见 3.5） |
+| rid | 审查编号：`currentReview.id` 的 URL 参数名，每轮审查随机生成、结束即失效（见 3.5） |
 | 审查页（`/reports/check`） | 机器人的审查入口页。首访留标记；二访进入渲染分支，全部检查通过才输出笔记原文 |
 | 审查界面（`/review`） | 管理员页面，内含沙箱 iframe 与批准逻辑，是攻击脚本的入口 |
 | BFCache | 浏览器把访问过的页面整体缓存进内存的机制；回退时优先恢复，不产生网络请求 |
