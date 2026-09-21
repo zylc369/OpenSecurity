@@ -274,12 +274,6 @@ $PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py delete -s <session_id>
 
 ---
 
-## 任务存档
-
-{{buwai-rule:task-archive}}
-
----
-
 ## 安全规则
 
 - **不向生产环境发送破坏性请求**（CTF 靶机和授权测试环境除外）

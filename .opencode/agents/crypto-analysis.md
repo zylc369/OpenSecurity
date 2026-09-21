@@ -129,12 +129,6 @@ permission:
 
 ---
 
-## 任务存档
-
-{{buwai-rule:task-archive}}
-
----
-
 ## 安全规则
 
 - 仅分析用户提供的题目/授权目标

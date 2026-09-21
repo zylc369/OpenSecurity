@@ -39,7 +39,6 @@ Security Analysis 的完整架构（你必须理解并遵守这个分层）:
 ```
 $OPENCODE_ROOT/                              # 由插件注入，项目级 .opencode/ 或全局 ~/.config/opencode/
 ├── agents/
-│   ├── security-coordinator.md            # 复合安全任务编排 Agent（自动分发到专业 Agent）
 │   ├── binary-analysis.md                # 二进制逆向分析 Agent（主 prompt，AI 编排器）
 │   ├── mobile-analysis.md                # 移动端分析 Agent
 │   ├── web-analysis.md                   # Web 安全分析 Agent

@@ -221,12 +221,6 @@ permission:
 
 ---
 
-## 任务存档
-
-{{buwai-rule:task-archive}}
-
----
-
 ## 安全规则
 
 - 不执行可能损坏用户设备的操作

@@ -50,7 +50,7 @@ mode: subagent          # 可选，默认 "subagent"
 
 ## description 是唯一路由层（写 agent 的硬要求）
 
-OpenCode 每次请求都会把所有**非 primary agent** 的 `description` 注入 Task 工具说明（格式 `- 名称: description`；缺 description 时替换为"仅限手动调用"文案）。**主 agent 只能看到 description，看不到正文**——因此：
+OpenCode 每次请求都会把所有 `mode` 不为 `primary` 的 agent（即 `mode: all` 与 `mode: subagent`）的 `description` 注入 Task 工具说明（格式 `- 名称: description`；缺 description 时替换为"仅限手动调用"文案）。**主 agent 只能看到 description，看不到正文**——因此：
 
 1. description 必须包含：**做什么 + 为什么这么做（避免什么损失）+ 最终目的（拿到什么结果）+ 何时主动委派（明确触发条件）+ 范围/排除 + 必须传什么/返回什么**——调用方据此判断这个委派何时值得发起、能拿到什么。输入契约写在正文里等于没写（主 agent 读不到）。
 2. 想获得更主动的委派，使用明确的触发句式（如"卡壳时主动委派：同一方向连续失败≥5 次…"）。
