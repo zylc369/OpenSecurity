@@ -582,7 +582,7 @@ Plugin hooks:
 | `$SHARED_DIR/knowledge-base/opencode-plugin-api.md` | 查看 Hook 签名、input/output 类型 |
 | `$SHARED_DIR/knowledge-base/opencode-plugin-hooks-lifecycle.md` | 理解 Hook 执行时序、awaited vs fire-and-forget、常见陷阱 |
 | `$SHARED_DIR/knowledge-base/opencode-plugin-development-guide.md` | 从零创建插件、最小模板、状态管理模式 |
-| `$SHARED_DIR/knowledge-base/opencode-agent-format.md` | 创建/修改 Agent 文件格式、frontmatter 字段 |
+| `$SHARED_DIR/knowledge-base/opencode-agent-format.md` | 创建/修改 Agent 文件格式、frontmatter 字段、description 路由写法 |
 | `$SHARED_DIR/knowledge-base/opencode-plugin-debugging.md` | 排查 Plugin 问题、测试验证方法 |
 | `$SHARED_DIR/knowledge-base/idapython-conventions.md` | 生成 IDAPython 脚本时的编码规范 |
 

@@ -30,8 +30,7 @@ permission:
 **可用工具**：Bash（执行命令行工具）、Read（读取文件/知识库）、Write（生成临时脚本/报告）、Glob/Grep（搜索文件）、webfetch（获取网页内容）
 
 **核心约束**：
-- 分析结果必须区分"事实"（来自工具输出/源码）和"推测"（AI 推理，标注置信度）
-- 禁止编造结论。当置信度不足时，输出当前分析状态、已验证的事实、待验证的假设（标注置信度），继续自主探索，不要停下来向用户提问
+{{buwai-rule:evidence-discipline}}
 - **安全红线**：不向生产环境发送破坏性请求，CTF 靶机和授权测试环境除外
 
 ---
@@ -168,7 +167,7 @@ permission:
 | `browser-automation.md` | 需要打开网页/登录/浏览器自动化/远程调试/操作结果确认时。启动铁律与 browser_cdp.py 用法、三级探测链、登录决策树、人机验证判别、硬信号、CDP 核心 API、debug() API、常见陷阱、操作后确认方法论（持久信号优先） |
 | `client-side-attacks.md` | 有 admin bot + flag 在 bot 端。bfcache 污染、CSS trigram exfil、xsleak、iframe reparenting、connection pool |
 | `css-attacks.md` | 能注 CSS 不能注 JS 时（webmail 渲染/CSP 留 style-src）。CSS hotwiring、label 劫持、select 键盘记录、净化器绕过、CSSOM mutation、CSP 全封外带 |
-| `race-conditions.md` | 竞态条件（单包攻击/HTTP/2 并发）；原型链污染（sources/sinks/gadgets/RCE 链） |
+| `race-conditions.md` | 竞态条件（单包攻击/HTTP/2 并发；`e.source === iframe.contentWindow` 类身份比较 × 文档切换的消息竞态）；原型链污染（sources/sinks/gadgets/RCE 链） |
 | `sqli-advanced.md` | SQL 注入实战（WAF 绕过全族/无列名/堆叠预处理/DNS OOB/写 shell/sqlmap 进阶） |
 | `xss-advanced.md` | XSS 进阶（DOM Clobbering/Shadow DOM/Unicode 折叠/Referer 泄漏/XS-Leak 组合） |
 | `command-injection.md` | 命令注入（无字母数字 RCE/无参数 RCE/临时文件 glob/分段写/各语言绕过表） |

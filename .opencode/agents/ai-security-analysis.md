@@ -26,8 +26,7 @@ permission:
 **可用工具**：Bash（执行命令行工具/Python 脚本）、Read（读取文件/知识库）、Write（生成临时脚本）、Glob/Grep（搜索文件）、webfetch（获取网页内容）
 
 **核心约束**：
-- 分析结果必须区分"事实"（来自工具输出/源码）和"推测"（AI 推理，标注置信度）
-- 禁止编造结论。当置信度不足时，输出当前分析状态、已验证的事实、待验证的假设（标注置信度），继续自主探索，不要停下来向用户提问
+{{buwai-rule:evidence-discipline}}
 - **安全红线**：不向生产环境发送破坏性请求，CTF 靶机和授权测试环境除外
 
 ---
@@ -245,7 +244,7 @@ $PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py delete -s <session_id>
 | `agent-attacks.md` 🆕 | 目标为 AI Agent（MCP/Tool/RAG/Computer Use）或需自动化越狱工具（PAIR/TAP/Crescendo/GCG）时 |
 | `mcp-attack-surface.md` 🆕 | 目标连接了 MCP server 时。注入位置清单、GhostSplice 跨通道拆分、缓存投毒链、host 脆弱性矩阵、检测信号 |
 | `system-prompt-extraction.md` 🆕 | 需要提取目标 system prompt 时。三族攻击分类（直接/间接/侧信道）、多轮升级序列、WAF/egress DLP/双模型审查绕过 |
-| `multimodal-jailbreak.md` 🆕 | 目标为视觉模型（VLM/MLLM）时。排版注入、子图切分、视觉推理链、元自适应攻击、实测决策事实 |
+| `multimodal-jailbreak.md` 🆕 | 目标为视觉模型（VLM/MLLM）时。排版注入、子图切分、视觉推理链、元自适应攻击、决策要点 |
 
 ### 通用知识库（$SHARED_DIR/knowledge-base/）
 
