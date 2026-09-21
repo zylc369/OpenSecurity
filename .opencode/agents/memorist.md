@@ -1,5 +1,5 @@
 ---
-description: 长期记忆专家 —— 从事件库（events）、知识库（向量库）和任务目录中检索历史上下文，为团队操作提供全面的历史背景。
+description: 长期记忆专家：检索历史上下文（执行记录、历史分析、失败教训、未闭环改进项），避免团队重复已走过的弯路。任务开工、卡壳、压缩后上下文缺失、需要同类历史案例时主动委派。委派时说明要查什么（问题/目标特征/时间范围）；返回带出处与置信度的报告。
 mode: subagent
 buwai-extension-id: memorist
 permission:
@@ -123,6 +123,8 @@ START
 - 事件库 entity_search（node_labels=`["Vulnerability"]`）：`"CVE-2024-3094"`
 - 事件库 entity_search（node_labels=`["Tool"]`, min_mentions=2）：`"成功用于权限提升的 Frida hook 脚本"`
 - 事件库 entity_relationships（获取 UUID 后）：`"关联实体和利用尝试"`
+
+**按失败教训/改进项查**：调用方要"失败教训 / 未闭环改进项"时，分两类问句检索——①失败模式（如"这个方向尝试失败的原因"、"被推翻的结论"）②复盘改进项（如"复盘后的改进项"、"根治方案"）；记录里未必带闭环标记，报告中列出候选并注明"是否已闭环由调用方判定"。
 
 > **node_labels 说明**：node_labels 是 事件库 知识图谱中节点的标签。可选值：Tool（工具）、Host（主机）、Vulnerability（漏洞/CVE）、File（文件/二进制）、Endpoint（Web 端点）、Algorithm（加密算法）、Model（AI 模型）、Prompt（提示词）。由 graphiti 提取时自动分配，英文首字母大写。不传则搜全部类型。
 
