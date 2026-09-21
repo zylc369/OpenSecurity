@@ -1,6 +1,6 @@
 # Web 竞态条件与原型链污染 — 单包攻击与 Gadget 速查
 
-> 当遇到竞态条件或原型链污染（PP）场景时通过 Read 工具加载。
+> 当遇到竞态条件（含客户端消息/文档切换竞态）或原型链污染（PP）场景时通过 Read 工具加载。
 > client-side 攻击见 `$AGENT_DIR/knowledge-base/client-side-attacks.md`。
 
 ## §1 单包攻击（Single-Packet Attack）
@@ -96,7 +96,44 @@ PP 源与 gadget 静态挖掘: 全部 JS `grep -nE "location\.(hash|search|href)
 | PHP session 锁 | PHP 默认 session 文件锁串行化 → 换不同 session 或不同 cookie |
 | 数据库事务 | 隔离级别不足 → check-then-act 非原子 |
 
-## §4 关联文件
+## §4 客户端文档生命周期竞态：消息跨文档切换投递
+
+> 一句话：消息从发出到被处理之间有排队延迟，这段时间里 iframe 可能已经换了文档——利用这个时间差，可以让消息送达时的"发送者身份比较"变成不相等，从而通过校验。
+>
+> 触发场景：消息处理函数用"发送者身份比较"做校验（如 `e.source === iframe.contentWindow`），该 iframe 内的文档可能会被替换（跳转到另一个页面）。
+
+### 机制
+
+- 消息里的 `e.source`（发送方窗口的引用）在**消息发出的那一刻**就被写下，之后不再变化；而接收方读取 `iframe.contentWindow` 时，读到的是**消息送达的那一刻** iframe 里当前的窗口。
+- 消息不是立刻送达的，要排队等待处理；排队期间，iframe 的文档可能已经被换掉（导航或替换）。
+- 如果消息正好是在旧文档**卸载的瞬间**发出的（`pagehide` 的监听处理函数里调用 `postMessage` 发消息），那么它会先进入队列，等文档切换完成、新文档生效之后才送达。送达时，`iframe.contentWindow` 已经指向新文档的窗口，而消息里记下的 `e.source` 还是旧文档窗口——两者不再相等。
+
+### 检查方法（对照实验）
+
+同一个脚本里并排跑两组，接收方记录每次比较的结果：
+
+```js
+// target = 持有校验代码的窗口引用（校验在父窗口时用 parent，在顶层窗口时用 top）
+// A 组：页面存活期间高频发送（预期：比较为 true → 被跳过）
+setInterval(() => target.postMessage({a: 1}, "*"), 1);
+// B 组：在卸载瞬间发送（预期：比较为 false → 进入处理分支）
+addEventListener("pagehide", () => target.postMessage({b: 1}, "*"));
+```
+
+判读：如果 B 组出现比较结果为 false，说明竞态成立。两组必须在同一个脚本里并排运行——只跑 A 组的话，会误以为"比较永远相等"。
+
+父页面用 `addEventListener("message", (e) => ...)` 监听 iframe 发来的消息，并在处理函数里比较 `e.source === iframe.contentWindow`。这个比较的实测结果：iframe 页面存活期间发送时——比较始终相等；iframe 在 `pagehide`（卸载瞬间）发送消息时——这条消息跨越文档切换后才被送达，比较变为不等。
+
+### 利用模板
+
+```js
+addEventListener("pagehide", function () { try { top.postMessage({p: 1}, "*"); } catch (e) {} });
+```
+
+- `top` 是持有校验代码的窗口引用（如果校验在父窗口，换成 `parent`）；消息内容任意。
+- 前置条件：接收方已经进入"等待换页"阶段（例如某个状态变量已经置位），并且消息被处理时仍处于该阶段。
+
+## §5 关联文件
 
 - `$AGENT_DIR/knowledge-base/client-side-attacks.md` — 客户端攻击（bfcache/CSS exfil/xsleak）
 - `$AGENT_DIR/knowledge-base/web-vulnerabilities.md` — 服务端漏洞模式
