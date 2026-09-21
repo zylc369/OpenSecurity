@@ -15,7 +15,6 @@ const AGENT_TITLE: Record<string, string> = {
   "web-analysis": "Web 安全",
   "ai-security-analysis": "AI 安全",
   "crypto-analysis": "密码学",
-  "security-coordinator": "协调器",
 };
 
 interface Props {

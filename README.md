@@ -10,15 +10,15 @@
 
 OpenSecurity 让 LLM 端到端地完成一次安全分析：拿到目标文件，自己编排工具链（IDA Pro、Frida、apktool……），一步步推进，最后产出一份可验证的报告。不是问一句答一句，不是停在"我建议你用 IDA 看看"，而是真的把工具跑起来、读输出、做推理、再决定下一步。
 
-覆盖四个安全分析领域 + 一个编排器 + 一个自我进化引擎：
+覆盖五个安全分析领域 + 一个自我进化引擎：
 
 | Agent | 负责什么 |
 |-------|---------|
-| `security-coordinator` | 复合安全任务拆分 + 分发到专业 Agent |
 | `binary-analysis` | 二进制逆向：算法还原、壳检测、漏洞挖掘 |
 | `mobile-analysis` | 移动端逆向：APK/IPA 反编译与 Java/Native 分析 |
 | `web-analysis` | Web 安全：URL/源码的漏洞审计与攻击链构造 |
 | `ai-security-analysis` | AI 应用安全：LLM 应用的提示注入与越狱 |
+| `crypto-analysis` | 密码学攻击：RSA/格/ECC/古典/对称/哈希 |
 | `security-analysis-evolve` | 自我进化：从实战复盘中沉淀脚本与知识库 |
 
 ## 核心架构
@@ -97,7 +97,7 @@ cd ~/your-workspace
 opencode
 ```
 
-在 TUI 中切换到 `security-coordinator`（复合任务）或具体领域的 Agent（单一任务），然后丢一句话：
+在 TUI 中切换到对应领域的 Agent，然后丢一句话：
 
 ```
 帮我逆向 /Users/me/Downloads/crackme.exe，找出正确的 license

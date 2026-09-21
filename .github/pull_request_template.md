@@ -20,7 +20,6 @@
 <!-- 勾选受影响的 Agent，方便 reviewer 分配 -->
 
 - [ ] 不涉及特定 Agent（平台基础设施 / 文档）
-- [ ] security-coordinator
 - [ ] binary-analysis
 - [ ] mobile-analysis
 - [ ] web-analysis

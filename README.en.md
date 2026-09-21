@@ -10,15 +10,15 @@
 
 OpenSecurity lets an LLM complete a security analysis end-to-end: take a target file, orchestrate the toolchain (IDA Pro, Frida, apktool...), push forward step by step, and produce a verifiable report. Not Q&A-style chat, not stopping at "I suggest you open it in IDA" — actually running the tools, reading output, reasoning, and deciding the next step.
 
-Covers four security domains + one orchestrator + one self-evolution engine:
+Covers five security domains + one self-evolution engine:
 
 | Agent | Responsibility |
 |-------|---------------|
-| `security-coordinator` | Splits complex tasks and dispatches to domain agents |
 | `binary-analysis` | Binary reverse engineering: algorithm recovery, packer detection, vulnerability research |
 | `mobile-analysis` | Mobile reverse engineering: APK/IPA decompilation and Java/Native analysis |
 | `web-analysis` | Web security: vulnerability auditing and exploit chain construction |
 | `ai-security-analysis` | AI application security: prompt injection and jailbreak attacks |
+| `crypto-analysis` | Cryptography attacks: RSA/lattice/ECC/classical/symmetric/hash |
 | `security-analysis-evolve` | Self-evolution: distilling reusable scripts and knowledge from real-world analyses |
 
 ## Architecture
@@ -97,7 +97,7 @@ cd ~/your-workspace
 opencode
 ```
 
-Switch to `security-coordinator` (complex tasks) or a domain-specific agent (single-domain tasks) in the TUI, then drop a message:
+Switch to the appropriate domain agent in the TUI, then drop a message:
 
 ```
 Reverse engineer /Users/me/Downloads/crackme.exe and find the correct license
