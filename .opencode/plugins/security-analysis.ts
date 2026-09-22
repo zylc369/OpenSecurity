@@ -1,13 +1,6 @@
-import {
-  readFileSync,
-  readdirSync,
-  statSync,
-  existsSync,
-  unlinkSync,
-} from "fs";
+import { readFileSync, readdirSync, existsSync, unlinkSync } from "fs";
 import { join, dirname, delimiter } from "path";
 import { tmpdir, homedir } from "os";
-import * as yaml from "js-yaml";
 import type { Plugin } from "@opencode-ai/plugin";
 import type { Event } from "@opencode-ai/sdk";
 import {
@@ -26,24 +19,27 @@ import {
   AGENT_MOBILE_ANALYSIS,
   AGENT_WEB_ANALYSIS,
   AGENT_SECURITY_ANALYSIS_EVOLVE,
-  AGENT_SECURITY_COORDINATOR,
+  LEDGER_INJECT_MAX_TOKENS,
   SECURITY_AGENTS,
   SECURITY_ANALYSIS_AGENTS,
-  AGENTS_WITH_DELEGATION_RULES,
   AGENT_SCRIPT_DIRS,
   SHARED_DIR,
   AGENTS_DIR,
   CONTROL_STARTUP_SERVICE,
 } from "./lib/constants";
+import { cognition } from "./lib/cognition";
 import { ctx } from "./lib/context";
 import { SessionData, SessionDataManager } from "./lib/session-manager";
 import { debugLog } from "./lib/logging";
-import TaskSessionPersistence from "./lib/task-session-persistence";
-import { getPythonCmd, getInstallHint, getCompilerName } from "./lib/venv";
+import TaskSessionPersistence, {
+  LEDGER_TEMPLATE,
+} from "./lib/task-session-persistence";
 import {
-  isControlHealthy,
-  startControl,
-} from "./lib/control-manager";
+  shouldTriggerCheckpoint,
+  renderCheckpointText,
+} from "./lib/checkpoint";
+import { getPythonCmd, getInstallHint, getCompilerName } from "./lib/venv";
+import { isControlHealthy, startControl } from "./lib/control-manager";
 import { controlFetch } from "./lib/control-http";
 import { refreshConfig, getCachedConfig } from "./lib/control-config";
 
@@ -164,7 +160,7 @@ function resolveNodeBinPath(sessionID: string): string | null {
   }
 }
 
-function getCompactionContext(agentName: string): string {
+function getCompactionContext(): string {
   let context = `## 分析状态（压缩时必须保留）
 
 当总结此会话时，如果包含分析相关内容，你必须保留以下信息：
@@ -186,20 +182,149 @@ function getCompactionContext(agentName: string): string {
 - 当前分析阶段和待完成步骤
 - 失败记录（已尝试方向，避免重复）
 - 验证结果和置信度
-- 用户显式约束`;
+- 用户显式约束
 
-  // Coordinator 不是分析 agent，而是编排 agent——需要保留编排状态
-  if (agentName === AGENT_SECURITY_COORDINATOR) {
-    context += `
-
-### 编排状态
-- 父任务目录路径
-- 已完成的子任务列表（Agent 名、关键发现摘要）
-- 待执行的子任务列表（Agent 名、任务描述）
-- 当前执行阶段（分析 / 分发 / 聚合）`;
-  }
+### 4. ${cognition.sections.conclusions}与${cognition.fields.untestedList}
+- 每条结论必须保留【${cognition.evidenceLevelSpec} + ${cognition.fields.verifiedScope} + ${cognition.fields.untestedList}】，禁止把未验证结论表述为已确认
+- "${cognition.sections.untested}"清单与"${cognition.sections.changelog}"必须原样保留
+- 禁止保留无条件的"${cognition.universalDenyMarkers.join("/")}"类结论；如需保留，必须同时保留其${cognition.fields.untestedList}（分析台账 $ROOT_TASK_DIR/${cognition.ledgerFilename} 的内容已随本提示一并提供——超约 ${LEDGER_INJECT_MAX_TOKENS} token 时截断并附全文路径；结论与未测清单照其原文保留，不要改写或精简）`;
 
   return context;
+}
+
+/** 估算 token 数：ASCII 4 字符 ≈ 1 token；非 ASCII（CJK 等）1 字符 ≈ 1 token——保守上估，宁少勿多 */
+function estimateTokens(text: string): number {
+  let ascii = 0;
+  let wide = 0;
+  for (const ch of text) {
+    if ((ch.codePointAt(0) ?? 0) < 0x80) ascii++;
+    else wide++;
+  }
+  return Math.ceil(ascii / 4) + wide;
+}
+
+/**
+ * 构建"分析台账原文"压缩注入块（认知干预系统：压缩时原样穿越）。
+ * 仅（五分析 agent + 有任务目录 + 台账文件非空）时返回内容；
+ * 超 LEDGER_INJECT_MAX_TOKENS token（估算）截断并附全文路径；其余情况返回 null（调用方不 push = 不注入）。
+ */
+function buildLedgerContextBlock(session: SessionData): string | null {
+  const sessionID = session.sessionID;
+  const ledgerTaskDir = session.rootTaskDir || session.getTaskDir();
+
+  if (!ledgerTaskDir) {
+    debugLog(`[buildLedgerContextBlock]无任务目录，跳过台账注入`, sessionID);
+    return null;
+  }
+
+  if (!SECURITY_ANALYSIS_AGENTS.includes(session.agentName)) {
+    debugLog(`[buildLedgerContextBlock]非分析 agent 跳过台账注入`, sessionID);
+    return null;
+  }
+
+  // 台账文件路径
+  const ledgerPath = join(ledgerTaskDir, cognition.ledgerFilename);
+  try {
+    const ledgerRaw = readFileSync(ledgerPath, "utf-8");
+    if (!ledgerRaw.trim()) {
+      debugLog(
+        `[buildLedgerContextBlock] 台账为空，跳过 ${ledgerPath}`,
+        sessionID,
+      );
+      return null;
+    }
+
+    const ledgerLines = ledgerRaw.split(/\r?\n/);
+    // token 预算截断：逐行累计估算，只取完整行（保持 markdown 结构，不做行内切断）
+    const keptLines: string[] = [];
+    let usedTokens = 0;
+    for (const line of ledgerLines) {
+      const lineTokens = estimateTokens(line) + 1; // +1 ≈ 行尾换行
+      if (usedTokens + lineTokens > LEDGER_INJECT_MAX_TOKENS) break;
+      keptLines.push(line);
+      usedTokens += lineTokens;
+    }
+
+    let truncated = keptLines.length < ledgerLines.length;
+    if (keptLines.length === 0) {
+      // 首行即超预算的病态情形：截断首行，保证注入不为空
+      keptLines.push(ledgerLines[0].slice(0, LEDGER_INJECT_MAX_TOKENS) + "…");
+      usedTokens = estimateTokens(keptLines[0]);
+      truncated = true;
+    }
+    const capped = keptLines.join("\n");
+    const truncatedNote = truncated
+      ? `\n…（已截断，共 ${ledgerLines.length} 行；全文见：${ledgerPath}）`
+      : "";
+    debugLog(
+      `[buildLedgerContextBlock] 注入分析台账 ${ledgerPath} (${keptLines.length}/${ledgerLines.length} 行，约 ${usedTokens} token) sessionID=${sessionID}`,
+      sessionID,
+    );
+    return `## 分析台账（未经总结的原始记录，必须保留）\n${capped}${truncatedNote}`;
+  } catch {
+    debugLog(
+      `[buildLedgerContextBlock] 台账不存在，跳：${ledgerPath}`,
+      sessionID,
+    );
+    return null;
+  }
+}
+
+/**
+ * 认知契约自检（镜像点一致性 + 插值渲染冒烟）。
+ * 启动时调用一次；漂移 → 日志 WARN + TUI toast，不阻塞启动。
+ * 手动即时验证（无独立脚本）：
+ *   bun -e "const m=await import('./plugins/lib/cognition.ts'); console.log(m.cognition.verifyMirrors())"
+ */
+async function verifyCognitionSelfCheck(): Promise<void> {
+  try {
+    const problems = cognition.verifyMirrors();
+
+    // 渲染冒烟：插值属性名笔误只会在渲染时暴露
+    try {
+      const compaction = getCompactionContext();
+      if (!compaction.includes(cognition.universalDenyMarkers.join("/")))
+        problems.push("压缩注入渲染缺否定词表");
+      if (!compaction.includes(cognition.evidenceLevelSpec))
+        problems.push("压缩注入渲染缺证据等级口径");
+      const checkpoint = renderCheckpointText({
+        checkpointCount: 0,
+        elapsedMinutes: 0,
+        toolCallCount: 0,
+        commandCallCount: 0,
+      });
+      if (!checkpoint.includes(cognition.ledgerFilename))
+        problems.push("检查点渲染缺台账文件名");
+      if (!LEDGER_TEMPLATE.includes(cognition.fields.untestedList))
+        problems.push("台账模板缺未测清单字段");
+    } catch (e) {
+      problems.push(`渲染冒烟异常: ${(e as Error)?.message}`);
+    }
+
+    if (problems.length === 0) {
+      debugLog("认知契约自检：一致");
+      return;
+    }
+    debugLog(
+      `[WARN] 认知契约漂移（${problems.length} 项）: ${problems.join(" | ")}`,
+    );
+    if (ctx.client) {
+      try {
+        await ctx.client.tui.showToast({
+          body: {
+            title: "认知契约漂移",
+            message: `${problems.length} 项不一致（详见 plugin_debug.log）：${problems[0]}`,
+            variant: "warning",
+            duration: 15000,
+          },
+        });
+      } catch (e) {
+        debugLog(`认知契约 toast 失败: ${(e as Error)?.message}`);
+      }
+    }
+  } catch (e) {
+    debugLog(`认知契约自检异常: ${(e as Error)?.message}`);
+  }
 }
 
 async function buildEnvSection(
@@ -220,14 +345,14 @@ async function buildEnvSection(
 
     const taskDir = session.getTaskDir();
     if (taskDir) {
-      envSection += `- 当前会话的任务目录($TASK_DIR)路径，当前会话的所有中间输出文件在此目录下: ${taskDir}`;
+      envSection += `- 当前会话的任务目录($TASK_DIR)路径（本会话工作目录：自己的中间产物写这里）: ${taskDir}`;
     } else {
       debugLog(`全局环境和目录位置信息 - 任务目录不存在`, sessionID);
     }
 
-    const rootTaskDir = session.getTaskDir();
-    if (!session.isRootAgent && rootTaskDir) {
-      envSection += `- 根会话的任务目录($ROOT_TASK_DIR)路径: ${rootTaskDir}`;
+    const rootTaskDir = session.rootTaskDir;
+    if (rootTaskDir) {
+      envSection += `- 根任务目录($ROOT_TASK_DIR)路径（约定文件落点：分析台账、无记忆评审报告；根会话下等于 $TASK_DIR）: ${rootTaskDir}`;
     }
 
     envSection += `- 共享目录($SHARED_DIR)路径，它里面有共享的通用的知识、工具和脚本: ${SHARED_DIR}\n`;
@@ -458,99 +583,6 @@ async function reportErrorAndAbort(
   }
 }
 
-/**
- * 构造"可委派 agent 清单"段——所有 AGENTS_WITH_DELEGATION_RULES 成员都看得到。
- *
- * 从每个成员 agent .md 的 frontmatter description 字段自动收集，
- * 避免维护两套描述。当前 agent 自己也会列出（让 LLM 知道自己是谁）。
- */
-function buildDelegationBlock(
-  currentAgent: string,
-  sessionID: string,
-): string | null {
-  const lines: string[] = [
-    "",
-    "## 可委派的 Agent",
-    "",
-    '遇到不属于你专长领域的子问题，用 **Task 工具**（`subagent_type` 参数）委派给对应专家 agent。把必要的上下文传给子 agent，不要只说"帮我查一下"。',
-    "",
-    "| subagent_type | 擅长 |",
-    "|---------------|------|",
-  ];
-
-  let agentCount = 0;
-
-  for (const agentName of AGENTS_WITH_DELEGATION_RULES) {
-    if (agentName === currentAgent) {
-      continue;
-    }
-    const desc = readAgentDescription(agentName, sessionID);
-    if (desc) {
-      lines.push(`| \`${agentName}\` | ${desc} |`);
-      agentCount++;
-    } else {
-      debugLog(
-        `buildDelegationBlock: ${agentName} description 读取失败，跳过`,
-        sessionID,
-      );
-    }
-  }
-
-  if (agentCount <= 0) {
-    debugLog("没有可以委派的子agents", sessionID);
-    return null;
-  }
-
-  lines.push("");
-  lines.push(
-    '**委派规则**：把已发现的全部相关信息传给子 agent（文件路径、URL、参数、目标），要求返回**具体的可操作结果**（flag / payload / 报告路径），不是"建议"。拿到返回结果后**整合进你的分析继续**，不要停下来等用户。',
-  );
-
-  return lines.join("\n");
-}
-
-/**
- * 从 agent .md 的 frontmatter 读 description 字段。
- * 使用 js-yaml 解析，支持完整 YAML 语法（多行/引号/嵌套）。
- * 带 mtime 缓存——文件未修改时返回缓存值。
- * 失败返回 null。
- */
-const descCache = new Map<string, { desc: string | null; mtime: number }>();
-
-function readAgentDescription(
-  agentName: string,
-  sessionID: string,
-): string | null {
-  const agentFile = join(AGENTS_DIR, `${agentName}.md`);
-  try {
-    const stat = statSync(agentFile);
-    const cached = descCache.get(agentName);
-    if (cached && cached.mtime === stat.mtimeMs) return cached.desc;
-
-    const content = readFileSync(agentFile, "utf-8");
-    const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
-    let desc: string | null = null;
-    if (match) {
-      try {
-        const fm = yaml.load(match[1]) as Record<string, any> | null;
-        if (fm?.description && typeof fm.description === "string") {
-          desc = fm.description.trim();
-        }
-      } catch {
-        // YAML 解析失败，desc 保持 null
-      }
-    }
-    descCache.set(agentName, { desc, mtime: stat.mtimeMs });
-    return desc;
-  } catch (e) {
-    debugLog(
-      `readAgentDescription: 读取 ${agentName} 失败: ${(e as Error)?.message}`,
-      sessionID,
-    );
-    return null;
-  }
-}
-
 function resolveDynamicSnippetName(
   session: SessionData,
   name: string,
@@ -745,6 +777,41 @@ function fireAndForgetMemory(
   );
 }
 
+/**
+ * 认知检查点：满足（根会话 + 五分析 agent + 有任务目录 + 触发判定）时返回注入文本并记账；
+ * 否则返回 null（调用方不 push）。触发判定含特性开关（COGNITION_CHECKPOINT_ENABLED）。
+ */
+function cognitionCheckpoint(session: SessionData): string | null {
+  if (!session.isRootAgent) {
+    return null;
+  }
+  const agentName = session.agentName;
+  if (!SECURITY_ANALYSIS_AGENTS.includes(agentName)) {
+    return null;
+  }
+
+  if (!session.getTaskDir()) {
+    return null;
+  }
+
+  const now = Date.now();
+  if (!shouldTriggerCheckpoint(session, now)) {
+    return null;
+  }
+
+  session.checkpointCount++;
+  session.lastCheckpointToolCount = session.toolCallCount;
+  session.lastCheckpointAt = now;
+
+  const result = renderCheckpointText(session);
+  const sessionID = session.sessionID;
+  debugLog(
+    `[INFO] system.transform: 注入认知检查点 #${session.checkpointCount} (tools=${session.toolCallCount}, cmds=${session.commandCallCount}, minutes=${session.elapsedMinutes}) sessionID=${sessionID}`,
+    sessionID,
+  );
+  return result;
+}
+
 export const SecurityAnalysisPlugin: Plugin = async (input) => {
   const { client, directory } = input;
 
@@ -794,6 +861,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   debugLog(
     `并行预热 ${preheatAgents.length} 个 agent 的环境检测: ${preheatAgents.join(", ")}`,
   );
+
+  // ── 认知契约启动自检（镜像点一致性 + 插值渲染冒烟；不阻塞启动）──
+  void verifyCognitionSelfCheck();
 
   return {
     tool: {},
@@ -966,7 +1036,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           `compacting: sessionID=${sid} agent=${agentName} (justCompacted=true)`,
           sid,
         );
-        const compactionCtx = getCompactionContext(agentName);
+        const compactionCtx = getCompactionContext();
         output.context.push(compactionCtx);
 
         debugLog(`=== compacting 注入内容开始 ===`, sid);
@@ -984,6 +1054,13 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             output.context.push(`## 分析持续性（压缩后必须遵守）
   这是安全分析会话，分析可能尚未完成。压缩后请继续执行未完成的分析步骤，不要输出状态报告后停下来等待用户。如果分析已完成，直接输出最终结论即可。`);
           }
+        }
+
+        // ── 分析台账原样穿越（认知干预系统：压缩时原样注入根任务目录的 ledger.md）──
+        // 台账是"结论/未测条件"的唯一记录处；压缩由总结器重写会洗掉限定词，这里原样注入。
+        const ledgerBlock = buildLedgerContextBlock(session);
+        if (ledgerBlock) {
+          output.context.push(ledgerBlock);
         }
       } catch (e) {
         debugLog(
@@ -1043,6 +1120,12 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           }
         }
 
+        // ── 认知检查点（独立于环境注入频率；仅根会话 + 五分析 agent + 有任务目录）──
+        const cognitionCheckpointResult = cognitionCheckpoint(session);
+        if (cognitionCheckpointResult) {
+          output.system.push(cognitionCheckpointResult);
+        }
+
         // ── buildEnvSection（所有识别的 agent 都执行）──
         session.systemTransformCount++;
         const shouldInject =
@@ -1060,19 +1143,6 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
 
         const envSection = await buildEnvSection(agentName, session);
         output.system.push(envSection);
-
-        // 注入"可委派 agent 清单"——只对 AGENTS_WITH_DELEGATION_RULES 成员生效
-        // 让调用方知道有哪些 agent 可以委派（含 searcher/memorist + 其他领域 agent）
-        if (AGENTS_WITH_DELEGATION_RULES.includes(agentName)) {
-          const delegationBlock = buildDelegationBlock(agentName, sessionID);
-          if (delegationBlock) {
-            output.system.push(delegationBlock);
-            debugLog(
-              `[INFO] system.transform: 注入委派清单 agent=${agentName} length=${delegationBlock.length}`,
-              sessionID,
-            );
-          }
-        }
 
         // 清理压缩标识
         if (session.justCompacted) {
@@ -1166,6 +1236,12 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           output.env.TASK_DIR = taskDir;
         }
 
+        // ROOT_TASK_DIR（任务级约定文件目录：台账/评审报告；根会话下等于 TASK_DIR，子会话下指向根任务目录）
+        const rootTaskDir = session.rootTaskDir;
+        if (rootTaskDir) {
+          output.env.ROOT_TASK_DIR = rootTaskDir;
+        }
+
         // OPENSECURITY_FLOW_ID（事件库分区标识，agent 调搜索工具时作为 group_id 传入）
         output.env.OPENSECURITY_FLOW_ID = session.flowId;
 
@@ -1199,6 +1275,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             ` AGENT_DIR=${scriptDir ?? "无"}` +
             ` SHARED_DIR=${output.env.SHARED_DIR}` +
             ` TASK_DIR=${taskDir ?? "无"}` +
+            ` ROOT_TASK_DIR=${output.env.ROOT_TASK_DIR ?? "无"}` +
             ` OPENSECURITY_FLOW_ID=${session.flowId}` +
             ` IDAT=${output.env.IDAT ?? "无"}` +
             ` PATH=${output.env.PATH ? "已注入venv/bin" : "无"}`,
@@ -1228,8 +1305,19 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           );
           return;
         }
+        // ── 认知检查点计数（仅根会话 + 五分析 agent）──
+        if (
+          session.isRootAgent &&
+          SECURITY_ANALYSIS_AGENTS.includes(session.agentName)
+        ) {
+          session.toolCallCount++;
+          if (input.tool === "bash") {
+            session.commandCallCount++;
+          }
+        }
+
         debugLog(
-          `tool.execute.before: tool=${input.tool} sessionID=${sid}`,
+          `tool.execute.before: tool=${input.tool} sessionID=${sid} tools=${session.toolCallCount} cmds=${session.commandCallCount}`,
           sid,
         );
 

@@ -207,3 +207,113 @@
   - 5 个分析 agent（web/binary/ai/crypto/mobile）的 `## 任务存档` 小节 + 挂载行删除（原小节两侧的两道 `---` 合并为一道；合并前的双 `---` 由替换产生，自检时发现）
 - 引用同步：`execution-discipline` 文件放置规则第 4 条去掉"任务归档"条目；插件 env 行与 L1234 注释去掉"任务归档/归档"
 - 说明：本进度文件此前条目（追加修复 15、ROOT 扫遍）中的 task-archive 记录属历史过程留痕，保留
+
+## 追加修复 17（删除插件委派块 + GENERAL_SUB_AGENTS 重构，同日）
+
+- 用户决策：① 删除插件委派块 ② fresh-eyes 加入 GENERAL_SUB_AGENTS（注册进 events/memory + 工具时间线）
+- 决策依据：
+  - opencode core 已把全部非 primary agent 的 description 每轮注入 Task 工具说明（vendor registry.ts:265-277），插件名单表冗余
+  - 委派纪律文本（传全上下文 / 可操作结果 / 拿回继续）已被 knowledge-management 片段 + 各子 agent 自身 description + execution-discipline 覆盖（零知识损失）
+  - memorist 冲突（被注入"用 Task 委派"但它无 task 工具且提示词声明不调用其他 agent）随块删除自动消失
+- 变更：
+  - `constants.ts`：删除 `AGENTS_WITH_DELEGATION_RULES`；`BASIC_GENERAL_AGENTS` 更名 `GENERAL_SUB_AGENTS`（searcher/memorist/fresh-eyes）；数组区新增"成员 × 集合"矩阵 + 各集合消费点注释
+  - `session-manager.ts`：`isBasicGeneralAgent()` 更名 `isGeneralSubAgent()`（方法保留，随数组更名）
+  - `security-analysis.ts`：删除 `buildDelegationBlock` + `readAgentDescription`（连带 descCache）+ 注入点；清理无用 import（AGENT_FRESH_EYES/AGENTS_WITH_DELEGATION_RULES/statSync/js-yaml）；1587→1474 行
+- 验证：插件 bun import OK；常量派生打印（GENERAL_SUB=3；ALL_REGISTERED=8；fresh-eyes 已注册、evolve 未注册）；全仓残留引用清零；两处删除交接区结构读回无痕
+- 备注：需求文档 S8"加入 AGENTS_WITH_DELEGATION_RULES"机制已被本决策取代（可见性由 core 自动注入承担），需求文档保留为历史
+
+## 追加修复 18（认知契约收口：单源 + 校验脚本，同日）
+
+- 用户决策：收口"结论台账与未测清单"等认知规则的跨文本重复——收口"必须逐字一致的契约词汇"，保留各文本用途差异
+- 指正：session-manager.ts 无该文本；实际承载点为 task-session-persistence.ts（台账模板）↔ security-analysis.ts（压缩 §4），另涉及 checkpoint.ts / server.py / execution-discipline.md
+- 发现并修正 4 处既有漂移：
+  - D1 否定词表三版本（§4 的 3 词 / md 的 5 词且写"全部" / server 的 6 词）→ 统一为 server 权威 6 词
+  - D2 server 拒绝消息"证据"→"证据等级（含取值枚举）"
+  - D3 模板列名"等级"→"证据等级"
+  - D4 task-session-persistence 注释与模板 blockquote 重复 → 注释收敛
+- 实施：
+  - 新建 `plugins/lib/cognition.ts`（单一来源：字段口径/节名/台账文件名/否定词表/未测标记）
+  - 消费方插值：LEDGER_TEMPLATE、压缩 §4、checkpoint 文案（改 cognition.ts 即全量同步）
+  - `getCompactionContext` 导出（便于验证，与 renderCheckpointText 同款先例）
+  - 新建 `security-analysis-evolve/scripts/check-cognition-consistency.py`（7 项跨 TS/Python/Markdown 校验；失败退出码 1）
+- 验证：校验器 7/7 PASS；负向测试（故意把 md 词表改回"全部"→ 精确报差异 + exit 1 → 恢复）；LEDGER_TEMPLATE/checkpoint/§4 三项渲染物实测；插件 bun import OK；server.py compile + 校验用例 8/8
+- 备注：evolve prompt（634 行）受 >600 行瘦身规则约束，未把校验器写入 prompt；运行方式见脚本头与 server.py / cognition.ts 注释
+
+## 追加修复 19（校验器形态修订：bun/TS 直跑，同日）
+
+- 用户反馈：Python 校验脚本形态丑（Python 套 bun -e 子进程 + JSON 往返 + 154 行脚手架）
+- 重写：`check-cognition-consistency.py` 删除 → `check-cognition-consistency.ts`（bun 直跑）
+  - 直接 import cognition.ts / task-session-persistence.ts / checkpoint.ts / security-analysis.ts——无子进程、无 JSON 往返
+  - 保留：4 项镜像点检查（server.py 词表 ×2 + 拒绝消息 + md 词表）+ 3 项渲染冒烟
+  - 引用同步：cognition.ts 头注释、server.py 注释
+- 验证：该独立脚本形态未经完整验证即被方案 A 取代（见追加修复 20）
+
+## 追加修复 20（校验并入插件启动自检，独立脚本删除，同日）
+
+- 用户决策：方案 A——不单独跑脚本；校验挂在"本来必然发生"的启动路径上
+- 变更：
+  - `cognition.ts`：新增 `verifyCognitionMirrors()`（server.py 词表 ×2 + 拒绝消息 + md 词表；返回不一致项列表）
+  - `security-analysis.ts`：setup 启动自检 `verifyCognitionSelfCheck()`（镜像项 + 渲染冒烟：压缩注入/检查点/台账模板 token）——不一致 → debugLog WARN + TUI toast；不阻塞启动
+  - 独立脚本 `check-cognition-consistency.ts` 删除；引用同步（cognition.ts 头注释 / server.py 注释）
+- 手动即时验证（无文件）：`bun -e "const m=await import('./plugins/lib/cognition.ts'); console.log(m.verifyCognitionMirrors())"`
+- 验证：函数直调返回 []；负向测试 ×2（md 词表漂移 / server.py 未测标记漂移 → 均精确报出 → 恢复后归零）；插件 bun import OK；server.py compile + 校验用例 8/8
+- 验证中发现并修复：TS 正则误用 Python 的 `\Z`（JS 不支持）导致拒绝消息区匹配失败——首跑即暴露假阳性（若跳过验证将每次启动弹假警报）→ 改用 `$` 并收紧为"下一个 def（含 async）或文件尾"
+
+## 追加修复 21（cognition.ts 类化收口，同日）
+
+- 用户要求：cognition.ts 常量/函数太散 → 用类包装；充分测试不出意外
+- 变更：`CognitionContract` 类（只读字段：triadName / evidenceLevelValues / fields / evidenceLevelSpec / sections / ledgerFilename / universalDenyMarkers / untestedMarkers；方法 verifyMirrors + 私有 pyMarkers / sameList）→ 模块级单例 `cognition`
+  - 消费方 3 处同步：task-session-persistence / checkpoint / security-analysis（含启动自检与手动命令注释）
+- 验证（重点：渲染产物零变化）：
+  - refactor 前后对三个渲染物（LEDGER_TEMPLATE / renderCheckpointText / getCompactionContext）做**字节级 diff → 全部零差异**
+  - `cognition.verifyMirrors()` → []；负向测试（md 词表漂移）→ 精确报出 → 恢复归零
+  - 插件 bun import OK；旧导出标识符运行时残留清零（仅剩 cognition.ts 内指向 server.py 的 Python 变量名字符串，应保留）
+
+## 追加修复 22（压缩 §4 台账说明措辞精确化，同日）
+
+- 用户审读：原句"（分析台账 $ROOT_TASK_DIR/ledger.md 会被原样注入；…）"——未说清注入的是文件还是内容、给谁（读者=总结器看不到插件内部机制）
+- 改为："（分析台账 $ROOT_TASK_DIR/ledger.md 的内容已随本提示一并提供——超 200 行时截断并附全文路径；结论与未测清单照其原文保留，不要改写或精简）"
+  - "内容"= 事实（插件 readFileSync 后以文本注入，非文件/附件）
+  - 超 200 行截断说明先告知，避免总结器把截断注当废注丢弃
+  - "200"用 LEDGER_INJECT_MAX_LINES 插值（常量改动自动同步）
+- 验证：临时副本渲染（改写相对导入 + globalThis 暴露内部函数，不动仓库文件）→ 与改前快照 diff 仅该句一行变化；cognition.verifyMirrors() → []；插件 bun import OK
+- export 移除（已澄清）：用户有意去掉 `getCompactionContext` 的 export——该函数在生产代码中仅有本模块调用（原导出是为外部渲染验证）；保持现状，验证改走临时副本法（改写相对导入 + globalThis 暴露，不动仓库文件）
+- verifyMirrors 分支覆盖补测：`_UNIVERSAL_MARKERS` 不匹配 / 拒绝消息缺字段口径 / 镜像文件读取失败 → 三分支均精确报出单条问题；恢复后 []；顺带 server.py 回归 8/8
+
+## 追加修复 23（台账注入函数化 + 自检本体补测，同日）
+
+- 用户要求：台账注入段封装为"返回内容则由调用方决定是否 push"的函数
+- 变更（security-analysis.ts）：
+  - 新增 `buildLedgerContextBlock(session): string | null`（五分析 agent + 有任务目录 + 台账非空 → 返回块；>200 行截断附路径；否则 null）
+  - compacting hook 内联段替换为 `const ledgerBlock = buildLedgerContextBlock(session); if (ledgerBlock) output.context.push(ledgerBlock);`
+  - 顺带修正：台账文件名改用 `cognition.ledgerFilename`（原为字面量 "ledger.md"）
+- 测试（临时副本法：相对导入改写为绝对 + globalThis 暴露内部函数 + 模拟 ctx.client，均不动仓库文件）：
+  - `buildLedgerContextBlock` 7 组用例全过：逐字匹配 / 截断边界（含 L200、不含 L201、总数与路径）/ 空白台账 / 文件缺失 / 非五分析 agent / 无任务目录 / rootTaskDir 回退
+  - `verifyCognitionSelfCheck` 本体 4 场景全过：一致（日志一行、零 toast）/ 镜像漂移（假 OPENCODE_ROOT：WARN + toast 精确报出 md 词表差异）/ 渲染冒烟失败（变异 §4：toast 报"压缩注入渲染缺否定词表"）/ toast 通道经模拟 client 实收验证
+
+## 追加修复 24（台账注入 cap：行数 → token 预算，同日）
+
+- 用户提议：截断按 token（真实开销计价单位）而非行数（行长方差大）
+- 变更：
+  - `constants.ts`：`LEDGER_INJECT_MAX_LINES = 200` → `LEDGER_INJECT_MAX_TOKENS = 4000`
+  - `security-analysis.ts`：新增 `estimateTokens()`（ASCII 4 字 ≈ 1 token；非 ASCII 1 字 ≈ 1 token，保守上估；vendor 的 len/4 对中文低估 4-5 倍，未照抄）；`buildLedgerContextBlock` 改逐行累计 token、只取完整行；病态单行 → 截断首行；日志含 kept/total 行数 + 估算 token；§4 文案改为"超约 4000 token 时截断"
+- 验证：15 用例全过（1999-2000-2001 行预算边界 / 长行 token 敏感 / 病态单行 / CRLF / 尾换行 / root 优先不回退 / emoji / 各 null 路径）；§4 渲染实测新文案
+
+## 追加修复 25（认知契约全量边界测试 + token 估算基准，验证记录，同日）
+
+- 测试矩阵（临时副本法，全部通过）：
+  - verifyMirrors 7 场景（子进程隔离 OPENCODE_ROOT）：一致 / py 词表顺序调换 / py 整行移除 / md 句移除 / md 缺失 / py 单引号 / 双文件缺失
+  - buildLedgerContextBlock 15 用例（见追加修复 24）
+  - cognitionCheckpoint 7 用例：工具数触发并记账 / 去重 / 未达阈值 / 时间触发 / 非根 / 非分析 agent / 无目录
+  - verifyCognitionSelfCheck 6 场景：一致 / 镜像漂移 / 冒烟失败 / 无 client / toast 抛异常（捕获记日志）/ 聚合 2 项
+- `estimateTokens` 基准（tiktoken o200k/cl100k，装于临时目录）：混合台账文本 估算/实际 = 1.10（o200k）/ 0.86（cl100k）；4000 估算 ≈ 3633（o200k）/4633（cl100k）真实 token；emoji 段低估（0.6-0.75）
+- `cognitionCheckpoint` review：与重构前内联逻辑逐项等价；建议补 doc comment（已随 26 落地）
+
+## 追加修复 26（认知检查开关 + 检查点格式 + 接口收口 + 台账规范审计，同日）
+
+- 开关（用户要求，默认开）：`ENV_KEY_COGNITION_CHECKPOINT = "COGNITION_CHECKPOINT_ENABLED"`（与 RESUME_ANALYSIS_ENABLED 同规则：未找到/非 0 非 false → 启用；"0"/"false"（忽略大小写）→ 禁用；控制台配置，重启 opencode 生效）
+  - 判定置于 `shouldTriggerCheckpoint` 内（开关 → 阈值）：关闭 = 不触发/不记账/不注入；工具调用计数继续（重开后基线正常）
+- 检查点格式：标题独立行（`## 认知检查点 序号#N`）+ 运行信息独立行 + 空行 + 列表；块首加 `\n`（vendor `llm.ts:126` 以 `\n` 连接 system 项，与其它注入块一致）；第 3 条统一 `cognition.sections.untested`
+- 接口收口（用户批评成立）：`SessionData implements CheckpointTriggerStats, CheckpointRenderData` + `elapsedMinutes` 派生 getter；`cognitionCheckpoint` 改 `renderCheckpointText(session)`；接口注释双向标注（"由 SessionData 实现，字段维护见 session-manager.ts"）
+- 台账填写规范审计：结论台账列口径已有（三件套）；"必须沿用模板结构"与「未测条件（维度）」五列填写规则缺失 → 补丁待用户确认
+- 测试：套件3 7 用例（新格式断言）/ 套件5 开关关闭 ×2（配置读值替换 "0"/"FALSE" → 不触发不记账）/ 台账 15 / 镜像 7 / 自检 2 回归全过；插件 bun import OK + verifyMirrors []；新渲染物实测

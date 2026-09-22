@@ -5,12 +5,32 @@ import {
   mkdirSync,
   writeFileSync,
 } from "fs";
-import { TASK_SESSIONS_DIR, WORKSPACE_DIR } from "./constants";
+import { TASK_SESSIONS_DIR, WORKSPACE_DIR, SECURITY_ANALYSIS_AGENTS } from "./constants";
+import { cognition } from "./cognition";
 import { debugLog } from "./logging";
 import TaskSessionPersistenceUtils, {
   TaskRawData,
   TaskSessionPersistenceData,
 } from "./task-session-persistence-utils";
+
+/** 分析台账模板（根任务目录创建时写入）。结构、字段口径与定位语见模板本体。 */
+export const LEDGER_TEMPLATE = `# 分析台账
+> 结论与未测条件的唯一记录处；按待复核记录对待（非免检结论）。下结论前先更新本文件；压缩时本文件会被原样注入保留。
+
+## ${cognition.sections.observations}
+- （实验/命令 + 关键输出摘要）
+
+## ${cognition.sections.conclusions}
+| # | 结论 | ${cognition.fields.evidenceLevel} | ${cognition.fields.verifiedScope} | ${cognition.fields.untestedList} | 更新于（时间） |
+|---|---|---|---|---|---|
+
+## ${cognition.sections.untested}
+| 维度 | 具体条件 | 为什么没测 | 预计成本 | 状态 |
+|---|---|---|---|---|
+
+## ${cognition.sections.changelog}
+- （时间 + 改动了什么）
+`;
 
 export default class TaskSessionPersistence {
   /**
@@ -47,6 +67,15 @@ export default class TaskSessionPersistence {
     const taskDirName = TaskSessionPersistenceUtils.genTaskDirName(agentName);
     const taskDir: string = join(realBaseDir, taskDirName);
     mkdirSync(taskDir, { recursive: true });
+
+    // 根任务目录：写入分析台账模板（认知干预系统：分析台账；仅五分析 agent；幂等，已存在不覆盖）
+    if (!baseDir && SECURITY_ANALYSIS_AGENTS.includes(agentName)) {
+      const ledgerPath = join(taskDir, cognition.ledgerFilename);
+      if (!existsSync(ledgerPath)) {
+        writeFileSync(ledgerPath, LEDGER_TEMPLATE);
+        debugLog(`createTaskDir: 写入分析台账模板 ${ledgerPath}`, sessionID);
+      }
+    }
 
     // 注册映射（sessionID 非空时）
     mkdirSync(TASK_SESSIONS_DIR, { recursive: true });

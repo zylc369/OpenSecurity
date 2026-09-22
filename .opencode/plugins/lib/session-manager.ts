@@ -2,9 +2,13 @@ import { join } from "path";
 import type { OpencodeClient, Part, UserMessage } from "@opencode-ai/sdk";
 import {
   SECURITY_AGENTS,
-  BASIC_GENERAL_AGENTS,
+  GENERAL_SUB_AGENTS,
   ALL_REGISTERED_AGENTS,
 } from "./constants";
+import type {
+  CheckpointRenderData,
+  CheckpointTriggerStats,
+} from "./checkpoint";
 import { debugLog } from "./logging";
 import { Result } from "./result";
 import TaskSessionPersistence from "./task-session-persistence";
@@ -20,7 +24,9 @@ function localIsRegisteredAgent(agentName: string): boolean {
   return ALL_REGISTERED_AGENTS.includes(agentName);
 }
 
-export class SessionData {
+export class SessionData
+  implements CheckpointTriggerStats, CheckpointRenderData
+{
   readonly flowId: string;
   /** session 创建时间戳（毫秒）。调试参考，不用于业务逻辑 */
   readonly createdAt: number;
@@ -68,6 +74,18 @@ export class SessionData {
   /** 冷却中 pending 的 setTimeout handle。新 resume 前或用户手动发消息时清除。 */
   pendingResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // ── 认知检查点（反公理固化）──
+  /** 累计工具调用次数（仅根会话 + 五分析 agent 累加） */
+  toolCallCount = 0;
+  /** 其中 bash 命令调用次数 */
+  commandCallCount = 0;
+  /** 已注入的检查点次数 */
+  checkpointCount = 0;
+  /** 上次检查点注入时间戳（毫秒）。初值为会话创建时间 */
+  lastCheckpointAt = Date.now();
+  /** 上次检查点注入时的工具调用计数 */
+  lastCheckpointToolCount = 0;
+
   constructor(
     flowId: string,
     agentName: string,
@@ -90,8 +108,8 @@ export class SessionData {
     return localIsSecurityAgent(this.agentName);
   }
 
-  isBasicGeneralAgent(): boolean {
-    return BASIC_GENERAL_AGENTS.includes(this.agentName);
+  isGeneralSubAgent(): boolean {
+    return GENERAL_SUB_AGENTS.includes(this.agentName);
   }
 
   isRegisteredAgent(): boolean {
@@ -140,6 +158,11 @@ export class SessionData {
           (p as { text?: string }).text === this.resumePrompt,
       )
     );
+  }
+
+  /** 会话已运行分钟数（CheckpointRenderData 的派生字段） */
+  get elapsedMinutes(): number {
+    return Math.round((Date.now() - this.createdAt) / 60000);
   }
 
   setTaskDir(taskDir: string | null | undefined): void {
@@ -442,7 +465,8 @@ export class SessionDataManager {
     if (!parentSessionID) {
       session.rootTaskDir = taskDir; // 根 session 任务目录
     } else {
-      session.rootTaskDir = parentSession?.rootTaskDir;
+      // 子会话继承父链的根任务目录；父链没有任务目录时回退自身目录（保证 $ROOT_TASK_DIR 总是可用）
+      session.rootTaskDir = parentSession?.rootTaskDir || taskDir;
     }
     return session;
   }

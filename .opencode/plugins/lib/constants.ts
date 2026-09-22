@@ -59,14 +59,28 @@ export const AGENT_WEB_ANALYSIS = "web-analysis";
 export const AGENT_AI_SECURITY_ANALYSIS = "ai-security-analysis";
 export const AGENT_CRYPTO_ANALYSIS = "crypto-analysis";
 export const AGENT_SECURITY_ANALYSIS_EVOLVE = "security-analysis-evolve";
-export const AGENT_SECURITY_COORDINATOR = "security-coordinator";
 
-// 通过 PentAGI searcher/memorist 进化新增的子 agent（2026-07-09）。
-// 以原始字符串形式保留，因为它们不属于历史的 SECURITY_AGENTS 列表
-// （后者用于控制环境信息注入 + 会话生命周期钩子）。
 export const AGENT_SEARCHER = "searcher";
 export const AGENT_MEMORIST = "memorist";
+export const AGENT_FRESH_EYES = "fresh-eyes";
 
+// 成员 × 集合矩阵（✓ = 属于该集合；各集合的语义与消费点见其定义处注释）:
+//
+// | agent                    | GENERAL_SUB | SECURITY_ANALYSIS | SECURITY | REGISTERED |
+// |--------------------------|-------------|-------------------|----------|------------|
+// | searcher                 | ✓           |                   |          | ✓          |
+// | memorist                 | ✓           |                   |          | ✓          |
+// | fresh-eyes               | ✓           |                   |          | ✓          |
+// | binary-analysis          |             | ✓                 | ✓        | ✓          |
+// | mobile-analysis          |             | ✓                 | ✓        | ✓          |
+// | web-analysis             |             | ✓                 | ✓        | ✓          |
+// | ai-security-analysis     |             | ✓                 | ✓        | ✓          |
+// | crypto-analysis          |             | ✓                 | ✓        | ✓          |
+// | security-analysis-evolve |             |                   | ✓        | 有意排除   |
+
+// 领域分析 agent（5 个）。消费点：根会话任务目录 + ledger.md 模板创建
+//（task-session-persistence.ts）；认知检查点计数/注入、压缩时台账注入
+//（security-analysis.ts）；启动时的环境检测预热。
 export const SECURITY_ANALYSIS_AGENTS = [
   AGENT_BINARY_ANALYSIS,
   AGENT_MOBILE_ANALYSIS,
@@ -75,36 +89,29 @@ export const SECURITY_ANALYSIS_AGENTS = [
   AGENT_CRYPTO_ANALYSIS,
 ];
 
+// 承担可观测性职责的 agent。消费点：独立日志文件（logging.ts）、时间线记录、
+// requireSecurityAgent 门控（compacting / 分析持续性持久化）、父链回溯
+//（searcher/memorist 据此加载 domain-sources 片段）、脚本目录映射。
 export const SECURITY_AGENTS = [
   ...SECURITY_ANALYSIS_AGENTS,
   AGENT_SECURITY_ANALYSIS_EVOLVE,
-  AGENT_SECURITY_COORDINATOR,
 ];
 
-export const BASIC_GENERAL_AGENTS = [AGENT_SEARCHER, AGENT_MEMORIST];
+// 通用辅助子 agent（非领域分析）：情报检索 / 长期记忆 / 无记忆评审。
+export const GENERAL_SUB_AGENTS = [
+  AGENT_SEARCHER,
+  AGENT_MEMORIST,
+  AGENT_FRESH_EYES,
+];
 
-// evolve 从注册名单摘除（知识双轨分离设计）：
-// - 摘除后 evolve 的工具执行/LLM 响应不再写 events/memory（isRegisteredAgent 链拦截）
-// - 但不从 SECURITY_AGENTS 拿掉：那边承担日志、timeline、父链查找等可观测性职责
-// - evolve 的环境注入不受影响（system.transform 用 sessionManager.get，无名单门控）
+// 注册进 events/memory 采集与工具时间线的 agent（= GENERAL_SUB + SECURITY）。
+// 消费点：events/memory 写入（tool.execute.after / text.complete）、
+// tool.execute.before/after 时间线、根会话任务目录创建门控（session-manager）。
+// evolve 有意排除：开发工具，其工具执行与 LLM 回复不写入事件/记忆库。
 export const ALL_REGISTERED_AGENTS = [
-  ...BASIC_GENERAL_AGENTS,
+  ...GENERAL_SUB_AGENTS,
   ...SECURITY_AGENTS,
 ].filter((agent) => agent !== AGENT_SECURITY_ANALYSIS_EVOLVE);
-
-// 所有参与跨 agent 委派的 agent。插件会向每个成员的系统提示词中注入
-// 一个"可委派 Agent"区块（从每个 agent 的 .md frontmatter description 中收集）。
-//
-// 组成：5 个领域分析 agent + searcher + memorist。
-// 设计上排除：
-//   - security-analysis-evolve（开发工具，不是分析 agent）
-//   - security-coordinator（保留以向后兼容，但不在此列表中）
-// 这并非 SECURITY_AGENTS 的超集——两个列表在 5 个领域 agent 上有重叠，
-// 但各自都包含对方没有的成员。
-export const AGENTS_WITH_DELEGATION_RULES = [
-  ...BASIC_GENERAL_AGENTS,
-  ...SECURITY_ANALYSIS_AGENTS,
-];
 
 export const AGENT_SCRIPT_DIRS: Record<string, string> = {};
 for (const name of SECURITY_AGENTS) {
@@ -132,6 +139,11 @@ export const ABORTED_ERROR_NAME = "MessageAbortedError";
 // 取值规则：未找到/非 0 非 false 的任意值 → 启用；值为 "0" 或 tolower 后 "false" → 禁用。
 export const ENV_KEY_RESUME_ANALYSIS = "RESUME_ANALYSIS_ENABLED";
 
+// 控制台配置中控制"认知检查点"开关的变量名（读写方：控制台 config_store；插件经配置缓存读取）。
+// 取值规则：未找到/非 0 非 false 的任意值 → 启用（默认开启）；"0" 或 tolower 后 "false" → 禁用。
+// 改配置后重启 opencode 生效。
+export const ENV_KEY_COGNITION_CHECKPOINT = "COGNITION_CHECKPOINT_ENABLED";
+
 // ─── venv ──────────────────────────────────────────────────────
 
 // venv 与 DATA_DIR 解耦：测试用沙箱 DATA_DIR 时仍可指向真实 venv（省 1GB+ 依赖安装）。
@@ -149,6 +161,15 @@ export const VENV_PYTHON_CANDIDATES = [
 // ─── 时间线 ────────────────────────────────────────────────────
 
 export const MAX_TIMELINE_BUFFER = 50;
+
+// ─── 认知检查点（反公理固化）────────────────────────────────────
+
+/** 检查点触发：每 N 次工具调用一次 */
+export const CHECKPOINT_TOOL_INTERVAL = 20;
+/** 检查点触发：时间间隔（毫秒；与工具调用数先到者触发） */
+export const CHECKPOINT_TIME_INTERVAL_MS = 40 * 60 * 1000;
+/** 台账原样注入压缩上下文的 token 预算（估算；超预算按行截断并附全文路径） */
+export const LEDGER_INJECT_MAX_TOKENS = 4000;
 
 // ─── 控制台（opencode-control）──────────────────────────────────
 //

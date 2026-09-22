@@ -50,7 +50,6 @@ SHARED_INFRA_AGENTS = frozenset({
     "web-analysis",
     "ai-security-analysis",
     "crypto-analysis",
-    "security-coordinator",
 })
 
 
