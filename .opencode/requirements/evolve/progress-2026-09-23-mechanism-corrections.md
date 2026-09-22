@@ -30,3 +30,4 @@
 - S10：全仓终扫（.opencode + docs）两错误类变体零残留（仅需求/进度文档的审计叙述命中，属预期）；书籍 07/12 章、知识库 race-conditions §4 抽查自洽 ✓
 - Phase 6 审计：3 个周期收敛——①2 轮通过 → 纯审抓 4 处（:1383 规范外推、:1430/:1431 取值规则、:1442 表、:1445 概括句）；②修复 → 2 轮通过 → 纯审再抓 3 处（:1581 拆零件示例、书籍 12:9 类比、12:16 定义句）；③修复 → 2 轮 + 纯审零问题（全载体旧模型词仅剩合法语境：:834 COOP"旧窗口复活"、描述题目固定代码的"写死"、BFCache"内存快照"）✓
 - 不修项（已记录）：events 图库（flow 隔离历史记录）、记忆库执行记录条目（[bash]/[read] 日志）、历史需求文档 2026-09-21（过程记录，由本需求 §5 承接）
+- 探针归档（补充执行）：`.opencode/web-analysis/scripts/probe-message-lifecycle/`（5 个）、`probe-cookie-scope/`（1 个）、`probe-navigation/`（2 个）——每目录自包含 README + package.json（可整体拷走）；命名规则：目录 = `probe-<行为域>`、文件 = `probe_<断言>.js`；原 `browser-probes` 单目录方案作废，旧暂存路径已从 git index 撤下
