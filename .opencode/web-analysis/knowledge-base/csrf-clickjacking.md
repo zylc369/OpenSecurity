@@ -49,7 +49,7 @@
 1. **GET 方法状态变更**: 服务端用 GET 做状态变更时——
    `<img src="https://target.com/account/delete?confirm=yes">` 或 `document.location='https://target.com/transfer?to=attacker&amount=1000'`
 2. **子域 XSS**: SameSite 按 site（eTLD+1）判定，`sub.target.com` 的 XSS 对 target.com 是 same-site → cookie 照发，子域 XSS 作跳板
-3. **Chrome Lax+POST 2 分钟豁免**: cookie 设置后 2 分钟内 Lax cookie 也随跨站 POST 发送（为 OAuth 设计）。利用: `window.open('https://target.com/login')` 强制设置新 cookie，5 秒后（setTimeout）提交跨站 POST 表单
+3. **Chrome Lax+POST 2 分钟豁免（仅未显式声明 SameSite 的 cookie）**: 未声明 `SameSite` 属性、由浏览器按默认 Lax 处理的 cookie，在设置后 2 分钟内会随跨站 POST 发送（官方名 `Lax-allowing-unsafe`，为 OAuth 设计）；显式声明 `SameSite=Lax` 的 cookie 不享受。验证: 同一响应同时种下"未声明"与"显式 Lax"两个 cookie，从跨站页面 POST——接收端只看到未声明的那个（对照实验须确保两侧跨 site；同 host 不同端口是同 site，会失真）。利用: 目标会话 cookie 未显式声明 SameSite 时，`window.open('https://target.com/login')` 让浏览器写入新 cookie，5 秒后（setTimeout）提交跨站 POST 表单
 4. **302 重定向链**: 攻击者页 302 到 `https://target.com/transfer?to=attacker&...` → 浏览器顶层导航跟随 → Lax cookie 发送 → GET 状态变更生效
 5. **Method override 伪装 GET**: 框架支持方法覆盖时 GET 请求按 POST/DELETE 执行:
    - `GET /transfer?_method=POST&to=attacker&amount=1000`（Rails/Laravel/Symfony `_method` 参数）

@@ -1077,9 +1077,9 @@ window.open("http://localhost:3000/review?u=" + 攻击脚本地址 + "&rid=" + r
 ```js
 addEventListener("pagehide", function(){ try { top.postMessage({p:1}, "*"); top.postMessage({p:2}, "*"); } catch(e){} });
 ```
-发送的消息被**父页面**的`addEventListener("message" ...`监听器接收，监听器内的`e.source === viewer.contentWindow`此时会返回 false：两边都是**窗口引用**（比较的就是窗口对象），只是此刻一个（`viewer.contentWindow`）已指向新文档的窗口，另一个（`e.source`）是正在脱离的旧文档的窗口，两者不是同一个窗口。
+发送的消息被**父页面**的`addEventListener("message" ...`监听器接收，监听器内的`e.source === viewer.contentWindow`此时会返回 false：这条消息穿过文档切换后才被投递，`viewer.contentWindow` 已指向新文档的窗口，而 `e.source` 因为源文档（旧文档）已销毁变成了 `null`——`null` 不等于任何窗口引用，两者不再相等。
 
-> `viewer.contentWindow` 是**框架的窗口代理（WindowProxy）**：对象身份全程不变、指向随导航切到新文档的窗口，窗口内文档未卸载的时候两者是同一个当前窗口；窗口内的文档卸载瞬间，`contentWindow` 已经切到新文档的窗口、`source` 还指向正在脱离的旧窗口（实测：此刻 `contentWindow` 读到的是新文档，`source` 的旧文档已不可访问），两者不再相等，身份比较失效。
+> `viewer.contentWindow` 是**框架的窗口代理（WindowProxy）**：对象身份全程不变、指向随导航切到新文档的窗口。而 `e.source` 的取值规则是**投递时求值**：源文档仍存活 → 指向该发送窗口；**源文档已销毁 → `null`**（不是保留旧窗口的引用）。文档存活期间发送的消息，`e.source` 与当时的 `contentWindow` 是同一个当前窗口，比较相等；`pagehide` 时刻发出的消息在文档切换后才被投递，源文档已销毁，`e.source` 为 `null`，两者不再相等，身份比较失效。
 
 
 用两个实验对照验证（修改攻击脚本，其余流程不变）：
@@ -1285,7 +1285,7 @@ res.render("review", { nonce, id: currentReview.id, state: currentReview.nonce }
 </script>
 ```
 
-这段逻辑的意图很明确：iframe 第一次加载完成后立刻换成空文档（"审查完毕，关闭文档"）；此后如果还收到来自沙箱窗口的消息，则判断为"文档关闭时仍有交互"，视为审查通过，调用 `/complete`。校验逻辑是那行身份比较：**消息来源是当前 iframe 窗口的会被丢弃**（正常时序下该窗口的脚本已随替换卸载，不会再有消息）；能通过的是被替换下来的旧文档窗口在卸载瞬间投递的消息。
+这段逻辑的意图很明确：iframe 第一次加载完成后立刻换成空文档（"审查完毕，关闭文档"）；此后如果还收到来自沙箱窗口的消息，则判断为"文档关闭时仍有交互"，视为审查通过，调用 `/complete`。校验逻辑是那行身份比较：**消息来源是当前 iframe 窗口的会被丢弃**（正常时序下该窗口的脚本已随替换卸载，不会再有消息）；能通过的是在旧文档销毁后才被处理的消息——投递时源文档已销毁，`e.source` 为 `null`，不等于任何窗口引用。
 
 **`/sandbox`**：渲染一个极简单的页面，关键只有一行：用 script 标签（HTML 里负责加载和执行 JavaScript 的标签）加载攻击脚本。这个标签带着服务器生成的 nonce（number used once，一次性随机数，用来证明内容出自服务器）：
 

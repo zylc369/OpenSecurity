@@ -282,7 +282,7 @@
 
 **利用思路**：
 - 删除 token 参数 / 换随机值 / 跨用户 token → 服务端未真正校验
-- `SameSite=Lax` 绕过：GET 状态变更 / 子域 XSS / 2 分钟豁免 / 302 链 / `_method` override
+- `SameSite=Lax` 绕过：GET 状态变更 / 子域 XSS / 2 分钟豁免（仅未显式声明 SameSite 的 cookie）/ 302 链 / `_method` override
 - JSON 端点：`text/plain` 表单伪装（`enctype="text/plain"` + name 构造 JSON 体）
 - OAuth 无 `state` → 授权码 CSRF → 账号绑定劫持
 

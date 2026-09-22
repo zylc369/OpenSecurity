@@ -104,9 +104,9 @@ PP 源与 gadget 静态挖掘: 全部 JS `grep -nE "location\.(hash|search|href)
 
 ### 机制
 
-- 消息里的 `e.source`（发送方窗口的引用）在**消息发出的那一刻**就被写下，之后不再变化；而接收方读取 `iframe.contentWindow` 时，读到的是**消息送达的那一刻** iframe 里当前的窗口。
+- 消息里的 `e.source`（发送方窗口的引用）在**投递时**求值：源文档仍存活 → 指向该发送窗口；**源文档已销毁 → `null`**；而接收方读取 `iframe.contentWindow` 时，读到的是**消息送达的那一刻** iframe 里当前的窗口（稳定的窗口引用，指向当前文档）。
 - 消息不是立刻送达的，要排队等待处理；排队期间，iframe 的文档可能已经被换掉（导航或替换）。
-- 如果消息正好是在旧文档**卸载的瞬间**发出的（`pagehide` 的监听处理函数里调用 `postMessage` 发消息），那么它会先进入队列，等文档切换完成、新文档生效之后才送达。送达时，`iframe.contentWindow` 已经指向新文档的窗口，而消息里记下的 `e.source` 还是旧文档窗口——两者不再相等。
+- 如果消息正好是在旧文档**卸载的瞬间**发出的（`pagehide` 的监听处理函数里调用 `postMessage` 发消息），那么它会先进入队列，等文档切换完成、新文档生效之后才送达。送达时，`iframe.contentWindow` 已经指向新文档的窗口，而这条消息的 `e.source` 已经是 `null`（投递时源文档已销毁）——`null` 不等于任何窗口引用，两者不再相等。
 
 ### 检查方法（对照实验）
 
@@ -118,11 +118,13 @@ PP 源与 gadget 静态挖掘: 全部 JS `grep -nE "location\.(hash|search|href)
 setInterval(() => target.postMessage({a: 1}, "*"), 1);
 // B 组：在卸载瞬间发送（预期：比较为 false → 进入处理分支）
 addEventListener("pagehide", () => target.postMessage({b: 1}, "*"));
+// 接收端（校验代码所在页面）加一行判别打印：
+addEventListener("message", (e) => console.log("eq=" + (e.source === iframe.contentWindow), "srcNull=" + (e.source === null)));
 ```
 
-判读：如果 B 组出现比较结果为 false，说明竞态成立。两组必须在同一个脚本里并排运行——只跑 A 组的话，会误以为"比较永远相等"。
+判读：B 组出现比较结果为 false（同时打印 `srcNull=true`）说明竞态成立。两组必须在同一个脚本里并排运行——只跑 A 组的话，会误以为"比较永远相等"。
 
-父页面用 `addEventListener("message", (e) => ...)` 监听 iframe 发来的消息，并在处理函数里比较 `e.source === iframe.contentWindow`。这个比较的实测结果：iframe 页面存活期间发送时——比较始终相等；iframe 在 `pagehide`（卸载瞬间）发送消息时——这条消息跨越文档切换后才被送达，比较变为不等。
+父页面用 `addEventListener("message", (e) => ...)` 监听 iframe 发来的消息，并在处理函数里比较 `e.source === iframe.contentWindow`。对照实验的观察结果：iframe 页面存活期间发送时——比较始终相等；iframe 在 `pagehide`（卸载瞬间）发送消息时——这条消息跨越文档切换后才被送达，此时 `e.source` 为 `null`，比较变为不等。
 
 ### 利用模板
 
