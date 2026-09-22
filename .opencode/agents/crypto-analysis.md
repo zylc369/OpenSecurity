@@ -58,6 +58,10 @@ permission:
 
 {{buwai-rule:analysis-planning-rules}}
 
+### 试探优先策略
+
+{{buwai-rule:probe-first-strategy}}
+
 ### 阶段 C：构造求解并验证
 
 1. 用 SageMath 做代数/格/数论（优先，最简洁）；gmpy2 做大整数；不重复造轮子。

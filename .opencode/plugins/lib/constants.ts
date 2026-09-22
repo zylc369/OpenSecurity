@@ -104,14 +104,17 @@ export const GENERAL_SUB_AGENTS = [
   AGENT_FRESH_EYES,
 ];
 
-// 注册进 events/memory 采集与工具时间线的 agent（= GENERAL_SUB + SECURITY）。
+// 项目内 agent 全集（agents/ 目录下均有定义文件）：领域分析 + 通用辅助 + evolve。
+// 消费点：占位符展开的"文件缺失即异常"判定（snippet.ts inspectAgentFile）。
+export const PROJECT_AGENTS = [...GENERAL_SUB_AGENTS, ...SECURITY_AGENTS];
+
+// 注册进 events/memory 采集与工具时间线的 agent（= PROJECT_AGENTS 去掉 evolve）。
 // 消费点：events/memory 写入（tool.execute.after / text.complete）、
 // tool.execute.before/after 时间线、根会话任务目录创建门控（session-manager）。
 // evolve 有意排除：开发工具，其工具执行与 LLM 回复不写入事件/记忆库。
-export const ALL_REGISTERED_AGENTS = [
-  ...GENERAL_SUB_AGENTS,
-  ...SECURITY_AGENTS,
-].filter((agent) => agent !== AGENT_SECURITY_ANALYSIS_EVOLVE);
+export const ALL_REGISTERED_AGENTS = PROJECT_AGENTS.filter(
+  (agent) => agent !== AGENT_SECURITY_ANALYSIS_EVOLVE,
+);
 
 export const AGENT_SCRIPT_DIRS: Record<string, string> = {};
 for (const name of SECURITY_AGENTS) {

@@ -44,7 +44,7 @@ $OPENCODE_ROOT/                              # 由插件注入，项目级 .open
 │   ├── web-analysis.md                   # Web 安全分析 Agent
 │   ├── ai-security-analysis.md           # AI 安全分析 Agent（提示注入 + 越狱攻击）
 │   └── security-analysis-evolve.md       # ← 你自己（本文件）
-├── agents-rules/                         # Agent prompt 共享片段（Plugin 自动展开 {{buwai-rule:xxx}}）
+├── agents-rules/                         # Agent prompt 共享片段（Plugin 自动展开 {{buwai-rule:片段名}}）
 ├── plugins/
 │   └── security-analysis.ts              # Plugin（上下文持久化 + session 管理 + 片段展开）
 ├── binary-analysis/                      # 逆向分析核心工具与知识库
@@ -212,7 +212,7 @@ Plugin hooks:
 │                                                            │
 │ 读取目标 agent prompt，计算展开后行数（LLM 实际收到的）:     │
 │   展开行数 = .md 文件行数 - 占位符行数 + 各片段文件行数之和  │
-│   （占位符 {{buwai-rule:xxx}} 占 1 行，展开后替换为片段内容） │
+│   （占位符 {{buwai-rule:片段名}} 占 1 行，展开后替换为片段内容） │
 │   < 450 行 → 跳过，进入 Phase 5                             │
 │   450-600 行 → 分析可提取内容，向用户建议                    │
 │   > 600 行 → 必须先瘦身再添加新内容                          │

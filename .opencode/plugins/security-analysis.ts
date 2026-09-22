@@ -22,6 +22,7 @@ import {
   LEDGER_INJECT_MAX_TOKENS,
   SECURITY_AGENTS,
   SECURITY_ANALYSIS_AGENTS,
+  PROJECT_AGENTS,
   AGENT_SCRIPT_DIRS,
   SHARED_DIR,
   AGENTS_DIR,
@@ -48,7 +49,9 @@ function getCachedConfigValue(key: string): string | null {
   return getCachedConfig()[key] ?? null;
 }
 import {
-  hasBuwaiExtensionId,
+  BUWAI_RULE_PLACEHOLDER_PREFIX,
+  BUWAI_RULE_PLACEHOLDER_SOURCE,
+  inspectAgentFile,
   loadSnippet,
   resolveDynamicRuleSnippetName as resolveDynamicByAgentSnippetName,
 } from "./lib/snippet";
@@ -623,12 +626,28 @@ function expandedSnippet(
     sessionID,
   );
   const agentFile = join(AGENTS_DIR, `${agentName}.md`);
+  const isProjectAgent = agentName ? PROJECT_AGENTS.includes(agentName) : false;
+  const inspection = inspectAgentFile(agentFile, isProjectAgent);
 
-  if (!hasBuwaiExtensionId(agentFile)) {
+  if (!inspection.exists) {
     debugLog(
-      `[ERROR] system.transform: ${agentFile} 不包含 buwai-extension-id，跳过占位符展开`,
+      `system.transform: ${agentFile} 不存在，跳过占位符展开`,
       sessionID,
     );
+    return;
+  }
+  if (!inspection.hasExtensionId) {
+    if (inspection.hasPlaceholders) {
+      debugLog(
+        `[ERROR] system.transform: ${agentFile} 含占位符但未声明 buwai-extension-id，占位符不会展开（请在 frontmatter 声明）`,
+        sessionID,
+      );
+    } else {
+      debugLog(
+        `system.transform: ${agentFile} 未声明 buwai-extension-id 且无占位符，跳过占位符展开`,
+        sessionID,
+      );
+    }
     return;
   }
 
@@ -637,10 +656,10 @@ function expandedSnippet(
     sessionID,
   );
 
-  // {{buwai-rule:片段名}} — 统一占位符展开
-  const regex = /\{\{buwai-rule:([a-zA-Z0-9_-]+)\}\}/g;
+  // 统一占位符展开（语法源见 snippet.ts）
+  const regex = new RegExp(BUWAI_RULE_PLACEHOLDER_SOURCE, "g");
   for (let i = 0; i < output.system.length; i++) {
-    if (!output.system[i].includes("{{buwai-rule:")) continue;
+    if (!output.system[i].includes(BUWAI_RULE_PLACEHOLDER_PREFIX)) continue;
     output.system[i] = output.system[i].replace(regex, (_, name: string) => {
       let realName: string | null | undefined = name;
       let snippet: string | null = null;
