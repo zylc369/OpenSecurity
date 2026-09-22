@@ -119,10 +119,14 @@ setInterval(() => target.postMessage({a: 1}, "*"), 1);
 // B 组：在卸载瞬间发送（预期：比较为 false → 进入处理分支）
 addEventListener("pagehide", () => target.postMessage({b: 1}, "*"));
 // 接收端（校验代码所在页面）加一行判别打印：
+// iframe = 接收端页面持有的、被校验的那个 iframe 元素（示例：const iframe = document.getElementById("viewer")）
+const iframe = document.getElementById("viewer");
 addEventListener("message", (e) => console.log("eq=" + (e.source === iframe.contentWindow), "srcNull=" + (e.source === null)));
 ```
 
 判读：B 组出现比较结果为 false（同时打印 `srcNull=true`）说明竞态成立。两组必须在同一个脚本里并排运行——只跑 A 组的话，会误以为"比较永远相等"。
+
+（适用范围：上述取值与比较行为已在 Chrome 146/148/153 复现；其他引擎未验证。）
 
 父页面用 `addEventListener("message", (e) => ...)` 监听 iframe 发来的消息，并在处理函数里比较 `e.source === iframe.contentWindow`。对照实验的观察结果：iframe 页面存活期间发送时——比较始终相等；iframe 在 `pagehide`（卸载瞬间）发送消息时——这条消息跨越文档切换后才被送达，此时 `e.source` 为 `null`，比较变为不等。
 
@@ -139,3 +143,4 @@ addEventListener("pagehide", function () { try { top.postMessage({p: 1}, "*"); }
 
 - `$AGENT_DIR/knowledge-base/client-side-attacks.md` — 客户端攻击（bfcache/CSS exfil/xsleak）
 - `$AGENT_DIR/knowledge-base/web-vulnerabilities.md` — 服务端漏洞模式
+- `$AGENT_DIR/scripts/probe-message-lifecycle/` — 可运行探针（复验本节 e.source 投递取值与比较翻转；判据见目录内 README）
