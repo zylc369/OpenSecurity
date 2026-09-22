@@ -317,3 +317,30 @@
 - 接口收口（用户批评成立）：`SessionData implements CheckpointTriggerStats, CheckpointRenderData` + `elapsedMinutes` 派生 getter；`cognitionCheckpoint` 改 `renderCheckpointText(session)`；接口注释双向标注（"由 SessionData 实现，字段维护见 session-manager.ts"）
 - 台账填写规范审计：结论台账列口径已有（三件套）；"必须沿用模板结构"与「未测条件（维度）」五列填写规则缺失 → 补丁待用户确认
 - 测试：套件3 7 用例（新格式断言）/ 套件5 开关关闭 ×2（配置读值替换 "0"/"FALSE" → 不触发不记账）/ 台账 15 / 镜像 7 / 自检 2 回归全过；插件 bun import OK + verifyMirrors []；新渲染物实测
+
+## 追加修复 27（开关判定重写 + 台账填写规范补丁，同日）
+
+- `isCheckpointSwitchOn` 重写为平铺分支（单次 toLowerCase + 顺序判断，去掉复合否定）——语义不变（未设置/其他值 → 启用；"0"/"false" 忽略大小写 → 禁用）
+- `execution-discipline`「台账」条目扩写（用户确认）：严格沿用模板结构（标题/节名/表头不改动、不另起格式）；结论按"结论三件套"逐列填写（证据等级取 observed/inferred/assumption/unverified）；「未测条件（维度）」表每批实验后追加行（"为什么没测"写清受阻点）+ 状态流转；「更新于」用 MM-DD
+- 验证：开关关闭 ×2 / 检查点 7 用例 / 插件 bun import / verifyMirrors [] 全过
+
+## 追加修复 28（契约词汇镜像登记：校验扩展，同日）
+
+- 用户发现：execution-discipline 台账补丁新增的契约词汇（四值枚举 / 未测条件（维度） / 结论三件套）在 md 中是"无人看管的镜像"
+- 变更（cognition.ts）：
+  - verifyMirrors 增加 md 存在性检查 ×3：结论三件套 / 证据等级枚举（observed/inferred/assumption/unverified）/ 未测条件节名（未测条件（维度））——缺任一 → 报"缺契约词汇"漂移
+  - 头部注释同步（md 镜像点描述扩展）
+- 明确不收口（避免过度）：MM-DD / 已测 / "「更新于」"为单点约定（无第二处引用、无镜像对象）——出现第二处引用时再升格进 cognition.ts
+- 测试：M 套件扩至 9 场景（新增 M7 枚举缩水 / M8 节名被改 → 均精确报出）；真实 root []；插件 bun import OK
+- 补充（用户确认）：md L96 重复枚举精简为"（等级用四值枚举，见上）"（L95 保留唯一列举；镜像检查与 M7 复验通过）
+
+## 追加修复 29（移除 MCP 普遍结论校验，同日）
+
+- 用户决策：`_validate_universal_claim` 整体移除。判定依据（本轮论证）：枚举不可完备（同义/否定/程度/英文全覆盖不了）+ 二字词系统性误杀（自有语料实锤：图灵完备 / 函数完备 / 完备性 / 谓词恒真）+ 可凑数绕过（正文加"未测"即过）
+- 变更：
+  - server.py：移除 `_validate_universal_claim` / `_UNIVERSAL_MARKERS` / `_UNTESTED_MARKERS` / 校验注释 / store_knowledge 调用与拒绝分支；工具 description 去掉"否则会被拒绝入库"；清 stale pyc
+  - cognition.ts：移除 `untestedMarkers` 字段、`pyMarkers` 方法、verifyMirrors 的 server.py 三项检查（镜像点仅剩 md）；头部/字段注释去掉 MCP 校验引用
+  - knowledge-management.md：入库格式条目去掉"会被 MCP 校验拒收"，改为软规则"缺少'未测清单'的普遍/否定结论不要入库"
+  - 保留：execution-discipline「禁止裸写」词表 + 压缩 §4 文案（降级为**纯指导示例**，不再有强制方；md↔TS 单源校验保留）
+- 测试：镜像套件 5 场景（一致 / md 词表句移除 / md 缺失 / 枚举缩水 / 节名被改）全过；自检 S2/S3 回归；server.py compile OK；插件 bun import + verifyMirrors []；运行时残留清零
+- 备注：temp 的 test-validate.py（校验器行为用例）随机制废弃；requirements 历史文档保留（机制已由本条取代）

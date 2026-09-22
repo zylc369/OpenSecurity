@@ -6,8 +6,7 @@
  *   - security-analysis.ts：压缩保留规则（结论台账与未测清单）
  *   - lib/checkpoint.ts：认知检查点行动指令
  *
- * 镜像点（跨语言/跨文件，无法 import，由 cognition.verifyMirrors()（插件启动自检）逐字比对）：
- *   - mcp-servers/knowledge/server.py：universalDenyMarkers / untestedMarkers / 拒绝消息
+ * 镜像点（静态文件无法 import，由 cognition.verifyMirrors()（插件启动自检）逐字比对）：
  *   - agents-rules/execution-discipline.md：禁止裸写词表 + 契约词汇（结论三件套 / 证据等级枚举 / 未测条件节名）
  *
  * 手动即时验证（无独立脚本）：
@@ -29,14 +28,14 @@ class CognitionContract {
   /** 证据等级的取值枚举 */
   readonly evidenceLevelValues = "observed/inferred/assumption/unverified";
 
-  /** 结论三件套字段口径（台账模板列 / 压缩注入 / MCP 校验消息共用同一词汇） */
+  /** 结论三件套字段口径（台账模板列 / 压缩注入共用同一词汇） */
   readonly fields = {
     evidenceLevel: "证据等级",
     verifiedScope: "已验证范围",
     untestedList: "未测清单",
   } as const;
 
-  /** 带取值枚举的证据等级说明（压缩注入与 MCP 校验消息使用） */
+  /** 带取值枚举的证据等级说明（压缩注入使用） */
   readonly evidenceLevelSpec = `${this.fields.evidenceLevel}（${this.evidenceLevelValues}）`;
 
   /** 分析台账节名（台账模板与检查点指令共用） */
@@ -50,7 +49,7 @@ class CognitionContract {
   /** 台账文件名（模板创建与压缩注入文本共用） */
   readonly ledgerFilename = "ledger.md";
 
-  /** 否定类封闭词表：保留此类表述必须同时附未测清单（顺序即拒绝消息展示顺序） */
+  /** 否定类封闭词表：保留此类表述必须同时附未测清单（压缩注入按此顺序展示） */
   readonly universalDenyMarkers = [
     "永远",
     "所有情况",
@@ -60,9 +59,6 @@ class CognitionContract {
     "已排除",
   ] as const;
 
-  /** 未测标记：判定内容是否已含未测清单的封闭词（server.py _UNTESTED_MARKERS 的镜像） */
-  readonly untestedMarkers = ["未测", "未验证", "待验证"] as const;
-
   /**
    * 镜像点一致性校验：返回不一致项列表（空 = 一致）。
    * 插件启动时自动调用；手动即时验证见本文件头部注释。
@@ -70,36 +66,6 @@ class CognitionContract {
   verifyMirrors(): string[] {
     const problems: string[] = [];
     try {
-      const server = readFileSync(
-        join(OPENCODE_ROOT, "mcp-servers", "knowledge", "server.py"),
-        "utf-8",
-      );
-      const pyDeny = this.pyMarkers(server, "_UNIVERSAL_MARKERS");
-      if (!this.sameList(pyDeny, this.universalDenyMarkers))
-        problems.push(
-          `server.py _UNIVERSAL_MARKERS=${pyDeny.join("/")}，应为 ${this.universalDenyMarkers.join("/")}`,
-        );
-
-      const pyUntested = this.pyMarkers(server, "_UNTESTED_MARKERS");
-      if (!this.sameList(pyUntested, this.untestedMarkers))
-        problems.push(
-          `server.py _UNTESTED_MARKERS=${pyUntested.join("/")}，应为 ${this.untestedMarkers.join("/")}`,
-        );
-
-      const validateFn =
-        server.match(
-          /def _validate_universal_claim[\s\S]*?(?=\n(?:async )?def |$)/,
-        )?.[0] ?? "";
-      for (const token of [
-        this.triadName,
-        this.evidenceLevelSpec,
-        this.fields.verifiedScope,
-        this.fields.untestedList,
-      ]) {
-        if (!validateFn.includes(token))
-          problems.push(`server.py 拒绝消息缺字段口径: ${token}`);
-      }
-
       const discipline = readFileSync(
         join(OPENCODE_ROOT, "agents-rules", "execution-discipline.md"),
         "utf-8",
@@ -126,12 +92,6 @@ class CognitionContract {
       problems.push(`镜像文件读取失败: ${(e as Error)?.message}`);
     }
     return problems;
-  }
-
-  /** 从形如 _NAME = ("a", "b") 的 Python 元组字面量提取字符串集 */
-  private pyMarkers(text: string, name: string): string[] {
-    const m = text.match(new RegExp(`^${name}\\s*=\\s*\\(([^)]*)\\)`, "m"));
-    return m ? [...m[1].matchAll(/"([^"]+)"/g)].map((g) => g[1]) : [];
   }
 
   /** 逐字列表比较（含顺序） */

@@ -65,7 +65,7 @@ mcp = FastMCP("knowledge", lifespan=_lifespan)
 
 
 @mcp.tool(
-    description="从向量库检索已有知识。必须首先调用，避免重复研究。返回最多 5 条语义相似的结果。可选按编程语言过滤代码。",
+    description="从向量库检索已有知识。任务开始时必须首先调用，避免重复研究；卡壳或遇到不熟悉的技术时再次调用。返回最多 5 条语义相似的结果。可选按编程语言过滤代码。",
 )
 async def search_knowledge(
     questions: Annotated[list[str], Field(description="1-5 个中文语义查询问句。")],
@@ -90,7 +90,7 @@ async def store_knowledge(
 
 
 @mcp.tool(
-    description="从向量库检索执行记忆（doc_type=memory）。用于回顾当前任务中执行过哪些工具、得到了什么结果。按 flow_id 隔离，只返回当前任务的记录。",
+    description="从向量库检索执行记忆（doc_type=memory）。用于回顾当前任务中执行过哪些工具、得到了什么结果；压缩后或需要回溯本任务执行记录时调用。按 flow_id 隔离，只返回当前任务的记录；跨任务历史不可用（跨任务检索走 memorist）。",
 )
 async def search_in_memory(
     questions: Annotated[list[str], Field(description="1-5 个中文语义查询问句，关于之前的工具执行和结果。")],
