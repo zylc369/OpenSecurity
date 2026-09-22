@@ -1,0 +1,39 @@
+name: windows-ipc
+
+# Windows 命名管道 IPC 验证（真机裁决，非纸面结论）。
+# 覆盖：ipc_listener 管道监听、control_url 本地代理 + httpx 往返、
+#       管道互斥、Bun node:http socketPath 兼容性（controlFetch 的 Windows 主路径）。
+
+on:
+  push:
+    paths:
+      - ".opencode/control/backend/services/ipc_listener.py"
+      - ".opencode/control/backend/config.py"
+      - ".opencode/mcp-servers/control_url.py"
+      - ".opencode/plugins/lib/control-http.ts"
+      - ".opencode/plugins/tests/win-pipe-probe.ts"
+      - ".opencode/control/backend/tests/test_windows_ipc.py"
+      - ".github/workflows/windows-ipc.yml"
+  pull_request:
+    paths:
+      - ".opencode/control/backend/services/ipc_listener.py"
+      - ".opencode/control/backend/config.py"
+      - ".opencode/mcp-servers/control_url.py"
+      - ".opencode/plugins/lib/control-http.ts"
+  workflow_dispatch:
+
+jobs:
+  pipe-roundtrip:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: oven-sh/setup-bun@v2
+      - name: 安装依赖
+        run: pip install fastapi uvicorn pywin32 httpx
+      - name: 管道 IPC 验证
+        env:
+          DATA_DIR: ${{ runner.temp }}
+        run: python .opencode/control/backend/tests/test_windows_ipc.py
