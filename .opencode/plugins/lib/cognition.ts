@@ -8,7 +8,7 @@
  *
  * 镜像点（跨语言/跨文件，无法 import，由 cognition.verifyMirrors()（插件启动自检）逐字比对）：
  *   - mcp-servers/knowledge/server.py：universalDenyMarkers / untestedMarkers / 拒绝消息
- *   - agents-rules/execution-discipline.md：禁止裸写词表
+ *   - agents-rules/execution-discipline.md：禁止裸写词表 + 契约词汇（结论三件套 / 证据等级枚举 / 未测条件节名）
  *
  * 手动即时验证（无独立脚本）：
  *   bun -e "const m=await import('./plugins/lib/cognition.ts'); console.log(m.cognition.verifyMirrors())"
@@ -110,6 +110,18 @@ class CognitionContract {
         problems.push(
           `execution-discipline.md 禁止裸写词表=${mdDeny.join("/")}，应为 ${this.universalDenyMarkers.join("/")}`,
         );
+
+      // md 无法 import 契约常量，只能镜像；以下词汇必须在 md 中出现（缺 = 漂移）
+      for (const [label, token] of [
+        ["结论三件套", this.triadName],
+        ["证据等级枚举", this.evidenceLevelValues],
+        ["未测条件节名", this.sections.untested],
+      ] as const) {
+        if (!discipline.includes(token))
+          problems.push(
+            `execution-discipline.md 缺契约词汇: ${label} (${token})`,
+          );
+      }
     } catch (e) {
       problems.push(`镜像文件读取失败: ${(e as Error)?.message}`);
     }
