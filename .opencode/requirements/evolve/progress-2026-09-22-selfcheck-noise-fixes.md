@@ -20,4 +20,6 @@
 - Step 3: `bun import` OK；harness C1-C5 全 PASS（首轮 C4 FAIL 系测试自身 byte/char 切片 bug，已修测试非产品）✓
 - Step 4: crypto vs binary 占位符集合 diff 一致；全 agent 解析仿真 0 失败；crypto 140 行、展开 ≈308 行 ✓
 - Phase 6: `hasBuwaiExtensionId` 插件/agent 零残留；`buwai-rule` 字面量仅在 snippet.ts 常量；旧 ERROR 文案零残留；verifyMirrors=[]；git diff 逐行复核 ✓
-- 追加: 异常日志测试 E1 EISDIR / E2 null 字节路径 → 均产出 `[ERROR] inspectAgentFile 异常`（含 code+message）；E3 ENOENT 无新增日志 ✓；C1-C5 回归全过 ✓
+- 追加: 异常日志测试 E1-E5 全过（真实 snippet.ts 直调：EISDIR×2/非法路径/非项目缺失静默/项目缺失 [ERROR]）✓
+- 追加: si-copy2 副本保真性逐字节校验通过（与真身仅差导入路径改写+暴露行）✓
+- 追加: C1-C7 全过并连续两轮幂等——含 9 项目 agent 健康扫描零 [ERROR]、项目 agent 缺失报警；测试自身两个 bug（字节切片错位、套件不幂等）已修 ✓

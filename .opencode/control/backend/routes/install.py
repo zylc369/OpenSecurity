@@ -22,7 +22,8 @@ from routes.deps import invalidate_deps_snapshot
 def _install_command(pip_name: str) -> list[str] | None:
     """按清单条目的 installer 字段构造安装命令。
 
-    pip:   venv python -m pip install <name>
+    pip:   venv python -m pip install <name><version_spec>（version_spec 必须应用：
+           漏掉会绕过清单版本锁装到不兼容的最新版，如 anthropic 1.x / mcp 2.x）
     conda: conda install -p <venv> -y <conda_name>（venv 由 conda 创建，PATH 上有 conda）
     未知包名返回 None（白名单二次校验兜底）。
     """
@@ -34,7 +35,7 @@ def _install_command(pip_name: str) -> list[str] | None:
         if not conda:
             return None
         return [conda, "install", "-p", sys.prefix, "-y", entry.conda_name or entry.pip_name]
-    return [sys.executable, "-m", "pip", "install", entry.pip_name]
+    return [sys.executable, "-m", "pip", "install", entry.pip_name + entry.version_spec]
 
 router = APIRouter(prefix="/api/install", tags=["install"])
 

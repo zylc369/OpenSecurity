@@ -109,9 +109,9 @@ EXTRA_CONFIG_META: list[ConfigField] = [
         key="DEEPSEEK_MODEL",
         label="DeepSeek 模型名",
         type="text",
-        hint="不配置默认 deepseek-v4-flash（events MCP 提取模型；需要更强提取质量可改 deepseek-v4-pro）",
+        hint="不配置默认 deepseek-flash（events MCP 提取模型；需要更强提取质量可改 deepseek-v4-pro）",
         required=False,
-        default_value="deepseek-v4-flash",
+        default_value="deepseek-flash",
     ),
     ConfigField(
         key="CONTROL_FRONTEND_DEV",
