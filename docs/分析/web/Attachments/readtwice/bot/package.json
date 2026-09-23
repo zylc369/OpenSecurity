@@ -1,0 +1,12 @@
+{
+  "name": "readtwice-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "puppeteer": "^24.32.0"
+  }
+}
