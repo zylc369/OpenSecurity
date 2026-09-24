@@ -72,6 +72,8 @@ flag 在管理员专属接口 `/api/flag` 里，只有管理员会话能读到�
 
 | 名字 | 指什么 |
 |---|---|
+| 路径 | URL 里域名和端口之后的那一段；服务器靠它决定返回什么内容。只写一个斜杠（`/`）时叫根路径。例：`http://host.docker.internal:8000/?note=1` 的路径是 `/` |
+| 路由 | 服务器把某个路径绑定到某段处理代码；请求命中哪条路由，就由对应代码处理。如 `GET /reports/check` 是审查页的路由 |
 | 检查器 | `bot.js` 里的 `inspectDocument` 函数：创建笔记时的 DOM 检查 |
 | 审查页 | 路由 `GET /reports/check` |
 | 审批页面 | 路由 `GET /review`，内含沙箱 iframe 与"收到就绪信号后批准"的逻辑 |
@@ -257,7 +259,7 @@ HTML 解析器会自动补出 `html`/`head`/`body`：`meta` 进入 head，`div` 
 
 整个机器人流程由一次 **POST /report** 请求触发（攻击者提交目标网址就是这一步）。触发入口有两个（等价）：
 
-- 页面：打开实例首页（路由 `/`，即 2.1 里启动后 curl 验证的那个地址）。首页包含 "Create note" 与 "Report document" 两块面板和最近笔记列表；其中 "Report document" 面板是提交网址的入口，填写 URL 后点 Send，浏览器提交的就是 POST /report；
+- 页面：打开实例首页（即 2.1 里启动后 curl 验证的那个地址）。首页包含 "Create note" 与 "Report document" 两块面板和最近笔记列表；其中 "Report document" 面板是提交网址的入口，填写 URL 后点 Send，浏览器提交的就是 POST /report；
 - 命令行：`curl -d 'url=<目标网址>' http://<实例>/report`（复现脚本用这个，见第五章；本挑战中这个网址的具体形态见 2.3.4）。
 
 "Report document" 面板的表单片段（来自 `src/views/index.ejs`，省略了外层的 `<p>` 与 `<label>` 标签），提交表单会调用`/report`接口：
@@ -471,6 +473,7 @@ function watchDocument(page, report, entryUrl) {
     // 已经到过入口了：这次是不是审查页 `/reports/check` ？
     if (isReportDocument(next, report)) {
       // 审查通过，并且到入口后没跑偏，才算最终确认
+      // （机器人不会主动把主窗口导航到审查页：这里是 finalized 唯一被置真的地方，触发它的是攻击者制造的导航，见 2.8）
       report.finalized = report.approved && !diverged;
       return;
     }
@@ -488,9 +491,16 @@ function watchDocument(page, report, entryUrl) {
 
 把上面这条流程放回攻击视角，复现里有三件事要交代：提交什么、什么时候动手、能用什么。
 
-- **提交的真实链接**：提交的就是攻击者入口页的地址，本地复现为 `http://host.docker.internal:8000/?note=<编号>`（回调服务器的准备见 2.5，`/` 路由即入口页；编号是 `/create` 创建笔记后返回的 `/note/<编号>` 里的数字）。机器人访问时会在它后面追加 `rid`（2.3.2 步骤 5 的 `url.searchParams.set("rid", report.id)`），所以入口页能从 `location.search` 读到本轮编号，用于第二次访问时把机器人 302 到审查页（2.8）。复现时提交它的命令（与 2.3.1 同形）：`curl -d 'url=http://host.docker.internal:8000/?note=<编号>' http://127.0.0.1:3001/report`。
+- **提交的真实链接**（填进 `/report` 的网址）：本地复现为 `http://host.docker.internal:8000/?note=<编号>`，拆开看：
+  - `http://host.docker.internal:8000/`：回调服务器地址。机器人打开提交的链接，就是向这个地址发请求；回调服务器返回的那张页面就是"入口页"，也就是机器人看到的第一张攻击者页面（对应 2.5 表中作用为入口页的那一行）；
+  - `?note=<编号>`：笔记编号参数，由攻击者填；编号来自 `/create` 创建笔记后返回的 `/note/<编号>`（2.6.5）；
+  - `&rid=<本轮编号>`：不在提交的网址里，由机器人访问前追加（2.3.2 步骤 5 的 `url.searchParams.set("rid", report.id)`）；入口页从 `location.search` 读到它，在第二次访问时把机器人 302 到审查页（2.8）。
+- **提交命令**（与 2.3.1 同形）：`curl -d 'url=http://host.docker.internal:8000/?note=<编号>' http://127.0.0.1:3001/report`。
 - **攻击窗口**：步骤 5 的 10 秒（`sleep(10000)`）就是全部攻击动作的时间窗；2.7（批准）与 2.8（时机）都发生在这段时间内。
-- **可用的杠杆**：入口页可读 `rid`；可用 `window.open` 打开审批页面，带着管理员会话（2.7.3）；`watchDocument` 只统计主窗口导航（2.3.3），攻击的导航序列按它的规则设计（2.8.2）。
+- **可用的杠杆**：
+  - 入口页可读 `rid`；
+  - 可用 `window.open` 打开审批页面，带着管理员会话（2.7.3）；
+  - `watchDocument` 只统计主窗口的导航（2.3.3）；攻击必须让它记录到的主窗口跳转满足三条规则（先经过入口、中途不偏离，命中审查页时 `finalized` 才置位），2.8.2 的攻击序列就是按这个要求排的。
 
 ### 2.4 审查页的两次访问（攻击目标）
 
@@ -587,12 +597,12 @@ app.post("/complete", (req, res) => {
 
 | 路由 | 第一次响应 | 第二次响应 | 作用 |
 |---|---|---|---|
-| `/`（带 `?note=` 参数） | 一段带 JavaScript 的 HTML | 302 重定向到 `http://localhost:3000/reports/check?rid=<rid>` | 入口页；第二次访问时把机器人送往审查页（2.8） |
+| `/`（根路径，带 `?note=` 参数） | 一段带 JavaScript 的 HTML | 302 重定向到 `http://localhost:3000/reports/check?rid=<rid>` | 入口页；第二次访问时把机器人送往审查页（2.8） |
 | `/helper` | 一段带 JavaScript 的 HTML | 无 | 对入口页执行历史回退（2.8） |
 | `/s.js` | JavaScript 代码 | 无 | 注入笔记中的脚本（双分支，2.6/2.9） |
 | `/flag?x=<base64>` | 无 | 无 | 接收外传的 flag（2.9） |
 
-`/` 和 `/s.js` 的具体内容在对应小节逐段给出。所有响应都带 `Cache-Control: no-store`（入口页这一条在 2.8 会用到）。
+入口页与 `/s.js` 的具体内容在对应小节逐段给出。所有响应都带 `Cache-Control: no-store`（入口页这一条在 2.8 会用到）。
 
 实现与启动：回调服务器与整套攻击编排写在同一个 Python 脚本里（完整可运行代码见第五章），在宿主机直接运行该脚本即启动（监听 8000 端口；环境与步骤见 6.2）。2.6 到 2.9 会在用到它的地方引用对应代码段。
 
@@ -888,7 +898,7 @@ window.open("http://localhost:3000/review?rid=" + rid);
 - **为什么 `helper` 能操作主窗口**：`helper` 与入口页都由攻击者控制、同源；同源窗口之间可以互相访问 `history` 对象。`opener` 是弹窗对"打开它的窗口"（主窗口）的引用；
 - **为什么这次导航恰好设置 `finalized`**：机器人 `watchDocument` 的规则（2.3.3）是"主窗口的导航请求命中审查页 → `finalized = approved && !diverged`"。整个序列里主窗口的导航请求只有三次：入口网址（第一步，记为入口）、回退后再次访问入口网址（与入口相同，不算偏离）、以及 302 之后的审查页请求（命中）。`about:blank` 不产生网络请求，不会被计入。因此 `diverged` 保持为假，命中时 `approved` 已为真（2.7 完成），`finalized` 被置真。
 
-`/` 路由的第二次访问处理（回调服务器端，完整脚本见第五章）：
+入口页第二次访问的处理（回调服务器端，完整脚本见第五章）：
 
 ```python
 if visits[p.query] > 1:                       # 第二次访问
@@ -978,7 +988,7 @@ if (location.pathname == "/reports/check") {
 | 序 | 发起方 | 动作 | 状态/日志 |
 |---|---|---|---|
 | 1 | 攻击者 | `POST /create` 提交 2.6.5 的笔记 | 检查通过，得到笔记编号 |
-| 2 | 攻击者 | `POST /report`，网址为 `回调/?note=<编号>` | 机器人启动本轮审查 |
+| 2 | 攻击者 | `POST /report`，网址为回调服务器的入口页地址（带 `note` 参数） | 机器人启动本轮审查 |
 | 3 | 机器人 | 步骤 1：访问 `/reports/session` | 管理员会话建立 |
 | 4 | 机器人 | 步骤 2：访问审查页（第一次） | `visited = true`（日志①） |
 | 5 | 机器人 | 步骤 3：访问 `/api/flag` | flag 存入本轮记录 |
@@ -1216,7 +1226,7 @@ server.shutdown()
 
 | 脚本部分 | 作用 | 对应章节 |
 |---|---|---|
-| 路由 `/` | 入口页：开弹窗、收端口发 `ready`、转入回退序列；第二次访问给 302 | 2.7、2.8 |
+| 路由 `/`（根路径） | 入口页：开弹窗、收端口发 `ready`、转入回退序列；第二次访问给 302 | 2.7、2.8 |
 | 路由 `/helper` | 对主窗口执行 `history.back()` | 2.8.2 |
 | 路由 `/s.js` | 注入笔记的脚本（双分支） | 2.6、2.7、2.9 |
 | 路由 `/flag` | 接收 base64 编码的 flag | 2.9 |
