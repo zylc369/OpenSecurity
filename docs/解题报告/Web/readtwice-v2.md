@@ -670,7 +670,7 @@ function watchDocument(page, report, entryUrl) {
 <script>
 const q = new URLSearchParams(location.search);
 const i = q.get("rid");                                        // 机器人追加的本轮编号
-const w = open("http://localhost:3000/review?rid=" + i);       // 第一段：打开审批页面（弹窗，本节）
+const w = open("http://localhost:3000/review?rid=" + i);       // 第一段：打开审批页面（弹窗，本节；w 就是打开的新窗口）
 
 // onmessage 是注册"消息处理器"：窗口收到 postMessage 消息时，浏览器自动调用它（不用手动调用）；
 // e.ports[0] 就是消息里转交来的端口，是一个 MessagePort 对象（不是网络端口那种数字）
@@ -868,7 +868,7 @@ onmessage = e => {
 // 第一段（2.6）：打开审批页面
 const q = new URLSearchParams(location.search);
 const i = q.get('rid');
-const w = open('http://localhost:3000/review?rid=' + i);
+const w = open('http://localhost:3000/review?rid=' + i);       // 打开审批页面；w 就是新打开的这个窗口
 
 // 第二段（2.7）：收到沙箱转交的端口后
 onmessage = e => {
@@ -930,22 +930,24 @@ setTimeout(() => opener.history.back(), 500);
 
 #### 2.8.1 逐步展开：三个页面怎么配合
 
-三个页面配合完成（角色：机器人主窗口停在入口页；弹窗停在你自己服务器的 `/helper` 页；笔记脚本在弹窗的沙箱 iframe 里运行）：
+三个页面配合完成（角色：机器人主窗口停在入口页，也就是你提交的攻击网页；弹窗是入口页用 `open(...)` 打开的，之后换到你自己服务器的 `/helper` 页；笔记脚本在弹窗的沙箱 iframe 里运行）：
 
 ```
 ① 入口页收到沙箱里的笔记脚本发来的消息（`s.js` 把端口 B 转交给入口页，见 2.7）
    效果：入口页的 onmessage 被触发；先回复 `"ready"`（批准，2.7），再安排 500 毫秒后开始回退
 
-② 500 毫秒后：弹窗被导航到你自己服务器的 /helper 页（入口页脚本设置 `w.location = '/helper'`；必须在主窗口离开前完成）
+② 500 毫秒后：弹窗被导航到你自己服务器的 /helper 页（弹窗就是开头 `open(...)` 打开的新窗口；`w.location = '/helper'` 换的是它的页，不是入口页）
    效果：弹窗换到攻击者自己的页面（与入口页同源），可以操作主窗口的历史
 
-③ 再过 250 毫秒：入口页（主窗口）执行 location = 'about:blank'
+③ 再过 250 毫秒：入口页（主窗口）执行 location = 'about:blank'（`location` 不带 `w.`，是入口页自己换页；② 没动过入口页，所以它的定时器照常触发）
    效果：主窗口离开入口网址，历史记录变成 [入口网址, about:blank]
 
 ④ helper 页加载 500 毫秒后执行 opener.history.back()
-   效果：主窗口回退到入口网址，这是一次"由浏览器发起"的导航
+   效果：主窗口回退到入口网址，这是一次"由浏览器发起"的导航（浏览器自动给这次请求附上 `Sec-Fetch-Site: none`；页面脚本做的跳转带不了这个值）
+   回退本来可能被 BFCache（回退/前进缓存）或 HTTP 缓存直接恢复、一个请求都不发；入口页响应带 `Cache-Control: no-store`（2.3），两种缓存都用不上，所以这里会真的发出一次网络请求（⑤）
 
 ⑤ 入口网址的第二次请求到达你自己的服务器（带 Sec-Fetch-Site: none、Sec-Fetch-Dest: document）
+   服务器怎么知道是第 2 次：`/` 路由给每个入口网址计数（同一 key 每来一次 `visits[key]` 加一，key 是带 rid 的完整查询串），计数为 2 时走 `visits[key] > 1` 分支；302 只看计数，与请求头无关
    你自己的服务器对第二次访问返回：302 → http://localhost:3000/reports/check?rid=<rid>
 
 ⑥ 浏览器跟随 302 请求审查页
@@ -958,7 +960,7 @@ setTimeout(() => opener.history.back(), 500);
 
 - **`about:blank` 步骤的作用**：主窗口需要先"离开"入口网址，`history.back()` 才有可回退的记录（历史栈变成"入口网址 ← about:blank"，回退即回到入口）。`about:blank` 是一次不产生网络请求的导航，不会干扰机器人的导航监听（见下条）；
 - **`/helper` 是什么、弹窗为什么转到它**：`/helper` 是你自己的服务器上的页面（2.3 表）。入口页里写的是 `w.location = '/helper'`，这是一个"没写网址、只写路径"的地址；补全它（把没写的网址部分接上）时，浏览器用的是**执行这行代码的页面**（入口页）的网址，而不是弹窗当时在的网站。入口页的网址就是你自己的服务器，所以补全后指向 `http://host.docker.internal:8000/helper`，弹窗于是从挑战域（审批页面）换到了攻击者自己的服务器上。本地复现日志里的 `[CB] helper hit`（第四章）就是这次访问；
-- **为什么 `helper` 能让主窗口回退**：`helper` 和入口页都是攻击者写的页面，而且同源（协议、域名、端口都相同，即同一个网站）；同源的窗口之间可以直接读对方的 `history`（历史记录）、调用 `back()`。`opener` 是弹窗对"打开它的那个窗口"（主窗口）的引用；
+- **为什么 `helper` 能让主窗口回退**：helper 加载在弹窗里，弹窗是主窗口用 `open(...)` 打开的，所以弹窗里的 `opener` 指向主窗口；`opener.history.back()` 读作"主窗口的历史记录退一步"，退的是主窗口（不带 `opener.` 的 `history.back()` 才会退弹窗自己）。能这么操作的前提是两窗口同源：主窗口这时停在 `about:blank`，空白页继承入口页的来源（你自己服务器），和 helper 同源；
 - **为什么这次导航恰好设置 `finalized`**：机器人 `watchDocument` 的规则（2.5.3）是"主窗口的导航请求命中审查页 → `finalized = approved && !diverged`"。整个序列里主窗口的导航请求只有三次：入口网址（最初那次访问，记为入口）、回退后再次访问入口网址（与入口相同，不算偏离）、以及 302 之后的审查页请求（命中）。`about:blank` 不产生网络请求，不会被计入。因此 `diverged` 保持为假，命中时 `approved` 已为真（2.7 完成），`finalized` 被置真。
 
 #### 2.8.2 概念展开：Sec-Fetch-Site 是什么
@@ -973,8 +975,6 @@ setTimeout(() => opener.history.back(), 500);
 | `none` | 请求没有"发起页面"，由浏览器本身发起 | 地址栏输入、点击书签、外部程序打开，以及**历史回退/前进**产生的重新请求 |
 
 对照检查 4 的要求（`Sec-Fetch-Site: none` 且 `Sec-Fetch-Dest: document`）：请求必须是一次"由浏览器发起的顶层文档导航"。脚本能做出的所有跳转都不满足；**历史回退可以**。
-
-> 补充：回退/前进产生的重新请求是否真的发出，与页面的缓存条件有关。本题的入口页响应带 `Cache-Control: no-store`（2.3），本地复现中回退触发了真实的第二次网络请求（第四章日志）。如果换成会被浏览器缓存直接复用的页面，可能不会产生这次请求。
 
 #### 2.8.3 至此八项检查的状态
 
