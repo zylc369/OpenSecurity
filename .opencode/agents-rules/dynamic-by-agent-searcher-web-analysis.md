@@ -48,6 +48,19 @@
 12. **缓存投毒参考资料** — `https://portswigger.net/web-security/web-cache-poisoning`
     专门针对缓存投毒/缓存欺骗攻击。
 
+### 平台新特性源（查新用）
+
+浏览器平台新特性、行为变更与弃用公告；用于开工查新与机制向检索：
+
+1. **Chrome 开发者博客** — `https://developer.chrome.com/blog/`（平台新特性、弃用公告、发布说明）
+2. **Chrome Status** — `https://chromestatus.com/`（特性状态与发布里程碑）
+3. **MDN** — `https://developer.mozilla.org/`（HTML/JavaScript/Web API 行为与兼容性）
+4. **WHATWG HTML 规范** — `https://html.spec.whatwg.org/`（解析/导航/历史行为的规范源）
+
+**检索式约定**：
+- 查新：`chrome <版本> new features`、`chromestatus <关键词>`
+- 机制向：`<行为关键词> site:developer.chrome.com`、`<机制关键词> MDN`
+
 ### 查询术语约定
 
 - 包含框架+版本：`"Laravel 11"`、`"Next.js 14"`、`"Spring Boot 3.2"`

@@ -102,6 +102,31 @@ window.addEventListener('message', function(ev) {
 | 敏感数据传递 | 是否通过 postMessage 传递了敏感数据（如 token、URL）？ |
 | 消息触发的操作 | 收到消息后是否执行了危险操作（如重定向、执行代码）？ |
 
+### 2.4 MessagePort 转交劫持（"等就绪信号"类流程）
+
+`MessageChannel` 创建一对互相连通的消息端口（port1/port2）；`postMessage(msg, target, [port])` 的第三个参数可把端口**转移**给另一窗口（转移后原持有者不可再使用；允许跨源）。
+
+**信任缺陷**：端口消息不携带可验证的发送者身份——持有端口 A 的一方只认"从端口 B 送来的消息"，无法验证实际发送者是谁。凡"把端口交给沙箱/iframe，等它回报完成信号（ready）后继续流程"的审批/就绪机制，都存在此缺口。
+
+攻击模式（A 等待沙箱内 B 的 "ready"）：
+
+1. A 建立 MessageChannel，把 port2 随消息转入沙箱内的 B；
+2. B 的脚本不自己发送 "ready"，而是把 port2 再转交给攻击者页面 C（用窗口链引用转发，如 `parent.opener.postMessage(0, "*", e.ports)`）；
+3. C 用 port2 发送 "ready"；A 侧 port1 收到即认定"B 已完成"，按流程继续（如调用批准接口）。
+
+```javascript
+// 沙箱内：收到端口后不回复，直接转交
+onmessage = e => { if (e.ports[0]) parent.opener.postMessage(0, "*", e.ports); };
+// 攻击者页面：用转交来的端口发送就绪信号
+onmessage = e => { const p = e.ports[0]; if (!p) return; p.postMessage("ready"); };
+```
+
+要点：
+
+- 转交可以多跳（沙箱 → 弹窗 → 顶层），每跳只要求持有端口与目标窗口引用；
+- 与目标窗口同源时才可操作其 `history` 等属性；跨源时仅能 `postMessage` 与转移端口；
+- 审计检查：等待信号的一方是否验证信号来源；端口是否被传给了不可信方。
+
 ---
 
 ## 3. Bot 时间差利用

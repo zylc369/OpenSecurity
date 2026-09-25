@@ -307,15 +307,16 @@ export class SessionDataManager {
   }
 
   /**
-   * 递归向上找父链中第一个 SECURITY_AGENTS 成员的 agentName。
-   * 用于 searcher/memorist 推断它服务于哪个领域，从而加载对应的 domain-sources-<root>.md 片段。
+   * 递归向上找父链中第一个 SECURITY_AGENTS 成员的会话。
+   * 用于 searcher 推断自己服务于哪个领域 agent，从而展开
+   * dynamic-by-agent-<片段名>-<agentName> 动态片段（见 lib/snippet.ts）。
    *
    * 返回值：
-   *   - 找到 → agentName（如 "binary-analysis"）
-   *   - 走到根未命中 → null（system.transform 兜底加载 domain-sources-general.md）
+   *   - 找到 → 该会话的 SessionData（调用方取 .agentName，如 "binary-analysis"）
+   *   - 走到根未命中/父会话缺失 → null（调用方不展开动态片段，占位符原样保留）
    *
    * 限制：依赖 sessions map 中父 session 已被 session.created hook 创建。
-   * 如果父 session 没创建（极少见，例如 plugin 重启时序问题），返回 null 兜底。
+   * 如果父 session 没创建（极少见，例如 plugin 重启时序问题），返回 null。
    */
   resolveFirstSecurityAgentSessionData(
     sessionID: string | null | undefined,

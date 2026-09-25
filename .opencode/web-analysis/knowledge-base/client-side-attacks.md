@@ -34,7 +34,7 @@
 ```
 
 **关键限制**：
-- Chrome 默认开 bfcache；2025/09 起连 `Cache-Control:no-store` 也开 bfcache
+- Chrome 默认开 bfcache；`Cache-Control:no-store` 页面自 Chrome 116 起分阶段放量、134/135（2025-03/04）全量放开（限 HTTPS 页面、仅 Chrome；cookie/授权状态变更等会 evict）；条件不满足或 HTTP 页面仍不进（回退重新发请求）
 - 用 `new WebSocket()` 主动禁掉 bfcache（连接存在时页面不进 bfcache）
 - 也可利用 bfcache 让 fetch 携带攻击者 header（如带 SCRIPT_NAME header 绕过校验）
 

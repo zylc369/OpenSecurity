@@ -72,9 +72,13 @@ permission:
 
 {{buwai-rule:analysis-planning-rules}}
 
+**凡方案依赖浏览器行为，先做平台查新**。判定只问一句：这份方案（含探测步骤）有没有依赖"浏览器应该会/不会怎么做"的假设？解析差异、CSP、导航与请求元数据、缓存与历史、窗口与跨源通信，任一项进入方案即算。动作：委派 searcher 检索目标浏览器近 12-18 个月的平台新特性（检索源与检索式见 searcher 的 Web 域源），重点覆盖上述机制的新增与变更；范围以方案涉及的机制为限。查新结果写入台账并入方案；执行中新形成的判断开始依赖浏览器行为时，同样先查新。
+
 ### 试探优先策略
 
 {{buwai-rule:probe-first-strategy}}
+
+**浏览器行为实验**：先列出真实场景的完整状态要素（窗口/弹窗、中间导航、响应头、同源关系、时序）再设计实验。
 
 ### 阶段 C：执行与监控
 
@@ -85,6 +89,8 @@ permission:
 ---
 
 {{buwai-rule:knowledge-management}}
+
+---
 
 ## Web 安全分析核心原则
 
@@ -166,10 +172,12 @@ permission:
 | `js-obfuscation-patterns.md` | 分析 JS 逆向题/混淆代码时。不可见 Unicode 字符、tagged template 隐式调用、Function.call 空函数、原型链劫持、debug condition 副作用 |
 | `browser-automation.md` | 需要打开网页/登录/浏览器自动化/远程调试/操作结果确认时。启动铁律与 browser_cdp.py 用法、三级探测链、登录决策树、人机验证判别、硬信号、CDP 核心 API、debug() API、常见陷阱、操作后确认方法论（持久信号优先） |
 | `client-side-attacks.md` | 有 admin bot + flag 在 bot 端。bfcache 污染、CSS trigram exfil、xsleak、iframe reparenting、connection pool |
+| `navigation-and-fetch-metadata.md` | 分析依赖 `Sec-Fetch-*` 判定、历史回退/重发、BFCache 条件、导航类型时 |
 | `css-attacks.md` | 能注 CSS 不能注 JS 时（webmail 渲染/CSP 留 style-src）。CSS hotwiring、label 劫持、select 键盘记录、净化器绕过、CSSOM mutation、CSP 全封外带 |
 | `race-conditions.md` | 竞态条件（单包攻击/HTTP/2 并发；`e.source === iframe.contentWindow` 类身份比较 × 文档切换的消息竞态）；原型链污染（sources/sinks/gadgets/RCE 链） |
 | `sqli-advanced.md` | SQL 注入实战（WAF 绕过全族/无列名/堆叠预处理/DNS OOB/写 shell/sqlmap 进阶） |
 | `xss-advanced.md` | XSS 进阶（DOM Clobbering/Shadow DOM/Unicode 折叠/Referer 泄漏/XS-Leak 组合） |
+| `html-parse-differentials.md` | 存在"同一份输入被两种环境读取"类现象（DOM 检查 vs 渲染；JS 开/关），或需要构造"检查态无害、渲染态执行"的 payload 时 |
 | `command-injection.md` | 命令注入（无字母数字 RCE/无参数 RCE/临时文件 glob/分段写/各语言绕过表） |
 | `ssti.md` | 模板注入（Jinja2/Twig/Smarty/EL/SpEL 沙箱逃逸/过滤绕过/动态索引查找） |
 | `xxe.md` | XML 外部实体（OOB/XInclude/像素通道外带/解析器差异） |
