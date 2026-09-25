@@ -161,7 +161,7 @@ malloc_hook 前 0x23 字节处常可找到 0x7f 字节 → 可解释为合法 0x
 ## §3a House of X 技法全集
 
 **House of Spirit**（全版本，目标地址可构造合法 size 时）:
-target_addr+0x08 放 fake size（如 0x40）→ 需保证 next chunk（+size 处）size 合法（>0x10 且 < av->system_mem）→ `free(target_addr+0x10)` 入 tcache/fastbin → malloc 对应 size 取回。tcache 路径（≥2.26）检查更少，**不需验证 next chunk size**。
+target_addr+0x08 放 fake size（如 0x40）→ 需保证 next chunk（+size 处）size 合法（>0x10 且 < av->system_mem）→ `free(target_addr+0x10)` 入 tcache/fastbin → malloc 对应 size 取回。tcache 路径（≥2.26）检查更少，**不需验证 next chunk size**。**栈上变体**（配负索引别名栈指针的任意 free）: 栈缓冲内直接伪造 chunk 头——`prev_size` 落缓冲 +0x00、`size`（如 0xa1 对应 malloc(0x90)）落 +0x08，`free(缓冲+0x10)` 入 tcache 后下一次同 size malloc 返回栈地址，其 `fgets/read` 越过原缓冲覆盖 saved RIP——**正是利用本身，无需 chunk 用户区完整落在可控缓冲内**（tcache 路径只检查对齐与 size 字段）。可控区只需容纳 16B chunk 头（30B 名字缓冲足够，缓冲 +0x10 起即 fake 用户指针）。ELF GNU 属性广告 IBT/SHSTK 不代表运行时强制启用（需内核+glibc+CPU 全链生效），ROP 链照常可用——以实际 ret 控制验证为准。
 
 **House of Einherjar**（off-by-null 主力路径）:
 布局 [A][B][C(victim)] → free(A) → off-by-null 清 C 的 P 位 + 伪造 C 的 prev_size=A 到 C 距离 → free(C) 按 prev_size 向后合并 → 覆盖 B 的大 chunk → B 在用但被覆盖，分配即控制。⚠ glibc ≥2.29 有 prev_size 与实际位置一致性检查，需更精确布局。**自引用四指针变体**: A 内伪造 largebin 风格 fake chunk——fd/bk/fd_nextsize/bk_nextsize **全指自身**（fake_addr），过 unlink_chunk 的 `FD->bk==P && BK->fd==P` + large chunk 的 `fd_nextsize->bk_nextsize==P && bk_nextsize->fd_nextsize==P` 全部检查; victim 的 prev_size 须等于 fake 到 victim 的精确距离。
@@ -186,6 +186,11 @@ target_addr+0x08 放 fake size（如 0x40）→ 需保证 next chunk（+size 处
 
 ### 落点 A：House of Apple（IO_FILE wide-data vtable）
 **场景**: glibc 2.35-2.39，有任意写 + 能触发 FSOP（exit / _IO_flush_all_lockp）
+
+**FILE UAF 三条前置技巧**:
+- **初始化长度差保尾泄漏**: `fopen` 的 `locked_FILE` 内部分配比 FILE 结构大（glibc 2.35 为 472 usable），fclose 后若全局 fp 悬挂且应用 note 尺寸恰好覆盖（464 请求 / 0x1e0 chunk）——应用只初始化自己请求的字节数，尾部 0x1d0 处的 `_IO_wfile_jumps` 指针原样保留，`view` 用 `%s` 打印满 464 非零字节后即续读到 vtable 指针 → 减固定偏移得 libc base。前提: 7 个同 size chunk 先填满 tcache 使 fclose 的 FILE 进 unsorted，再二次腾空 tcache 后取回。找法: 比对 `malloc_usable_size` 与应用 memset/写入长度。
+- **投毒落入 libc 数据区的快照恢复**: tcache 投毒目标选 `_IO_list_all-0x1d0` 这类 libc 数据区内地址时，**整个 472B 分配范围都在 libc 数据上**——该范围可能被其他运行时状态引用（如 stdin 的 wide-data 指针落点），清零/乱写会破坏后续 `scanf`/`fgets`。做法: 先用假 FILE 读写原语（构造见下条）快照该 472B 运行时内容，投毒取回后原样恢复，仅改最后一个 qword（`_IO_list_all` 指向假 FILE）——假 FILE 本体放在可控堆 chunk，避免覆写活数据。safe-linking 编码字节须无 `\0`/`\n`（连接 ASLR 不利时重试）。
+- **假 FILE 任意读原语构造**: 已控制一个 FILE 结构体内容（UAF chunk 重占或任意写）后，`_fileno=1`（stdout）、`_IO_write_base=目标地址`、`_IO_write_ptr=目标地址+N`、vtable 用真 `_IO_file_jumps`——任何触发该 FILE 输出操作的路径（fwrite/puts/fflush）都会把 `[write_base, write_ptr)` 共 N 字节**原样输出到 fd 1**，即任意地址快照读。`_flags` 必须置 `_IO_CURRENTLY_PUTTING`(0x800) 且清 `_IO_NO_WRITES`(0x8)——否则 `_IO_new_file_overflow` 走 buffer setup 分支调用 `_IO_setp` **重置**精心构造的 write_base/write_ptr 使原语失效（典型值 0xfbad1800，同前述轻量原语行）。flush 路径以 `write_ptr - write_base` 为长度直接 write，**不受 `_IO_buf_end` 约束**（buf_end 只影响常规缓冲 IO）。快照大区域时分段改 base/ptr 多轮读。
 
 **vtable 范围检查绕过线**（2.24+）: 2.24-2.27 用合法 `_IO_str_jumps`（_IO_str_overflow 的 malloc(fp+0xe0) 可控 / _IO_str_finish 的 _s._free_buffer）；≥2.28 走 wide 路径（`_wide_data->_wide_vtable` **无范围检查**——Apple 2/Cat 主力）；_IO_wstr_jumps（Apple 3 任意写链）; _IO_cookie_jumps 需 pointer_guard。历史补遗（two-hop，2.24 时代）: 检查只验 vtable 地址范围不验子函数间接跳转——unsorted fd/bk 恰 0x10 间距布两指针（valid_vtable-0x18 / system），flush 走 `*(fp+0xd8)+0x18` 落 unchecked 子函数再调 `*(fp+0xe8)`。
 **flush 触发时机**: exit / main 返回 / **malloc 检测到破坏时 abort**（主动触发手段）; 每文件条件: `(mode<=0 && write_ptr>write_base) || (mode>0 && wide_data->write_ptr>wide_data->write_base)`; fake FILE 的 `_lock`（+0x88）须指向有效可写且内容为 NULL 的锁。
