@@ -1906,6 +1906,122 @@ def test_locked_wrapper_mutex():
     run_concurrent(reranker, "predict", lambda i: ([("q", f"p{i}")],))
 
 
+@test("model_loader: 架构守护——推理收口不回归（静态断言，防绕锁复发）")
+def test_model_loader_architecture_guard():
+    """并发安全回归的静态层：真模型并发竞态无法在单测复现（fake 线程安全、
+    竞态概率性、需 MPS 真环境），因此用源码级断言锁住架构不变量——
+    2026-09-25 双 SIGSEGV 的教训：注释契约挡不住人，只有 CI 断言挡得住。"""
+    from pathlib import Path
+    backend = Path(__file__).resolve().parents[1]
+    py_files = sorted(
+        list((backend / "services").glob("*.py")) + list((backend / "routes").glob("*.py"))
+    )
+    assert_true(len(py_files) > 5, f"源文件收集异常: {len(py_files)}")
+
+    def read(p):
+        return p.read_text(encoding="utf-8")
+
+    # 1. sentence_transformers 只允许 model_loader import——其他模块
+    #    import 即可能构造裸模型（绕过 LockedEmbedder 的唯一途径）
+    offenders = [
+        f"{p.name}: {i+1}"
+        for p in py_files if p.name != "model_loader.py"
+        for i, line in enumerate(read(p).splitlines())
+        if "from sentence_transformers import" in line or "import sentence_transformers" in line
+    ]
+    assert_true(not offenders, f"sentence_transformers 应只在 model_loader 出现: {offenders}")
+
+    # 2. _infer_lock 获取点恰 2 处（LockedEmbedder.encode + LockedReranker.predict）
+    #    多于 2 = 有人手动持锁回归（锁句柄外泄的开端）；少于 2 = 包装被破坏
+    ml_src = read(backend / "services" / "model_loader.py")
+    lock_sites = sum(1 for line in ml_src.splitlines()
+                     if line.strip().startswith("with _infer_lock"))
+    assert_eq(lock_sites, 2, f"_infer_lock 获取点应为 2，实际 {lock_sites}")
+
+    # 3. 已删符号零引用（D 痕迹/死出口/重复函数不得复活）
+    for sym in ("def infer_lock", "_do_embed", "_do_rerank"):
+        hits = [f"{p.name}: {i+1}" for p in py_files
+                for i, line in enumerate(read(p).splitlines()) if sym in line]
+        assert_true(not hits, f"已删符号 {sym} 出现: {hits}")
+
+    # 4. .model 裸引用死出口禁止复活（graphiti_core 从不访问该属性；
+    #    复活即提供绕过 LockedEmbedder 拿裸模型的通道）
+    prop_hits = [f"{p.name}: {i+1}" for p in py_files
+                 for i, line in enumerate(read(p).splitlines())
+                 if line.strip().startswith("def model")]
+    assert_true(not prop_hits, f"不得定义 .model property（裸引用出口）: {prop_hits}")
+
+
+@test("e2e 冒烟: 真模型三路并发 embed×memory×graphiti-embedder（OPENSECURITY_E2E_SMOKE=1 启用，零污染）")
+def test_real_model_concurrency_smoke():
+    """真模型 + MPS + 多线程并发的唯一可复现验证层。
+
+    为什么需要它：fake 测不了并发安全（fake 线程安全，故障域被抽象边界
+    隔离）；竞态在真环境概率性触发。本测试零污染设计——三路并发全部
+    避开生产存储：embed 直调（纯计算）、MemoryDB 写临时库（finally 删）、
+    BgeM3Embedder.create 是 graphiti 的 embed 入口（episode 落图在其上，
+    崩溃点在本层）。SIGSEGV 会直接杀死测试进程 = 最强失败信号。
+    成本：真模型加载 ~90s + 压测 ~10s，故 ENV 开关默认跳过。
+    """
+    import os
+    if os.environ.get("OPENSECURITY_E2E_SMOKE") != "1":
+        print("  ⏭ 跳过（设 OPENSECURITY_E2E_SMOKE=1 启用）")
+        return
+    import asyncio
+    import tempfile
+    import threading
+    import time
+    from pathlib import Path
+    from services import model_loader
+    from services.knowledge_db import MemoryDB
+    from services.graphiti_config import BgeM3Embedder
+
+    ITER = 6
+    errors: list[str] = []
+
+    def lane_embed():
+        for i in range(ITER):
+            vecs = model_loader.embed_batch_sync([f"smoke embed {i}", f"lane a {i}"])
+            if len(vecs) != 2 or len(vecs[0]) != 1024:
+                errors.append(f"embed_batch_sync 形状异常: {len(vecs)}")
+
+    def lane_memory(db_path: Path):
+        try:
+            db = MemoryDB(db_path, model_loader.get_embedder())
+            for i in range(ITER):
+                db.store(question=f"smoke {i}", content=f"smoke memory content {i}",
+                         doc_type="memory", flow_id="smoke-flow")
+            if not db.search(["smoke memory"], doc_type="memory", flow_id="smoke-flow"):
+                errors.append("memory 临时库回读为空")
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def lane_graphiti():
+        async def run():
+            emb = BgeM3Embedder()
+            for i in range(ITER):
+                v = await emb.create(input_data=[f"smoke graphiti {i}"])
+                if len(v) != 1024:
+                    errors.append(f"graphiti embedder 维度异常: {len(v)}")
+        asyncio.run(run())
+
+    t0 = time.monotonic()
+    with tempfile.TemporaryDirectory() as td:
+        db_path = Path(td) / "smoke.db"
+        lanes = [
+            threading.Thread(target=lane_embed, name="smoke-embed"),
+            threading.Thread(target=lane_memory, args=(db_path,), name="smoke-memory"),
+            threading.Thread(target=lane_graphiti, name="smoke-graphiti"),
+        ]
+        for t in lanes:
+            t.start()
+        for t in lanes:
+            t.join(timeout=300)
+        assert_true(not any(t.is_alive() for t in lanes), "并发线程 300s 超时未结束")
+    assert_true(not errors, f"三路并发错误: {errors}")
+    print(f"  ⏱ 三路×{ITER} 并发完成，耗时 {time.monotonic() - t0:.1f}s（含模型加载）")
+
+
 @test("knowledge_store: 队列写路径落库 + 非法条目跳过 + 同步方法（fake embedder）")
 def test_knowledge_store_paths():
     import numpy as np

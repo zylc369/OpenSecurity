@@ -13,6 +13,9 @@
 | 3 | graphiti_config.py + reranker.py：删两个 `.model` 死出口 property、`_encode_locked`→`_encode`、过时 docstring 修正 | ✅ | py_compile ×2；property 定义清零；全后端无 `.model` 消费（llm_client 的 `self.model` 为 LLM 模型名字符串，无关） |
 | 4 | knowledge_store.py 头部并发模型文档更新（model_loader 头部已在步骤1重写） | ✅ | 人工审读一致 |
 | 5 | 新增回归测试 `test_locked_wrapper_mutex`（4 线程并发 probe 断言 peak==1） | ✅ | 测试通过（encode 与 predict 双路径互斥实证） |
+| 5a | 补充 `test_model_loader_architecture_guard`（静态架构守护：sentence_transformers 仅限 model_loader import、_infer_lock 获取点==2、已删符号零引用、.model 死出口禁止复活） | ✅ | 测试通过；四断言全绿 |
+| 5b | 补充 `test_real_model_concurrency_smoke`（ENV 开关 `OPENSECURITY_E2E_SMOKE=1`，默认跳过）：真模型三路并发 embed×memory×graphiti-embedder，**零污染设计**（embed 直调纯计算 / MemoryDB 临时库 finally 删 / BgeM3Embedder.create 不落图） | ✅ | 实跑通过：17.7s（热缓存），三路×6 并发零异常；零残留复核（生产 memory 库/Neo4j 均无 smoke 与 load-test 数据） |
+| 5c | 清理历史压测污染：生产 memory 库 6 条 `[load-test]`（ids 5749-5754，含 answer_vectors 联动删除）+ graphiti 6 个 load-test-exec episodes（DETACH DELETE，实体节点保留防误删合并实体） | ✅ | 复核零残留 |
 | 6 | 端到端：优雅停旧控制台（SIGTERM）→ 同参重启（pid 8757）→ 压测 | ✅ | 详见下 |
 
 ## 端到端验证记录
