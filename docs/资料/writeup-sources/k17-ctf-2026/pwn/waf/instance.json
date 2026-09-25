@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "endpoints": [
+    {
+      "name": "main",
+      "protocol": "tcp",
+      "host": "chal.secso.cc",
+      "port": 4006
+    }
+  ]
+}

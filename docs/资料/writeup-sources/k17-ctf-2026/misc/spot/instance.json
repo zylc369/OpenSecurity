@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "endpoints": [
+    {
+      "name": "main",
+      "protocol": "ssh",
+      "host": "vm2.secso.cc",
+      "port": 21518,
+      "username": "ctf",
+      "password_env": "SPOT_SSH_PASSWORD"
+    }
+  ]
+}

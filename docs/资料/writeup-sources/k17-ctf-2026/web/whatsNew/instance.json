@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "endpoints": [
+    {
+      "name": "main",
+      "protocol": "https",
+      "url": "https://56773-e6d234bac9d74f799e3bcc499d3aaa51.sbx.secso.cc"
+    },
+    {
+      "name": "callback_tunnel",
+      "protocol": "ssh",
+      "host": "localhost.run",
+      "port": 22,
+      "username": "nokey"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+name: web/whatsnew
+
+services:
+  app:
+    build: .
+    image: web/whatsnew
+    container_name: web-whatsnew
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      BASE_URL: "http://127.0.0.1:3000"
+      BOT_TIMEOUT_MS: "7000"
+      NODE_ENV: "production"
+      PUBLIC_NAME: "whatsNew"
+    env_file:
+      - flag
+    restart: unless-stopped
