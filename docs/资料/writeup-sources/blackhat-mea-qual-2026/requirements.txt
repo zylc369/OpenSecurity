@@ -1,0 +1,11 @@
+cryptography==50.0.1
+frida==17.5.2
+numpy==2.5.2
+pillow==12.3.0
+pwntools==4.15.0
+pycryptodome==3.17
+pycryptosat==5.14.7
+pyopencl==2026.1.4
+python-sat==1.9.dev15
+pyzipper==0.4.0
+requests==2.34.2

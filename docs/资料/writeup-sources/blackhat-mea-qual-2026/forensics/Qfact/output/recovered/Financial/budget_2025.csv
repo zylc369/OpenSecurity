@@ -1,0 +1,49 @@
+﻿DEPARTMENT BUDGET SUMMARY - FISCAL YEAR 2025
+Prepared by: Finance Department
+As of: June 15, 2025
+Classification: Internal - Restricted
+
+OVERVIEW
+Total approved budget for FY2025 is USD 12,450,000 across 9 departments.
+Year-to-date utilization stands at 67.2% with Q3 traditionally being the
+highest spend quarter due to conference season and annual software renewals.
+
+DETAILED BREAKDOWN
+
+Department,Annual Budget,Q1 Actual,Q2 Actual,Q3 Forecast,Q4 Forecast,YTD Spent,Remaining,Utilization,Status
+Engineering,,,,,,,,47.3%,On Track
+Product Development,,,,,,,,48.2%,On Track
+Sales,,,,,,,,50.7%,Watch
+Marketing,,,,,,,,53.9%,Over Budget Risk
+Customer Success,,,,,,,,47.6%,On Track
+Operations,,,,,,,,48.9%,On Track
+Human Resources,,,,,,,,47.6%,On Track
+Legal,,,,,,,,47.9%,On Track
+IT Infrastructure,,,,,,,,49.9%,On Track
+Executive Office,,,,,,,,47.8%,On Track
+
+CAPITAL EXPENDITURE ITEMS (Q3)
+Item,Department,Amount,Status,Approval Date,Expected Delivery
+Server Rack Expansion,IT Infrastructure,,Approved,2025-05-20,2025-07-15
+GPU Cluster (ML Training),Engineering,,Pending CFO,2025-06-10,2025-08-01
+Office Renovation (Floor 3),Operations,,Approved,2025-04-15,2025-07-30
+Security Audit Tools,IT Infrastructure,,Approved,2025-06-01,2025-07-01
+Conference Sponsorships,Marketing,,Approved,2025-05-28,N/A
+
+HEADCOUNT PLAN
+Department,Current HC,Approved Additions,Start Date,Annualized Cost
+Engineering,142,12,2025-07-01,
+Sales,67,5,2025-07-15,
+Customer Success,34,3,2025-08-01,
+Product Development,28,2,2025-07-01,
+Marketing,19,1,2025-09-01,
+
+NOTES
+- Marketing spend trending 6% above plan due to unbudgeted trade show
+- Engineering capex for GPU cluster requires CFO signature (> threshold)
+- Q3 includes annual AWS commitment renewal (.2M, split across IT and Eng)
+- Legal fees may increase if M&A due diligence proceeds in August
+- Travel budget across all departments reduced 15% per CEO directive
+
+Prepared by: Rachel Kim, Financial Controller
+Approved by: Michael Torres, CFO

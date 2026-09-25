@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "endpoints": [
+    {
+      "name": "main",
+      "protocol": "tcp",
+      "host": "tcp.flagyard.com",
+      "port": 23514
+    }
+  ]
+}
+

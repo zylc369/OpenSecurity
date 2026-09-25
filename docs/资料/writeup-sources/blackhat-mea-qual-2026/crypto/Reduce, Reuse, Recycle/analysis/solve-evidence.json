@@ -1,0 +1,42 @@
+{
+  "endpoint": "tcp.flagyard.com:21221",
+  "backend": "8.213.48.164",
+  "probe_utf8": "425c57cdabe99eb1f19ebdae",
+  "high": [
+    "d846ed8b9767b796",
+    "edac170018d7f59c",
+    "d0c0c69c6e46aeb2",
+    "9ad8186eb1f280ff",
+    "5874dd601d2e72cb",
+    "e8bbcbbbbbfb38ef"
+  ],
+  "low": [
+    "e5ede6ef00055a9f",
+    "3944b747025f37ad",
+    "3c76077b3880e513",
+    "c3b3cf7f1eae3c37",
+    "3da5e9f58df80e31",
+    "6ec91e53f8bcc94a"
+  ],
+  "full": [
+    "de854e6deed68ebf90706075b57a996f",
+    "e3d9a4c41b7704071082d57ff3579acd",
+    "d30cc706c06797cb63e84860aee5b123",
+    "9ca3db831c8f67efb11efa2e830cf3f7",
+    "538d7a45ded96f0518dd2fe8702ec3b1",
+    "e68ebcb9c1beb5b3bfb8fbbc3c89e4fa"
+  ],
+  "H": "3eabbc51d2cf6d660638ebe0fef724c9",
+  "key0": "fe912176e4846ef801e2d7e620364c1a",
+  "key1": "6864222f2d8fc42302eadb4fd3f40036",
+  "J0": "4cf72f6fd72c9014278a22cad7ea6a70",
+  "E4_byte1": 50,
+  "key_stats": {
+    "weight": 3,
+    "patterns": 1609,
+    "affine_candidates": 973593,
+    "valid_candidates": 17110,
+    "elapsed": 2.82799999999952
+  },
+  "flag": "BHFlagY{cf4aece12ca6b0b0b9f8a0111dfd3132}"
+}
