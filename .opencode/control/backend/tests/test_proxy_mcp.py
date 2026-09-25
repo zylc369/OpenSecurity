@@ -50,6 +50,7 @@ def test_mcp_tools_and_sop_description():
             assert banned not in all_desc, f"描述越界残留: {banned}"
     finally:
         proc.kill()
+        proc.wait()
 
 
 def test_mcp_status_call_shape():
@@ -69,3 +70,4 @@ def test_mcp_status_call_shape():
         assert "rotate_history" in parsed and "credentials_configured" in parsed
     finally:
         proc.kill()
+        proc.wait()

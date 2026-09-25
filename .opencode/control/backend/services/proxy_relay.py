@@ -30,32 +30,49 @@ _drain_grace_sec = 5.0
 
 
 class Tunnel:
-    """一条已建立的转发隧道（客户端连接 + 上游连接 + 双向泵 task）。"""
+    """一条已建立的转发隧道（客户端连接 + 上游连接 + 双向泵 task）。
+
+    tasks 顺序约定：[0]=client→upstream（请求方向），[1]=upstream→client（响应方向）。
+    """
 
     def __init__(self, client_w: asyncio.StreamWriter, up_w: asyncio.StreamWriter):
         self.client_w = client_w
         self.up_w = up_w
         self.tasks: list[asyncio.Task] = []
+        self.draining = False           # 优雅排空中（见 graceful_close_upstream）
+        self.drain_deadline: float = 0.0  # 排空宽限截止（monotonic）
 
-    async def graceful_close_upstream(self, grace: float = _drain_grace_sec) -> None:
-        """对上游发 FIN（不再发新请求）+ 继续读尽剩余响应字节送达客户端；
-        grace 秒后兜底强关（需求 §5.4：在飞响应完整送达，POST 无重复提交风险）。"""
+    async def graceful_close_upstream(self, grace: float | None = None) -> None:
+        """优雅排空（需求 §5.4：在飞响应完整送达）。
+
+        排空模式：上游已 FIN（不再有新请求），此期间客户端可能继续发数据
+        （WebSocket/keep-alive 复用/pipelining）——若让 client→up 泵继续跑，
+        写已 EOF 的 transport 抛 RuntimeError 令泵异常死亡并连坐取消响应方向泵
+        （在飞响应被截断）。因此显式取消请求方向泵（tasks[0]，其数据已无处可去），
+        仅保留响应方向泵（tasks[1]）投递剩余字节，至自然 EOF 或 grace 兜底强关。
+        """
+        if grace is None:
+            grace = _drain_grace_sec   # 运行期解析（默认参数会在定义期绑定常量，不可调）
+        self.draining = True
+        self.drain_deadline = time.monotonic() + grace
+        # 上游 FIN（不再有新请求）。请求方向泵不 cancel：排空期间客户端再发数据会令其
+        # 因"EOF 后写"结束（RuntimeError 已被泵捕获，finally 半关无害）——泵结束本身
+        # 触发 _pipe 的排空等待分支，响应方向泵继续投递。
         try:
-            self.up_w.write_eof()          # FIN：告诉目标站"我没有新请求了"
+            self.up_w.write_eof()
         except (OSError, RuntimeError) as e:
             _log.debug("write_eof 已关闭连接（预期半关收尾）: %s", e)
-            return
+        # 2. 等待响应方向泵自然结束（剩余字节送达 + 客户端方向收尾），grace 兜底
         deadline = time.monotonic() + grace
-        # 等待 up→client 泵自然结束（剩余字节送达 + 客户端方向收尾）
-        for t in self.tasks:
+        if len(self.tasks) > 1:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                await asyncio.wait({t}, timeout=remaining)
-            except Exception:
-                pass
-        for w in (self.up_w, self.client_w):  # 兜底强关（超长响应场景）
+            if remaining > 0 and not self.tasks[1].done():
+                try:
+                    await asyncio.wait({self.tasks[1]}, timeout=remaining)
+                except Exception as e:
+                    _log.debug("等待响应泵结束异常: %r", e)
+        # 3. 兜底强关（超长响应场景）
+        for w in (self.up_w, self.client_w):
             try:
                 w.close()
             except Exception as e:
@@ -154,18 +171,24 @@ async def _connect_upstream(host: str, port: int) -> tuple[asyncio.StreamReader,
         # 之后的字节才在"客户端↔目标站"端到端流动。缺这一步=TLS 字节灌进裸 TCP(协议垃圾)。
         # 只发请求行+空行（不发 Host 头）——Host 对 CONNECT 是可选的，且部分代理实现
         # 只 readline 一行即进泵，多发的头会泄漏进隧道污染目标请求。
-        up_w.write(f"CONNECT {host}:{port} HTTP/1.1\r\n\r\n".encode())
-        await up_w.drain()
-        status_line = await asyncio.wait_for(up_r.readline(), timeout=15)
-        if b" 200 " not in status_line:
+        try:
+            up_w.write(f"CONNECT {host}:{port} HTTP/1.1\r\n\r\n".encode())
+            await up_w.drain()
+            status_line = await asyncio.wait_for(up_r.readline(), timeout=15)
+            fields = status_line.split()
+            if len(fields) < 2 or fields[1] != b"200":   # 容忍无 reason phrase 的 200
+                raise OSError(f"接入点 CONNECT 握手失败: {status_line[:60]!r}")
+            while True:  # 读完接入点响应头（到空行）
+                line = await asyncio.wait_for(up_r.readline(), timeout=10)
+                if line in (b"\r\n", b"\n", b""):
+                    break
+        except (asyncio.TimeoutError, OSError, RuntimeError) as e:
+            _log.warning("上游 CONNECT 握手异常（关闭泄漏连接）: %r", e)
             up_w.close()
-            raise OSError(f"接入点 CONNECT 握手失败: {status_line[:60]!r}")
-        while True:  # 读完接入点响应头（到空行）
-            line = await asyncio.wait_for(up_r.readline(), timeout=10)
-            if line in (b"\r\n", b"\n", b""):
-                break
+            raise
         return up_r, up_w
-    return await asyncio.open_connection(host, port)
+    # direct 出口：IPv6 字面量去方括号（CONNECT 线格式 [::1]:443 → open_connection 需 ::1）
+    return await asyncio.open_connection(host.strip("[]"), port)
 
 
 async def _pipe(tunnel: Tunnel, client_r: asyncio.StreamReader,
@@ -180,13 +203,15 @@ async def _pipe(tunnel: Tunnel, client_r: asyncio.StreamReader,
                     break
                 w.write(data)
                 await w.drain()
-        except (ConnectionError, asyncio.IncompleteReadError, OSError) as e:
-            _log.debug("隧道泵结束（连接断开属正常流）: %s", e)
+        except (ConnectionError, asyncio.IncompleteReadError, OSError, RuntimeError) as e:
+            _log.debug("隧道泵结束（连接断开/EOF后写属正常流）: %s", e)
         finally:
+            # 半关目标（write_eof 传播 EOF）而非 close——close 会立即杀死对端方向
+            # 正在投递的在飞响应（优雅关闭场景）。close 留给 _pipe 统一收尾。
             try:
-                w.close()
-            except Exception as e:
-                _log.debug("泵收尾关闭异常（多已关闭）: %s", e)
+                w.write_eof()
+            except (OSError, RuntimeError):
+                pass
 
     _tunnels.add(tunnel)
     t1 = asyncio.create_task(pump(client_r, tunnel.up_w))
@@ -194,6 +219,12 @@ async def _pipe(tunnel: Tunnel, client_r: asyncio.StreamReader,
     tunnel.tasks = [t1, t2]
     try:
         await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+        # 排空模式：t1 结束（EOF/被 graceful cancel/异常）而响应泵 t2 仍在投递——
+        # 不立即 teardown，等 t2 至排空宽限线（在飞响应完整送达，需求 §5.4）
+        if tunnel.draining and not t2.done():
+            remaining = tunnel.drain_deadline - time.monotonic()
+            if remaining > 0:
+                await asyncio.wait({t2}, timeout=remaining)
     finally:
         t1.cancel()
         t2.cancel()
@@ -248,6 +279,8 @@ async def _handle_client(client_r: asyncio.StreamReader,
             # 服务器多接受绝对 URI 但部分拒绝；direct 出口时无影响。统一改写最稳。
             # method 用原始值（明文代理可能承载 POST/HEAD））
             path_part = target[len(f"http://{sp.netloc}"):] or "/"
+            if path_part.startswith("?"):          # http://host?a=1（无斜杠）→ /?a=1
+                path_part = "/" + path_part
             up_w.write(f"{method} {path_part} HTTP/1.1\r\n".encode())
             await up_w.drain()
             tunnel = Tunnel(client_w, up_w)

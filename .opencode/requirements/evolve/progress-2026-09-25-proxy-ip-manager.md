@@ -87,3 +87,22 @@
      pool 2处(状态文件损坏重置/持久化失败, 均 warning)
 - 测试侧自修: gather 是 Future 需包装协程; 并发阈值测试重设计(串行预热+并发触发)
 - 终态: 55/55 全绿; 真实链路回归 qq 200/118KB, 出口=陕西电信, 已恢复 direct
+
+## 外部 Review 处置（review 两 commit）— 完成
+- 中#1 优雅排空期间客户端续发数据截断在飞响应: 完整修复=泵结束改半关(write_eof
+  传播 EOF 而非 close 杀连接) + _pipe 感知 draining(t1 结束不 teardown, 等 t2 至
+  drain_deadline) + graceful_close 标记排空; 新增回归用例(排空期4次续发→响应完整)
+- 低#2 direct IPv6 字面量去方括号; 低#3 握手超时关泄漏连接; 低#4 恒真断言修正
+  (bad_ips==[]); 低#5 测试 try/finally 恢复全局 + mcp wait() 收尸
+- 信息级全修: routes mode 吞异常加日志/mark_bad reason 入日志/无斜杠路径补 /
+  /握手判定容忍无 reason phrase/supervise task 持引用
+- 文档#6: 架构图 HTTPS→HTTP 修正(供应商仅支持 HTTP, 签名明文传输属其约束)
+- 终态: 56/56 全绿; restart 后真实回归 qq 200/118KB 出口=江苏常州移动
+
+## "详尽测试"补齐(用户质询后自查四缺口)
+- 补 4 针对性用例: IPv6 direct([::1] 剥括号)/无斜杠路径 /?a=1/无 reason phrase 200/
+  grace 超时强关分支 —— 其中 grace 用例逮住真问题: 默认参数定义期绑定 _drain_grace_sec
+  (写死不可调), 修为运行期解析
+- 真实供应商链路排空演练: 在飞 httpbin /delay/3 中途 rotate → 200+307B 完整返回+
+  JSON 完整解析(需求 §5.4 核心保证的真实性证明)
+- 终态: 60/60 全绿 + 真实排空通过

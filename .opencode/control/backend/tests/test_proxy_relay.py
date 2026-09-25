@@ -25,10 +25,11 @@ ORIGIN_BODY = b"ORIGIN-RESPONSE-" + b"X" * 500
 class FakePool:
     """替身 pool：返回指定代理地址；计数提取/轮换。"""
 
-    def __init__(self, proxy_addr: str):
+    def __init__(self, proxy_addr: str, force_proxy: bool = True):
         self.proxy_addr = proxy_addr
         self.get_calls = 0
         self.rotate_calls = 0
+        self._force_proxy = force_proxy
 
     async def get(self, force_new: bool = False) -> "pp.ProxyInfo":
         self.get_calls += 1
@@ -40,10 +41,10 @@ class FakePool:
         return await self.get(force_new=True)
 
     def domain_cooled(self, domain_raw: str) -> bool:
-        return True  # 测试内强制走 proxy 出口
+        return self._force_proxy
 
     def status(self) -> dict:
-        return {"mode": "proxy"}
+        return {"mode": "proxy" if self._force_proxy else "direct"}
 
 
 async def start_mock_origin(slow: bool = False) -> int:
@@ -314,4 +315,135 @@ def test_concurrent_threshold_single_rotate():
         assert fake.rotate_calls == 1, f"并发到达阈值应只轮换 1 次，实际 {fake.rotate_calls}"
         assert fake.get_calls >= 5
         pr.PROXY_ROTATE_CONN_THRESHOLD = 35
+    run_relay_test(scenario)
+
+
+def test_graceful_close_survives_client_sends_during_drain():
+    """回归（外部 review 复现）：优雅排空期间客户端继续发数据（WebSocket/keep-alive
+    复用形态）——排空模式应丢弃该数据而非令泵异常死亡截断在飞响应。"""
+    async def scenario(relay_port):
+        slow_port = await start_mock_origin(slow=True)
+        proxy_port, _ = await start_mock_proxy()
+        pr.get_pool = lambda: FakePool(f"127.0.0.1:{proxy_port}")
+        r, w = await client(relay_port)
+        w.write(f"CONNECT 127.0.0.1:{slow_port} HTTP/1.1\r\n\r\n".encode()); await w.drain()
+        await r.readline(); await r.readline()
+        await asyncio.sleep(0.2)                       # 慢响应传输中
+        drain_task = asyncio.create_task(pr.graceful_close_upstreams())
+        await asyncio.sleep(0.05)
+        # 排空期间客户端持续发数据（打过的泵若写已 EOF transport 会 RuntimeError 死亡）
+        for _ in range(4):
+            try:
+                w.write(b"CLIENT-DATA-DURING-DRAIN"); await w.drain()
+            except (ConnectionError, RuntimeError):
+                pass                                    # 连接后期被关属预期
+            await asyncio.sleep(0.08)
+        await drain_task
+        got = b""
+        try:
+            while True:
+                d = await asyncio.wait_for(r.read(65536), timeout=6)
+                if not d:
+                    break
+                got += d
+        except asyncio.TimeoutError:
+            pass
+        assert got.endswith(b"X" * 100), f"排空期客户端发数据截断了在飞响应({len(got)}/{len(ORIGIN_BODY)})"
+    run_relay_test(scenario)
+
+
+def test_direct_mode_ipv6_literal_target():
+    """回归（外部 review #2）：direct 出口 CONNECT [::1]:port —— 方括号剥离后可达。"""
+    async def scenario(relay_port):
+        async def v6_origin(reader, writer):
+            await reader.read(65536)
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nV6OK"); await writer.drain()
+            writer.close()
+        srv = await asyncio.start_server(v6_origin, "::1", 0)
+        v6port = srv.sockets[0].getsockname()[1]
+        pr.get_pool = lambda: FakePool("127.0.0.1:1", force_proxy=False)  # direct
+        r, w = await client(relay_port)
+        w.write(f"CONNECT [::1]:{v6port} HTTP/1.1\r\n\r\n".encode()); await w.drain()
+        line = await r.readline()
+        assert b"200" in line, f"IPv6 direct 应剥方括号直连: {line!r}"
+        w.write(b"ping"); await w.drain()
+        data = await read_all(r)
+        assert b"V6OK" in data
+    run_relay_test(scenario)
+
+
+def test_plaintext_path_without_slash():
+    """回归（外部 review 信息级）：GET http://host?a=1（无斜杠）→ 改写为 /?a=1。"""
+    async def scenario(relay_port):
+        got_line: list[bytes] = []
+        async def echo_origin(reader, writer):
+            got_line.append(await reader.readline())
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"); await writer.drain()
+            writer.close()
+        srv = await asyncio.start_server(echo_origin, "127.0.0.1", 0)
+        origin = srv.sockets[0].getsockname()[1]
+        proxy_port, _ = await start_mock_proxy()
+        pr.get_pool = lambda: FakePool(f"127.0.0.1:{proxy_port}")
+        r, w = await client(relay_port)
+        w.write(f"GET http://127.0.0.1:{origin}?a=1 HTTP/1.1\r\nHost: x\r\n\r\n".encode()); await w.drain()
+        body = await read_all(r)
+        assert body.endswith(b"OK")
+        assert got_line[0].startswith(b"GET /?a=1 "), got_line
+    run_relay_test(scenario)
+
+
+def test_connect_status_line_without_reason_phrase():
+    """回归（外部 review 信息级）：接入点回无 reason phrase 的 `HTTP/1.1 200` 不误判失败。"""
+    async def scenario(relay_port):
+        origin = await start_mock_origin()
+        async def terse_proxy(reader, writer):
+            await reader.readline()
+            while True:
+                if (await reader.readline()) in (b"\r\n", b"\n", b""):
+                    break
+            writer.write(b"HTTP/1.1 200\r\n\r\n"); await writer.drain()   # 无 reason phrase
+            u_r, u_w = await asyncio.open_connection("127.0.0.1", origin)
+            async def pump(rr, ww):
+                try:
+                    while True:
+                        d = await rr.read(65536)
+                        if not d: break
+                        ww.write(d); await ww.drain()
+                except Exception: pass
+            await asyncio.gather(pump(reader, u_w), pump(u_r, writer))
+        srv = await asyncio.start_server(terse_proxy, "127.0.0.1", 0)
+        pp = srv.sockets[0].getsockname()[1]
+        pr.get_pool = lambda: FakePool(f"127.0.0.1:{pp}")
+        r, w = await client(relay_port)
+        w.write(f"CONNECT 127.0.0.1:{origin} HTTP/1.1\r\n\r\n".encode()); await w.drain()
+        line = await r.readline()
+        assert b"200" in line, f"无 reason phrase 的 200 被误判: {line!r}"
+    run_relay_test(scenario)
+
+
+def test_graceful_close_grace_timeout_force_close():
+    """排空宽限超时分支：响应慢于 grace → 宽限后强关（不挂死，收到部分即闭环）。"""
+    async def scenario(relay_port):
+        async def very_slow_origin(reader, writer):
+            await reader.read(65536)
+            for i in range(10):
+                writer.write(b"S" * 50); await writer.drain()
+                await asyncio.sleep(0.15)          # 总 1.5s > 缩短的 grace
+        srv = await asyncio.start_server(very_slow_origin, "127.0.0.1", 0)
+        slow = srv.sockets[0].getsockname()[1]
+        proxy_port, _ = await start_mock_proxy()
+        pr.get_pool = lambda: FakePool(f"127.0.0.1:{proxy_port}")
+        old_grace = pr._drain_grace_sec
+        pr._drain_grace_sec = 0.3                  # 缩短宽限加速测试
+        try:
+            r, w = await client(relay_port)
+            w.write(f"CONNECT 127.0.0.1:{slow} HTTP/1.1\r\n\r\n".encode()); await w.drain()
+            await r.readline(); await r.readline()
+            await asyncio.sleep(0.2)
+            t0 = time.monotonic()
+            await pr.graceful_close_upstreams()
+            elapsed = time.monotonic() - t0
+            assert elapsed < 1.0, f"grace 超时应及时强关(实际{elapsed:.1f}s)——挂死"
+        finally:
+            pr._drain_grace_sec = old_grace
     run_relay_test(scenario)

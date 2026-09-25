@@ -187,7 +187,7 @@ def test_routes_rotate_reason_matrix(routes_env):
     assert c.post("/api/proxy/rotate", json={"reason": "turbo"}).status_code == 400
     r = c.post("/api/proxy/rotate", json={"reason": "bad_ip"})
     assert r.status_code == 200 and r.json()["reason"] == "bad_ip"
-    assert "9.9.9.9:9" not in pool._state.bad_ips or True  # 首次无旧 IP
+    assert pool._state.bad_ips == [], "首次 rotate(bad_ip) 时无旧 IP，不应有黑名单残留"
     hist = c.get("/api/proxy/status").json()["rotate_history"]
     assert hist and hist[-1]["reason"] == "bad_ip"
 

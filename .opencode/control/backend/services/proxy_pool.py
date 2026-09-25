@@ -235,6 +235,7 @@ class ProxyPool:
     def mark_bad(self, ip: str, reason: str = "bad_ip") -> None:
         """黑名单登记（rotate(reason=bad_ip) 内部调用；也可单独使用）。"""
         if ip and ip not in self._state.bad_ips:
+            _log.info("代理IP %s 进黑名单（原因: %s）", ip, reason)
             self._state.bad_ips.append(ip)
             self._persist()
 

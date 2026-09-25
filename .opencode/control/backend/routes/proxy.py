@@ -78,8 +78,9 @@ async def proxy_mode(body: ModeBody) -> dict:
     try:
         from services.proxy_relay import graceful_close_upstreams
         await graceful_close_upstreams()
-    except Exception:
-        pass  # relay 未启动时切换模式无需关连接
+    except Exception as e:
+        import logging
+        logging.getLogger("proxy_routes").debug("模式切换后关闭存量隧道跳过（relay 未启动属正常）: %r", e)
     return {"mode": result}
 
 

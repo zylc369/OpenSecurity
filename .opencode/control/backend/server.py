@@ -35,6 +35,9 @@ from config import is_dev_mode
 from services import model_loader
 
 
+_relay_supervise_task: "asyncio.Task | None" = None
+
+
 def create_app() -> FastAPI:
     """构造 FastAPI app。
 
@@ -132,7 +135,8 @@ def create_app() -> FastAPI:
                         break
                 await asyncio.sleep(0.2)
 
-        asyncio.create_task(_supervise())
+        global _relay_supervise_task  # 持引用防 GC（asyncio 文档建议）
+        _relay_supervise_task = asyncio.create_task(_supervise())
 
     # 开发态自动拉起 vite dev server（此前依赖手动启动，控制台重启后
     # 前端 404）。幂等：vite 已运行则跳过；拉起失败由 dev 提示页指路。
