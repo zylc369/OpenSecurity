@@ -1,16 +1,31 @@
 # 整库蒸馏方法论
 
 > 给定一个完整素材库（Git 仓库、题目集、离线文档目录），把它全量精读、验证、提炼、沉淀到本体系知识库的六阶段流程。
-> 与散篇信源扫描（`knowledge-sourcing-guide.md`）互补: 那是"追新宽度"，本文是"整库榨干深度"。
-> 命令入口: `/knowledge-distill`。不依赖主 prompt 上下文即可理解。
+> 与散篇侦察（knowledge-scout 的 `knowledge-sourcing-guide.md`）互补: 那是"找料"，本文是"炼钢"。
+> 入口: 对 security-analysis-evolve 直接下达蒸馏指令（对话触发, 如"蒸馏 <仓库 URL>"或"先搜 XX 再蒸馏"）。不依赖主 prompt 上下文即可理解。
 
 ---
 
 ## 0. 适用判定
 
 - **走本流程**: 素材是一个结构化集合（题目集/CTF 题库、漏洞复现集合、内部报告库），量级通常 ≥10 篇，有既定边界
-- **不走本流程**: 单篇/散篇 writeup → 走 `$AGENT_DIR/knowledge-base/knowledge-sourcing-guide.md` 的信源扫描
+- **不走本流程**: 单篇/散篇 writeup → 派发 `knowledge-scout` 子 agent 侦察（或提示用户 `/knowledge-search`），本体系不再直接持有信源扫描方法论
 - 素材含非知识成分（源码、附件）时，蒸馏对象是 writeup/分析文档，源码用于验证而非直接沉淀
+
+---
+
+## 输入解析
+
+| 输入形态 | 行为 |
+|----------|------|
+| Git 仓库 URL（github.com/.../repo） | 克隆到临时区 → 全量蒸馏 |
+| 含 `/tree/<ref>/<子目录>` 的 URL | 克隆全仓库，以该子目录为盘点范围 |
+| GitHub 单篇 blob URL（含 `/blob/`） | 不进蒸馏——提示走 `/knowledge-search`（散篇侦察） |
+| 本地路径 | 直接盘点该目录 → 全量蒸馏 |
+| 方向限定 | 由自然语言表达（"只做 crypto 部分"），无标志参数; 限定方向只盘点其余跳过 |
+| 意图不明 | 追问素材来源，禁止自行猜测对象 |
+
+素材未定时先侦察: 派发 `knowledge-scout` 子 agent（subagent_type 显式指定）→ 其侦察报告的素材路径即本流程输入。
 
 ---
 

@@ -63,6 +63,7 @@ export const AGENT_SECURITY_ANALYSIS_EVOLVE = "security-analysis-evolve";
 export const AGENT_SEARCHER = "searcher";
 export const AGENT_MEMORIST = "memorist";
 export const AGENT_FRESH_EYES = "fresh-eyes";
+export const AGENT_KNOWLEDGE_SCOUT = "knowledge-scout";
 
 // 成员 × 集合矩阵（✓ = 属于该集合；各集合的语义与消费点见其定义处注释）:
 //
@@ -97,11 +98,12 @@ export const SECURITY_AGENTS = [
   AGENT_SECURITY_ANALYSIS_EVOLVE,
 ];
 
-// 通用辅助子 agent（非领域分析）：情报检索 / 长期记忆 / 无记忆评审。
+// 通用辅助子 agent（非领域分析）：情报检索 / 长期记忆 / 无记忆评审 / 知识侦察。
 export const GENERAL_SUB_AGENTS = [
   AGENT_SEARCHER,
   AGENT_MEMORIST,
   AGENT_FRESH_EYES,
+  AGENT_KNOWLEDGE_SCOUT,
 ];
 
 // 项目内 agent 全集（agents/ 目录下均有定义文件）：领域分析 + 通用辅助 + evolve。
@@ -120,6 +122,8 @@ export const AGENT_SCRIPT_DIRS: Record<string, string> = {};
 for (const name of SECURITY_AGENTS) {
   AGENT_SCRIPT_DIRS[name] = join(OPENCODE_ROOT, name);
 }
+// knowledge-scout 有专属知识库目录（sourcing-guide），注入 $AGENT_DIR; 其余通用辅助子 agent 无脚本目录，不注入。
+AGENT_SCRIPT_DIRS[AGENT_KNOWLEDGE_SCOUT] = join(OPENCODE_ROOT, AGENT_KNOWLEDGE_SCOUT);
 
 export const SHARED_DIR = join(OPENCODE_ROOT, AGENT_BINARY_ANALYSIS);
 

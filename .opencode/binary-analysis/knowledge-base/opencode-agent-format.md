@@ -14,7 +14,11 @@
 name: my-agent          # 可选，默认取文件名（不含 .md）
 description: 做某件事    # 可选，Agent 描述
 model: claude-opus-4    # 可选，模型名称（会自动映射到 provider/model 格式）
-tools: Read,Write,Bash  # 可选，逗号分隔的工具列表
+tools:                      # 可选，工具启用映射（白名单须含 "*": false 前置）
+  "*": false
+  read: true
+  write: true
+  bash: true
 mode: subagent          # 可选，默认 "subagent"
 ---
 
@@ -28,7 +32,7 @@ mode: subagent          # 可选，默认 "subagent"
   "name": "my-agent",
   "description": "做某件事",
   "model": "claude-opus-4",
-  "tools": ["Read", "Write", "Bash"],
+  "tools": { "*": false, "read": true, "write": true, "bash": true },
   "mode": "subagent",
   "prompt": "系统提示内容"
 }
@@ -43,14 +47,15 @@ mode: subagent          # 可选，默认 "subagent"
 | `name` | `string` | 否 | Agent 名称，默认取文件名（不含 `.md`） |
 | `description` | `string` | 否 | Agent 描述，用于 UI 展示和 Agent 选择 |
 | `model` | `string` | 否 | 模型名称（如 `claude-opus-4`），自动映射 |
-| `tools` | `string` | 否 | 逗号分隔的工具白名单（如 `Read,Write,Bash`） |
+| `tools` | `object` | 否 | 工具启用映射（键=工具名小写如 `read/bash/webfetch/websearch`, 值=boolean）。白名单语义须前置 `"*": false` 再逐工具 `true`——只列 `true` 不拒绝未列工具。schema 为 Record<String,Boolean>，逗号字符串会解析失败 |
 | `mode` | `string` | 否 | `"primary"` / `"subagent"` / `"all"`，默认 `"subagent"` |
+| `hidden` | `boolean` | 否 | `true` 时该 agent 不注入任何 agent 的 Task 工具说明、不出现在用户切换菜单，**但仍可被 task 显式派发**（派发按 name 解析不过滤 hidden）。适用: 内部专用子 agent（内置 compaction/title/summary 同用法）。注意: hidden 后 description 不再承担路由职责，调用说明书必须写在派发方的 prompt 模板里 |
 
 ---
 
 ## description 是唯一路由层（写 agent 的硬要求）
 
-OpenCode 每次请求都会把所有 `mode` 不为 `primary` 的 agent（即 `mode: all` 与 `mode: subagent`）的 `description` 注入 Task 工具说明（格式 `- 名称: description`；缺 description 时替换为"仅限手动调用"文案）。**主 agent 只能看到 description，看不到正文**——因此：
+OpenCode 每次请求都会把所有 `mode` 不为 `primary` 的 agent（即 `mode: all` 与 `mode: subagent`）的 `description` 注入 Task 工具说明（格式 `- 名称: description`；缺 description 时替换为"仅限手动调用"文案）。 `hidden: true` 的 agent 例外——被全部注入列表过滤（源码 `filter((a) => !a.hidden)`），对其他 agent 零上下文成本。**主 agent 只能看到 description，看不到正文**——因此：
 
 1. description 必须包含：**做什么 + 为什么这么做（避免什么损失）+ 最终目的（拿到什么结果）+ 何时主动委派（明确触发条件）+ 范围/排除 + 必须传什么/返回什么**——调用方据此判断这个委派何时值得发起、能拿到什么。输入契约写在正文里等于没写（主 agent 读不到）。
 2. 想获得更主动的委派，使用明确的触发句式（如"卡壳时主动委派：同一方向连续失败≥5 次…"）。

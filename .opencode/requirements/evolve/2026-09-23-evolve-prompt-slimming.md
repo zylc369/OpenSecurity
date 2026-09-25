@@ -1,6 +1,6 @@
 # 2026-09-23 evolve prompt 瘦身（635 → <450）
 
-> 状态：需求文档（Phase 2）→ 待用户确认执行
+> 状态：已执行（2026-09-25 由 `2026-09-25-knowledge-system-restructure.md` 步骤 7 合并落地: 641→439 行 <450; 实际执行含索引表误伤修复，详见 progress-2026-09-25-knowledge-system-restructure.md）
 > 触发债务：`2026-09-22-selfcheck-noise-fixes.md` §5 约定"若后续需往 evolve prompt 新增内容，先立瘦身需求"；`2026-09-23-mechanism-corrections-and-retro-methodology.md` S8 新增 1 行触发红线——本文档兑现该约定，解除下一次增改被 600 行红线阻塞的状态
 
 ## §1 背景与目标
