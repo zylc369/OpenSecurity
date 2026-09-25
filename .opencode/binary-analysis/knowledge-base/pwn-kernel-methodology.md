@@ -52,7 +52,7 @@ qemu-system-x86_64（内核题启动文件系统+init 脚本: `-kernel vmlinux -
 kernel_base = leaked_addr - known_offset;  // offset 从 /proc/kallsyms 或 vmlinux 获取
 ```
 
-**KASLR 泄漏全景**: 除结构体函数指针外还有——dmesg（dmesg_restrict=0 时内核打印地址）/ /proc/self/stat wait_channel 字段（版本相关）/ eBPF JIT spray（可预测偏移）/ 已知 module 基址推算 / **9 bit 熵 = 512 位置可爆破**（可持久重连场景）。基址: `kaslr_base = (leak & ~0xfffff) - (vmlinux 符号 & ~0xfffff)`。
+**KASLR 泄漏全景**: 除结构体函数指针外还有——dmesg（dmesg_restrict=0 时内核打印地址）/ /proc/self/stat wait_channel 字段（版本相关）/ eBPF JIT spray（可预测偏移）/ 已知 module 基址推算 / **9 bit 熵 = 512 位置可爆破**（可持久重连场景）/ **PREFETCH 时序 oracle**（ring 3 `prefetch` 内核地址: 已映射 ~亚微秒、未映射走缺页处理显著慢——自地址与确定 unmapped 地址校准基线后，从 `0xffffffff80000000` 起 2MiB 步进扫，连续 3 个快页首址即 _text; 较新 CPU 微码已抹平该时序差、物理机部分失效，软件模拟（QEMU 带探测补丁）或未打微码环境仍可用）。基址: `kaslr_base = (leak & ~0xfffff) - (vmlinux 符号 & ~0xfffff)`。
 
 ## §3 内核落点
 
@@ -247,6 +247,8 @@ madvise(page, PAGE_SIZE, MADV_DONTNEED);
 **对象大小表**（x86-64，版本相关）: seq_operations/shm_file_data 0x20→kmalloc-32; msg_msg 0x30+数据→64~4096; subprocess_info 0x60→96; timerfd_ctx 0x68→128; sk_buff head ~0xE0→专用; **cred 0xA8→cred_jar 专用（须 cross-cache）**; file 0x100→filp 专用; tty_struct 0x2B8/0x2e0→1024; pipe_buffer×16 0x280→1024; poll_list 0x10+变长。
 
 **原语→目标选择**: 控制 RIP → pipe_buffer(ops)/seq_operations（open /proc/self/stat 分配，改 start，read 触发，rdi=seq_file）; 任意读 → msg_msg 改 m_ts/next; 任意写 → msg_msg+msgrcv 回收; KASLR 泄漏 → pipe_buffer 读 ops。**tty_struct kROP 两阶段**（，顺序写 ≥0x200B 全结构内自包含）: +0x00 magic=0x5401/+0x08 dev=`pop rsp` gadget/+0x10 driver=结构+0x170（须有效堆指针）/+0x18 ops=结构+0x50（假 vtable ioctl 槽=leave gadget）/+0x170 真 ROP——ioctl→leave（RBP 指结构）→RSP 落 +0x08→ret pop rsp→弹 driver 迁 +0x170。捷径: `push rdx;...;pop rsp` gadget + ioctl 第 3 参全控一步迁栈。**ioctl 寄存器 AAW**: cmd→部分控 RBX/RCX/RSI、arg→全控 RDX/R8/R12——假 vtable 放 `mov [rdx],esi;ret` 逐 4B 写 modprobe_path。
+
+**kmalloc 分区随机化下的 UAF 回收（CONFIG_KMALLOC_PARTITION_CACHES+RANDOM）**: 每个 kmalloc cache 按调用点分裂为 16 个分区，索引 `hash_64(call_site ^ random_kmalloc_seed, 4)`——UAF 目标与回收分配**必须落在同一分区**，单对 call site 碰撞概率 1/16。策略: ①同一目标对象准备**多条分配路径**（如 pipe: 既有 pipe 的 `F_SETPIPE_SZ` 扩容走 `pipe_resize_ring()`、新建 pipe 走 `alloc_pipe_info()`——两条 call site 并行试，任一命中即回收）②失败必须**可安全观测**（不崩溃、可检测未命中）③重试预算按独立概率算（双路径 ~12%/次，fresh VM 重连数十次量级）。`GFP_KERNEL_ACCOUNT` 标志在 `CONFIG_MEMCG=n` 时**不**进独立 cgroup cache——与普通分配同池，评估分配同池性时先看 MEMCG 配置。CPU 为 qemu64 时不暴露 SMEP/SMAP——内核间接调用目标可直接换用户态函数（ret2usr 免 ROP）。
 
 ## §7b DirtyPipe（CVE-2022-0847）
 

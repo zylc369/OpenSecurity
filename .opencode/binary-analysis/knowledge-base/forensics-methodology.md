@@ -216,6 +216,8 @@ for fp, content in files.items():
 
 **成功判据**：重建的文件树能通过语法检查/导入执行；密钥能解出嵌入数据。**失败排查**：工具调用有遗漏（日志截断/中间轮缺失）→ 对比相邻请求的 messages 数组长度找缺口。
 
+**本地 LLM 工具（Ollama 类）痕迹取证**: 与 API 网关不同，本地推理留痕在主机——①`~/.ollama/history` 明文保存全部 prompt/回复（口令、密钥派生 passphrase、恶意意图常直接写在请求里）②`/etc/systemd/system/ollama.service` + journal/syslog 存在性证明安装与运行 ③auditd `EXECVE` 事件记录 `ollama pull/run` 与后续脚本执行链 ④`~/.Trash` 或未彻底删除的生成脚本本体 ⑤脚本产物（加密归档、外发路径）与 auditd 文件访问事件交叉。bash_history 清空不影响以上任一来源。流程: history 提 passphrase → 回收站脚本还原派生逻辑（如 `blake2b(pass, digest_size=32).hexdigest()[:20]` 类 ZIP 口令变换）→ 解密归档恢复已删除敏感文件（与现存文件按 SHA-256 比对定位被删的那份）。
+
 ---
 
 ## 7. 工具速查

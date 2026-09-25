@@ -253,6 +253,7 @@ print(i2b(int(m)))
 - **Manger（OAEP 首字节阈值 oracle）**：B=2^(8(k-1))，oracle 判 m < B。三步：倍增 f1 至过界 → (n+B)//B*f1//2 起 +f1//2 步进找 f2 → 二分收缩（1024-bit 约 1024 查询）。比 Bleichenbacher（v1.5，~10K 查询）收敛快
 - **Python or 短路时延 oracle**：昂贵 KDF 排在条件链后位被短路 → 快=Y≠0 / 慢=Y==0。校准（known-fast/known-slow 各 5 采样定阈值）+ 模糊区间重试
 - **LSB oracle 噪声版**：随机出错不收敛 → 跑 N 轮逐字节取众数（`Counter.most_common`）；或恢复后按字符集定位错误位翻转重算
+- **Hamming weight oracle（返回 `HW(x^d mod n)` 而非比特）**：乘法 blinds——直接送 `x_i = c·(2^-i)^e mod n`，oracle 返回 `y_i = 2^-i·m mod n` 的 Hamming weight。**modular halving 的 weight 保持性判 parity**: 定义 `h_i=HW(y_i)`、`g_i=HW(-y_i mod n)`——`y_i` 偶则 `y_{i+1}=y_i/2` 且 `h` 不变（parity 0）; `y_i` 奇则补数侧 `n-y_{i+1}=(n-y_i)/2` 且 `g` 不变（parity 1）; 两侧都恰好不变时该位模糊。逐位 `b_i` 满足 `u=Σb_i·2^i ≡ -m·n⁻¹ (mod 2^L)`，全部位定后 `m = (-u·n) mod 2^L`。模糊位消歧: 对 `z=3m` 重跑同流程，`u_z ≡ 3u+q (mod 2^L)`（q∈{0,1,2}=⌊3m/n⌋），从低位起解进位链分支三种 q，终验三判据 `0≤m<n`、`(3m)//n==q`、`pow(m,e,n)==c`。查询量 ~2L 起步（weight 相等时补 `-x mod n` 查询）
 - **Montgomery 规约时序（Kocher）**：额外条件减法次数泄漏 → MSB 起 逐位猜 0/1 预测减法数与观测取 corrcoef。768-bit 需 ~20 万签名
 - **RSA-CRT 故障**：单比特翻转 d 时 `ratio = s_bad * s_good⁻¹ mod n == 2^(±2^k) mod n` 逐位恢复 d；输出前不自验的 CRT 实现一次故障即泄因子 gcd(s^e-m, n)
 - **CRT 字段解析缺陷**：无边界 fgets 读 d_p 发 33+ 空字节 → d_p=0 → m_2=0^0=1 → gcd(sig-1, N)=p；`buf[strlen-1]=0` 剥换行遇空输入回写覆盖相邻模数末字节（N' 与真 N 差 ≤255，delta 暴力）

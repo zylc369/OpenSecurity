@@ -74,6 +74,8 @@ CheckRemoteDebuggerPresent 底层=NtQIP(DebugPort)，hook 底层一并覆盖。I
 
 时序类四源: QueryPerformanceCounter / GetTickCount(64) / rdtsc / OutputDebugString 时间差（有调试器 ODS 反而快）。多检查点累积漂移→Frida 全源 replace。
 
+**rdtsc 参与校验值计算（非仅时序检查）**: validator 返回值本身含 `tsc` 分量（如 `crc32(input) ^ const ^ (tsc >> 32)`）时结果天然非确定——须区分**两个 rdtsc 角色**: 外层超时检查（NOP 掉分支即可）与内层参与计算（NOP 不解决）。处理: Unicorn 仿真该函数并**固定 tsc 值**（EDX=0 常是校验设计本意——原生执行因 rdtsc 与使用点之间的派发路径（内层 shellcode/信号 handler）未保存 EDX 而 clobber，固定后即恢复确定性），或硬件断点在 rdtsc 后改 EAX/EDX。
+
 低可靠性族: 父进程检查(explorer.exe) / FindWindow("OLLYDBG"/"x64dbg") / 进程名枚举 / **CRC .text 完整性**（patch 存储哈希或 hook CRC 函数）/ BlockInput。
 
 ## 4. 多层组合四型
@@ -81,7 +83,7 @@ CheckRemoteDebuggerPresent 底层=NtQIP(DebugPort)，hook 底层一并覆盖。I
 1. **fork+ptrace watchdog**: 子进程 attach 父失败→SIGKILL 父。破解: patch fork / kill watchdog / 双调试器
 2. **多进程互检**: 父子互查。破解: 双附加
 3. **多检查点累积时序**: 单点 patch 无效。破解: Frida replace 全部时序源
-4. **Nanomite (INT3 替换)**: 条件跳转全换 INT3，父进程求值条件 SETREGS。破解: trace 全部 INT3 handler 重建跳转表后 patch。Linux 信号版载体: SIGTRAP(int3)/SIGILL(ud2)/SIGFPE(idiv 0)/SIGSEGV(null 解引用)，真实操作在信号 handler（父进程=真 CPU，log 全部 PTRACE_POKETEXT 序列重建算法）; Windows 版 EXCEPTION_DEBUG_EVENT + 魔数 0x1337BABE/0xDEADC0DE
+4. **Nanomite (INT3 替换)**: 条件跳转全换 INT3，父进程求值条件 SETREGS。破解: trace 全部 INT3 handler 重建跳转表后 patch。Linux 信号版载体: SIGTRAP(int3)/SIGILL(ud2)/SIGFPE(idiv 0)/SIGSEGV(null 解引用)，真实操作在信号 handler（父进程=真 CPU，log 全部 PTRACE_POKETEXT 序列重建算法）; Windows 版 EXCEPTION_DEBUG_EVENT + 魔数 0x1337BABE/0xDEADC0DE。**分 stage 解密变体的还原法**: handler 每次只解密/搬运下一 chunk 再继续执行——在 handler 入口与"解密完成、跳回执行前"各下断点，两次断点间 dump 目标缓冲，逐 stage 拼接即得全部明文代码，无需全量单步 trace。
 
 **pwntools 函数级 patch**（按符号名定位免算偏移）:
 ```python

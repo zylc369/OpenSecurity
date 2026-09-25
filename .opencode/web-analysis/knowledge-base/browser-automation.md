@@ -282,3 +282,15 @@ headless 模式下定时器调度、CPU 节流等行为可能与有头模式不�
 | 空参数/格式错误参数 | 无提交记录（多数平台进不到提交逻辑） | 探测端点存在性与参数 schema 的首选 |
 | 错误 flag | 记一次错误提交（部分平台限次/扣分） | 仅当真实 flag 只有一次机会、必须先验证端点/参数时 |
 | 真实 flag | 正式提交 | 确认完毕后 |
+
+## 9. 目标侧 CDP/WebDriver 端口暴露攻击面
+
+> 本文件其余章节是"我方"自动化; 本节是被测服务内部的 automation 端口——同一套协议从攻击侧看是权限边界突破口。
+
+**形态**: 渲染/截图/html-to-image 类服务在容器内跑多个 Chromium 实例——低权限渲染实例执行用户提交的 HTML/JS，另有 loopback 上的高权限实例供内部操控（ChromeDriver `--port=38560+N` 或 CDP `--remote-debugging-port`），启动参数常见 `--allowed-origins='*'` 甚至 `--disable-web-security` + 允许 `file://`。
+
+**利用链**: 用户 JS 在低权限实例内 `fetch('http://127.0.0.1:PORT/status')` 扫 loopback 端口段（端口=基地址+种子 mod 8 一类窄窗口，如 38560-38567; ChromeDriver `/status` 回 `ready:true`）→ 直接 `POST /session` 在**高权限实例**开新会话（WebDriver over HTTP 无鉴权，通配 origin 放行跨源）→ `POST /session/{id}/url` 导航 `file:///` 读宿主文件 → `/session/{id}/source` 拿页面源码——权限以"被控实例"为准，随机文件名/Unix 权限对 WebDriver 视角全部透明。单页有渲染时限时用**多页面拆分**: 每页 JS 只同步执行一条 WebDriver 命令，N 页接力完成整个会话操作。
+
+**像素 codeword 信道**（输出是图像、无文本回传时）: 把要回传的比特/字符编码为**灰度亮度条**（每字符一根条，亮度档间隔 ≥10/255，取条中心像素采样，相邻条靠中心采样+足够条宽区分边界），渲染进结果图; JPEG 有损压缩下单色条内中心像素漂移 ≤2 档，nearest-codeword 解码零误差。比 OCR 可靠（无字形歧义）、比逐像素二值化抗压缩。收发两侧约定: 条宽 ≥8px、以已知终止符/已知明文字符收尾作对齐校验。
+
+**审计清单**: 服务容器内 `127.0.0.1` 端口段是否有 ready 状态的 automation 端点; 启动参数含 `allowed-origins`/`remote-debugging`/`disable-web-security`; 渲染实例与内部实例是否共享 network namespace; 用户 JS 可达 loopback 即视为同暴露。

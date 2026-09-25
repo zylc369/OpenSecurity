@@ -37,6 +37,8 @@
 
 回收站 $R=内容/$I=元数据（UTF-16 原路径+时间）; OEMInformation SupportURL=C2 后门 IOC; hosts 行尾空白藏数据（xxd tail）; .contact 的 `<c:Notes>`; 遥测 imprbeacons.dat（CIP/geo_*/COUNTRY）。WinZip AES: zip2john + hashcat -m 13600（-a 6 '?d?d?d?d' 混合）; ZipCrypto 场景用 bkcrack（见 disk-memory §4）。
 
+**Defender 隔离区恢复恶意样本**（原始文件已删、取证包含 `ProgramData/Microsoft/Windows Defender/Quarantine/` 时）: ①`ResourceData/<xx>/...` 数据流用**公开固定 RC4 key** 解保护层（key 见 fox-it dissect.target quarantine parser）②解出后是连续 `WIN32_STREAM_ID` 记录: 按 `dwStreamId`/`Size`/`dwStreamNameSize` 逐条读——**stream id=1 为原始文件数据**（id=3 安全描述符、id=7 object ID）③恢复的样本存为 `.txt` 等非执行后缀再分析。配合 Defender-Operational.evtx 的 1116（检测）/1117（隔离处置）时间线与 Prefetch 交叉确认处置过程; 勒索类案件隔离样本里常含加密 key 材料（key 派生逻辑在样本内 + IV=环境值 hash——从 EVTX/勒索note 恢复 hostname/username 即可重构全部 key material）。
+
 ## §6a DFIR 高价值 artifact（SRUM/SNSS/搜索索引/RDP 缓存）
 
 > 常规日志/artifact 被清或答不上"外发流量/运行时长/已删浏览记录/屏幕内容"类问题时逐项检查。

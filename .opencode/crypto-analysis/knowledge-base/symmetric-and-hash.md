@@ -190,6 +190,7 @@ for root, _ in eq.roots():
 ## 7. 模式滥用与组合攻击速查
 
 - **GCM nonce 重用（forbidden attack）**: ①C1^C2=P1^P2 恢复明文 ②tag 差多项式在 GF(2^128) 因式分解恢复 GHASH 认证密钥 H → 伪造任意 tag。工具 nonce-disrespect。短 nonce（1-4 字节）+ 已知 key 直接暴力。派生链常见 nonce=wrapped^SHA256(secret), key=SHA256(secret+nonce)——MAC check failed 先查上游 secret 端序
+- **GCM tag 部分泄漏（只露 nibble/截断）+ 可控短前缀的代数全恢复**: 同 key 同 nonce、明文=可控短前缀+固定后缀（key 材料在后缀里）、tag 只回高/低 nibble 轮换时——①**等长消息差分消项**: 同长度两消息仅首字节不同，CTR keystream 与 tag mask 全消，`ΔT = ΔP·H^4`（47B 消息共 3 密文块+1 长度块、差分块居首——GHASH 中每块乘一次 H，块序上它后面还有 2 密文块+1 长度块、自身再乘一次 → 系数 H⁴; 一般化: 系数=总块数含长度块）; 两组差分×16 个 nibble 位=128 个 GF(2) 位级线性方程，满秩解出 H^4，**Frobenius 逆** `H=(H^4)^(2^126)` 得 H ②**长度边界移动密钥材料**: 选前缀使明文总长跨块边界（47/48/49/50B 阶梯），后缀对齐移位一字节 → 差分方程的未知量=后缀 hex 字符; 每字符 5-bit 编码（'0'-'9' α=0 q=0-9; 'a'-'f' α=1 q=1-6），128 方程 176 变量 nullity 48——用 **ASCII hex 域稀疏性压自由度**: `q3=1` 仅 '8'/'9' 合法（随机 32 hex 串平均 ~4 个位置），按 Hamming weight 顺序猜 q3 位集，剩余小 affine 空间枚举域内合法解，`AES_K(0^128)==H` 唯一定 key ③**nonce 闭式恢复**: GHASH 线性性消前 3 个 CTR 块（`Z=Y49+H·Y48=(1+H)M+trunc1(E4)·H^2`），长度差分直接暴露 E4[1]，对 E4[0] 的 256 个候选逐一算 `M=(Z+trunc(E4[0])·H^2)/(1+H)→J0=AES_K⁻¹(M)→E4'=AES_K(inc32(J0,4))`，取 E4' 前 2 字节与观测值相符的唯一候选; nonce 恢复后本地重算全部 tag 全匹配才提交（`N=(J0+[len=128]·H)/H^2`）
 - **CBC 头部块剥离**: 任意连续密文切片是合法 CBC 密文（前块提升为 IV）。nonce/magic 恰占一块时 new_iv=ct[:16], new_ct=ct[16:] 剥掉头部
 - **CTR + CRC**: CRC(A^B)=CRC(A)^CRC(B)^CRC(0)——XOR 改数据段同时修 CRC 段; CRC32(msg||secret) 可用 crchack 追 4 字节伪造任意目标 CRC。流密码+CRC=完整性灾难
 - **错误消息泄漏解密值**: 全零块读 intermediate（D(C)），目标明文 XOR intermediate = 正确密文块，从最后一块向前迭代构造任意明文密文（可携盲注 payload）
