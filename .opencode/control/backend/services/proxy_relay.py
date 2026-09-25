@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 from config import PROXY_RELAY_PORT_CANDIDATES, PROXY_RELAY_PORT_START, PROXY_ROTATE_CONN_THRESHOLD
@@ -19,6 +20,8 @@ from services.proxy_pool import JuliangError, get_pool, normalize_domain
 
 _server: asyncio.AbstractServer | None = None
 _port: int | None = None
+_log = logging.getLogger("proxy_relay")
+_rotate_gate: asyncio.Lock | None = None  # 阈值轮换防重入（惰性建，绑定运行循环）
 
 # 活动隧道注册表（优雅关闭用）与 proxy 出口连接计数（阈值轮换用）
 _tunnels: set["Tunnel"] = set()
@@ -39,8 +42,9 @@ class Tunnel:
         grace 秒后兜底强关（需求 §5.4：在飞响应完整送达，POST 无重复提交风险）。"""
         try:
             self.up_w.write_eof()          # FIN：告诉目标站"我没有新请求了"
-        except (OSError, RuntimeError):
-            return                          # 已关/半关，无需处理
+        except (OSError, RuntimeError) as e:
+            _log.debug("write_eof 已关闭连接（预期半关收尾）: %s", e)
+            return
         deadline = time.monotonic() + grace
         # 等待 up→client 泵自然结束（剩余字节送达 + 客户端方向收尾）
         for t in self.tasks:
@@ -54,8 +58,8 @@ class Tunnel:
         for w in (self.up_w, self.client_w):  # 兜底强关（超长响应场景）
             try:
                 w.close()
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug("graceful_close 兜底关闭异常（多已关闭）: %s", e)
 
 
 async def graceful_close_upstreams() -> None:
@@ -73,14 +77,18 @@ def current_server() -> "asyncio.AbstractServer | None":
 
 
 async def stop_relay() -> None:
-    """关闭当前 server 并清空注册态（supervisor 重拉前调用）。"""
-    global _server, _port
+    """关闭监听并清空注册态（supervisor 重拉前调用）。
+
+    只 close 不 wait_closed——wait 会等所有存活连接（含 keep-alive）排空，
+    可能分钟级；自愈要求秒级，close 后内核继续排空在途数据，新实例即可 bind。
+    """
+    global _server, _port, _rotate_gate
+    _rotate_gate = None            # 关闭时清锁（下次 start 重建）
     if _server is not None:
         try:
             _server.close()
-            await _server.wait_closed()
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("relay 关闭监听异常: %r", e)
     _server = None
     _port = None
 
@@ -94,9 +102,12 @@ def relay_port() -> int:
 
 async def start_relay() -> None:
     """绑定端口（顺延候选段）并开始服务。幂等（已运行直接返回）。"""
-    global _server, _port
+    global _server, _port, _rotate_gate
     if _server is not None:
         return
+    _rotate_gate = asyncio.Lock()  # 随监听生命周期重建（绑定当前循环，防跨循环残留）
+    global _proxy_conn_count
+    _proxy_conn_count = 0
     for port in range(PROXY_RELAY_PORT_START,
                       PROXY_RELAY_PORT_START + PROXY_RELAY_PORT_CANDIDATES):
         try:
@@ -123,15 +134,37 @@ async def _connect_upstream(host: str, port: int) -> tuple[asyncio.StreamReader,
     domain = normalize_domain(host)  # 与控制接口同一归一化（收口）
     use_proxy = pool.domain_cooled(domain) or pool.status()["mode"] == "proxy"
     if use_proxy:
+        global _rotate_gate
         info = await pool.get()  # 缓存复用；过期/黑名单自动提取（惰性）
         _proxy_conn_count += 1
         if _proxy_conn_count >= PROXY_ROTATE_CONN_THRESHOLD:
-            _proxy_conn_count = 0
-            await pool.rotate("auto_rotate_35conn")   # 阈值轮换（记 rotate_history）
-            info = await pool.get()                   # 拿轮换后的新 IP（否则本次连接仍走旧出口）
-            await graceful_close_upstreams()           # 存量隧道优雅收尾→新连接走新出口
+            if _rotate_gate is None:
+                _rotate_gate = asyncio.Lock()
+            async with _rotate_gate:                  # 防重入：并发到达阈值的连接只轮换一次
+                if _proxy_conn_count >= PROXY_ROTATE_CONN_THRESHOLD:  # 双重检查
+                    _proxy_conn_count = 0
+                    await pool.rotate("auto_rotate_35conn")   # 阈值轮换（记 rotate_history）
+                    info = await pool.get()                   # 轮换后的新 IP
+                    await graceful_close_upstreams()           # 存量隧道优雅收尾
+                else:                                        # 已被首个连接轮换过——复用新 IP
+                    info = await pool.get()
         proxy_host, _, proxy_port = info.ip.rpartition(":")
-        return await asyncio.open_connection(proxy_host, int(proxy_port))
+        up_r, up_w = await asyncio.open_connection(proxy_host, int(proxy_port))
+        # 上游是 HTTP 代理：必须先向接入点完成 CONNECT 握手（建立它到目标站的隧道），
+        # 之后的字节才在"客户端↔目标站"端到端流动。缺这一步=TLS 字节灌进裸 TCP(协议垃圾)。
+        # 只发请求行+空行（不发 Host 头）——Host 对 CONNECT 是可选的，且部分代理实现
+        # 只 readline 一行即进泵，多发的头会泄漏进隧道污染目标请求。
+        up_w.write(f"CONNECT {host}:{port} HTTP/1.1\r\n\r\n".encode())
+        await up_w.drain()
+        status_line = await asyncio.wait_for(up_r.readline(), timeout=15)
+        if b" 200 " not in status_line:
+            up_w.close()
+            raise OSError(f"接入点 CONNECT 握手失败: {status_line[:60]!r}")
+        while True:  # 读完接入点响应头（到空行）
+            line = await asyncio.wait_for(up_r.readline(), timeout=10)
+            if line in (b"\r\n", b"\n", b""):
+                break
+        return up_r, up_w
     return await asyncio.open_connection(host, port)
 
 
@@ -147,13 +180,13 @@ async def _pipe(tunnel: Tunnel, client_r: asyncio.StreamReader,
                     break
                 w.write(data)
                 await w.drain()
-        except (ConnectionError, asyncio.IncompleteReadError, OSError):
-            pass
+        except (ConnectionError, asyncio.IncompleteReadError, OSError) as e:
+            _log.debug("隧道泵结束（连接断开属正常流）: %s", e)
         finally:
             try:
                 w.close()
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug("泵收尾关闭异常（多已关闭）: %s", e)
 
     _tunnels.add(tunnel)
     t1 = asyncio.create_task(pump(client_r, tunnel.up_w))
@@ -167,8 +200,8 @@ async def _pipe(tunnel: Tunnel, client_r: asyncio.StreamReader,
         for w in (tunnel.client_w, tunnel.up_w):
             try:
                 w.close()
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug("隧道收尾关闭异常（多已关闭）: %s", e)
         _tunnels.discard(tunnel)
 
 
@@ -201,7 +234,7 @@ async def _handle_client(client_r: asyncio.StreamReader,
             await _pipe(tunnel, client_r, up_r)
 
         elif target.startswith("http://"):
-            # 明文绝对 URI：解析 host 后原样转发（请求头仍在 client_r 流中，由管道承载）
+            # 明文绝对 URI：解析 host 后转发（请求头仍在 client_r 流中，由管道承载）
             from urllib.parse import urlsplit
             sp = urlsplit(target)
             host, port = sp.hostname or "", sp.port or 80
@@ -211,15 +244,19 @@ async def _handle_client(client_r: asyncio.StreamReader,
                 client_w.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                 await client_w.drain()
                 return
-            up_w.write(first)  # 原样转发请求行
+            # 改写为相对 URI（proxy 出口时上游是 CONNECT 隧道后的目标站——隧道内
+            # 服务器多接受绝对 URI 但部分拒绝；direct 出口时无影响。统一改写最稳。
+            # method 用原始值（明文代理可能承载 POST/HEAD））
+            path_part = target[len(f"http://{sp.netloc}"):] or "/"
+            up_w.write(f"{method} {path_part} HTTP/1.1\r\n".encode())
             await up_w.drain()
             tunnel = Tunnel(client_w, up_w)
             await _pipe(tunnel, client_r, up_r)
         # 其他方法（相对 URI/未知协议）：关闭
-    except (asyncio.TimeoutError, ConnectionError, OSError, ValueError):
-        pass
+    except (asyncio.TimeoutError, ConnectionError, OSError, ValueError) as e:
+        _log.debug("客户端连接结束（超时/断开/非法输入）: %r", e)
     finally:
         try:
             client_w.close()
-        except Exception:
-            pass
+        except Exception as e:
+            _log.debug("客户端连接收尾关闭异常: %s", e)

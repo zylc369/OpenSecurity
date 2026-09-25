@@ -64,3 +64,26 @@
   假验证实例(端到端 credentials_configured=true 结论作废, 待生产实例重验)
 - 待用户: 重启后在控制台配置页填写 JULIANG_TRADE_NO/JULIANG_API_KEY;
   生产实例上重验凭证加载与 proxy 全链路
+
+## 终验(生产实例+正轨凭证) + 重大 bug 修复
+- 误诊更正: 端到端④"首个坏IP超时"为误诊——真因是 relay proxy 分支缺陷
+- 真根因: _connect_upstream proxy 分支只与接入点建 TCP, 从未发送 CONNECT 握手,
+  客户端 TLS 字节被灌进裸 TCP(协议垃圾→接入点断连→000)。direct 模式无此环节
+  (直连目标站)故通; 明文通因绝对URI GET 恰是代理明文协议——三者完美解释
+- 修复: proxy 分支建 TCP 后发 CONNECT host:port + Host 头, 读接入点 200 响应
+  (非200→502), 读完响应头后才返回作上游
+- 修复后: proxy 模式 HTTPS qq 200/118KB, httpbin 200, OoC 503(Render冷启动,隧道已通)
+- 全链路: mode 切换/entry/明文出口/HTTPS隧道/bad_ip轮换/消耗对账(6提取/9587余/3黑名单/9条history)/direct恢复 全部通过
+- 待放行项: ⑦浏览器(~/Library/Caches/ms-playwright) ⑧MCP协议级 ⑨pytest(需放行 $PYTHON_CMD 的 venv 路径)
+
+## 测试 REVIEW 第二轮(并发/日志/边界) — 完成
+- 用户五问处置:
+  1. 复用判定澄清: 全局单IP池+全局锁(asyncio.Lock 锁内提取不释放), 并发 get 不重复申请
+     (测试证明: 8并发→1次提取); 真实并发洞=阈值轮换重入(并发到达35→多次轮换浪费IP),
+     已修: _rotate_gate 防重入锁+双重检查(测试: 2串行+3并发→恰1次轮换)
+  2/4. 并发测试补: 并发get单提取/并发阈值单轮换; 全场景 55 用例矩阵见需求文档
+  3. 其他边界: start_relay 重置连接计数(跨启停残留); 锁随监听生命周期重建(跨事件循环)
+  5. 静默吞异常全部加日志: relay 8处(debug=正常网络收尾/warning=异常状态),
+     pool 2处(状态文件损坏重置/持久化失败, 均 warning)
+- 测试侧自修: gather 是 Future 需包装协程; 并发阈值测试重设计(串行预热+并发触发)
+- 终态: 55/55 全绿; 真实链路回归 qq 200/118KB, 出口=陕西电信, 已恢复 direct

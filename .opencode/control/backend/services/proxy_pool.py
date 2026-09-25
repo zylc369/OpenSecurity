@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -33,6 +34,8 @@ from config import (
 )
 from services import config_store
 from services.process_lock import atomic_write
+
+_log = logging.getLogger("proxy_pool")
 
 # ─── 域名归一化（唯一实现，需求 §5.1 全表）──────────────────
 
@@ -147,13 +150,19 @@ class ProxyPool:
                 rotate_history=[RotateEvent(**e) for e in data.get("rotate_history", [])],
             )
             self._state = st
-        except (ValueError, KeyError, TypeError):
-            self._state = PoolState()  # 状态文件损坏 → 重置（黑名单/冷却重启后重学）
+        except (ValueError, KeyError, TypeError) as e:
+            _log.warning("代理状态文件损坏，已重置（黑名单/冷却将重新学习）: %r", e)
+            self._state = PoolState()
 
     def _persist(self) -> None:
+        """持久化（尽力而为）：失败不阻断主流程——提取已成功，持久化异常
+        只损失重启后的状态延续，不应让已消耗的提取在接口层表现为失败。"""
         import json
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(self._path, json.dumps(asdict(self._state), ensure_ascii=False, indent=1))
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write(self._path, json.dumps(asdict(self._state), ensure_ascii=False, indent=1))
+        except OSError as e:
+            _log.warning("代理状态持久化失败（不影响本次操作，重启后状态回退）: %r", e)
 
     # ── 凭证 ──
 
@@ -180,8 +189,11 @@ class ProxyPool:
                 if data.get("code") != 200:
                     raise JuliangError(f"供应商业务错误 {data.get('code')}: {data.get('msg', '')}")
                 d = data.get("data") or {}
-                first = str((d.get("proxy_list") or [""])[0])
-                ip_part, _, remain_part = first.partition(",")
+                proxy_list = d.get("proxy_list") or []
+                first_entry = str(proxy_list[0]).split(",")[0].strip() if proxy_list else ""
+                if not first_entry:
+                    raise JuliangError("供应商返回空 proxy_list（无可用代理IP）")
+                ip_part, _, remain_part = str(proxy_list[0]).partition(",")
                 now = time.time()
                 info = ProxyInfo(ip=ip_part, fetched_at=now,
                                  expire_at=now + JULIANG_IP_TTL_SEC - JULIANG_TTL_MARGIN_SEC)
