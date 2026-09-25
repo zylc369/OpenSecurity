@@ -20,6 +20,8 @@ description: 信源进化 — 扫描 writeup 信源、识别知识库 gap、提�
 
 $ARGUMENTS
 
+> 整库/离线知识库（Git 仓库、题目集、内部文档库）不走本命令——走 `/knowledge-distill`（全量精读 + 验证分级 + 独立复审的深度蒸馏）。
+
 ## 执行：派发
 
 用 task 工具派发给 `security-analysis-evolve` agent，派发 prompt 用下方模板（替换 `<输入>` 为解析后的值）：

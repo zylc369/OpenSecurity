@@ -550,7 +550,7 @@ Plugin hooks:
 - 脚本和工具放到 `$AGENT_DIR/scripts/` 或 `$SHARED_DIR/scripts/`
 - 知识库文件自包含——不通过路径引用 `docs/` 中的文件来补充信息
 
-**例外**: `download_sources.py` 的 `SOURCE_DIR` 指向 `docs/资料/writeup-sources/` 作为下载保存目标——这是"写入"操作（产出原始资料），不是 agent 运行时"依赖"（读取）。
+**例外**: 向 `docs/资料/writeup-sources/` 写入的操作（download_sources.py 的 SOURCE_DIR 下载、蒸馏任务的源素材归档）——都是"写入"产出原始资料，不是 agent 运行时"依赖"（读取）。
 
 ### 规则 12: 修改后自检清单（每次修改知识库文件后、回复用户前必须逐条回答）
 
@@ -578,6 +578,7 @@ Plugin hooks:
 |----------|---------|
 | `$SHARED_DIR/knowledge-base/knowledge-writing-guide.md` | 沉淀知识到任何知识库文件之前 |
 | `$AGENT_DIR/knowledge-base/knowledge-sourcing-guide.md` | 搜索下载 writeup 素材时（Phase 0 入口 C） |
+| `$AGENT_DIR/knowledge-base/distillation-methodology.md` | 整库蒸馏时——素材是 Git 仓库/题目集/离线文档库（`/knowledge-distill` 命令入口） |
 | `$AGENT_DIR/knowledge-base/retrospective-methodology.md` | 写《复盘报告》、提炼进化候选时（复盘/反思指令触发） |
 | `$SHARED_DIR/knowledge-base/opencode-plugin-api.md` | 查看 Hook 签名、input/output 类型 |
 | `$SHARED_DIR/knowledge-base/opencode-plugin-hooks-lifecycle.md` | 理解 Hook 执行时序、awaited vs fire-and-forget、常见陷阱 |
