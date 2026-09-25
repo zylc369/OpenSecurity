@@ -66,7 +66,7 @@ def create_app() -> FastAPI:
         )
 
     # 路由
-    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, processes, knowledge, events, heartbeat
+    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, processes, knowledge, events, heartbeat, proxy
     app.include_router(embed.router)
     app.include_router(health.router)
     app.include_router(heartbeat.router)
@@ -83,6 +83,7 @@ def create_app() -> FastAPI:
     app.include_router(system.router)
     app.include_router(knowledge.router)
     app.include_router(events.router)
+    app.include_router(proxy.router)
 
     # 前端静态文件（开发态跳过，发布态挂载 dist/）
     _mount_frontend(app)
@@ -103,6 +104,35 @@ def create_app() -> FastAPI:
     async def _warm_deps_snapshot() -> None:
         import asyncio
         asyncio.get_running_loop().run_in_executor(None, warm_deps_snapshot)
+
+    @app.on_event("startup")
+    async def _start_proxy_relay() -> None:
+        # relay（本地代理服务）supervisor：崩溃自动重拉（2 秒级），不拖垮主进程
+        import asyncio
+        import logging
+        from services import proxy_relay
+        log = logging.getLogger("proxy_relay")
+
+        async def _supervise() -> None:
+            # 持续监督：启动 + 每 2s 探活（server 对象失活 → 关闭旧的重新拉起，
+            # 2 秒级自愈，不拖垮控制台主进程，需求 §8 步骤 3b 验证点）
+            while True:
+                try:
+                    await proxy_relay.start_relay()
+                except Exception as e:
+                    log.error("[proxy_relay] 启动失败(2s 后重试): %s", e)
+                    await asyncio.sleep(2)
+                    continue
+                while True:
+                    await asyncio.sleep(2)
+                    srv = proxy_relay.current_server()
+                    if srv is None or not srv.sockets or srv.is_serving() is False:
+                        log.warning("[proxy_relay] 服务失活，自动重拉监听")
+                        await proxy_relay.stop_relay()
+                        break
+                await asyncio.sleep(0.2)
+
+        asyncio.create_task(_supervise())
 
     # 开发态自动拉起 vite dev server（此前依赖手动启动，控制台重启后
     # 前端 404）。幂等：vite 已运行则跳过；拉起失败由 dev 提示页指路。

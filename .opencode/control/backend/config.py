@@ -127,6 +127,20 @@ EXTRA_CONFIG_META: list[ConfigField] = [
         hint="1=会话压缩后自动注入分析状态续传提示",
         required=False,
     ),
+    ConfigField(
+        key="JULIANG_TRADE_NO",
+        label="代理IP供应商订单号",
+        type="text",
+        hint="代理 IP 池用（juliangip.com 企业版套餐的业务编号，会员中心-业务管理获取）",
+        required=False,
+    ),
+    ConfigField(
+        key="JULIANG_API_KEY",
+        label="代理IP供应商 API 秘钥",
+        type="password",
+        hint="与订单号配套的 API Key（同页面获取）；两项都配置后 proxy MCP/代理池才可用",
+        required=False,
+    ),
 ]
 
 
@@ -169,3 +183,19 @@ def is_dev_mode() -> bool:
 EXIT_CODE_REUSE = 2          # 已有实例运行，本进程主动退出复用
 EXIT_CODE_PORT_EXHAUSTED = 3 # 候选端口全部占用
 EXIT_CODE_NORMAL = 0         # 正常退出（心跳表空，自杀）
+
+# ─── 代理 IP 管理（proxy_pool / proxy_relay）─────────────
+# relay 端口：9676 起（= 9776−100，反顺延方向，与控制台 TCP 段隔离），
+# 冲突 +1 顺延，真实端口写状态文件（entry 接口对外返回真实值）。
+PROXY_RELAY_PORT_START = 9676
+PROXY_RELAY_PORT_CANDIDATES = 10
+# 代理IP供应商（企业版）：凭证键名 + API 地址（凭证存 .ai_env，config_store 唯一读写）
+JULIANG_TRADE_NO_KEY = "JULIANG_TRADE_NO"
+JULIANG_API_KEY_KEY = "JULIANG_API_KEY"
+JULIANG_API_URL = "http://v2.api.juliangip.com/company/dynamic/getips"
+# 轮换/寿命参数（实测依据见 requirements/evolve/2026-09-25-proxy-ip-manager.md 附录A）
+JULIANG_IP_TTL_SEC = 300.0        # 单 IP 存活（5 分钟档）
+JULIANG_TTL_MARGIN_SEC = 30.0     # 到期安全余量
+PROXY_ROTATE_CONN_THRESHOLD = 35  # proxy 模式下新建连接数满此值自动轮换（实测 60 发零限流留余量）
+DOMAIN_COOLDOWN_SEC = 600.0       # 域名限流冷却 10 分钟
+ROTATE_HISTORY_LIMIT = 50         # rotate_history 上限

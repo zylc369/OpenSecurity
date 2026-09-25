@@ -32,6 +32,11 @@ const MCP_SERVERS: McpServerDef[] = [
     script: join(OPENCODE_ROOT, "mcp-servers", "ocr", "server.py"),
     timeout: 60000, // 薄壳（模型在控制台），握手快；acquire 在 lifespan 内含首载余量
   },
+  {
+    name: "proxy",
+    script: join(OPENCODE_ROOT, "mcp-servers", "proxy", "server.py"),
+    timeout: 60000, // 薄壳（IP池在控制台），握手快
+  },
 ];
 
 export class McpManager {

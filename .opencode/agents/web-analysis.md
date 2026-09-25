@@ -117,6 +117,14 @@ permission:
 
 ## 工具清单
 
+### 代理 IP 管理（proxy MCP：状态查询 / 换出口 / 模式切换 / 取入口，四个工具）
+
+- **批量任务（爆破/fuzz/侧信道/批量验证）**：开工前切 proxy 模式 + 取入口地址，脚本写一行 `proxies={"http": entry, "https": entry}`，结束切回 direct；
+- **Playwright 浏览器（有头/无头）**：出生即连入口 `launch(proxy={"server": entry})`——切出口（MCP 工具）时浏览器零重启零重建；
+- **低频探测（<10 发）**：不接代理，直接本机；
+- **限流信号**（429 / `cf-mitigated: challenge` 头 / 挑战页）：**第一个动作永远是用状态查询工具查轮换历史判定**——1 分钟内有轮换=预期挑战不换；无轮换突发=真限流换出口+冷却该域；轮换过+等 30s 仍挑战=烂 IP 换出口（reason=bad_ip）。脚本内遇 429 只打印 `[LIMITED]` 报告，**禁止自动换 IP**（信息完整性铁律）；
+- 完整判定 SOP、入口用法模板、Retry 装配、限流特征清单：Read `$AGENT_DIR/knowledge-base/proxy-usage.md`。
+
 ### Web 安全工具（bash 调用）
 
 | 工具 | 用途 | 典型命令 |
@@ -160,6 +168,7 @@ permission:
 
 | 文档 | 触发条件 |
 |------|---------|
+| `proxy-usage.md` | 任何批量请求/爆破/fuzz/浏览器分析任务，或检测到限流信号（429/挑战页）时。代理入口获取、限流三场景判定 SOP、Retry 装配、[LIMITED] 报告模板 |
 | `web-methodology.md` | 分析规划阶段（阶段 B）。白盒/黑盒分析流程、PHP 应用分析方法、Bot 类题目分析 |
 | `score-verification-osint.md` | 需要验证某账号/团队在某平台的历史成绩（排名/得分），活动页已删除或无法访问时。证书 S3 直链、档案页证书入口、API WAF 降级、双源矛盾裁决; 目标值无法在线验证时的交付规范见 web-methodology.md §4b |
 | `wordlists-guide.md`（$SHARED_DIR） | 任何爆破/fuzz 需要字典时（$WORDLISTS_DIR 场景选型速查: 目录/密码/子域/payload/中文设备口令） |

@@ -733,7 +733,7 @@ function fireAndForgetEvent(
   source: string,
   groupId: string,
 ): void {
-  if (!session.isRegisteredAgent()) {
+  if (!session.isInstrumentedAgent()) {
     return;
   }
   postToControl(
@@ -777,7 +777,7 @@ function fireAndForgetMemory(
   output: string,
   flowId: string,
 ): void {
-  if (!session.isRegisteredAgent()) {
+  if (!session.isInstrumentedAgent()) {
     return;
   }
   // 白名单检查（对齐 PentAGI allowedStoringInMemoryTools）
@@ -1113,7 +1113,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         const session = ctx.sessionManager.get(sessionID);
         if (!session) {
           debugLog(
-            `[WARN] system.transform: 跳过 — 非注册 agent, sessionID=${sessionID}`,
+            `[WARN] system.transform: 跳过 — 非仪表化 agent, sessionID=${sessionID}`,
             sessionID,
           );
           return;
@@ -1204,7 +1204,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         const session = ctx.sessionManager.get(sessionID);
         if (!session) {
           debugLog(
-            `shell.env: 跳过 — 非注册 agent sessionID=${sessionID}`,
+            `shell.env: 跳过 — 非仪表化 agent sessionID=${sessionID}`,
             sessionID,
           );
           return;
@@ -1313,13 +1313,13 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     "tool.execute.before": async (input, output) => {
       try {
         const sid = input.sessionID;
-        const session = ctx.sessionManager.requireRegisteredAgent(
+        const session = ctx.sessionManager.requireInstrumentedAgent(
           "tool.execute.before",
           sid,
         );
         if (!session) {
           debugLog(
-            `tool.execute.before: 跳过 — 非注册 Agent, sessionID=${sid}`,
+            `tool.execute.before: 跳过 — 非仪表化 Agent, sessionID=${sid}`,
             sid,
           );
           return;
@@ -1366,13 +1366,13 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
     "tool.execute.after": async (input, output) => {
       try {
         const sid = input.sessionID;
-        const session = ctx.sessionManager.requireRegisteredAgent(
+        const session = ctx.sessionManager.requireInstrumentedAgent(
           "tool.execute.after",
           sid,
         );
         if (!session) {
           debugLog(
-            `tool.execute.after: 跳过 — 非注册 agent, sessionID=${sid}`,
+            `tool.execute.after: 跳过 — 非仪表化 agent, sessionID=${sid}`,
             sid,
           );
           return;
