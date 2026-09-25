@@ -41,6 +41,14 @@
 
 教训追加: **行为性断言（"hidden 会过滤注入"）必须实测或追到确切代码行**——本次错误源于把 A 处的 hidden 过滤语义推广到 B 处列表; `opencode run --agent/--command` 是 agent/命令的端到端测试利器。
 
+## 第三轮外部 review 修复（commit dab0a10d，3 findings）
+
+| # | 级 | 内容 | 处置 |
+|---|---|------|------|
+| F1 | 中 | agent-format.md 两处把"不注入 Task 说明"归因 hidden——实为 `mode: primary` 效果（describeTask 只看 mode）; 与 scout.md 机制说明段矛盾，按此文档建 hidden agent 会重蹈覆辙 | ✅ 两处改: hidden 仅管切换菜单/available 列表; Task 说明排除归因 mode: primary; 组合写法明确（先例 compaction/title/summary/knowledge-scout） |
+| F2 | 低 | constants.ts 成员×集合矩阵注释漏 knowledge-scout 行 | ✅ 补行（对齐列宽，node --check 过） |
+| F3 | 低·决策 | scout 进 ALL_REGISTERED_AGENTS → 网页抓取内容批量写入事件库+knowledge 向量库（每条截 2000 字符）——需求未分析的副作用 | **用户决策: 排除 scout**。执行: `INSTRUMENTED_AGENTS`（原 ALL_REGISTERED_AGENTS，同步改名）filter 加 scout 排除（与 evolve 同款）; 追查到第 5 消费点 `createTaskSession` 根会话任务目录门控——scout 流程不依赖 $TASK_DIR（子会话继承父链），零影响; 改名 INSTRUMENTED_AGENTS/isInstrumentedAgent/requireInstrumentedAgent（原 REGISTERED 命名不表达"采集范围"语义，集合也不 ALL——注释 :114 自己写着"注册进采集"却叫 REGISTERED）; 三文件语法过、旧名零残留、agent list 正常 |
+
 ## 独立复审修复（8 findings 全修）
 
 | # | 级 | 内容 | 修复 |

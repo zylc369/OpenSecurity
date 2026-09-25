@@ -67,17 +67,18 @@ export const AGENT_KNOWLEDGE_SCOUT = "knowledge-scout";
 
 // 成员 × 集合矩阵（✓ = 属于该集合；各集合的语义与消费点见其定义处注释）:
 //
-// | agent                    | GENERAL_SUB | SECURITY_ANALYSIS | SECURITY | REGISTERED |
-// |--------------------------|-------------|-------------------|----------|------------|
+// | agent                    | GENERAL_SUB | SECURITY_ANALYSIS | SECURITY | INSTRUMENTED |
+// |--------------------------|-------------|-------------------|----------|-------------|
 // | searcher                 | ✓           |                   |          | ✓          |
 // | memorist                 | ✓           |                   |          | ✓          |
 // | fresh-eyes               | ✓           |                   |          | ✓          |
-// | binary-analysis          |             | ✓                 | ✓        | ✓          |
-// | mobile-analysis          |             | ✓                 | ✓        | ✓          |
-// | web-analysis             |             | ✓                 | ✓        | ✓          |
-// | ai-security-analysis     |             | ✓                 | ✓        | ✓          |
-// | crypto-analysis          |             | ✓                 | ✓        | ✓          |
-// | security-analysis-evolve |             |                   | ✓        | 有意排除   |
+// | knowledge-scout          | ✓           |                   |          | 有意排除    |
+// | binary-analysis          |             | ✓                 | ✓         | ✓          |
+// | mobile-analysis          |             | ✓                 | ✓         | ✓          |
+// | web-analysis             |             | ✓                 | ✓         | ✓          |
+// | ai-security-analysis     |             | ✓                 | ✓         | ✓          |
+// | crypto-analysis          |             | ✓                 | ✓         | ✓          |
+// | security-analysis-evolve |             |                   | ✓         | 有意排除    |
 
 // 领域分析 agent（5 个）。消费点：根会话任务目录 + ledger.md 模板创建
 //（task-session-persistence.ts）；认知检查点计数/注入、压缩时台账注入
@@ -110,12 +111,13 @@ export const GENERAL_SUB_AGENTS = [
 // 消费点：占位符展开的"文件缺失即异常"判定（snippet.ts inspectAgentFile）。
 export const PROJECT_AGENTS = [...GENERAL_SUB_AGENTS, ...SECURITY_AGENTS];
 
-// 注册进 events/memory 采集与工具时间线的 agent（= PROJECT_AGENTS 去掉 evolve）。
+// 仪表化（instrumented）agent: 注册进 events/memory 采集与工具时间线的 agent（= PROJECT_AGENTS 去掉 evolve 与 knowledge-scout）。
 // 消费点：events/memory 写入（tool.execute.after / text.complete）、
 // tool.execute.before/after 时间线、根会话任务目录创建门控（session-manager）。
 // evolve 有意排除：开发工具，其工具执行与 LLM 回复不写入事件/记忆库。
-export const ALL_REGISTERED_AGENTS = PROJECT_AGENTS.filter(
-  (agent) => agent !== AGENT_SECURITY_ANALYSIS_EVOLVE,
+// knowledge-scout 有意排除：侦察的批量网页抓取内容对记忆库是噪音（用户决策 2026-09-25）。
+export const INSTRUMENTED_AGENTS = PROJECT_AGENTS.filter(
+  (agent) => agent !== AGENT_SECURITY_ANALYSIS_EVOLVE && agent !== AGENT_KNOWLEDGE_SCOUT,
 );
 
 export const AGENT_SCRIPT_DIRS: Record<string, string> = {};

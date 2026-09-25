@@ -3,7 +3,7 @@ import type { OpencodeClient, Part, UserMessage } from "@opencode-ai/sdk";
 import {
   SECURITY_AGENTS,
   GENERAL_SUB_AGENTS,
-  ALL_REGISTERED_AGENTS,
+  INSTRUMENTED_AGENTS,
 } from "./constants";
 import type {
   CheckpointRenderData,
@@ -20,8 +20,8 @@ function localIsSecurityAgent(agentName: string): boolean {
   return SECURITY_AGENTS.includes(agentName);
 }
 
-function localIsRegisteredAgent(agentName: string): boolean {
-  return ALL_REGISTERED_AGENTS.includes(agentName);
+function localIsInstrumentedAgent(agentName: string): boolean {
+  return INSTRUMENTED_AGENTS.includes(agentName);
 }
 
 export class SessionData
@@ -112,8 +112,8 @@ export class SessionData
     return GENERAL_SUB_AGENTS.includes(this.agentName);
   }
 
-  isRegisteredAgent(): boolean {
-    return localIsRegisteredAgent(this.agentName);
+  isInstrumentedAgent(): boolean {
+    return localIsInstrumentedAgent(this.agentName);
   }
 
   isPrimarySession() {
@@ -253,14 +253,14 @@ export class SessionDataManager {
   }
 
   /** 只返回 Security Agent 的 session。只查不创建。 */
-  requireRegisteredAgent(
+  requireInstrumentedAgent(
     hookName: string,
     sessionID?: string,
   ): SessionData | null {
     return this.requireAgentWithMatchFunc(
       hookName,
       (session) => {
-        return session.isRegisteredAgent();
+        return session.isInstrumentedAgent();
       },
       sessionID,
     );
@@ -482,9 +482,9 @@ export class SessionDataManager {
     let baseDir = parentSession?.rootTaskDir;
 
     if (isCurrentPrimaryAgent) {
-      if (!localIsRegisteredAgent(agentName)) {
+      if (!localIsInstrumentedAgent(agentName)) {
         debugLog(
-          `根 session 且非注册的Agent，不创建 task_dir sessionID=${sessionID} agent=${agentName}`,
+          `根 session 且非仪表化 Agent，不创建 task_dir sessionID=${sessionID} agent=${agentName}`,
           sessionID,
         );
         return {
