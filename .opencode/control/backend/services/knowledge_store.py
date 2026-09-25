@@ -3,10 +3,13 @@
 消费两路：
   - plugin fire-and-forget 写入（POST /api/memory/entry → 队列 → worker 线程）
   - agent 读写（POST /api/knowledge/search|store、/api/memory/search → 同步方法，
-    FastAPI 线程池执行，MemoryDB._lock 串行）
+    FastAPI 线程池执行，MemoryDB._lock 串行 SQLite 访问）
 
-单实例：全进程只有一条 MemoryDB SQLite 连接（embedder=model_loader.get_embedder()，
-与 /embed 端点同源）。非法条目（question/answer/type 为空）跳过并记日志。
+单实例：全进程只有一条 MemoryDB SQLite 连接（embedder=model_loader.get_embedder()
+返回的 LockedEmbedder，与 /embed 端点同源）。推理线程安全由 LockedEmbedder
+内部持锁串行保证（torch/MPS 并发推理堆损坏——2026-09-25 双 SIGSEGV 实证），
+_memory worker 与 graphiti 事件管道并发到达亦安全。非法条目（question/answer/type
+为空）跳过并记日志。
 """
 from __future__ import annotations
 

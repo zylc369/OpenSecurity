@@ -40,10 +40,11 @@ SCORE_THRESHOLD = 0.2
 
 
 class EmbedderLike(Protocol):
-    """embedder 鸭子类型（SentenceTransformer 真实例，duck-type 面）。
+    """embedder 鸭子类型（LockedEmbedder 真实例，duck-type 面）。
 
-    model_loader.get_embedder() 返回的 SentenceTransformer 天然满足；
-    测试用 fake 只需实现 encode。
+    model_loader.get_embedder() 返回的 LockedEmbedder（encode 内部持锁
+    串行，torch/MPS 并发推理会堆损坏）天然满足；
+    测试用 fake 只需实现 encode（单线程下无锁无害）。
     """
 
     def encode(self, texts: Any, **kwargs: Any) -> "np.ndarray": ...
@@ -119,9 +120,20 @@ class MemoryDB:
         self._conn.commit()
 
     def _embed(self, text: str) -> bytes:
-        """将文本编码为 1024 维归一化向量，打包为小端序浮点数字节流。"""
+        """单文本编码 → 1024 维向量小端序字节流（store 单条写入用）。
+
+        线程安全由注入的 embedder 保证：生产注入 model_loader.get_embedder()
+        返回的 LockedEmbedder（encode 内部持锁串行——torch/MPS 并发推理
+        堆损坏，2026-09-25 两次 SIGSEGV 实证）；测试注入 fake（单线程，
+        同协议）。SQLite 访问另由 self._lock 串行，两者职责不同。
+        """
         vec = self.embedder.encode(text, convert_to_numpy=True)
         return struct.pack(f"{EMBEDDING_DIM}f", *vec.tolist())
+
+    def _embed_batch(self, texts: list[str]) -> list[bytes]:
+        """批量编码 → 向量字节流列表（search 多问题用）：一次前向、一次持锁。"""
+        vecs = self.embedder.encode(texts, convert_to_numpy=True)
+        return [struct.pack(f"{EMBEDDING_DIM}f", *v.tolist()) for v in vecs]
 
     def store(
         self,
@@ -170,8 +182,9 @@ class MemoryDB:
 
         per_query = max(top_k * 3, top_k)
         seen: dict[int, dict[str, Any]] = {}
-        # embed 在 lock 外（CPU-bound，不涉及 SQL；并发安全：embedder 内部线程安全）
-        q_embs = [self._embed(q) for q in questions]
+        # embed 在 self._lock 外（CPU-bound，不涉及 SQL）；并发安全由注入的
+        # LockedEmbedder 保证（推理全进程串行）。批量化：N 个问题一次前向。
+        q_embs = self._embed_batch(questions)
         with self._lock:
             for q_emb in q_embs:
                 rows = self._conn.execute(

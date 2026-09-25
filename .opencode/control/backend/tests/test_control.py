@@ -1845,6 +1845,67 @@ def test_health_boot_token():
     assert_true(len(BOOT_TOKEN) == 8, "boot_token 应为 8 位 hex")
 
 
+@test("model_loader: LockedEmbedder/LockedReranker 并发互斥（串行不变量的构造保证）")
+def test_locked_wrapper_mutex():
+    import threading
+    import time
+    from services.model_loader import LockedEmbedder, LockedReranker
+
+    class ConcurrencyProbe:
+        """encode/predict 进入 +1、退出 -1，记录并发峰值。"""
+
+        def __init__(self):
+            self.current = 0
+            self.peak = 0
+            self._lk = threading.Lock()
+
+        def _enter(self):
+            with self._lk:
+                self.current += 1
+                self.peak = max(self.peak, self.current)
+
+        def _exit(self):
+            with self._lk:
+                self.current -= 1
+
+        def encode(self, inputs, **kw):
+            self._enter()
+            time.sleep(0.05)  # 拉宽并发窗口：无锁时 4 线程必然交叠
+            self._exit()
+            import numpy as np
+            single = isinstance(inputs, str)
+            n = 1 if single else len(inputs)
+            out = np.zeros((n, 1024), dtype=np.float32)
+            return out[0] if single else out
+
+        def predict(self, pairs, **kw):
+            self._enter()
+            time.sleep(0.05)
+            self._exit()
+            import numpy as np
+            return np.zeros(len(pairs), dtype=np.float32)
+
+    def run_concurrent(wrapped, method, make_args):
+        probe = wrapped._inner
+        threads = [
+            threading.Thread(target=getattr(wrapped, method), args=make_args(i))
+            for i in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        assert_true(probe.peak == 1, f"推理并发峰值应恒为 1（串行保证），实测 {probe.peak}")
+
+    probe = ConcurrencyProbe()
+    embedder = LockedEmbedder(probe)
+    run_concurrent(embedder, "encode", lambda i: (f"t{i}",))
+
+    probe2 = ConcurrencyProbe()
+    reranker = LockedReranker(probe2)
+    run_concurrent(reranker, "predict", lambda i: ([("q", f"p{i}")],))
+
+
 @test("knowledge_store: 队列写路径落库 + 非法条目跳过 + 同步方法（fake embedder）")
 def test_knowledge_store_paths():
     import numpy as np

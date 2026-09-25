@@ -22,12 +22,6 @@ logger = logging.getLogger(__name__)
 class BgeRerankerClient(CrossEncoderClient):
     """使用 bge-reranker-v2-m3 本地模型实现 CrossEncoderClient 接口。"""
 
-    @property
-    def model(self):
-        """CrossEncoder 单例（延迟加载，model_loader 内部线程安全）。"""
-        from services import model_loader
-        return model_loader.get_reranker()
-
     async def rank(
         self, query: str, passages: list[str]
     ) -> list[tuple[str, float]]:

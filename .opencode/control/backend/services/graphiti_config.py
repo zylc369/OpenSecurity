@@ -156,13 +156,8 @@ class BgeM3Embedder(EmbedderClient):
     def __init__(self):
         self._embedding_dim = 1024
 
-    @property
-    def model(self):
-        """SentenceTransformer 单例（延迟加载，model_loader 内部线程安全）。"""
-        from services import model_loader
-        return model_loader.get_embedder()
-
-    def _encode_locked(self, text: str) -> "list[float]":
+    def _encode(self, text: str) -> "list[float]":
+        """单文本 embed（串行由 model_loader 的 LockedEmbedder 保证）。"""
         from services import model_loader
         return model_loader.embed_sync(text)
 
@@ -184,10 +179,10 @@ class BgeM3Embedder(EmbedderClient):
 
         # graphiti 传 [text]（单元素列表）→ 取第一个元素做 embedding
         if isinstance(input_data, list) and len(input_data) > 0 and isinstance(input_data[0], str):
-            return await asyncio.to_thread(self._encode_locked, input_data[0])
+            return await asyncio.to_thread(self._encode, input_data[0])
 
         if isinstance(input_data, str):
-            return await asyncio.to_thread(self._encode_locked, input_data)
+            return await asyncio.to_thread(self._encode, input_data)
 
         # 预计算向量（Iterable[int]）→ 原样返回
         return [float(x) for x in input_data]
@@ -195,8 +190,8 @@ class BgeM3Embedder(EmbedderClient):
     async def create_batch(self, input_data: list[str]) -> list[list[float]]:
         """批量生成 embedding 向量（async）。
 
-        self.model 必须在主线程解析（避免工作线程竞态导致重复加载模型），
-        只把 encode 调用交给 to_thread。
+        模型解析在 model_loader 内部线程安全（双重检查锁定单例），
+        只把 encode 调用交给 to_thread（串行由 LockedEmbedder 保证）。
         """
         from services import model_loader
         return await asyncio.to_thread(model_loader.embed_batch_sync, input_data)
