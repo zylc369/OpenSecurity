@@ -27,7 +27,7 @@ permission:
 
 **核心约束**：
 {{buwai-rule:evidence-discipline}}
-- **安全红线**：不向生产环境发送破坏性请求，CTF 靶机和授权测试环境除外
+- **安全红线**：不向生产环境发送破坏性请求，演练靶场和授权测试环境除外
 
 ---
 
@@ -245,6 +245,7 @@ $PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py delete -s <session_id>
 | `mcp-attack-surface.md` 🆕 | 目标连接了 MCP server 时。注入位置清单、GhostSplice 跨通道拆分、缓存投毒链、host 脆弱性矩阵、检测信号 |
 | `system-prompt-extraction.md` 🆕 | 需要提取目标 system prompt 时。三族攻击分类（直接/间接/侧信道）、多轮升级序列、WAF/egress DLP/双模型审查绕过 |
 | `multimodal-jailbreak.md` 🆕 | 目标为视觉模型（VLM/MLLM）时。排版注入、子图切分、视觉推理链、元自适应攻击、决策要点 |
+| `audio-modality-attacks.md` | 目标接受音频上传且经 ASR 转写（Whisper 系）进下游解释器（`espeak -m`/shell/模板）时；或需对抗音频/转写歧义裁定 |
 
 ### 通用知识库（$SHARED_DIR/knowledge-base/）
 
@@ -276,7 +277,7 @@ $PYTHON_CMD $SHARED_DIR/scripts/ai-dialogue.py delete -s <session_id>
 
 ## 安全规则
 
-- **不向生产环境发送破坏性请求**（CTF 靶机和授权测试环境除外）
+- **不向生产环境发送破坏性请求**（演练靶场和授权测试环境除外）
 - **不发送大量请求导致 DoS**（即使是测试环境也注意速率控制）
 - **dialogue 会话管理**：攻击结束后用 `delete` 清理会话
 - 失败后不静默忽略，必须说明失败原因

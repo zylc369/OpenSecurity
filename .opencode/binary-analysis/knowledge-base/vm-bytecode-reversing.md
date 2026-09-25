@@ -12,7 +12,7 @@
 
 ## §1 识别与五步方法论
 
-dispatcher 三形态: switch 型（CTF 常见）/ 表驱动 `handlers[op](&ctx)` / if 链。辅助信号: 高圈复杂度单函数、数据缓冲逐字节 xref。
+dispatcher 三形态: switch 型（自研 VM 常见）/ 表驱动 `handlers[op](&ctx)` / if 链。辅助信号: 高圈复杂度单函数、数据缓冲逐字节 xref。
 五步: 找 dispatcher → 映射 opcode 五属性（值/操作/操作数字节/类型/副作用）→ 提取 bytecode → 写反汇编器（`OPCODES={op:(mnemonic,operand_bytes)}` 字典循环）→ 分析 check 逻辑（通常 XOR/ADD 变换比对常量表）→ 手动逆或 Z3。
 输入空间小 → Unicorn 爆破; 嵌套 VM → 逐层提取或符号执行穿透。
 
@@ -45,10 +45,10 @@ dispatcher 静态分析过复杂（混淆/规模大）时的替代路线:
 
 **VMProtect 六步**: 搜 pushad/pushfd 入口 → VM context 结构 → handler 表（去不透明谓词）→ 逐 handler 记语义 → Pin/DynamoRIO 指令级 trace → 重建逻辑。
 **Tigress 五特性**: split handlers / 嵌套 VM / 加密 bytecode（fetch 前动态解密）/ 多态 handlers。
-**难度表**: VMProtect·Themida 高（CISC 大 handler 集）/ Tigress 中高 / movfuscator 中（全 mov 无 dispatcher 特征）/ CTF 自制低中。
+**难度表**: VMProtect·Themida 高（CISC 大 handler 集）/ Tigress 中高 / movfuscator 中（全 mov 无 dispatcher 特征）/ 自研简易 VM 低中。
 工具: Pin/DynamoRIO（trace）/ REVEN（录制回放）/ Miasm（IR 提升）/ Sleigh（复用规范）。
 
-**补集**: VMProtect 识别锚点 .vmp0/.vmp1 节+熵>7.5+push/pop 密集入口+mutation engine（同 opcode 每 build handler 不同，脚本不可跨版本复用）; devirt 工具 VMPAttack（IDA 自动识别 handler）/NoVmp（VTIL）。**CTF 策略: 操作追踪优于完全 devirtualize**——Frida hook dispatch 记 handler 索引+栈状态，聚焦 VM 内对输入的操作（比较/加密）即可，全还原很少必要。Themida dump（AI 无头路径）: Frida 反反调试脚本跑起进程 → 内存特征定位 OEP（入口节熵降+API 调用模式）→ Frida 读全内存段 dump → 自写脚本重建导入表（脱壳后 IAT 重建的自动化: 扫 dump 中 IAT 指针回填名称）→ 修复后按 normal 分析（识别 .themida/.winlice 节+内核级反调试三合一）。
+**补集**: VMProtect 识别锚点 .vmp0/.vmp1 节+熵>7.5+push/pop 密集入口+mutation engine（同 opcode 每 build handler 不同，脚本不可跨版本复用）; devirt 工具 VMPAttack（IDA 自动识别 handler）/NoVmp（VTIL）。**核心策略: 操作追踪优于完全 devirtualize**——Frida hook dispatch 记 handler 索引+栈状态，聚焦 VM 内对输入的操作（比较/加密）即可，全还原很少必要。Themida dump（AI 无头路径）: Frida 反反调试脚本跑起进程 → 内存特征定位 OEP（入口节熵降+API 调用模式）→ Frida 读全内存段 dump → 自写脚本重建导入表（脱壳后 IAT 重建的自动化: 扫 dump 中 IAT 指针回填名称）→ 修复后按 normal 分析（识别 .themida/.winlice 节+内核级反调试三合一）。
 
 ## §5 Ghidra Sleigh 处理器
 
@@ -67,3 +67,17 @@ VM 用 printf 格式串实现: %hhn 把已打印字符数（mod 256）写入指�
 2. 写反编译器: 每 `%N...%hhn` 对=一次内存写（地址来自参数指针槽，值来自计数 N）
 3. 识别算法: 通常字节线性方程组，地址映射符号变量
 4. Z3 求解（可打印约束+写序列约束）
+
+## §8 VM 题落点：guest 代码段可写 + 相对偏移 patch
+
+**触发情境**: VM 解释器暴露任意写原语给 guest 代码（如 Lua console 里的 `note_save(addr, value)` 写 32 位字），且 guest 代码段与数据段共享**可写**内存。
+
+**位置无关利用**（实例化随机 padding 使绝对地址漂移，但**相对布局稳定**）:
+1. **函数 repr 泄 guest 地址**: `tostring(note_save)` 尾部十六进制即宿主侧 C 函数地址，`tonumber(tostring(f):match("(%x+)$"), 16)` 取回——一个已知锚点
+2. **锚点推全局**: 宿主把 guest 代码/数据平面映射，函数地址与代码基址/目标数据的**相对偏移固定**（如 `code_base = f - 0x4150`、`flag = f - 0x4174`、patch 点 = `f + 0xf78`）——偏移从本地同构建的 trace/反汇编量出
+3. **patch 指令立即数**: 把某条 `LC`（load constant）指令的立即字从原缓冲指针改到 flag 地址，随后调用使用该常量的原函数（如 `rand_hex(24)`）——它会把 flag 内容当正常数据返回，**无需理解完整 VM 语义**
+4. 同一相对偏移 payload 对本地测试镜像与远程实例同时有效（布局模型正确性证明）
+
+**NDJSON 指令流提取**: VM 程序以 NDJSON 存指令/数据对象时，过滤 `DATA_BYTES` 类对象按地址排序拼接即得嵌入的 guest 源码（Lua/SQL 应用层）——先恢复应用源码再找 gadget，比直接啃指令流快。
+
+**宿主兼容性**: 分发的 VM 二进制可能要求比容器更新版的 glibc 符号（如 `sqrtf@GLIBC_2.43`）——改 ELF `.gnu.version` 符号版本映射到旧版本即可本地跑（保原件改副本）。

@@ -19,7 +19,7 @@
 
 **子类漫游**: `().__class__.__bases__[0].__subclasses__()` 从任意字面量到全部已加载类（等价起点 `''.__class__.__mro__[1]` 等）。目标类: `os._wrap_close`（`__init__.__globals__['system']`）/ `warnings.catch_warnings`（恢复 __builtins__）/ `subprocess.Popen` / `codecs.IncrementalDecoder`（globals 入口）/ `BuiltinImporter.load_module('os')`。索引版本相关，现场枚举 `for i,cls in enumerate(...): if 'wrap_close' in str(cls)`。
 
-**字符/关键字过滤**: 拼串 `'__imp'+'ort__'` / getattr 计算串 / chr() 逐字 / hex-unicode 转义 / base64。引号滤→chr/bytes; 点滤→getattr/`__getattribute__`; **括号滤→装饰器 `@exec @input class X: pass`**（input 读入+exec 求值）/ `__init_subclass__(cmd=...)` 继承触发 / `__class_getitem__ = staticmethod(exec)` 下标触发。
+**字符/关键字过滤**: 拼串 `'__imp'+'ort__'` / getattr 计算串 / chr() 逐字 / hex-unicode 转义 / base64。引号滤→chr/bytes; 点滤→getattr/`__getattribute__`; **括号滤→装饰器 `@exec @input class X: pass`**（input 读入+exec 求值）/ `__init_subclass__(cmd=...)` 继承触发 / `__class_getitem__ = staticmethod(exec)` 下标触发。**赋值语句也被滤时→comprehension 赋值目标**: `{... for X.__class_getitem__ in {f}}` 把任意属性赋值藏进 for 目标（正则只查字符集时此形态全通过; 结合 `X:=alias` 海象与数字禁用时 `T:=True,F:=T-T` 系构造常量）。**descriptor binding 构造任意属性 getter**: `f:=lambda x:x.__getattribute__` 取 `object.__getattribute__` 描述符 → `f.__get__(x,type(x))(x,'name')` 绑定后等价 getattr——全程无引号（名字从 `hint` 类字符串切片 + repr 十六进制尾拼装）。
 **无 open 读文件**: pathlib.Path().read_text / os.read(os.open()) / codecs.open / urllib file:// / linecache.getlines / help() globals。
 
 **AST 解析型沙箱**: 节点黑名单→等价物: Import 拦→`__import__()`; Call 拦→装饰器/`__init_subclass__`/实例化副作用; Attribute 拦→getattr; Subscript 拦→`__getitem__`; 全表达式拦→f-string 内嵌。RestrictedPython（Plone/Zope）: `_getattr_` 包装→找不经包装路径; `_getiter_`→map/filter; 导入拦→BuiltinImporter。**code object 构造**: types.CodeType 手工字节码 或 compile 后替换 co_code/co_consts/co_names 再 exec。
@@ -39,6 +39,7 @@
 pickle 反序列化逃逸见 deserialization 体系。
 
 **自定义指令集/汇编语言沙箱**（PROP/CALL 型）: 自定义 ISA 但宿主是 Python 时走 MRO 链——`PROP __class__`→`PROP __base__`→`PROP __subclasses__`+`CALL`→IDX 选 os._wrap_close→`PROP __init__`→`PROP __globals__`→builtins。通用五步: ①读 /docs /help /api 找指令参考 ②找结果寄存器 ③字符串 hex 编码（0x666c61672e747874→"flag.txt"）绕关键字过滤 ④MRO 链到 RCE（同 Jinja2 SSTI）⑤故意报错泄漏 Python 内部类清单。
+
 
 ## §2 Lua 沙箱
 
@@ -63,6 +64,28 @@ pickle 反序列化逃逸见 deserialization 体系。
 - **add eax,imm32 嵌 gadget**: -O0 下 `var=var+CONST` 编码 `05 XX XX XX XX`——常量 4 字节即机器码，跳 offset+1 执行: `0f 05 c3`(syscall;ret)=12780815、`5f c3`(pop rdi;ret)=50015、`54 5e 0f 05`(push rsp;pop rsi;syscall)=84893268
 - `push rsp;pop rsi;syscall` 当 sys_read 把输入读到栈返回地址处→直接装载 ROP 链（mprotect+read+shellcode，glob `cat /flag*` 适配未知路径）
 - 前提 `-static -nostartfiles -nostdlib`: 无 ASLR，函数地址确定。同族: 常量摘要拼接/ 字母数字 shellcode
+
+## §2d PHP 沙箱（disable_functions + open_basedir）
+
+**边界认知**: `disable_functions` 只把函数从 runtime function_table 摘除——**模块的静态 `zend_function_entry` 表与 `zif_system` handler 仍驻留内存**。拿到任意读/内存损坏原语后可定位 handler 伪造 Closure 调用，因此它不是内存攻击下的安全边界。`open_basedir` 只在 PHP 层拦截路径函数，不拦 setuid 外部程序（`/readflag` 类）。
+
+**禁用函数名的等价通道**（审计顺序）:
+1. **包装方法暴露同一引擎**: 禁 `unserialize()` 后检查 SPL——`SplDoublyLinkedList::unserialize()`/`ArrayObject::unserialize()` 等 `Serializable` 实现仍调 PHP 序列化解析器（入口换壳，引擎未封）
+2. eval 可用（`eval($_POST['cmd'])` 型）时一切"纯 PHP"构造函数/反射都在（`ReflectionFunction`、`Closure::fromCallable` 不在 disable 名单语义内）
+
+**Serializable 共享 var_hash UAF → 任意读 → 伪造 Closure**（PHP ≥8.x，引用 Calif 研究）:
+1. 构造序列化流: 外层 `SplDoublyLinkedList` 流内嵌一个 8 属性 `stdClass` + `class CachedData implements Serializable` 对象 + spray 字符串 + 引用 `R:3`..`R:n`
+2. 解析中 `CachedData::unserialize()` 回调给**已注册的第一个对象**追加第 9 属性 → property HashTable 8→16 槽扩容 → 释放原 288B `arData`——但外层解析器的共享 `var_hash` 仍存旧地址
+3. 用 280B 字符串（同 size class）复用该块 → `R:n` 引用把**字符串内容当 zval** 解释 = 类型混淆读
+4. 升级原语: 长 zval spray 的引用写差异泄 `zend_reference` 地址 → 定位 2MiB Zend heap chunk → 扫 spray 的 Closure 对象取 `ce`/`handlers` 指针 → 读 handlers 附近 `.bss` 找 `executor_globals`（`function_table`/`symbol_table`）
+5. 从 function_table 的活跃函数（如 `bin2hex`）走 `zend_internal_function.module` → 标准模块静态表 → **禁用函数的原 handler 仍在**（`zend_function_entry` 逐 build 尺寸必须对目标实际测量，如 8.6 系 `0x38`B/条、目标函数在静态表中的序号以远程内存为准）
+6. 字符串里伪造 `zend_closure`（真 `ce`/`handlers` + `zif_system` handler）→ UAF 把伪造对象地址暴露为 `IS_OBJECT` zval → 调用执行 `/readflag`
+
+**验证锚点**: 每阶段有独立输出（引用地址泄漏、扫描命中数、函数表 entry dump）再进下一阶段; `zend_function_entry` 尺寸与目标函数序号必须对**远程实际内存**验证（本地同版本编译校准 + 远程 dump 复核），版本差一个 commit 布局即变。机制原始研究: `calif.io/research/php-uaf`（21 年 PHP Serializable 共享 var_hash UAF）及其公开 exploit（heap spray / executor_globals 发现 / 伪造 Closure 参考实现）。
+
+## §2e 自研语言编译到宿主语言的转义不一致
+
+**自研语言编译到宿主语言的转义不一致**（源→lexer/AST→生成 C/shell/SQL 型）: lexer 在 tokenize 阶段把 `\x22` 等转义序列**解码成真实字符**，而 codegen 只对**字符串字面量**调用 `esc` 转义函数——经成员访问/属性名等非字面量路径嵌入宿主语言的 token 不再编码，宿主特殊字符直接生效。识别: 读编译器源码找两处——① 转义函数被哪些 emit 路径调用（map 字面量 key/参数名通常有）② 哪些路径裸拼（成员访问 `m."prop"` 生成的 `y_map_get(_m, "<prop>")` 常裸拼）。利用: 属性名里放 `\x22); <宿主代码>; <恢复合法调用>` ——闭合并注入宿主语句后补一个合法表达式保证生成代码可编译; 引号在源语言被禁时用字节数组构造（C: `system((char[]){47,114,...,0})`，`/readflag owo` = `{47,114,101,97,100,102,108,97,103,32,111,119,111,0}`）。判定注入面: 生成的原生程序链接 runtime、入口脚本以 setuid 程序为读取目标时，注入即提权。防御侧知识: 每个 token（标识符/属性名）进宿主字面量前必须过**同一个**编码器——"lexer 解码"与"codegen 转义"是两层独立操作，缺一即洞。
 
 ## §3 chroot 逃逸
 

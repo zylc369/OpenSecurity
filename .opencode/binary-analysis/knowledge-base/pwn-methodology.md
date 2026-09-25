@@ -48,7 +48,7 @@ dump 后三层分析: 白名单(默认 KILL)→找允许项的替代; 黑名单(
 - **白名单组合升级**: splice+tee（fd 间搬数据）/ process_vm_readv（读他进程内存）/ prctl(PR_SET_NAME)（16B 内核可见通道）/ mmap+mprotect（RWX shellcode）/ memfd_create+execveat。RET_KILL=违规即死只能避开; **RET_ERRNO=进程存活可逐个探测放行状态**再系统性试替代号。sendfile ORW: read/write 全禁时 `open→sendfile(1,fd,0,len)`（SYS=40, len 在 r10）。
 - **条件缓冲地址限制**: filter 对参数**地址**做 SCMP_CMP_LE/GE 检查（read 只准高窗、write 只准低窗、两窗不重叠）——shellcode 读进 read 允许窗后 `rep movsb` 搬到 write 允许窗再输出。
 - **规则反汇编还原**: 静态/剥离符号时从 `seccomp_rule_add(ctx,action,nr,argc,arg_cmp*)` 手工还原——scmp_arg_cmp: +0x00 arg(uint)/+0x04 op(NE=1,LT=2,LE=3,EQ=4,GE=5,GT=6,MASKED_EQ=7)/+0x08 datum_a/+0x10 datum_b; default 0x7fff0000=ALLOW。产出参数条件表（含地址窗口边界）找黑名单缺口。
-- **X 寄存器寻址盲区**: BPF `code=0x1d`（JEQ X）= "syscall 号==rdx" 比较——seccomp-tools 反汇编不了（显示 ???），filter 实际比看起来松: ROP 设 rdx=rax=59 即放行 execve。手工解析 sock_filter{code,jt,jf,k} 8 字节结构搜 0x1d; 工具 dump 结果须实测验证。
+- **X 寄存器寻址盲区**: BPF `code=0x1d`（JEQ X）= "syscall 号==rdx" 比较——seccomp-tools 反汇编不了（显示 ???），filter 实际比看起来松: ROP 设 rdx=rax=59 即放行 execve。手工解析 sock_filter{code,jt,jf,k} 8 字节结构搜 0x1d; 工具 dump 结果须实际验证。
 - **read 全禁时 mmap 文件映射**: open 被禁→openat(257); read 被禁→`mmap(NULL,0x1000,PROT_READ,MAP_PRIVATE,fd,0)` 把 flag 文件直接映射进内存再 write 输出——免 read syscall。其他替代: pread64(17)/readv(19)/writev(20)。
 
 **ORW 链速查**（pwntools 是写漏洞利用脚本用的 python 库——`from pwn import *` 导入后 remote/process/asm/shellcraft 等函数全可用，以下模板均在此前提下）：
@@ -280,6 +280,12 @@ cat /proc/sys/kernel/randomize_va_space   # 0=关 1=部分 2=完全
 | **栈内容有数论约束**（须素数/平方等） | **运行时合成**: 目标值拆合法部分之和/XOR（Goldbach: 偶数=两素数和，奇数先试 2+g-2）写入相邻槽，前置 `pop rax;pop rdx;add rax,rdx;push rax;ret` 类 reducer gadget 在 ret 消费前合成。平方约束用拉格朗日四平方同理。先找程序内现成算术 gadget 再定分解形式 |
 | **gadget 带中间杂指令** | 别弃用——逐行审查: 只要杂指令不破坏目的寄存器（`add al`/`and al` 不碰 esp 无害），多余栈消耗（`add esp,0x24`）用垃圾槽 padding 吸收、被 pop 的寄存器填垃圾值。与立即数藏 gadget、异种指令链并称 gadget 枯竭三路 |
 | **Ruby 服务用户输入内插 unpack/pack 格式串** | 格式串注入 Ruby 变体（CVE-2018-8778，<2.5.1）: 巨大 `@N` 偏移带符号比较回绕为负→读字符串缓冲区之前的内存逐字节输出; payload `@2^64-0x1C0000 C1200000` 即任意内存 dump。相关: Ruby String#unpack 格式串注入（CVE-2018-8778）详见 pwn-methodology 格式串进阶表 |
+| **远程无 libc 文件**（附件只有二进制，版本未知） | **内存 ELF 解析链**: GOT 泄一个 libc 指针 → 从该指针**页对齐向下回扫**找 `\x7fELF` 头 → 解析 program headers → PT_DYNAMIC → DT_GNU_HASH → 沿 hash bucket 链解符号（`system`/`__environ`）——全程只用任意读原语，无需本地匹配 libc。配套: `__environ`（libc 全局恒指栈环境数组）→ 读栈 → 找 main 帧的不变量匹配（如 `[p+8]` 是自引用指针、相邻菜单选择值、返回地址落在 libc 区间三条件）定位 saved rip |
+| **PIE 零泄漏入口**（无输出函数可用） | **`__dso_handle` 自引用重定位**: PIE 基址 + 固定偏移处（.data 段头部附近）有 `R_X86_64_RELATIVE` 条目，其 addend 即 `自身地址 = base + offset`——若程序有"按索引读 .data/重定位表"类的负索引/越界访问，`view(-N)` 读到的 self-pointer 减偏移即 PIE base，无需任何格式串/输出 |
+| **大堆布局不可控（跨 ~1GiB 找 OOB 落点）** | **mmap threshold 动态抬升 + pattern 必中**: 先 free 一个大 mmap 块（≥128KiB）抬高 `mp_.mmap_threshold`（glibc 动态调整，粗略翻倍）→ 后续同尺寸 malloc 走 brk/堆而非 mmap → 连续分配 N×8MiB 成一片 → 其中一块填满 `p64(target)` 模式 → 从 PIE 起**按块大小步进**扫（8MiB 对 8MiB 必中一次落点）——OOB 读/写一次命中 |
+| **浮点程序且索引/上限由运算结果决定** | **fenv 检查顺序缺陷**: `fetestexcept` 在运算**之前**调用则检查的是上一次的标志位——本次上溢（`1e308 * 1e308` 向上舍入 = inf）漏检，inf 参与后续"扩大索引上限"类逻辑（`limit = product of usable sizes`）→ 巨大索引合法通过。识别: 审计所有浮点代码的 fetestexcept/clear 与实际运算的相对顺序; 利用: 两个大 double 相乘制造 inf 绕过上限检查 |
+| **seccomp 严苛但需确认输入是否正确（验证 oracle）** | **ENOSYS vs ERRNO 差异**: 未定义 syscall 正常路径返回 `-ENOSYS`(-38)，被 seccomp `SECCOMP_RET_ERRNO(1)` 拦截返回 `-1`——同一 syscall 号两种来源可区分。用于逆向输入校验器: 程序以"syscall 返回值满足约束"当验收（如自定义 syscall 0x1337-0x1344 的 `((arg^k1)+k2)&mask == target`），把每条 BPF 约束翻成 Z3 方程 + 末尾 checksum 联立求解唯一输入。配套: **间接跳转主导 + SIMD 直线代码**的二进制——提取 Unicorn 执行的基本块路径 + 内存写 + seccomp BPF（比重建静态控制流有效）; MBA 混淆函数逐指令翻译进 Z3（每条指令一个表达式），用运行时观测的中间状态对拍验证翻译正确性 |
+| **隐藏数据页地址随机（16GiB 范围内找一页）** | **`MAP_FIXED_NOREPLACE` 占用 oracle 二分**: 白名单允许 mmap/munmap 时，对候选区间 `mmap(addr, len, PROT_READ, MAP_FIXED_NOREPLACE|MAP_ANON|MAP_PRIVATE)` 返回 `-EEXIST` = 该区间已被隐藏页占用; 对半缩小 + 成功探测立即 munmap 复原——22 次探针从 16GiB 定位到 4KiB 页。**区间左闭右开** `[addr, addr+len)`——二分边界取 `hidden < addr+len` 判归属，端点相等不算覆盖。只许写固定页时，把页内容拷到可写出口逐 8 字节送出 |
 
 ## §5 工具链
 

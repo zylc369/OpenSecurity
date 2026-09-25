@@ -10,7 +10,7 @@
 
 ## 1. Bot 代码通用结构
 
-几乎所有 Web CTF Bot 共享相同的基础结构（Express + Puppeteer）。Bot 代码的关键差异集中在两个点：
+几乎所有 admin bot 共享相同的基础结构（Express + Puppeteer）。Bot 代码的关键差异集中在两个点：
 1. **Flag 存储方式**（Cookie vs localStorage vs DOM）
 2. **页面数量**（单页 vs 双页）
 
@@ -63,9 +63,22 @@
 - 可以使用 `http://internal-service:port` 访问内网服务
 - 可以使用 `https://external-server.com/page` 访问外部服务器
 
+### 3.1a Bot 网络位置攻击面盘点（admin bot 题必做）
+
+Bot 与应用同容器/同网络命名空间时，**bot 的网络视角 = 容器内视角**——公网入口的防护（反代加的头、WAF、端口过滤）对 bot 全部无效。逐项盘点:
+
+| 检查项 | 看哪里 | 攻击含义 |
+|---|---|---|
+| 上游进程直听端口 | `entrypoint.sh`/`docker-compose.yml`——`php -S 127.0.0.1:900x`、gunicorn/uvicorn 多 worker、`node server.js` 等 | 反代（Caddy/nginx）在公网端口追加的 CSP/头/限流**不存在**于直连响应——构造 `http://127.0.0.1:<上游端口>/<反射点>` 让 bot 访问 |
+| sidecar 服务 | compose 里的第二、三个 service（redis/memcached/内部 API） | SSRF 型面: bot 可达 `internal-host:port`，应用凭据可能就在环境变量里 |
+| host 回环别名 | `localhost` vs `127.0.0.1` vs `host.docker.internal` | cookie/host 隔离差异（localhost 与 127.0.0.1 是不同 origin，cookie 域可能只挂一边） |
+| 绑定差异 | `0.0.0.0` vs `127.0.0.1` 监听 | 0.0.0.0 时其他容器也能访问该端口 |
+
+**方法**: 公网端口响应头 vs 直连上游端口响应头逐项 diff（CSP/X-Frame-Options/CORS 差异即突破口）; 题目附件里有 entrypoint.sh 的优先读它——端口清单就是攻击面清单。
+
 ### 3.2 httpOnly 设置
 
-CTF 中 flag Cookie 通常设为 `httpOnly: false`（刻意设计让 XSS 可读）。真实场景中鉴权 Cookie 应设 `httpOnly: true`。
+演练环境的 flag cookie 常设为 `httpOnly: false`（刻意设计让 XSS 可读）；生产环境鉴权 cookie 应设为 `httpOnly: true`。
 
 ### 3.3 Docker 中 Chromium 的 AE 特性
 

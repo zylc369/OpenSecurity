@@ -110,7 +110,7 @@ def validate_kd(k, d, N, e, Nn, n, mu_max=1000):
 # （相邻收敛子 (h_i,k_i)、(h_{i-1},k_{i-1}) 的线性组合 (r*h_i+h_{i-1}, r*k_i+k_{i-1})，r ≤ 64）
 ```
 
-**λ 陷阱（解密必看）**：`(p^n-1)(q^n-1)` 通常**不是**商环单位群的真指数——`x^n - r` mod p 的不可约因子次数不必整除 n（实测 `x^10 - 2` mod 3 分解为 2 次 + 8 次因子，p^8-1 ∤ p^10-1）。直接 `c^(phi-d)` 解密有 ~30% 概率输出乱码。必须分解 `x^n - r` mod p、mod q 求 `λ = lcm(p^d_i - 1)`，用 `e^{-1} mod λ` 分别解密、对系数 CRT：
+**λ 陷阱（解密必看）**：`(p^n-1)(q^n-1)` 通常**不是**商环单位群的真指数——`x^n - r` mod p 的不可约因子次数不必整除 n（`x^10 - 2` mod 3 分解为 2 次 + 8 次因子，p^8-1 ∤ p^10-1）。直接 `c^(phi-d)` 解密有 ~30% 概率输出乱码。必须分解 `x^n - r` mod p、mod q 求 `λ = lcm(p^d_i - 1)`，用 `e^{-1} mod λ` 分别解密、对系数 CRT：
 
 ```python
 # sage：可靠解密（n、r 按题替换）
@@ -260,6 +260,17 @@ print(i2b(int(m)))
 ## 12. 部分密钥泄漏
 
 dp/dq/qinv 任一泄漏即全恢复：`for k in range(3, e): p = (dp*e-1)//k + 1; is_prime(p)` 命中即 p（O(e) 瞬时）。原理 e*dp-1 = k*(p-1)，k < e。PEM 只泄底部 CRT 区照样沦陷。
+
+### 12a. Common Prime RSA + d 的中段空洞（联合模格 + 连分数）
+
+**适用**: `p = 2ga+1, q = 2gb+1`（p-1 与 q-1 共享大素数 g，Common Prime RSA），且 d 的十进制中间 k 位未知（首尾已知: `d = D0 + 10^s·x`，`0 ≤ x < 10^k`）。
+
+**两步攻击**:
+
+1. **联合模格补全 d**（内部 MSB/LSB gap 型）: 设 `A = ed-1 = k·g·a·b`。两条同余——`f1(x) = x + a1 ≡ 0 (mod g)`（由 A 与 d 结构，a1 从已知部分推出）与 `f2(y) = y + N + 1 ≡ 0 (mod g²)`（因 `N+1-p-q = (p-1)(q-1) = 4g²ab`，`y = -(p+q)`）。**加权移位** `f1^i · f2^j · (N-1)^r`（f1 权 1、f2 权 2）使各移位模 `g^t` 为零——`t=3` 时构成 27 维整数格，LLL 归约后**两两多项式取 GCD** 暴露线性因子 `x - x0`。恢复的 d 用 `2^(ed-1) mod N == 1` 验证。
+2. **连分数恢复 2g**: 利用生成关系 `h = p·b + a`（λ+a+b 型 hint）时 `N-1 = 2g·h`，故 `G(ed-1) - k(N-1) = -G·k·(a+b)` 右侧远小于主项且 `gcd(k,G)=1`——**k/G 是 (ed-1)/(N-1) 的连分数收敛子**，601-bit 分母即 `G=2g`。随后 `λ=(ed-1)/k`、`a+b = h-λ`、`ab = λ/G`，判别式 `(a+b)²-4ab` 开方得 a,b → `p=Ga+1, q=Gb+1`。
+
+**工具**: `python-flint` 的 `fmpz_mat.lll()` 可跑整数格; 权重/维度参数参照 Zheng & Nitaj《Partial Key Exposure Attack on Common Prime RSA》（ePrint 2024/061）。
 
 ## 13. 实现细节补遗
 

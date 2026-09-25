@@ -139,6 +139,14 @@ addEventListener("pagehide", function () { try { top.postMessage({p: 1}, "*"); }
 - `top` 是持有校验代码的窗口引用（如果校验在父窗口，换成 `parent`）；消息内容任意。
 - 前置条件：接收方已经进入"等待换页"阶段（例如某个状态变量已经置位），并且消息被处理时仍处于该阶段。
 
+### e.source 存活侧：`window.opener = null` 不能撤销发送方引用
+
+上面的销毁侧结论（源文档已销毁 → `e.source === null`）的互补面：**接收方清除自己存储的 opener 引用，不影响后续消息的 `e.source`**。`event.source` 在投递时求值并指向发送窗口——只要发送方文档存活，引用就完整可用（可回发 `e.source.postMessage`）。
+
+- 触发场景：popup/iframe 里执行了 `window.opener = null`（断链防御），之后外部父窗口 `postMessage` 到该窗口。
+- 攻击含义：被隔离的窗口仍能通过 `e.source` 恢复父窗口 `WindowProxy`——父窗口随后导航到目标源（与 popup 同源）后，popup 可枚举父 DOM、以父上下文发请求。**置 null 不是断链手段**；需要隔离时应依赖不可降级的 origin 检查（每条消息校验 `e.origin` 且窗口引用来自可信创建路径）。
+- 复验: `$AGENT_DIR/scripts/probe-opener-recovery/`（三版本 Chrome 一致: `openerIsNull=true` 且 `msg2SrcNotNull=true`、经 e.source 回发成功; 判据见目录内 README）。
+
 ## §5 关联文件
 
 - `$AGENT_DIR/knowledge-base/client-side-attacks.md` — 客户端攻击（bfcache/CSS exfil/xsleak）

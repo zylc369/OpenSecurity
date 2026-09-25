@@ -1,6 +1,6 @@
 # 逆向分析模式速查（Reverse Patterns）
 
-> 逆向 CTF/crackme/保护类目标时按模式查找。反混淆选型见 deobfuscation-selection.md; 反调试见 anti-debugging-bypass.md; VM 分析见 vm-bytecode-reversing.md; 校验结果验证见 verification-patterns.md。
+> 逆向 crackme/保护类/校验型目标时按模式查找。反混淆选型见 deobfuscation-selection.md; 反调试见 anti-debugging-bypass.md; VM 分析见 vm-bytecode-reversing.md; 校验结果验证见 verification-patterns.md。
 
 ## §1 字节独立变换（byte-wise uniform）检测与逆映射求解
 
@@ -59,7 +59,7 @@ main 自发 SIGINT N 次，每 handler 验一个字符，通过后 signal() 装�
 
 ## §10 四叉树递归图像格式
 
-专有图像格式 = 四叉树: 命令字节 bit3..0 对应四象限（位 1=递归细分/位 0=叶+3 字节 RGB）。调试: 每次 parse 打印递归深度+流偏移——深度不匹配=位序/叶大小错的第一信号（象限位序 4 排列逐一试）。元规律: CTF 专有图像/压缩格式几乎总是 quadtree/LZ77 变体/Huffman 流，识别信号是"短命令字节后跟更多命令或定宽叶数据"的递归结构。
+专有图像格式 = 四叉树: 命令字节 bit3..0 对应四象限（位 1=递归细分/位 0=叶+3 字节 RGB）。调试: 每次 parse 打印递归深度+流偏移——深度不匹配=位序/叶大小错的第一信号（象限位序 4 排列逐一试）。元规律: 专有图像/压缩格式几乎总是 quadtree/LZ77 变体/Huffman 流，识别信号是"短命令字节后跟更多命令或定宽叶数据"的递归结构。
 
 ## §11 运行时密钥捕获与静态参数提取双捷径
 
@@ -247,3 +247,25 @@ SSE2 psadbw: 8 组字节 |差| 求和→方程 |a[i]-k[i]| 之和=C 非线性但
 - **SGX**: ECALL 分发表（函数指针数组）可逆; 认证协议重实现: ECDH P-256 → CMAC-AES-128 派生 SK → AES-GCM 解密（确定性派生）
 - **Glulx**: 字典表 grep 开发者动词（xyzzy/plugh）进 debug 房; 校验是 Z_2^32 线性 → Sage solve_right 直接解
 - **EBCDIC**: decode('cp500') 转码; 大写+下划线过滤适配 flag 格式; take-N-skip-N 交错识别
+
+## §55 Heaven's Gate 双模式解码（同字节区 32/64 各验证一半）
+
+**识别**: PE32（i386）中出现 `6a 33 e8 00 00 00 00 83 04 24 05 cb`（push 0x33; call $+0; add dword[esp],5; retf）——far return 到 CS=0x33 进入 64 位模式执行**同一段字节**，配套 `push 0x23; retf` 切回。搜 `\x6a\x33....\xcb` 或 `\x68\x33\x00\x00\x00` 定位 gate。
+
+**陷阱**: gate 目标地址的字节按 64 位解码是正常函数序言（`55 48 89 ec...`= push rbp; mov rbp,rsp），按 32 位解码则完全是别的指令——**只按 PE 头的 nominal 模式反汇编会把一半验证逻辑看成乱码**。同一 VA 区域必须分别以 i386 和 x86-64 反汇编各看一遍（objdump `-b binary -m i386` / `-m i386:x86-64` 两次）。
+
+**利用结构**: 典型布局——32 位路径校验输入前半（5×u32 ROL/XOR 链），64 位路径校验后半（2×u64 + 1×u32）。链式变换 `T[i] = ROL(word[i] XOR prev, n)` 的**目标是下一块的状态**——直接逆推: `word[i] = ROR(target[i], n) XOR prev`，从初始 key 逐块恢复。
+
+## §56 repack 对照法（容器格式/密钥流逆向）
+
+**场景**: 程序把输入打包成自定义容器（带置换、RS 校验、XOR keystream），纯静态逆格式慢且易错。
+
+**方法**: **用被分析程序自己打包一个已知输入** → diff 官方目标文件与自产文件：
+1. 结构常量直接读出（magic、shard 数、块数——两版头部 diff 即分离静态字段与输入相关字段）
+2. 同输入两次打包（若含随机 seed）→ 不变位 = 确定性字段，变位 = 随机化位置
+3. 已知明文的 keystream 恢复: 自产容器 XOR 已知输入内容 = keystream 片段 → 验证 keystream 生成函数假设（如 `state = mix32(output_offset + state + K)`）
+4. 置换逆: 已知输入按序号打标记（如逐块不同填充）→ 输出位置反推置换表
+
+**校验锚点**: 逆向过程中用**已知 magic**（内层格式的文件头如 `11 50 9d 02`）做独立验收——恢复出的数据以该 magic 开头才算置换/解密正确，避免在错误参数上迭代。
+
+**RS 擦除恢复**（容器带 Reed-Solomon 校验时的逆向障碍）: GF(256)（primitive poly 0x11d）生成矩阵 `M[p,d] = (p+1)^d`；每块 32 个擦除 shard 时——去掉已知数据项后对幸存校验方程做**高斯消元**恢复缺失数据 shard; shard 存储置换（排序键从运行时计划捕获）必须先逆，否则字段算术全对也出不了内层 magic。

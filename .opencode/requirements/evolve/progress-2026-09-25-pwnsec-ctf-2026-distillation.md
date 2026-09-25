@@ -29,6 +29,7 @@
 | 21 G22 | ✅ | chall.py 依赖 sage 无法本地生成（动态复跑降级）; **静态对照核实**: solve.py 的 fmpz_mat.lll/交换关系 gcd 恢复模数/f(x)=x^4097+3x^257+11x^17+42x+99 代入验证/babai_closest 与 writeup 阶段一致; exotic-algebra-attacks.md §14a; 修既有 1 处叙事 |
 | 22 全量回归 | ✅ | 20 文件叙事词词边界扫描清零; prompt 索引 2 行在位; 交叉引用 5/5 存在; 探针 README 判据齐; 归档 49 文件（25 题全量）; 回归修复 3 处既有叙事词 + 记录 2 个 grep 假阳性模式 |
 | Phase 6 审计 | ✅ | 轮1: 章节顺序修正（prng §10→§8a 前移、exotic §15→§14a 前移至决策节前）; 轮2: prompt 展开 441/451 复核、引用格式抽读、diff 审查（17 删除行全为叙事修正、核心零删除）; 纯审计轮零问题通过 |
+| 外部 review 修复 | ✅ | 7 findings 全修: ① pwn-kernel §7f 重号→LKM 节改 §7g（:245 交叉引用恢复无歧义）② sandbox-escape 编译器转义段从 §1 移出为 §2e（按宿主语言分节）③ v8 文件 2 处 CTF 叙事清理 ④ 两探针失败路径修复（goto .catch + 超时兜底，PONG_TIMEOUT 接上）——负向测试: goto 失败 1s 内输出 JSON + exit 2 不挂起，正常路径三断言回归通过 ⑤ 两 README 补 npm install 步骤（node_modules gitignore，symlink 仅本机）⑥ client-side 探针引用补 $AGENT_DIR 全路径 ⑦ cross-site 注释改 cross-origin |
 
 ## 原题核实记录
 

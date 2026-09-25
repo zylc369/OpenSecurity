@@ -285,7 +285,7 @@ ARM fcntl64 路径 set_fs(KERNEL_DS) 未恢复 USER_DS → 该线程 copy_from/t
 
 ## §7f 2026 SLUB 新机制：CPU sheaf/barn、INIT_ON_ALLOC 双刃剑与 personality 喷射
 
-**CPU sheaf/barn 层**（新内核在 SLUB 之上新增的 per-CPU 快缓存）: 对象 free 优先落入本 CPU sheaf（容量小，典型 12 对象）而非旧 freelist——**cross-cache 的"释放回 buddy"步骤会被 sheaf 截胡**。回落旧层: 灌满 sheaf 后继续 free，触发 sheaf 向 SLUB 层 flush/migrate（写 exp 先探测 sheaf 容量 SHEAF_CAP，按"灌满→溢出"节奏安排释放序列; 单靠传统"绑核分配+换核释放"的旧 cross-cache 节奏未必够，需实测验证 flush 阈值）。
+**CPU sheaf/barn 层**（新内核在 SLUB 之上新增的 per-CPU 快缓存）: 对象 free 优先落入本 CPU sheaf（容量小，典型 12 对象）而非旧 freelist——**cross-cache 的"释放回 buddy"步骤会被 sheaf 截胡**。回落旧层: 灌满 sheaf 后继续 free，触发 sheaf 向 SLUB 层 flush/migrate（写 exp 先探测 sheaf 容量 SHEAF_CAP，按"灌满→溢出"节奏安排释放序列; 单靠传统"绑核分配+换核释放"的旧 cross-cache 节奏未必够，须对目标内核实际测量 flush 阈值）。
 
 **PCP（Per-CPU Page Set）**: 页从 SLUB 回收到 buddy 之间还有 per-CPU 页缓存——目标页可能滞留 PCP 未到 buddy，喷射端回收不到。对策: 大量高阶分配/释放排空 PCP，或加大目标对象的页级喷射量。
 
@@ -294,6 +294,27 @@ ARM fcntl64 路径 set_fs(KERNEL_DS) 未恢复 USER_DS → 该线程 copy_from/t
 - **io_uring personality 喷射**: `io_uring_register(fd, IORING_REGISTER_PERSONALITY, 0, 0)` 每次注册经 prepare_creds() 创建一份当前 cred 拷贝（从 cred_jar 专用缓存分配，存入 ring ctx 的 personality 表）——比 fork 进程轻量的精准 cred 喷射原语，personality id 池上限 65535，配合页级回收让清零目标精准落位。
 
 **兼容性速查**: 老内核（无 sheaf）直接走 §6 cross-cache; 新内核 = sheaf 耗干 + PCP 排空 + §6 旧流程; INIT_ON_ALLOC 开启时优先评估"清零即覆写"路线（省去泄漏与写原语）。
+
+## §7g 可加载内核模块（LKM）利用链
+
+**触发情境**: 题目带自编 `.ko`（rootfs 里 insmod，提供 ioctl/dev 文件接口）+ 用户态入口二进制。模块是"内核给你的一部分可控内核内存"——比内核本体易攻得多。
+
+**模块基址泄露——`/proc/modules`**: 模块基址**独立于内核 KASLR** 随机化，但任何可读 `/proc/modules` 的路径（如模块自带的"任意文件读"功能、dmesg）直接给出——`shadowops 16384 1 - Live 0xffffffffc0614000` 行尾即基址。加载布局: 各段顺序拼接对齐（`.text = base`、`.data = base + <text 对齐后>`、`.bss` 紧随 `.data`; 具体偏移对 `objdump -h *.ko` 的段大小向上对齐页/16 计算后在本地校准，`nm` 拿段内符号偏移如 `used`、`shadowops_write`）。
+
+**调用次数限制自续写**: 模块用 `.bss` 计数器限制原语使用次数（如 `used <= 2`）——**计数器本身可被原语写**。第一次写重置 `used=0`（地址 = 模块 base + .bss 偏移），限制即解除。识别: 反汇编模块找 `lock xadd/cmp <限值>` 模式并定位计数变量。
+
+**模块 .text 可写 → patch 读原语进自身**: 本地加载的模块 `.text` 页无 RO 保护（无 CONFIG_STRICT_MODULE_RWX 时; 先写一个值到模块 .text 空洞验证可写性）。把**读原语** patch 进未使用的函数区（open/release handler 的剩余空间）:
+```
+count == 8:  读内核 qword 回用户缓冲（复用 copy_to_user 语义）
+count == 16: 原 {target, value} 写语义
+```
+再把 dispatch 入口（write handler）开头改 `jmp <patch 区>` 复用同一入口分派——一次 patch 同时获得内核任意读+写。
+
+**模块内重定位 → 内核 KASLR slide**: 模块 .text 里的 `e8 <disp32>` 调用（如 call `_copy_from_user`）加载时按内核符号重定位——读回该 4 字节: `sym_addr = call_next_insn + sign_extend(disp32)`，`slide = sym_addr - vmlinux 中该符号地址`。之后任意内核符号 = `静态地址 + slide`（core_pattern/modprobe_path 同理）。不需要任何内核侧泄漏通道。
+
+**seccomp 与 core_pattern**: 用户态侧 seccomp 白名单（read/write/exit）不拦**内核驱动路径**——覆写 `core_pattern` 为 `|/bin/sh -c cat${IFS}/flag*>/dev/console` 后任一进程崩溃即触发 root usermode helper（`${IFS}` 保证 core helper 的空白切 argv 后第三参数仍是完整命令; 触发文件首 4 字节须不可打印）。
+
+**端到端判据**: 用户态菜单程序读 `/proc/modules` 拿基址 → 写 `used=0` → patch 读原语 → 读 `base+0x57`（e8 处）算 slide → 写 core_pattern → 崩溃触发 → console 出 flag。字母数字约束的 stage-1 shellcode 用 ALPHA3 RAX decoder（解码 12 字节 read 循环拉 stage-2）。
 
 ## §8 关联文件
 

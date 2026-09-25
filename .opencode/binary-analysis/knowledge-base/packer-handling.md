@@ -102,6 +102,15 @@
 
 **memfd_create 无文件载荷**（games-and-vms-3）: 载荷经 memfd_create+fexecve 全内存执行、磁盘零落盘——解密产物在 fexecve 前拦截: hook memfd_create 取缓冲，或 dump `/proc/<pid>/fd/` 的匿名 fd 条目（fd 指向 `memfd:xxx`），照常分析 dump 出的二进制。
 
+**多层嵌套容器的提取策略**（ELF→PyInstaller→VMProtect→Game Boy ROM→伪装 ELF 型五层链）:
+
+1. **逐层剥离用标记+变换对**: PyInstaller stub 后找 `<<<PAYLOAD_START>>>` 类标记——其后 `LE32 长度 + 混淆数据`，逆变换（如 `reverse(bytes[i] ^ [a5,3c,ff,00,55,aa][i%6])`）还原内层 PE; 每层的嵌入标记/密钥在该层二进制里静态可查。
+2. **拦截"最终动作"API 阻止执行分叉**: VMProtect 层会用 `ShellExecuteA`（弹出内嵌 ROM 文件）、`MessageBoxW` 等产生 GUI/文件副作用——Frida `Interceptor.replace` 让它们直接返回成功值（如 33）不执行真动作，进程留在"解包完成、即将行动"的稳定状态，此时按**固定 RVA** 从主模块读出全部内嵌资源（ROM 起始 base+0x4000、长度 base+0xc000 等——RVA 在脱壳后的 `.data` 布局稳定）。
+3. **诱饵层识别**: 某层的"看起来是下一层入口"的元数据（如 ROM 里的 140 条虚拟 opcode 表）与外层证据矛盾（PE 级 `.data` 里另有完整 ELF 资源 + 长度字段）时，判定该表为 decoy 跳过——**跨层证据矛盾是诱饵信号**，别把每层元数据都当真payload 挖到底。
+4. **伪装数据容器**: 最内层"ELF"可能只是**借 ELF 格式存数据**（无代码）——直接解析 section headers 取 `.rodata`（key）与 `.data`（密文）做 AES 解密，别找入口点。
+
+**总原则**: 比起完整脱壳每层 protector，"跑到解包完成点 → 按 RVA 抄资源"更短且可复现（Frida spawn + hook + 100×0.1s 轮询即一个稳定提取器）。
+
 ## 阶段 3：静态分析脱壳（最后手段）
 
 **仅在以下场景使用**：

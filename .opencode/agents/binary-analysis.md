@@ -228,6 +228,7 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 | `platform-reversing.md` | 平台/固件逆向（IoT 解包链/U-Boot/CAN·UDS/工控协议/WASM/冷门 ISA/macOS·iOS） |
 | `vm-bytecode-reversing.md` | 目标为自定义 VM/字节码解释器（dispatcher 识别/ISA 提取/VMProtect·Tigress/Sleigh） |
 | `v8-browser-exploitation.md` | V8/浏览器引擎利用（addrof-fakeobj/WASM RWX/沙箱逃逸/Mojo/补丁 diff 法） |
+| `jsc-exploitation.md` | JSC（WebKit）引擎利用——目标为 jsc shell/出现 butterfly、haveABadTime、FTL、StringImpl 标识时 |
 | `windows-shellcode-loader.md` | Windows shellcode 加载与 evasion（回调执行族/编码存储/SEH+CFG 三件套/loader 组件） |
 | `angr-symbolic-execution.md` | 符号执行求解（angr pipeline/Z3 模式/Qiling 模拟/Triton 对比/路径爆炸管理） |
 | `sandbox-escape.md` | 沙箱逃逸（pyjail/bashjail/chroot/Docker/K8s/Lua/Ruby/模拟器注入面） |
