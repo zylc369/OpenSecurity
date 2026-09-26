@@ -47,10 +47,10 @@
 
 **派发模板**（与 guide §1a 收割专项一一对应）:
 
-> task(subagent_type="knowledge-scout", prompt=)
+> task(subagent_type="knowledge-scout", background=true, prompt=)
 > 「对归档目录 `<绝对路径>` 执行信源收割专项: ①读你的方法论 `$AGENT_DIR/knowledge-base/knowledge-sourcing-guide.md` §1a"收割专项"形态 ②对该目录跑收割脚本（guide 内权威版），count ≥3 的域名逐个判读 ③bash 更新 `$AGENT_DIR/data/sources-staging.json`: 值得跟踪的写 pending 条目（proposal 带证据），命中 curated/aggregators 已有源的累加 refs_in，噪音丢弃 ④返回值一行: `收割完成: 新 pending N 个 / refs_in 累加 M 处`」
 
-**同步/异步现状**: 当前 opencode 的 task 工具为同步阻塞（派发后等待子 agent 完成才返回），返回值约束为一行即为此缓解; 上游已在推进 background 模式（task 工具 background 参数，fire-and-forget + 完成自动通知），本环境 task schema 支持该参数后，此处的派发即升级为真异步——蒸馏主会话派发后立即进入阶段二，无需任何等待。
+**异步已启用**（环境变量 `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true`，实验特性）: 派发时传 `background=true`，task 立即返回 running 状态，子 agent 在后台执行，完成时自动通知——蒸馏主会话派发后立即进入阶段二，全程零等待零阻塞。若未设该环境变量（task schema 无 background 参数），退化为同步等待，返回值一行约束仍适用。
 
 ## 2. 阶段二: 全量精读与 gap 判定
 
