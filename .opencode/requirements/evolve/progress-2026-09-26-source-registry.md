@@ -16,7 +16,7 @@
 - [x] 步骤 2: 6 候选巡检分流——curated +2（alpacahack S1、shazzer O）; staging 4（cybersecurityelite pending 活跃但同题存疑 / zenn.dev AG 候选 / pepsipu 停更待 gap 对照 / ankursundara rejected 否决留档: 停更 2 年+已归档）
 - [x] 步骤 3: sourcing-guide §1 重写（注册表机制+CTF Base API 细节保留）+ 新增 §1a 调用即自进化 / §1b 无状态末位判据 / §1c 审核转正
 - [x] 步骤 4: scout prompt 三处（铁律第二例外 / 工作流程第 6 步 / 报告骨架信源维护行）
-- [x] 步骤 5: distillation-methodology 阶段 1a 引用收割（脚本运行时自动从 guide 提取权威正则，零双维护）+ 暂存文档标注已并入
+- [x] 步骤 5: distillation-methodology 阶段 1a 引用提取与计数（脚本运行时自动从 guide 提取权威正则，零双维护）+ 暂存文档标注已并入
 - [x] 步骤 6: 回归 + 审计
 
 ### 审计记录

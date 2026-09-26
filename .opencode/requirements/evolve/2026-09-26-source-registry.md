@@ -13,10 +13,10 @@
 
 **目标**:
 - 信源数据从方法论文档拆出为双层 JSON: curated（沉淀基线）+ staging（自更新唯一写入目标）
-- scout 每次出勤即自进化: 状态更新/引用收割/末位标记/pending 验证四个动作寄生在主任务里
+- scout 每次出勤即自进化: 状态更新/引用提取与计数/末位标记/pending 验证四个动作寄生在主任务里
 - 发现与活力统一为一条生命周期流水线，审核收口（evolve review 后转正）
 
-**预期收益**（四维）: 减少轮次（用户不再人肉喂源，实证: K17/BHMEA 两跳转手）; 准确度（已验证作者新产出质量先验高）; 上下文（引用收割零额外请求）; 速度（90 天追新从"用户看到"提速到"出勤即扫"）。
+**预期收益**（四维）: 减少轮次（用户不再人肉喂源，实证: K17/BHMEA 两跳转手）; 准确度（已验证作者新产出质量先验高）; 上下文（引用提取与计数零额外请求）; 速度（90 天追新从"用户看到"提速到"出勤即扫"）。
 
 ## §2 技术方案
 
@@ -51,12 +51,12 @@
 
 **字段二分法**: 机器判定用固定字段（domain 主键 / tier: S1站点级·S2作者级·O一次性·AG聚集体 / status: active·reduced·archive / last_seen / refs_in / added_at）; 指导行为用自然语言（profile/proposal——原 directions+note 合一，消费方是大模型）。
 
-**读取规则**: 优先 staging，不可用（不存在/空/损坏 json parse 失败）回退 curated。
+**读取规则**: 优先 staging，不可用（不存在/空/损坏 json parse 失败）回退 curated。> 勘误（实施后修订）: 实际落地为**逐条目合并语义**（curated 全量基线 + staging 同 domain 条目覆盖 + 新 domain 附加），非整文件替换——以 sourcing-guide §1 为唯一权威。
 
 ### 2.2 调用即自进化（scout 出勤四动作，寄生主任务）
 
 1. **状态更新**: 每扫描一源，bash 更新 staging 该源 last_seen + 产出证据（自然语言追加 profile 或 proposal）
-2. **引用收割**: 读过的 writeup 顺手 grep 外链，滤噪音（图床/cdn/社交/规范/题目实例域名），命中 curated/aggregators 已有源则 refs_in+1，新域名追加 staging 条目（带 proposal: 引用来源+被引次数）
+2. **引用提取与计数**: 读过的 writeup 顺手 grep 外链，滤噪音（图床/cdn/社交/规范/题目实例域名），命中 curated/aggregators 已有源则 refs_in+1，新域名追加 staging 条目（带 proposal: 引用来源+被引次数）
 3. **末位标记**: 本轮接触的源当次计算无状态判据——近 30 天有效产出=0 且最新>30 天 → staging 标记建议降频; 90 天窗末位且产出<中位数 1/3 → 标记建议移出 archive
 4. **pending 顺带验证**: 本轮方向扫描碰到 staging pending 源时，顺带核对 90 天≥2 机制级产出，达标则在 proposal 里升级建议（"建议入表 S1"），证据齐
 
@@ -64,7 +64,7 @@
 
 用户在 evolve 会话触发（或蒸馏任务前 evolve 顺带）: 读 staging → 对照判据 + 抽查可信性 → 可信: merge 进 curated（新增/状态迁移生效）→ 清 staging 对应条目; 不可信: 删条目，否决理由留在审核报告一页。
 
-### 2.4 引用收割进蒸馏流程
+### 2.4 引用提取与计数进蒸馏流程
 
 distillation-methodology 的蒸馏流程加一步: 素材归档后、gap 判定前，对全部 writeup 跑外链提取（命令级: python3 正则提取 https?:// 链接，滤噪音正则见 §3），结果追加 staging。
 
@@ -79,7 +79,7 @@ distillation-methodology 的蒸馏流程加一步: 素材归档后、gap 判定�
 
 - 改动范围: 2 新数据文件 + 1 方法论重写节 + 2 prompt 增段 + 1 暂存文档标注
 - JSON 一律 `python3 -c "import json; json.load(open(...))"` 验证; md 人工读自包含性
-- 滤噪音正则（引用收割用）: `gyazo|imgur|st-hatena|zenn\.studio|wikipedia|php\.net|mozilla|chrom(e|ium)|googlesource|whatwg|mitre|x\.com|twitter|tiktok|esm\.sh|02\.rs|transfer\.sh|siam\.org|localhost|127\.0\.0\.1|example|attacker\.com|vulnerable|chal\.ctf|flagyard|forms\.gle|t\.co|hexo\.io|unpkg|linkedin|medium\.com|<|server`（实测 101 篇归档调优）
+- 滤噪音正则（引用提取与计数用）: `gyazo|imgur|st-hatena|zenn\.studio|wikipedia|php\.net|mozilla|chrom(e|ium)|googlesource|whatwg|mitre|x\.com|twitter|tiktok|esm\.sh|02\.rs|transfer\.sh|siam\.org|localhost|127\.0\.0\.1|example|attacker\.com|vulnerable|chal\.ctf|flagyard|forms\.gle|t\.co|hexo\.io|unpkg|linkedin|medium\.com|<|server`（实测 101 篇归档调优）
 
 ### §3.1 实施步骤
 
@@ -107,10 +107,10 @@ distillation-methodology 的蒸馏流程加一步: 素材归档后、gap 判定�
    - 验证点: 展开行数 <450; 零写入铁律与 bash 数据文件例外表述无矛盾; 调用链（knowledge-search 命令→task 派发→scout 读 guide）不受影响
    - 依赖: 3
 
-5. distillation-methodology 加引用收割步 + 暂存文档标注已立项
+5. distillation-methodology 加引用提取与计数步 + 暂存文档标注已立项
    - 文件: security-analysis-evolve/knowledge-base/distillation-methodology.md、requirements/evolve/2026-09-26-source-lifecycle-plan.md
    - 预估行数: ~25 行
-   - 验证点: 收割步骤在流程图内且命令级可执行; 暂存文档头部标注"已并入 2026-09-26-source-registry 立项"
+   - 验证点: 引用计数步骤在流程图内且命令级可执行; 暂存文档头部标注"已并入 2026-09-26-source-registry 立项"
    - 依赖: 无
 
 6. 回归 + 审计
@@ -127,4 +127,4 @@ distillation-methodology 的蒸馏流程加一步: 素材归档后、gap 判定�
 
 - 取代 `2026-09-26-source-lifecycle-plan.md`（暂存活力机制方案，全部内容并入本文档 §2.2/§2.3）
 - 承接 K17 蒸馏复盘的"发现链三断链"教训（本需求是其体系化解决）
-- 与 `2026-09-25-knowledge-distill-command.md`（蒸馏命令化）互补: 蒸馏流程的引用收割步是本需求的 §2.4
+- 与 `2026-09-25-knowledge-distill-command.md`（蒸馏命令化）互补: 蒸馏流程的引用提取与计数步是本需求的 §2.4

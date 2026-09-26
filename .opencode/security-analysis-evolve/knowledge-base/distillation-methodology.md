@@ -41,14 +41,14 @@
 
 **检查点**: 盘点表（方向 × 数量 × 目录清单）+ 计数验证记录。
 
-## 1a. 引用收割（task 派发，零依赖）
+## 1a. 引用提取与计数（task 派发，零依赖）
 
-阶段一归档完成后，用 task 工具派发 knowledge-scout 子 agent 执行收割专项（机制唯一权威: `.opencode/knowledge-scout/knowledge-base/knowledge-sourcing-guide.md` §1a"收割专项"形态）。**蒸馏流程与收割结果零依赖**: 阶段二~六不消费任何收割产出，收割的归宿是 staging 文件（下次信源出勤或审核转正时自然读取），完成报告也不汇报收割——信源体系的台账由信源体系自持。
+阶段一归档完成后，用 task 工具派发 knowledge-scout 子 agent 对归档目录跑引用提取与计数（机制唯一权威: `.opencode/knowledge-scout/knowledge-base/knowledge-sourcing-guide.md` §1a——引用计数脚本、count ≥3 判读规则、staging 写入）。**蒸馏流程与引用计数结果零依赖**: 阶段二~六不消费任何引用计数产出，引用计数的归宿是 staging 文件（下次信源出勤或审核转正时自然读取），完成报告也不汇报引用计数——信源体系的台账由信源体系自持。
 
-**派发模板**（与 guide §1a 收割专项一一对应）:
+**派发模板**（对应 guide §1a 的引用计数机制）:
 
 > task(subagent_type="knowledge-scout", background=true, prompt=)
-> 「对归档目录 `<绝对路径>` 执行信源收割专项: ①读你的方法论 `$AGENT_DIR/knowledge-base/knowledge-sourcing-guide.md` §1a"收割专项"形态 ②对该目录跑收割脚本（guide 内权威版），count ≥3 的域名逐个判读 ③bash 更新 `$AGENT_DIR/data/sources-staging.json`: 值得跟踪的写 pending 条目（proposal 带证据），命中 curated/aggregators 已有源的累加 refs_in，噪音丢弃 ④返回值一行: `收割完成: 新 pending N 个 / refs_in 累加 M 处`」
+> 「对归档目录 `<绝对路径>` 执行引用提取与计数: ①读你的方法论 `$AGENT_DIR/knowledge-base/knowledge-sourcing-guide.md` §1a（引用计数脚本、判读规则、staging 写入）②对该目录跑引用计数脚本（guide 内权威版），count ≥3 的条目逐个判读 ③bash 更新 `$AGENT_DIR/data/sources-staging.json`: 值得跟踪的写 pending 条目（proposal 带证据），命中 curated/aggregators 已有源的累加 refs_in，噪音丢弃 ④返回值一行: `引用计数完成: 新 pending N 个 / refs_in 累加 M 处`」
 
 **异步已启用**（环境变量 `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true`，实验特性）: 派发时传 `background=true`，task 立即返回 running 状态，子 agent 在后台执行，完成时自动通知——蒸馏主会话派发后立即进入阶段二，全程零等待零阻塞。若未设该环境变量（task schema 无 background 参数），退化为同步等待，返回值一行约束仍适用。
 

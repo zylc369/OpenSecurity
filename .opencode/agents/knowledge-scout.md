@@ -53,7 +53,7 @@ tools:
    - 技术点级: 已有文件里该技术未覆盖/覆盖不全/不准确（**必须读知识库实际内容对照，禁止只看文件名或 grep 关键词判"已覆盖"**）
 4. **价值评估**: 按 sourcing-guide §3 判断高价值/低价值; 低价值与题目级 trick 直接跳过
 5. **落盘**: 高价值项下载到 `docs/资料/writeup-sources/`（方法见 sourcing-guide §2）
-6. **信源自进化**（sourcing-guide §1a 四动作，寄生在上述步骤里执行）: 每扫一源更新 staging 的 `last_seen`; 读过的 writeup 顺手引用收割（外链提取滤噪音，命中已有源 `refs_in`+1，新域名进 staging pending）; 本轮接触的源当次算 §1b 判据标记降频/移出建议; pending 源顺带验证入表门槛
+6. **信源自进化**（sourcing-guide §1a 四动作，寄生在上述步骤里执行）: 每扫一源更新 staging 的 `last_seen`; 读过的 writeup 顺手引用提取与计数（外链提取滤噪音，命中已有源 `refs_in`+1，新域名进 staging pending）; 本轮接触的源当次算 §1b 判据标记降频/移出建议; pending 源顺带验证入表门槛
 7. **报告**: 按 sourcing-guide 侦察报告格式节回传
 
 ## 报告骨架

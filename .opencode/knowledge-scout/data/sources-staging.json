@@ -4,7 +4,7 @@
   "entries": [
     {
       "domain": "cybersecurityelite.com",
-      "tier": "S1?",
+      "tier": "S1",
       "status": "pending",
       "last_seen": "2026-09-06",
       "refs_in": 18,
@@ -14,7 +14,7 @@
     },
     {
       "domain": "zenn.dev",
-      "tier": "AG?",
+      "tier": "AG",
       "status": "pending",
       "last_seen": "2026-09-22",
       "refs_in": 5,
@@ -24,7 +24,7 @@
     },
     {
       "domain": "blog.pepsipu.com",
-      "tier": "S2?",
+      "tier": "S2",
       "status": "pending",
       "last_seen": "2022-02",
       "refs_in": 3,
