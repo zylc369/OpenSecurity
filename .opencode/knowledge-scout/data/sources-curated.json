@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "domain": "how2heap",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-20",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "Shellphish 维护的堆利用技术示例库（github.com/shellphish/how2heap）。每个 .c 文件是一个可编译复现的攻击技术。curl raw 拉 .c 文件。新增文件名即新攻击面，扫 README 的技术列表增量"
+    },
+    {
+      "domain": "ptr-yudai.hatenablog.com",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 28,
+      "added_at": "2026-09-26",
+      "profile": "内核/pwn 顶流研究者博客（日本人，hitenablog 平台）。每月发当月赛题 writeup，机制级推导。curl HTML → BeautifulSoup 提正文。平均 22.5 外链/篇——引用收割的顶级燃料源。其引用大量指向日本 hatena 博客圈（见 aggregators）"
+    },
+    {
+      "domain": "blog.huli.tw",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 21,
+      "added_at": "2026-09-26",
+      "profile": "台湾 Web 安全研究者博客，中文。XSS/CSP/浏览器机制深度文。curl HTML → BeautifulSoup"
+    },
+    {
+      "domain": "portswigger.net",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 82,
+      "added_at": "2026-09-26",
+      "profile": "PortSwigger Research（Burp 官方研究博客）。Web 漏洞研究金标准，HTTP/2、缓存投毒、解析差异类前沿。curl HTML → BeautifulSoup。research 栏目按年份倒序"
+    },
+    {
+      "domain": "github.com/pcw109550/write-up",
+      "tier": "S2",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 6,
+      "added_at": "2026-09-26",
+      "profile": "韩国密码学选手 writeup 仓库，.sage/.py 求解脚本为主。curl raw 拉单文件。椭圆曲线/格/配对方向"
+    },
+    {
+      "domain": "github.com/rkm0959/CTFWriteups",
+      "tier": "S2",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "韩国密码学顶流选手 writeup 仓库。curl raw。cover CTF/Kryptos/Google CTF 等赛事 crypto 全解"
+    },
+    {
+      "domain": "zkdocs.com",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "ZKP 安全知识库（ZKDocs）。零知识证明攻击面系统文档。curl HTML。fiat-shamir/HVZK 章节已蒸馏"
+    },
+    {
+      "domain": "github.com/GiacomoPope/Castryck-Decru-SageMath",
+      "tier": "O",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "SIDH Castryck-Decru 攻击官方 SageMath 实现。一次性研究素材，知识已入库（ecdlp-solving.md），不再追踪"
+    },
+    {
+      "domain": "D-810/GoReSym/HexRaysDeob 工具 README",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "IDA 逆向工具三件套 README（GitHub raw）。工具大版本更新时看变更，平时低频。D-810 反混淆规则/GoReSym Go 符号恢复/HexRaysDeob 微码反混淆"
+    },
+    {
+      "domain": "frida.re",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "Frida 官方 news + docs。版本 API 变更追踪（17.x 有破坏性变更史）。curl HTML"
+    },
+    {
+      "domain": "github.com/sajjadium/ctf-archives",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "CTF 赛事题目官方归档（按赛事/年份目录）。找题目源码/附件的入口，writeup 少。按赛事定向浏览"
+    },
+    {
+      "domain": "api.ctfbase.com",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "CTF Base 搜索引擎 REST API（免认证 limit 50）。category: forensics/web/crypto/reverse/pwn/mobile; AI 安全无 category 用 websearch。日期编码在 id 前 8 位，时间窗按 id 前缀本地比较; 结果无排序参数需 offset 翻页"
+    },
+    {
+      "domain": "hackingarticles.in",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "HackingArticles。取证/Web/提权方法论教程站，入门友好深度中等。curl HTML → BeautifulSoup"
+    },
+    {
+      "domain": "0xdf.gitlab.io",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "0xdf 的 HTB/CTF writeup 博客，500+ 机器详尽复盘，HTJ 渗透取证详尽度金标准。curl HTML"
+    },
+    {
+      "domain": "r3kapig.com",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "top10 战队（Eur3kA+FlappyPig 联合）官方站，每赛必发机制级 writeup，pwn/web/crypto 全覆盖，中英双语。Writeup 栏目按时间倒序取 90 天窗。成员区挂个人 GitHub/博客（crazymanarmy.github.io 等）可下钻"
+    },
+    {
+      "domain": "github.com/stack1245",
+      "tier": "S2",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "韩国个人选手。三库已蒸馏（PwnSec/K17/BHMEA 2026，结构: 题目目录+analysis/original-write-up.md+solve 脚本）。比赛活跃，新仓库模式: <比赛名>-CTF-<年>。users/<u>/repos API 查增量"
+    },
+    {
+      "domain": "alpacahack.com",
+      "tier": "S1",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 5,
+      "added_at": "2026-09-26",
+      "profile": "日本 CTF 持续练习平台（类 picoCTF），新题+官方 writeup 持续产出。题目偏体系化练习，适合补方法论文库的入门-中级面"
+    },
+    {
+      "domain": "shazzer.co.uk",
+      "tier": "O",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 6,
+      "added_at": "2026-09-26",
+      "profile": "Gareth Heyes（PortSwigger）的在线 fuzz 向量库: Browser Quirks/CSS Parsing/HTML Parsing/JS Syntax 等类目的活向量。写解析差异类 payload 时查库用，非持续内容源"
+    }
+  ],
+  "aggregators": [
+    {
+      "domain": "ctftime.org",
+      "tier": "AG",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "CTF 竞赛数据中心。入口三用途: ①/api/v1/events/ 近期赛事（赛后 1-2 周=writeup 涌出黄金窗）②/stats/<年> 排行→战队页（4/4 抽样有 Website 字段→官网=writeup 主发布地）③/writeups 聚合搜索。注意: 用户页无外部链接（实测死路），下钻走战队官网成员区不走用户页"
+    },
+    {
+      "domain": "d.hatena.ne.jp",
+      "tier": "AG",
+      "status": "active",
+      "last_seen": "2026-09-26",
+      "refs_in": 0,
+      "added_at": "2026-09-26",
+      "profile": "日本博客聚合平台，ptr-yudai 所在圈子。ptr-yudai 单源被引 204 次指向此圈。下钻: 从 ptr-yudai writeup 的 hatena 引用链提取具体选手子域名。待首轮侦察开采"
+    }
+  ]
+}

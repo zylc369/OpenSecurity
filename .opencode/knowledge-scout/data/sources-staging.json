@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "reviewed_at": null,
+  "entries": [
+    {
+      "domain": "cybersecurityelite.com",
+      "tier": "S1?",
+      "status": "pending",
+      "last_seen": "2026-09-06",
+      "refs_in": 18,
+      "added_at": "2026-09-26",
+      "profile": "混合站: BHMEA 2026 / ASIS 2026 等赛事 writeup（2026-09 密集）+ 泛安全营销文",
+      "proposal": "活跃度达标（90 天多篇）但存疑: ①BHMEA 同题 writeup 与 stack1245 高度重叠（我们已蒸馏，边际价值低）②营销文掺杂拉低信噪比。建议: 下轮 crypto/web 方向扫描时抽查其独立产出（非 stack1245 重叠题）的机制级程度再定"
+    },
+    {
+      "domain": "zenn.dev",
+      "tier": "AG?",
+      "status": "pending",
+      "last_seen": "2026-09-22",
+      "refs_in": 5,
+      "added_at": "2026-09-26",
+      "profile": "日本工程师技术社区平台，泛技术非安全专门",
+      "proposal": "聚集体候选非直接信源。建议: 用 'site:zenn.dev CTF writeup' 类定向查询测安全 tag 产出密度，若日本选手在此发 writeup 则入 aggregators"
+    },
+    {
+      "domain": "blog.pepsipu.com",
+      "tier": "S2?",
+      "status": "pending",
+      "last_seen": "2022-02",
+      "refs_in": 3,
+      "added_at": "2026-09-26",
+      "profile": "pwn 选手博客，Nightmare/Daydream/House of Blindness 单字节写系列（2020-2023），归档已有 3 篇",
+      "proposal": "追新价值低（停更）但旧文深挖价值存疑: 归档 3 篇是否已榨干其技术点待 gap 对照。建议: 下轮 pwn 方向蒸馏前对照，无增量则否决"
+    },
+    {
+      "domain": "blog.ankursundara.com",
+      "tier": "S2",
+      "status": "rejected",
+      "last_seen": "2024-08",
+      "refs_in": 14,
+      "added_at": "2026-09-26",
+      "profile": "arxenix（corCTF 出题人）博客，htmlsandbox/cookie-bugs/SECCON 系列",
+      "proposal": "否决留档: 停更 2 年（最新 2024-08），核心文章 htmlsandbox-writeup 已在归档（web/2024-sekaictf-htmlsandbox.md）。复活条件: 被 CTFtime 排名/引用链再次命中且恢复产出"
+    }
+  ]
+}

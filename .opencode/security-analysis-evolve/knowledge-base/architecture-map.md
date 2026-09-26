@@ -41,7 +41,10 @@ $OPENCODE_ROOT/                              # 由插件注入，项目级 .open
 │                                         #   classical-crypto、symmetric-and-hash、prng-attacks、exotic-algebra-attacks 等）
 ├── knowledge-scout/                      # 知识侦察专属（谁执行谁持有）
 │   ├── knowledge-base/
-│   │   └── knowledge-sourcing-guide.md   # 信源表/gap 判定/价值判断/下载方法/侦察报告格式
+│   │   └── knowledge-sourcing-guide.md   # 信源注册表机制/调用即自进化/gap 判定/价值判断/下载方法/侦察报告格式
+│   ├── data/                             # 信源注册表（bash 可写的运行时数据，非知识库）
+│   │   ├── sources-curated.json          # 沉淀层: 审核转正的可信基线（sources+aggregators，随 git）
+│   │   └── sources-staging.json          # 工作层: 自更新唯一写入目标（含 proposal/rejected 条目）
 │   └── scripts/
 │       └── download_sources.py           # 素材下载工具
 ├── security-analysis-evolve/             # 进化工程师专属
