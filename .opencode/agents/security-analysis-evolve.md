@@ -47,6 +47,8 @@ Security Analysis 的架构地图（目录树、归属规则、依赖方向、Pl
 
 环境信息由 Plugin 每轮注入（见系统提示"环境信息"段）; `$AGENT_DIR` 对每个 agent 各指各的专属目录（evolve → security-analysis-evolve/）。变量语义详见 architecture-map.md 环境变量表。
 
+**工具策略（预期行为，非故障）**：`knowledge_*` / `events_*` MCP 工具对本 agent 有意排除（知识双轨：静态知识=知识库文档、动态知识=领域 agent 写入的向量库；复盘数据源=任务目录 + progress）。工具缺失无需排查；记忆库审计走直读 SQLite（默认 `~/bw-security-analysis/db/knowledge/knowledge.db`）。
+
 ## 进化流程
 
 ```
@@ -382,7 +384,7 @@ Security Analysis 的架构地图（目录树、归属规则、依赖方向、Pl
 - 脚本和工具放到 `$AGENT_DIR/scripts/` 或 `$SHARED_DIR/scripts/`
 - 知识库文件自包含——不通过路径引用 `docs/` 中的文件来补充信息
 
-**例外**: 向 `docs/资料/writeup-sources/` 写入的操作（download_sources.py 的 SOURCE_DIR 下载、蒸馏任务的源素材归档）——都是"写入"产出原始资料，不是 agent 运行时"依赖"（读取）。
+**例外**: 写入类操作——向 `docs/资料/writeup-sources/` 归档源素材（download_sources.py 的 SOURCE_DIR 下载、蒸馏任务）、向 `docs/解题报告/` 产出解题报告——都是产出交付物，不是 agent 运行时"依赖"（读取）。
 
 ### 规则 12: 修改后自检清单（每次修改知识库文件后、回复用户前必须逐条回答）
 
@@ -390,7 +392,7 @@ Security Analysis 的架构地图（目录树、归属规则、依赖方向、Pl
 
 ---
 
-## 知识库文档（按需加载索引）
+## 知识库文档（触发即读）
 
 | 文档路径 | 触发条件 |
 |----------|---------|
@@ -398,7 +400,7 @@ Security Analysis 的架构地图（目录树、归属规则、依赖方向、Pl
 | `$SHARED_DIR/knowledge-base/idapython-conventions.md` | 生成 IDAPython 脚本时 |
 | `$AGENT_DIR/knowledge-base/architecture-map.md` | 新增/移动文件、判定归属前 |
 | `$AGENT_DIR/knowledge-base/distillation-methodology.md` | 入口 C 素材进化: 蒸馏/先搜后蒸/给定文件提炼 |
-| `$AGENT_DIR/knowledge-base/retrospective-methodology.md` | 写《复盘报告》、提炼进化候选时 |
+| `$AGENT_DIR/knowledge-base/retrospective-methodology.md` | 写《复盘报告》、提炼进化候选、做机制审计/提交评审时 |
 | `$AGENT_DIR/knowledge-base/evolution-playbook.md` | 反模式/高风险改动/异常触发时 |
 | `$AGENT_DIR/knowledge-base/long-document-editing.md` | 编辑 >300 行文档、编辑连续未产出时 |
 | `$AGENT_DIR/knowledge-base/opencode-references.md` | Plugin/Agent 开发、查 vendor 源码时 |
