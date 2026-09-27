@@ -149,7 +149,7 @@ permission:
 
 | 模块 | 依赖 | 用途 | 关键函数/类 |
 |------|------|------|------------|
-| `$AGENT_DIR/scripts/web_helpers.py` | requests + bs4 + lxml | HTTP session 管理、CSRF 提取、注册登录、webhook 交互 | `create_session`、`get_csrf`、`register_and_login`、`extract_flag_from_webhook`、`create_webhook` |
+| `$AGENT_DIR/scripts/web_helpers.py` | requests + bs4 + lxml | HTTP session 管理、CSRF 提取、注册登录、webhook 交互、gopher SSRF URL 构造（自动修正 Content-Length） | `create_session`、`get_csrf`、`register_and_login`、`extract_flag_from_webhook`、`create_webhook`、`build_gopher_url` |
 | `$AGENT_DIR/scripts/cache_poison.py` | 无（纯标准库） | 缓存投毒攻击框架、Bot AE 探测、缓存键分析、缓存中缓存渗出 | `CachePoison`（类：`poison`/`verify_cache_hit`/`trigger_bot`/`read_exfil`）、`probe_accept_encoding`、`probe_cache_key` |
 | `$AGENT_DIR/scripts/param_bomb.py` | 无（纯标准库） | PHP max_input_vars 参数炸弹生成（POST/GET/两阶段组合） | `build_bomb_post_data`、`build_bomb_get_url`、`build_two_stage_bomb`、`estimate_param_count` |
 | `$AGENT_DIR/scripts/markdown_fuzz.py` | 无（纯标准库） | Markdown 解析器 XSS 注入系统化测试（8 种分类，30+ payload） | `MarkdownFuzzer`（类）、`generate_payloads`、`PayloadCategory` |
@@ -169,7 +169,7 @@ permission:
 | 文档 | 触发条件 |
 |------|---------|
 | `proxy-usage.md` | 任何批量请求/爆破/fuzz/浏览器分析任务，或检测到限流信号（429/挑战页）时。代理入口获取、限流三场景判定 SOP、Retry 装配、[LIMITED] 报告模板 |
-| `web-methodology.md` | 分析规划阶段（阶段 B）。白盒/黑盒分析流程、PHP 应用分析方法、Bot 类题目分析 |
+| `web-methodology.md` | 分析规划阶段（阶段 B）。白盒/黑盒分析流程、PHP 应用分析方法、Bot 类目标分析 |
 | `score-verification-osint.md` | 需要验证某账号/团队在某平台的历史成绩（排名/得分），活动页已删除或无法访问时。证书 S3 直链、档案页证书入口、API WAF 降级、双源矛盾裁决; 目标值无法在线验证时的交付规范见 web-methodology.md §4b |
 | `wordlists-guide.md`（$SHARED_DIR） | 任何爆破/fuzz 需要字典时（$WORDLISTS_DIR 场景选型速查: 目录/密码/子域/payload/中文设备口令） |
 | `web-vulnerabilities.md` | 识别到潜在漏洞类型时。XSS（含 Markdown 注入）、SSRF、iframe sandbox、Cookie 安全、开放重定向、Markdown 解析器安全测试方法论 |
@@ -178,7 +178,7 @@ permission:
 | `nextjs-analysis.md` | 识别到 Next.js 框架（特别是 App Router）。RSC/flight data 分析、middleware 审计、node_modules 源码阅读、框架内部不一致性探测 |
 | `spa-frontend-analysis.md` | 识别到 SvelteKit/SPA/纯前端应用（localStorage 认证、无后端数据库）。SvelteKit 路由分析、Notebook 导入攻击面、Bot localStorage 变体 + 异步 flag 时间差利用 |
 | `attack-orchestration.md` | 需要多步骤/多窗口攻击编排时。控制器页面模式、postMessage 攻击、popup 存活机制、SSO/OAuth 回调安全审计 |
-| `bot-patterns.md` | 分析 Bot server.js 时。Bot 代码通用结构、单页/双页模式快速分类、安全决策分析（URL 验证、httpOnly、Docker Chromium 特性）、攻击链决策树 |
+| `bot-patterns.md` | Bot 类目标（源码可见或黑盒可观察：自动审核/提交后自动访问/机器人预览页），或需分析 bot 浏览器 cookie/存储可达性时。Bot 代码通用结构、单页/双页模式快速分类、安全决策分析（URL 验证、httpOnly、cookie 播种与 jar 驱逐、Docker Chromium 特性）、攻击链决策树 |
 | `js-obfuscation-patterns.md` | 分析 JS 逆向题/混淆代码时。不可见 Unicode 字符、tagged template 隐式调用、Function.call 空函数、原型链劫持、debug condition 副作用 |
 | `browser-automation.md` | 需要打开网页/登录/浏览器自动化/远程调试/操作结果确认时。启动铁律与 browser_cdp.py 用法、三级探测链、登录决策树、人机验证判别、硬信号、CDP 核心 API、debug() API、常见陷阱、操作后确认方法论（持久信号优先） |
 | `client-side-attacks.md` | 有 admin bot + flag 在 bot 端。bfcache 污染、CSS trigram exfil、xsleak、iframe reparenting、connection pool |

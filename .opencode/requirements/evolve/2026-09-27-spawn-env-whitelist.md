@@ -38,6 +38,9 @@ darwin / linux（共 4 键）:
   `setdefault` 为单一来源（位于 import 链最顶部，时机足够早）; 4 个 MCP server
   零 huggingface 系 import（已逐一验证），不需要
 - 业务键（DEEPSEEK_API_KEY 等）: 原本就不注入，全量继承断掉后自然隔离
+- 代理键（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 等）: 不透传——当前部署环境无代理
+  （实测 shell 代理键 0）; 若未来在代理受限网络部署，控制台的模型下载与
+  GitHub API 将直连失败，届时将代理键加入 buildSpawnEnv 透传列表即可
 
 Windows（win32 分支按语义编写，无环境验证——关联 pending-items #5）:
 透传 `PATH / USERPROFILE / HOMEDRIVE / HOMEPATH / TEMP / TMP / SystemRoot /
@@ -218,6 +221,16 @@ plist 是控制台另一条 spawn 路径（launchd 启动），其 env 集应与
    不读业务键），env 继承无执行面消费，清理必要性弱; 保持 opencode 合并
    语义直跑（与历史行为一致）。控制台白名单不受影响。env -i 机制知识
    备档 opencode-references.md 供未来收紧时使用。
+7. **（外部 review 修复）装饰器分离 bug**: test_github_token_config_path
+   插入时 edit 未包含装饰器行，@test("config.is_dev_mode...") 挂到新函数
+   头上、test_dev_mode_default 失去装饰器静默退出收集（85+1=86 的数字
+   掩盖了 -1+1）。修复后 87/87。讽刺的是失效模式正是本仓库
+   testing-blind-spot-patterns 模式 A 的变体（插入位置偷装饰器）。
+8. **（外部 review 低优先级三项）**: model_assets _hf_endpoint 陈旧
+   docstring 修正（.ai_env > 官方默认）; launchd plist 的 PATH/HOME 补
+   XML 转义（PATH 含 &/< 时 launchctl load 会失败）; test_integration
+   场景 6 移至横幅前（结构归位）。代理键不透传决策记入 §2.1 排除列表
+   （当前环境无代理，实测 0 键）。
 
 生效时点: 控制台白名单即时生效（生产 60468）; MCP 白名单 command 在
 opencode 下次重启后生效（注册发生在 opencode 启动时）。

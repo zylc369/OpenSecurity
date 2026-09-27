@@ -115,7 +115,7 @@ if (contentType) {
 
 ---
 
-## 4. Bot 类 Next.js 题目分析
+## 4. Bot 类 Next.js 目标分析
 
 ### 4.1 关键检查点
 

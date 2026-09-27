@@ -227,7 +227,7 @@ Security Analysis 的架构地图（目录树、归属规则、依赖方向、Pl
   - `.py`: `python -c "compile(open('<文件>').read(), '<文件>', 'exec')"`
   - `.ts`: `node --check <文件>`
   - `.json`: `python -c "import json; json.load(open('<文件>'))"`
-  - `.md`: 无自动检查，人工读一遍确认自包含性
+  - `.md`: 人工读一遍确认自包含性 + 不可见字节扫描（编辑存量文件后必做——NUL/控制字节会让 grep 断言静默归零、git diff 变 Binary; 扫描模板与修复纪律见 `$AGENT_DIR/knowledge-base/testing-blind-spot-patterns.md` 模式 H）
   - ⚠ 语法检查只能发现语法错误，语义错误（资源泄漏、类型错误、逻辑错误）由验证点覆盖
 - 接口变更属于高风险改动，参照"高风险改动"表的验证要求执行
 

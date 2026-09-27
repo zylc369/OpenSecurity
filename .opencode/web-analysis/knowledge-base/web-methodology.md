@@ -36,7 +36,7 @@
 | 🟡 中 | 认证/授权代码 | 权限绕过 |
 | 🟡 中 | Bot/爬虫代码 | Bot 行为决定了 XSS 的触发条件和 Cookie 可达性 |
 | 🟢 低 | 前端代码 | 通常只影响用户体验，除非有 XSS |
-| 🔴 高 | 框架/运行时源码（node_modules/vendor） | **复杂题目的突破往往在这里** |
+| 🔴 高 | 框架/运行时源码（node_modules/vendor） | **复杂目标的突破往往在这里** |
 
 ### 1.3 框架/运行时源码审计方法
 
@@ -93,9 +93,9 @@ PHP 的 `max_input_vars` 限制计算**所有来源**的输入变量：
 
 利用方法：在正常参数之后添加垃圾参数，使总数超过 1000。重要参数放在前面确保被正常解析。
 
-### 1.5 Bot 类题目分析方法
+### 1.5 Bot 类目标分析方法（自动化浏览器）
 
-CTF 中 Bot 类题目是非常常见的模式：Bot 用浏览器访问页面，带着包含 flag 的数据。目标是构造 XSS 在 Bot 的浏览器中执行，窃取数据。
+自动化浏览器访问用户可控 URL 的场景（admin bot、受害者会话模拟、审批/巡检机器人）中，Bot 用浏览器访问页面，带着高价值数据（凭据/token/flag）。目标是构造 XSS 在 Bot 的浏览器中执行，窃取数据。
 
 **按 flag 存储位置分类**：
 
@@ -115,7 +115,7 @@ CTF 中 Bot 类题目是非常常见的模式：Bot 用浏览器访问页面，�
 | Bot 使用 Puppeteer/Playwright | 真实浏览器，支持 JS 执行 |
 | Cookie 域设置为内部域名 | Cookie 只在内部网络域名下发送 |
 
-#### 1.5.2 Bot 类题目分析流程
+#### 1.5.2 Bot 类目标分析流程
 
 ```
 1. 确定 Bot 行为
@@ -256,6 +256,7 @@ const poll = setInterval(() => {
 **HTML 线索**: `<!--注释-->`/`<input type=hidden>`/`<form action>` 暴露接口。
 **Cookie/表单指纹→方向**: PHPSESSID→LFI/反序列化/上传｜connect.sid→原型链/EJS SSTI｜JSESSIONID→反序列化/JNDI/SpEL｜csrfmiddlewaretoken→Django Jinja2 SSTI｜session=eyJ→Flask session 伪造。
 **CTF 单应用效率原则**（CTF-only）: 2-3 轮内完成侦察；不做子域枚举、不做大规模端口扫描；有发现就地深入。
+**兄弟子域定位**（目标 URL 未知、但已知同域任一兄弟服务域名时，按序）: ①`dig +short <已知子域>` 解析 IP → ``echo | openssl s_client -connect <IP>:443 -servername <已知子域> 2>/dev/null | openssl x509 -noout -text | grep -A2 "Subject Alternative Name"``——批量部署的兄弟服务常共用一张多域名证书（同一 LB 后的多站点/多租户均此模式），1 次请求得全部兄弟域名且无 CT 日志入库延迟; ②`crt.sh` 查询（受 CT 日志入库延迟影响，刚部署的证书常查不到）; ③DNS 字典爆破为最后手段——服务命名多为非字典词（拼接词/主题词），命中率极低。
 
 | 枚举方向 | 方法 | 工具 |
 |---------|------|------|
@@ -447,7 +448,7 @@ def fuzz(tmpl, words, headers=None, filt=lambda r: r.status_code != 404):
 
 ### 7.4 侦察与端口扫描工具链
 
-> 本节为扫描工具生态（高速无状态扫描/SAN 批量/渲染爬虫）。**项目内最小替代路径**: 子域→`curl "https://crt.sh/?q=%25.target.com&output=json"`（证书 SAN）+ dnspython 爆破; 存活探测→python 线程池模板（§7.3）; 端口→nmap; 历史 URL→`curl "http://web.archive.org/cdx/search/cdx?url=*.target.com*&output=json&limit=500"`; JS 端点→web_render.py（playwright 渲染后 grep）; 测绘→FOFA/Shodan API curl。环境具备 go 工具族时用下方管道效率更高。
+> 本节为扫描工具生态（高速无状态扫描/SAN 批量/渲染爬虫）。**项目内最小替代路径**: 子域→证书 SAN 直读优先（`openssl s_client`/`openssl x509`，见 §2.2 兄弟子域定位）+ `curl "https://crt.sh/?q=%25.target.com&output=json"`（证书 SAN）+ dnspython 爆破; 存活探测→python 线程池模板（§7.3）; 端口→nmap; 历史 URL→`curl "http://web.archive.org/cdx/search/cdx?url=*.target.com*&output=json&limit=500"`; JS 端点→web_render.py（playwright 渲染后 grep）; 测绘→FOFA/Shodan API curl。环境具备 go 工具族时用下方管道效率更高。
 
 **端口扫描三件分工**: naabu（SYN 高并发快 10×，非 root 自动 CONNECT，`-top-ports 100/1000`，端口发现首选）→ nmap 深度（`-sV` 版本 `--version-intensity 9` 精确/`-O` OS 指纹/`-A` 组合/600+ NSE; UDP 慢限定 `-sU -p 53,161,500`）; masscan 大规模（/16+ 异步无状态 `--rate 10000`，需 root，nmap XML 兼容输出）。
 **fscan 内网优先**: 单二进制 scp 即用/600 线程/内置 10 服务弱口令爆破/POC（MS17-010·Redis 未授权·WebLogic·Struts2 兼容 xray POC）/利用动作直接打（Redis 写公钥）/NetBIOS 域控识别/国产 CMS·OA 指纹; `-nopoc` 与 `-nobr` 独立开关，`-m ssh/ms17010` 单模块，`-pa` 追加端口。同族 gogo（500 并发 `--filter`）。nikto: `-Tuning` 数字（1上传 2默认文件 3信息泄露 4注入 6DoS 8命令执行 9SQLi; `x6` 排除 DoS）/`-no404` 减误报。服务指纹: fingerprintx（51 协议 `--json`，`naabu -silent | fingerprintx`）/nerva。

