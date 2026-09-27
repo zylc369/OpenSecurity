@@ -149,8 +149,9 @@ def create_app() -> FastAPI:
 
     # 开发态自动拉起 vite dev server（此前依赖手动启动，控制台重启后
     # 前端 404）。幂等：vite 已运行则跳过；拉起失败由 dev 提示页指路。
-    from services.config_manager import ConfigManager as _is_dev
-    if _is_dev():
+    # 注意不能把 ConfigManager 类当谓词调用（构造单例恒真——曾在生产
+    # 每次 create_app 都 spawn vite）
+    if ConfigManager.get_instance().is_dev_mode:
         from services.frontend_port import FrontendPortRegistry
         FrontendPortRegistry.get_instance().ensure_vite_dev()
 

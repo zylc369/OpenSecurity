@@ -39,22 +39,7 @@ async def get_config_meta() -> dict[str, dict]:
     hidden=True 的键不进配置页（专属 TAB 管理 / 仅 .ai_env 手编，如远程资源）。
     """
 
-    meta: dict[str, dict] = {}
-    for field in [*REQUIRED_CONFIGS, *EXTRA_CONFIG_META, *REMOTE_TAB_CONFIGS, *REMOTE_TUNABLE_CONFIGS]:
-        meta[field.key] = {
-            "label": field.label,
-            "type": field.type,
-            "hint": field.hint,
-            "required": field.required,
-            "default_value": field.default_value,  # 不配置时后端使用的默认值
-            "hidden": field.hidden,
-        }
-    # .ai_env 中存在但无元数据的键 → text 兜底（保证 meta 覆盖全部键）
-    for key in ConfigManager.get_instance().get_all():
-        if key not in meta:
-            meta[key] = {"label": key, "type": "text", "hint": "", "required": False,
-                         "default_value": "", "hidden": False}
-    return meta
+    return ConfigManager.get_instance().config_meta()
 
 
 @router.get("/required-status")

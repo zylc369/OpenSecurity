@@ -70,17 +70,6 @@ class FrontendPortRegistry:
         return False
 
 
-    def effective_bind_host() -> str:
-        """实际绑定地址: 节点角色（CONTROL_API_KEY 已配置）→ 0.0.0.0（局域网可入）;
-        否则维持 127.0.0.1（默认仅本机，安全约束）。"""
-        try:
-            cm = ConfigManager.get_instance()
-            if (cm.get(cm.Keys.CONTROL_API_KEY) or "").strip():
-                return "0.0.0.0"
-        except Exception:  # noqa: BLE001 —— 配置读取异常 → 安全默认
-            pass
-        return ConfigManager.Protocol.BIND_HOST
-
     @staticmethod
     def effective_bind_host() -> str:
         """实际绑定地址: 节点角色（CONTROL_API_KEY 已配置）→ 0.0.0.0（局域网可入）;

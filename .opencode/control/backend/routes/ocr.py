@@ -1,7 +1,7 @@
 """/api/ocr 路由：本地图像文字识别（glm-ocr，控制台持有模型）。
 
 消费方：mcp-servers/ocr/server.py（MCP 薄壳，extract 直调——懒加载对壳透明）。
-生命周期语义见 services/OcrService.get_instance().py（extract 懒加载 + 纯空闲 600s 自动卸载）。
+生命周期语义见 services/ocr_service.py（extract 懒加载 + 纯空闲 600s 自动卸载）。
 """
 from __future__ import annotations
 

@@ -93,9 +93,15 @@ def test_initial_ok():
 @test("remote_link: 连续 2 次失败 → DEGRADED + 预热触发")
 def test_degrade_on_failures():
     async def run():
+        # 预热验证: 只替换 _model_inference 返回桩（真 _warm_local 保持原样——
+        # 曾因整体替换 _warm_local 掩盖了 staticmethod 引用 self 的必炸 bug）。
+        # patch/还原必须 staticmethod 包装对称: 类属性读取会脱壳成普通函数，
+        # 裸还原会破坏 staticmethod 语义（实例调用绑定 self → TypeError）
         warm_calls = []
-        rl_module.RemoteLinkService._warm_local = staticmethod(  # noqa: SLF001
-            lambda: warm_calls.append(1))
+        stub = type("StubMI", (), {"preload_all_models_background": staticmethod(
+            lambda: warm_calls.append(1))})()
+        orig_mi = rl_module.RemoteLinkService.__dict__["_model_inference"]
+        rl_module.RemoteLinkService._model_inference = staticmethod(lambda: stub)  # noqa: SLF001
         svc = _mk_service()
         _set_probe(svc, [_ok_info()])
         await _pump(svc, 1)
@@ -108,6 +114,7 @@ def test_degrade_on_failures():
         assert_true("fail-2" in (st.last_fail_reason or ""), "记录失败原因")
         assert_false_fn = st.fail_streak
         assert_eq(assert_false_fn, 2, "fail_streak=2")
+        rl_module.RemoteLinkService._model_inference = orig_mi  # noqa: SLF001
         assert_true(len(warm_calls) == 1, f"预热触发一次，实际 {len(warm_calls)}")
         assert_true(not svc.should_use_remote(), "路由关闭（本地兜底）")
     asyncio.run(run())

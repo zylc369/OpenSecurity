@@ -114,12 +114,9 @@ class OcrService:
         Raises:
             RuntimeError: 加载失败 / 推理失败。
         """
-        if self._backend() == "ollama":
-            if not self._ollama.available():
-                raise RuntimeError("Ollama 不可用或未拉取 glm-ocr（控制台模型页可下载）")
-            text, _ = await self._ollama.infer(image_b64, prompt)
-            return text
-        # 远程路由（对 remote_link/remote_client 延迟 import——循环依赖防护）
+        # 远程路由（对 remote_link/remote_client 延迟 import——循环依赖防护）。
+        # 三模型统一远程化: ollama 平台同样先路由远程——远程不可用再回落
+        # 本地后端（mlx 受管模型 / ollama），与 embed/rerank 的降级语义一致
         try:
             from services.remote_link import RemoteLinkService
             use_remote = RemoteLinkService.get_instance().should_use_remote()
@@ -133,6 +130,12 @@ class OcrService:
             except RemoteUnavailable as e:
                 RemoteLinkService.get_instance().note_request_failure(f"ocr: {e}")
                 logger.warning("远程 ocr 失败，fallback 本地: %s", e)
+        # 本地推理: 后端二选一（mlx 受管模型 / ollama）
+        if self._backend() == "ollama":
+            if not self._ollama.available():
+                raise RuntimeError("Ollama 不可用或未拉取 glm-ocr（控制台模型页可下载）")
+            text, _ = await self._ollama.infer(image_b64, prompt)
+            return text
         # 阶段 1: 预处理（并发——纯 CPU，不进 worker 队列）
         prepared = await asyncio.to_thread(self._mlx.preprocess, image_b64, prompt)
         # 阶段 2: generate（ManagedModel: 确保加载 + worker FIFO 串行;

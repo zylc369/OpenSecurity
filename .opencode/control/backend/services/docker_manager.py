@@ -361,7 +361,7 @@ class DockerManager:
                 return
         raise RuntimeError(f"Docker daemon 启动超时（{timeout}s 未就绪，请手动启动 Docker）")
 
-
+    @staticmethod
     def ensure_neo4j_events_blocking() -> None:
         """确保 neo4j-events 容器运行且 bolt(7687) 可连（运行→等就绪；停止→start；不存在→拉镜像+创建）。
 

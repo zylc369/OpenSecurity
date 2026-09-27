@@ -123,7 +123,7 @@ class ConsoleRestarter:
             "pid=int(sys.argv[1])\n"
             "while True:\n"
             "    try:\n"
-            "        os.kill(pid, 0); time.sleep(" + str(self.WIN_HELPER_POLL_SEC) + ")\n"
+            "        os.kill(pid, 0); time.sleep(" + str(ConsoleRestarter.WIN_HELPER_POLL_SEC) + ")\n"
             "    except OSError:\n"
             "        break\n"
             "server=sys.argv[2]\n"

@@ -80,3 +80,19 @@
 - 实施: test_control 新增 81 号用例（四段断言: create 1024 维 / create_batch 2×1024 / rank 真推理区分度+降序 / create_graphiti 组装类型——graphiti 未传参静默默认 OpenAIEmbedder 的唯一防线）; 置 E2E /rerank 后
 - 防作弊闭环: 注入旧 bug 形态（reranker.py 裸模块调用）→ 用例红（报错与生产当天一字不差）→ 还原 → 绿
 - 验收: 81/81（耗时 77.8s，增量 ~8s 含测试进程首次模型加载）; e2e_real 6/6; config_manager 5/5 + api_guard 4/4 抽测绿; 生产代码零改动
+
+## 追加（2026-09-27 晚六）：外部 review 修复——8 生产 bug + 测试盲区
+外部代码评审（基线 89ab1ba0）发现 8 个生产 bug（全部运行时复现属实），本轮全部修复：
+1. [高] routes/config_route /api/config/meta 引用已删常量 → 500（配置页失效）→ 切 ConfigManager.config_meta()
+2. [高] remote_link._warm_local @staticmethod 引用 self → 降级预热必炸（远程挂时 /health 永久 503）→ 改实例方法
+3. [中高] server.py ConfigManager 类别名当谓词恒真 → 生产每次启动 spawn vite → 改 get_instance().is_dev_mode
+4. [中] restart._restart_windows 同款 self 引用 → Windows 重启静默失败 → 类常量直引
+5. [中] launchd plist 缺 EnvironmentVariables → 自启动节点配置错位自毁 → 补 OPENCODE_ROOT/DATA_DIR + WorkingDirectory
+6. [低中] ipc_probe_alive 缺 @staticmethod / frontend_port effective_bind_host 重复定义 / docker_manager ensure_neo4j 缺装饰器 → 三处修齐
+7. [低] 心跳 _tunables() 在 try 外 → 瞬时读配置异常杀心跳任务 → 入 try
+8. [低] OCR ollama 分支先于远程路由 → 非 mlx 平台永不远程 → 远程优先+本地回落（与 embed/rerank 语义一致）
+遗漏项：routes/deps.py 模块级 deps_service 删除（DepsService 单例化，_init_once 模板防 __init__ 重入）; 三处陈旧文档引用清理
+测试盲区修复：
+- /api/config/meta 新增 E2E 用例（82 号——bug#1 溜走通道）
+- test_remote_link 预热验证改 patch _model_inference 返回桩（真 _warm_local 保持原样——曾掩盖 bug#2）; 修 staticmethod patch/还原脱壳坑（__dict__ 取原对象）
+验证: test_control 82/82; remote_link 9/9; 快族+proxy 58 全绿; e2e_remote 三模型全链路 ✓; e2e_real 6/6; 生产控制台重启（/api/config/meta 27 项 ✓; vite 零进程 ✓）

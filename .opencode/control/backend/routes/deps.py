@@ -112,17 +112,40 @@ class SharedInfraView:
 
 
 class DepsService:
-    """依赖快照服务（模块级单例 deps_service）。
+    """依赖快照服务（get_instance() 单例——模块级实例导出已删）。
 
     状态封装：缓存读写全走方法；_build_lock 保护预热线程与
     请求线程池的并发写入；_singleflight 让并发请求共享一次构建。
     """
 
-    def __init__(self, ttl_sec: float = SNAPSHOT_TTL_SEC) -> None:
-        self._ttl_sec = ttl_sec
+    _instance: "DepsService | None" = None
+    _instance_lock = __import__("threading").Lock()
+
+    def __new__(cls) -> "DepsService":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    inst = super().__new__(cls)
+                    inst._init_once()
+                    cls._instance = inst
+        return cls._instance
+
+    def _init_once(self) -> None:
+        """一次性初始化（__new__ 内调用——不定义 __init__: Python 对每次
+        cls() 都重跑 __init__ 会抹掉缓存/锁运行态，IpcListener 曾栽过）。"""
+        self._ttl_sec = SNAPSHOT_TTL_SEC
         self._snap: DepsSnapshot | None = None
         self._build_lock = threading.Lock()
         self._singleflight = asyncio.Lock()
+
+    @classmethod
+    def get_instance(cls) -> "DepsService":
+        return cls()
+
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        with cls._instance_lock:
+            cls._instance = None
 
     # ── 快照 ──
 
@@ -279,23 +302,20 @@ class DepsService:
         return (agent == "all" or agent in t.agents) and detect_tools.ToolsScanner.get_instance()._platform_matches(t)
 
 
-# 模块级单例
-deps_service = DepsService()
-
 
 def warm_deps_snapshot() -> None:
     """模块级委托（server.py 启动预热调用）。"""
-    deps_service.warm()
+    DepsService.get_instance().warm()
 
 
 def invalidate_deps_snapshot() -> None:
     """模块级委托（依赖状态变更路由调用）。"""
-    deps_service.invalidate()
+    DepsService.get_instance().invalidate()
 
 
 def _register_invalidation_hooks() -> None:
     """模型下载完成回调 → 快照失效（依赖方向 routes → services 合法）。"""
-    ModelAssetRegistry.get_instance().add_change_callback(lambda _mid: deps_service.invalidate())
+    ModelAssetRegistry.get_instance().add_change_callback(lambda _mid: DepsService.get_instance().invalidate())
 
 
 _register_invalidation_hooks()
@@ -317,5 +337,5 @@ async def get_agent_deps(agent: str, refresh: bool = False) -> dict:
 
     ?refresh=1 强制重建快照（排查用；正常路径走 TTL 缓存）。
     """
-    snap = await deps_service.get_snapshot(force=refresh)
-    return asdict(deps_service.assemble(agent, snap))
+    snap = await DepsService.get_instance().get_snapshot(force=refresh)
+    return asdict(DepsService.get_instance().assemble(agent, snap))

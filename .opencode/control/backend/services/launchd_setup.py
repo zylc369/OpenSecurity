@@ -63,10 +63,20 @@ class LaunchdManager:
 
     @classmethod
     def _plist_content(cls) -> str:
-        """生成 plist（解释器 + server.py 均绝对路径）。"""
+        """生成 plist（解释器 + server.py 均绝对路径）。
+
+        EnvironmentVariables 必带 OPENCODE_ROOT/DATA_DIR: LaunchAgent 无
+        shell 环境，缺这两键时 ConfigManager 的 .ai_env 定位回退到相对
+        路径（launchd 工作目录通常为 /）→ 节点以全默认配置启动并因
+        心跳自杀退出（CONTROL_RESIDENT 等在 .ai_env 内可正常读到）。
+        """
+        import os
         from services.config_manager import ConfigManager
+        cm = ConfigManager.get_instance()
         server_py = Path(__file__).resolve().parents[1] / "server.py"
-        log_dir = Path(ConfigManager.get_instance().data_dir) / "logs"
+        log_dir = Path(cm.data_dir) / "logs"
+        oc_root = os.environ.get("OPENCODE_ROOT") or str(server_py.parents[2])
+        data_dir = os.environ.get("DATA_DIR") or str(cm.data_dir)
         return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
         "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -79,6 +89,15 @@ class LaunchdManager:
         <string>{sys.executable}</string>
         <string>{server_py}</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>OPENCODE_ROOT</key>
+        <string>{oc_root}</string>
+        <key>DATA_DIR</key>
+        <string>{data_dir}</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>{server_py.parents[1]}</string>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>

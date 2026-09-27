@@ -25,7 +25,7 @@ start() 返回 IpcStartStatus 枚举（调用方按语义处理，不用裸 bool
 日志：全路径经 logging 打到 DATA_DIR/logs/control.log（stdio=ignore 下
 print 不可见——见 services/logging_setup.py）。
 
-模块级单例 ipc_listener + 同名委托（消费方零改动）。
+单例经 IpcListener.get_instance() 获取（模块级委托已删）。
 """
 from __future__ import annotations
 
@@ -87,6 +87,7 @@ class IpcListener:
                 cls._instance.cleanup()
             cls._instance = None
 
+    @staticmethod
     def ipc_probe_alive(timeout: float = 1.0) -> bool:
         """IPC 通道上是否有活着的控制台（connect 一次，通 = 活）。无共享态。"""
         if ConfigManager.get_instance().is_windows:

@@ -677,6 +677,24 @@ def test_e2e_required_status():
     assert_true("DEEPSEEK_API_KEY" in data, "应有 DEEPSEEK_API_KEY 状态")
 
 
+@test("E2E: GET /api/config/meta 配置页元数据")
+def test_e2e_config_meta():
+    """配置页渲染唯一数据源（曾因引用已删模块级常量 500——页面永久"加载中"，
+    无测试覆盖而溜进生产; 本用例锚定端点 200 + 结构契约）。"""
+    cp = get_shared_server()
+    import httpx
+    r = cp.client.get("http://localhost/api/config/meta", timeout=5)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_true(isinstance(data, dict) and len(data) > 5, f"meta 应为非空 dict: {type(data)}")
+    for key in ("DEEPSEEK_API_KEY", "IDA_PRO_HOME", "DEEPSEEK_MODEL"):
+        assert_true(key in data, f"meta 缺 {key}")
+        field = data[key]
+        for prop in ("label", "type", "required", "default_value", "hidden"):
+            assert_true(prop in field, f"{key}.{prop} 缺失")
+    assert_true(data["DEEPSEEK_API_KEY"]["required"], "API_KEY 应 required")
+
+
 @test("E2E: GET /api/scan 全量扫描")
 def test_e2e_scan():
     cp = get_shared_server()

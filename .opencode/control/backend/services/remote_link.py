@@ -4,7 +4,7 @@
 
 心跳（asyncio task，server lifespan 启动）:
   周期与阈值经 ConfigManager.get_instance().remote_tunables() 每轮重读（.ai_env 配置，
-  改后即时生效; 键清单/默认值见 config.REMOTE_TUNABLE_CONFIGS）:
+  改后即时生效; 键清单/默认值见 ConfigManager.remote_tunables()）:
     • 连续失败达 fail_threshold（含请求级失败反馈）:
         REMOTE → DEGRADED + 后台预热本地三模型（降级）
     • 连续成功达 recover_threshold:
@@ -193,7 +193,13 @@ class RemoteLinkService:
 
     async def _heartbeat_loop(self) -> None:
         while True:
-            await asyncio.sleep(_tunables().heartbeat_interval_sec)
+            try:
+                await asyncio.sleep(_tunables().heartbeat_interval_sec)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 —— 读配置瞬时异常不杀心跳任务
+                logger.exception("心跳读 tunables 异常（本轮跳过继续）")
+                continue
             try:
                 await self._probe_once()
             except asyncio.CancelledError:
@@ -268,9 +274,8 @@ class RemoteLinkService:
 
     # ── 预热 / 延迟卸载（后台线程; 延迟 import 防循环）─────
 
-    @staticmethod
-    def _warm_local() -> None:
-                self._model_inference().preload_all_models_background()
+    def _warm_local(self) -> None:
+        self._model_inference().preload_all_models_background()
 
     def _schedule_unload_locked(self) -> None:
         """安排稳定期后卸载（持锁调用）。"""
