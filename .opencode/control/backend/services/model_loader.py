@@ -72,12 +72,12 @@ class ModelInferenceService:
         """测试重置收尾: 卸载两模型（还内存）。"""
         try:
             self._embedder_managed.release()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001 —— 释放失败留痕（内存可能未回收）
+            logger.warning("embedder 释放异常: %s", e)
         try:
             self._reranker_managed.release()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001 —— 释放失败留痕（内存可能未回收）
+            logger.warning("reranker 释放异常: %s", e)
 
     def _init_once(self) -> None:
         # 裸引用（_embedder/_reranker）仅在 ManagedModel worker 线程写
@@ -196,8 +196,8 @@ class ModelInferenceService:
         try:
             from services.remote_link import RemoteLinkService
             RemoteLinkService.get_instance().note_request_failure(description)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning("note_request_failure 通知失败: %s", e)
 
     def _remote_client(self):
         """获取共享远程客户端（remote_link 持有; 配置热重载时重建）。"""

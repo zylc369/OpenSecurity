@@ -193,8 +193,8 @@ class KnowledgeStoreService:
                     if self._db is not None:
                         try:
                             self._db.close()
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning("坏库重建初始化失败（下一条重试）: %s", e)
                         self._db = None  # 下一条重试初始化
             finally:
                 self._queue.task_done()
@@ -202,8 +202,8 @@ class KnowledgeStoreService:
             if self._db is not None:
                 try:
                     self._db.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("MemoryDB close 异常: %s", e)
                 self._db = None
         logger.info("worker 退出")
 

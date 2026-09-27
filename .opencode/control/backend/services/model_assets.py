@@ -172,8 +172,8 @@ class ModelAssetRegistry:
         for fn in list(self._change_callbacks):
             try:
                 fn(model_id)
-            except Exception:
-                pass  # 回调异常不干扰下载流程
+            except Exception as e:
+                logger.warning("模型回调异常（不干扰下载）: %s", e)
 
 
     def _hf_endpoint(self) -> str:
@@ -191,8 +191,8 @@ class ModelAssetRegistry:
                 if repo.repo_id == repo_id:
                     return ModelCacheState(True, str(repo.repo_path),
                                            round(repo.size_on_disk / 1024**3, 2))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("缓存状态读取异常: %s", e)
         return ModelCacheState(False, None, 0.0)
 
 

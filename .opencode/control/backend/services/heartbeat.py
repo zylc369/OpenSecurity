@@ -193,7 +193,8 @@ class HeartbeatTask:
         try:
             cm = ConfigManager.get_instance()
             return (cm.get(cm.Keys.CONTROL_RESIDENT) or "").strip().lower() in ("1", "true")
-        except Exception:  # noqa: BLE001 —— 配置读取异常 → 默认非常驻
+        except Exception as e:  # noqa: BLE001 —— 配置读取异常 → 默认非常驻
+            logger.warning("CONTROL_RESIDENT 读取异常（默认非常驻）: %s", e)
             return False
 
     def start(self) -> None:

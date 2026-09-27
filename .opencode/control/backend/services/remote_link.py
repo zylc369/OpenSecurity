@@ -110,8 +110,8 @@ class RemoteLinkService:
         if self._client is not None:
             try:
                 self._client.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                logger.warning("远程 client close 异常: %s", e)
 
     def _init_once(self) -> None:
         self._lock = threading.Lock()
@@ -377,8 +377,8 @@ class RemoteLinkService:
         if self._client is not None:
             try:
                 self._client.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                logger.warning("远程 client close 异常（重建前）: %s", e)
         t = _tunables()
         self._client = RemoteConsoleClient(
             url, token=token,
@@ -403,8 +403,8 @@ class RemoteLinkService:
             try:
                 from services.ocr_service import OcrService
                 local_models["ocr"] = OcrService.get_instance().status().state
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                logger.warning("OCR 状态采集异常: %s", e)
             countdown: float | None = None
             if self._unload_due_at is not None:
                 countdown = max(0.0, self._unload_due_at - time.monotonic())

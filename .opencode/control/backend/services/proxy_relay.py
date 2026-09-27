@@ -53,7 +53,7 @@ class Tunnel:
         try:
             self.up_w.write_eof()
         except (OSError, RuntimeError) as e:
-            ProxyRelay.logger.debug("write_eof 已关闭连接（预期半关收尾）: %s", e)
+            ProxyRelay.logger.warning("write_eof 已关闭连接（预期半关收尾）: %s", e)
         # 2. 等待响应方向泵自然结束（剩余字节送达 + 客户端方向收尾），grace 兜底
         deadline = time.monotonic() + grace
         if len(self.tasks) > 1:
@@ -62,13 +62,13 @@ class Tunnel:
                 try:
                     await asyncio.wait({self.tasks[1]}, timeout=remaining)
                 except Exception as e:
-                    ProxyRelay.logger.debug("等待响应泵结束异常: %r", e)
+                    ProxyRelay.logger.warning("等待响应泵结束异常: %r", e)
         # 3. 兜底强关（超长响应场景）
         for w in (self.up_w, self.client_w):
             try:
                 w.close()
             except Exception as e:
-                ProxyRelay.logger.debug("graceful_close 兜底关闭异常（多已关闭）: %s", e)
+                ProxyRelay.logger.warning("graceful_close 兜底关闭异常（多已关闭）: %s", e)
 
 
 class ProxyRelay:
@@ -208,7 +208,7 @@ class ProxyRelay:
                     w.write(data)
                     await w.drain()
             except (ConnectionError, asyncio.IncompleteReadError, OSError, RuntimeError) as e:
-                ProxyRelay.logger.debug("隧道泵结束（连接断开/EOF后写属正常流）: %s", e)
+                ProxyRelay.logger.warning("隧道泵结束（连接断开/EOF后写属正常流）: %s", e)
             finally:
                 # 半关目标（write_eof 传播 EOF）而非 close——close 会立即杀死对端方向
                 # 正在投递的在飞响应（优雅关闭场景）。close 留给 _pipe 统一收尾。
@@ -236,7 +236,7 @@ class ProxyRelay:
                 try:
                     w.close()
                 except Exception as e:
-                    ProxyRelay.logger.debug("隧道收尾关闭异常（多已关闭）: %s", e)
+                    ProxyRelay.logger.warning("隧道收尾关闭异常（多已关闭）: %s", e)
             ProxyRelay._tunnels.discard(tunnel)
 
     @staticmethod
@@ -291,9 +291,9 @@ class ProxyRelay:
                 await ProxyRelay._pipe(tunnel, client_r, up_r)
             # 其他方法（相对 URI/未知协议）：关闭
         except (asyncio.TimeoutError, ConnectionError, OSError, ValueError) as e:
-            ProxyRelay.logger.debug("客户端连接结束（超时/断开/非法输入）: %r", e)
+            ProxyRelay.logger.warning("客户端连接结束（超时/断开/非法输入）: %r", e)
         finally:
             try:
                 client_w.close()
             except Exception as e:
-                ProxyRelay.logger.debug("客户端连接收尾关闭异常: %s", e)
+                ProxyRelay.logger.warning("客户端连接收尾关闭异常: %s", e)

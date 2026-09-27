@@ -265,7 +265,7 @@ class IpcListener:
             except OSError as e:
                 logger.info("IPC accept loop: 退出（监听 socket 关闭: %s）", e)
                 return  # 进程退出
-            logger.debug("IPC accept: 新连接")
+            logger.info("IPC accept: 新连接")
             threading.Thread(target=self._serve_conn, args=(conn,), daemon=True).start()
 
     def _serve_conn(self, conn: socket.socket) -> None:
@@ -298,7 +298,7 @@ class IpcListener:
             except OSError as e:
                 logger.info("IPC accept loop: 退出（%s）", e)
                 return
-            logger.debug("IPC accept: 管道客户端连入")
+            logger.info("IPC accept: 管道客户端连入")
             try:
                 nxt = win32pipe.CreateNamedPipe(
                     ConfigManager.get_instance().ipc_addr(),

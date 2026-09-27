@@ -78,8 +78,8 @@ class FrontendPortRegistry:
             cm = ConfigManager.get_instance()
             if (cm.get(cm.Keys.CONTROL_API_KEY) or "").strip():
                 return "0.0.0.0"
-        except Exception:  # noqa: BLE001 —— 配置读取异常 → 安全默认
-            pass
+        except Exception as e:  # noqa: BLE001 —— 配置读取异常 → 安全默认
+            logger.warning("bind host 配置读取异常（安全默认）: %s", e)
         return ConfigManager.Protocol.BIND_HOST
 
     # ── 控制台 TCP 通道 ────────────────────────────────────

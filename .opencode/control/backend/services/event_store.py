@@ -195,8 +195,8 @@ class EventStoreService:
         if self._graphiti is not None:
             try:
                 await self._graphiti.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("graphiti close 异常（reset 路径）: %s", e)
             self._graphiti = None
 
     # ── worker（写路径）────────────────────────────────────
@@ -294,7 +294,8 @@ class EventStoreService:
         try:
             graphiti = await self._on_loop(self._ensure_graphiti())
             return await self._on_loop(graphiti.search_(**kwargs))
-        except Exception:
+        except Exception as e:
+            logger.warning("搜索失败（reset 后重试）: %s", e)
             await self._on_loop(self._reset_graphiti())
             graphiti = await self._on_loop(self._ensure_graphiti())
             return await self._on_loop(graphiti.search_(**kwargs))

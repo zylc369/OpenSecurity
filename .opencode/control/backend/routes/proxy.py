@@ -10,10 +10,14 @@
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services.config_manager import ConfigManager
+
+logger = logging.getLogger(__name__)
 from services.proxy_pool import JuliangError, ProxyPool
 
 router = APIRouter(prefix="/api/proxy", tags=["proxy"])
@@ -39,7 +43,8 @@ def _relay_port() -> int:
     try:
         from services.proxy_relay import ProxyRelay
         return relay_port()
-    except Exception:
+    except Exception as e:
+        logger.warning("relay_port 获取失败，回落默认段: %s", e)
         return ConfigManager.Protocol.PROXY_RELAY_PORT_START
 
 

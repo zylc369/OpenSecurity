@@ -96,3 +96,9 @@
 - /api/config/meta 新增 E2E 用例（82 号——bug#1 溜走通道）
 - test_remote_link 预热验证改 patch _model_inference 返回桩（真 _warm_local 保持原样——曾掩盖 bug#2）; 修 staticmethod patch/还原脱壳坑（__dict__ 取原对象）
 验证: test_control 82/82; remote_link 9/9; 快族+proxy 58 全绿; e2e_remote 三模型全链路 ✓; e2e_real 6/6; 生产控制台重启（/api/config/meta 27 项 ✓; vite 零进程 ✓）
+
+## 追加（2026-09-27 晚七）：静默吞异常全量审计 + 整改
+- 审计: 171 个 except 块，分拣出 17 处"宽泛 except Exception + pass"黑洞（异常信息完全消失）
+- 整改: 数据/生命周期路径 7 处补 warning（坏库重建/graphiti close/搜索重试/embedder·reranker 释放失败/快照预热/relay 回落）; 辅助采集/降级默认 10 处补 debug（close 类/回调/状态采集/安全默认）; routes/deps.py 补 logger（已有）、routes/proxy.py 补 import logging + logger（L85 函数内局部 import 骗过存在性检查的坑）
+- 合法静默保留: queue.Empty/进程不存在/探测超时（预期语义）、as e 进响应体（有去向）、CancelledError re-raise（生命周期信号非错误）
+- 验证: test_control 82/82（E2E 子进程启动曾因 proxy.py NameError 挂 22 项——修复后全绿）; 生产控制台重启

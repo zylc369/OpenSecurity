@@ -23,6 +23,8 @@ import asyncio
 import logging
 import threading
 import time
+
+logger = logging.getLogger(__name__)
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import Callable, TypeVar
@@ -200,8 +202,8 @@ class DepsService:
         """启动预热（后台线程调用）：失败静默——首个请求会正常构建。"""
         try:
             self.build_snapshot()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("快照预热构建失败（下个请求重试）: %s", e)
 
     def invalidate(self) -> None:
         """主动失效（依赖状态变更路由调用）。不立即重建——下个请求触发。"""
@@ -217,7 +219,8 @@ class DepsService:
         """单项扫描异常兜底：失败返回 default，不拖垮整份快照。"""
         try:
             return fn()
-        except Exception:
+        except Exception as e:
+            logger.warning("快照单项失败（降级 default）: %s", e)
             return default
 
     # ── 组装 ──
