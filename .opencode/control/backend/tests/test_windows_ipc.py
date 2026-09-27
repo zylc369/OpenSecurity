@@ -59,8 +59,8 @@ def main() -> int:
             break
         time.sleep(0.25)
     assert server.started, "uvicorn 未启动"
-    from services.frontend_port import frontend_ports
-    assert frontend_ports.register_tcp(9776), "上游端口注册（9776 应有监听）"
+    from services.frontend_port import FrontendPortRegistry
+    assert FrontendPortRegistry.get_instance().register_tcp(9776), "上游端口注册（9776 应有监听）"
 
     # 2. 管道监听
     from services.ipc_listener import IpcListener

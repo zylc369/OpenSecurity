@@ -34,16 +34,9 @@ import socket
 import threading
 import time
 
-from config import (
-    IS_WINDOWS,
-    ipc_addr,
-    ipc_unix_socket_path,
-    BIND_HOST,
-    IPC_BIND_WAIT_SEC,
-)
-from services.frontend_port import frontend_ports
+from services.config_manager import ConfigManager
+from services.frontend_port import FrontendPortRegistry
 
-_BUF = 65536
 
 import logging
 
@@ -58,21 +51,45 @@ class IpcStartStatus(enum.Enum):
     BIND_TIMEOUT = "bind_timeout"          # 等待窗口耗尽仍无法 bind（真异常）
 
 
-def ipc_probe_alive(timeout: float = 1.0) -> bool:
-    """IPC 通道上是否有活着的控制台（connect 一次，通 = 活）。无共享态。"""
-    if IS_WINDOWS:
-        return IpcListener._pipe_connect_ok()
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        s.connect(ipc_addr())
-        s.close()
-        return True
-    except OSError:
-        return False
-
 
 class IpcListener:
+    """IPC 监听器（全局单例）。Unix socket / Windows 命名管道。"""
+
+    _BUF = 65536
+    _instance: "IpcListener | None" = None
+    _instance_lock = threading.Lock()
+
+    def __new__(cls) -> "IpcListener":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+
+    @classmethod
+    def get_instance(cls) -> "IpcListener":
+        return cls()
+
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        with cls._instance_lock:
+            if cls._instance is not None:
+                cls._instance.cleanup()
+            cls._instance = None
+
+    def ipc_probe_alive(timeout: float = 1.0) -> bool:
+        """IPC 通道上是否有活着的控制台（connect 一次，通 = 活）。无共享态。"""
+        if ConfigManager.get_instance().is_windows:
+            return IpcListener._pipe_connect_ok()
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect(ConfigManager.get_instance().ipc_addr())
+            s.close()
+            return True
+        except OSError:
+            return False
+
     """IPC 监听生命周期管理（线程安全单例语义由模块级实例保证）。"""
 
     def __init__(self) -> None:
@@ -93,8 +110,8 @@ class IpcListener:
         with self._lifecycle_lock:
             if self._running:
                 return IpcStartStatus.LISTENING
-            logger.info("IPC start: 尝试监听 %s（platform=%s）", ipc_addr(),
-                        "win32" if IS_WINDOWS else "unix")
+            logger.info("IPC start: 尝试监听 %s（platform=%s）", ConfigManager.get_instance().ipc_addr(),
+                        "win32" if ConfigManager.get_instance().is_windows else "unix")
             obj = self._do_start_platform()
             if obj is not None:
                 self._listener = obj
@@ -111,8 +128,8 @@ class IpcListener:
             was_running, self._running = self._running, False
         if not was_running:
             return
-        logger.info("IPC cleanup: 开始（platform=%s）", "win32" if IS_WINDOWS else "unix")
-        if obj is None or IS_WINDOWS:
+        logger.info("IPC cleanup: 开始（platform=%s）", "win32" if ConfigManager.get_instance().is_windows else "unix")
+        if obj is None or ConfigManager.get_instance().is_windows:
             return
         try:
             if hasattr(obj, "close"):
@@ -120,7 +137,7 @@ class IpcListener:
         except OSError as e:
             logger.warning("IPC cleanup: 关闭监听 socket 异常: %s", e)
         try:
-            ipc_unix_socket_path().unlink(missing_ok=True)
+            ConfigManager.get_instance().ipc_unix_socket_path().unlink(missing_ok=True)
             logger.info("IPC cleanup: socket 文件已删除")
         except OSError as e:
             logger.warning("IPC cleanup: 删除 socket 文件异常: %s", e)
@@ -129,30 +146,30 @@ class IpcListener:
 
     def _wait_or_retry(self) -> IpcStartStatus:
         """bind 失败后的处置：等胜者就绪复用 / 清残留重 bind。全路径打日志。"""
-        deadline = time.monotonic() + IPC_BIND_WAIT_SEC
+        deadline = time.monotonic() + ConfigManager.Protocol.IPC_BIND_WAIT_SEC
         poll_count = 0
         while time.monotonic() < deadline:
             poll_count += 1
-            if ipc_probe_alive(timeout=0.5):
+            if IpcListener.ipc_probe_alive(timeout=0.5):
                 logger.info(
                     "IPC wait: 第 %d 次探测发现活实例（%.1fs 内），复用退出",
-                    poll_count, IPC_BIND_WAIT_SEC - (deadline - time.monotonic()),
+                    poll_count, ConfigManager.Protocol.IPC_BIND_WAIT_SEC - (deadline - time.monotonic()),
                 )
                 return IpcStartStatus.EXISTING_INSTANCE
-            path = ipc_unix_socket_path()
-            if not IS_WINDOWS and not path.exists():
+            path = ConfigManager.get_instance().ipc_unix_socket_path()
+            if not ConfigManager.get_instance().is_windows and not path.exists():
                 logger.info("IPC wait: sock 文件已消失（胜者放弃），立即重试 bind")
                 break
             time.sleep(0.25)
         else:
             logger.warning(
                 "IPC wait: 等待窗口 %.1fs 耗尽（探测 %d 次），尝试清残留重 bind",
-                IPC_BIND_WAIT_SEC, poll_count,
+                ConfigManager.Protocol.IPC_BIND_WAIT_SEC, poll_count,
             )
         # 清理可能的死残留后重 bind
-        if not IS_WINDOWS:
+        if not ConfigManager.get_instance().is_windows:
             try:
-                ipc_unix_socket_path().unlink(missing_ok=True)
+                ConfigManager.get_instance().ipc_unix_socket_path().unlink(missing_ok=True)
             except OSError:
                 pass
         obj = self._do_start_platform()
@@ -161,22 +178,22 @@ class IpcListener:
             self._running = True
             logger.info("IPC wait: 重 bind 成功（残留已清理），本实例成为监听者")
             return IpcStartStatus.LISTENING
-        if ipc_probe_alive(timeout=0.5):
+        if IpcListener.ipc_probe_alive(timeout=0.5):
             logger.info("IPC wait: 重 bind 仍失败但探测到活实例，复用退出")
             return IpcStartStatus.EXISTING_INSTANCE
-        logger.error("IPC wait: bind 失败且无活实例（窗口 %.1fs），真异常", IPC_BIND_WAIT_SEC)
+        logger.error("IPC wait: bind 失败且无活实例（窗口 %.1fs），真异常", ConfigManager.Protocol.IPC_BIND_WAIT_SEC)
         return IpcStartStatus.BIND_TIMEOUT
 
     # ── 平台分支 ──────────────────────────────────────────
 
     def _do_start_platform(self):
         """bind 当前平台 IPC 地址。成功返回监听对象，被占返回 None。"""
-        if IS_WINDOWS:
+        if ConfigManager.get_instance().is_windows:
             return self._start_windows()
         return self._start_unix()
 
     def _start_unix(self) -> socket.socket | None:
-        path = ipc_unix_socket_path()
+        path = ConfigManager.get_instance().ipc_unix_socket_path()
         # 父目录兜底创建（DATA_DIR 首次运行可能不存在；缺目录时 bind 报 OSError
         # 会被误判为"地址被占"）
         try:
@@ -185,7 +202,7 @@ class IpcListener:
             logger.error("IPC bind: 创建父目录失败 %s: %s", path.parent, e)
             return None
         # 死残留自愈：connect 不通但文件存在 = 死残留，unlink
-        if path.exists() and not ipc_probe_alive(timeout=0.3):
+        if path.exists() and not IpcListener.ipc_probe_alive(timeout=0.3):
             logger.info("IPC bind: 发现死残留 %s（probe 不通），unlink 后重 bind", path)
             try:
                 path.unlink(missing_ok=True)
@@ -209,20 +226,20 @@ class IpcListener:
 
         try:
             handle = win32pipe.CreateNamedPipe(
-                ipc_addr(),
+                ConfigManager.get_instance().ipc_addr(),
                 win32pipe.PIPE_ACCESS_DUPLEX | win32file.FILE_FLAG_FIRST_PIPE_INSTANCE,
                 win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE | win32pipe.PIPE_WAIT,
                 win32pipe.PIPE_UNLIMITED_INSTANCES,
-                _BUF, _BUF,
+                self._BUF, self._BUF,
                 0, None,
             )
         except pywintypes.error as e:
             logger.info("IPC bind: 管道 %s 创建失败: %s（被占，走等待/复用流程）",
-                        ipc_addr(), e)
+                        ConfigManager.get_instance().ipc_addr(), e)
             return None
         threading.Thread(target=self._pipe_accept_loop, args=(handle,), daemon=True).start()
         logger.info("IPC bind: 管道创建成功（FIRST_PIPE_INSTANCE）")
-        return ipc_addr()
+        return ConfigManager.get_instance().ipc_addr()
 
     # ── Unix accept / 泵 ──────────────────────────────────
 
@@ -246,10 +263,10 @@ class IpcListener:
             conn.close()
             return
         self._bridge(
-            lambda: conn.recv(_BUF),
+            lambda: conn.recv(self._BUF),
             conn.sendall,
             conn.close,
-            lambda: upstream.recv(_BUF),
+            lambda: upstream.recv(self._BUF),
             upstream.sendall,
             upstream.close,
         )
@@ -270,11 +287,11 @@ class IpcListener:
             logger.debug("IPC accept: 管道客户端连入")
             try:
                 nxt = win32pipe.CreateNamedPipe(
-                    ipc_addr(),
+                    ConfigManager.get_instance().ipc_addr(),
                     win32pipe.PIPE_ACCESS_DUPLEX,
                     win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE | win32pipe.PIPE_WAIT,
                     win32pipe.PIPE_UNLIMITED_INSTANCES,
-                    _BUF, _BUF,
+                    self._BUF, self._BUF,
                     0, None,
                 )
             except OSError as e:
@@ -294,7 +311,7 @@ class IpcListener:
             return
 
         def pipe_read():
-            _, data = win32file.ReadFile(handle, _BUF)
+            _, data = win32file.ReadFile(handle, self._BUF)
             return data
 
         def pipe_write(data):
@@ -310,7 +327,7 @@ class IpcListener:
             pipe_read,
             pipe_write,
             pipe_close,
-            lambda: upstream.recv(_BUF),
+            lambda: upstream.recv(self._BUF),
             upstream.sendall,
             upstream.close,
         )
@@ -321,7 +338,7 @@ class IpcListener:
         import win32file
         try:
             handle = win32file.CreateFile(
-                ipc_addr(),
+                ConfigManager.get_instance().ipc_addr(),
                 win32file.GENERIC_READ | win32file.GENERIC_WRITE,
                 0,
                 None,
@@ -345,11 +362,11 @@ class IpcListener:
         Docker 自愈 ~36s）期间 5s 无数据即抛 timeout → 误判 EOF → 双侧断连
         （真链路 E2E 抓出：TCP 直连 36s 正常 200，泵路径 5.1s 断）。
         """
-        port = frontend_ports.tcp_port()
+        port = FrontendPortRegistry.get_instance().tcp_port()
         if port is None:
             return None
         try:
-            sock = socket.create_connection((BIND_HOST, port), timeout=5)
+            sock = socket.create_connection((ConfigManager.Protocol.BIND_HOST, port), timeout=5)
             sock.settimeout(None)  # 关键：清除连接超时，恢复纯阻塞
             return sock
         except OSError as e:
@@ -394,14 +411,4 @@ class IpcListener:
             on_finish()
 
 
-# 模块级单例 + 同名委托（消费方零改动）
-ipc_listener = IpcListener()
 
-
-def start_ipc_listener() -> IpcStartStatus:
-    """启动 IPC 监听。返回 IpcStartStatus（见枚举定义）。"""
-    return ipc_listener.start()
-
-
-def cleanup_ipc_listener() -> None:
-    ipc_listener.cleanup()

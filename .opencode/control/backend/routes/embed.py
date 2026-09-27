@@ -11,7 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from services import model_loader
+from services.model_loader import ModelInferenceService
 
 router = APIRouter()
 
@@ -37,7 +37,7 @@ async def embed(req: EmbedRequest) -> list[list[float]]:
         raise HTTPException(status_code=400, detail="missing 'inputs'")
     if isinstance(inputs, str):
         inputs = [inputs]
-    return await model_loader.embed_async(inputs)
+    return await ModelInferenceService.get_instance().embed_async(inputs)
 
 
 @router.post("/rerank")
@@ -45,4 +45,4 @@ async def rerank(req: RerankRequest) -> list[float]:
     """重排序候选文本。"""
     if not req.texts:
         return []
-    return await model_loader.rerank_async(req.query, req.texts)
+    return await ModelInferenceService.get_instance().rerank_async(req.query, req.texts)

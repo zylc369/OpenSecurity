@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from services.heartbeat import collect_opencode_processes, heartbeats
+from services.heartbeat import HeartbeatRegistry
 
 router = APIRouter(prefix="/api")
 
@@ -24,8 +24,8 @@ class HeartbeatBody(BaseModel):
 
 @router.post("/heartbeat")
 async def heartbeat(body: HeartbeatBody) -> dict[str, object]:
-    heartbeats.record(body.pid)
-    return {"ok": True, "active": heartbeats.active_count()}
+    HeartbeatRegistry.get_instance().record(body.pid)
+    return {"ok": True, "active": HeartbeatRegistry.get_instance().active_count()}
 
 
 @router.get("/heartbeats")
@@ -34,4 +34,4 @@ async def list_heartbeats() -> dict[str, Any]:
 
     psutil 富化见 services.collect_opencode_processes; 本路由仅序列化。
     """
-    return {"opencode": [asdict(i) for i in collect_opencode_processes()]}
+    return {"opencode": [asdict(i) for i in HeartbeatRegistry.get_instance().collect_opencode_processes()]}

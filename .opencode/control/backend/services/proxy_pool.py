@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -22,58 +23,12 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from config import (
-    DATA_DIR,
-    DOMAIN_COOLDOWN_SEC,
-    JULIANG_API_KEY_KEY,
-    JULIANG_API_URL,
-    JULIANG_IP_TTL_SEC,
-    JULIANG_TTL_MARGIN_SEC,
-    JULIANG_TRADE_NO_KEY,
-    ROTATE_HISTORY_LIMIT,
-)
+from services.config_manager import ConfigManager
 from services import config_store
-from services.process_lock import atomic_write
+from services.process_lock import ProcessLockUtil
 
-_log = logging.getLogger("proxy_pool")
 
 # ─── 域名归一化（唯一实现，需求 §5.1 全表）──────────────────
-
-
-def normalize_domain(raw: str) -> str:
-    """从任意 URL/host 形态提取归一化域名；无法提取时抛 ValueError（接口层转 400）。
-
-    规则：任意 scheme 只取 host；host 小写；剥端口/userinfo/trailing dot；
-    非 ASCII 转 IDNA；IP/localhost 原样保留。
-    """
-    if not raw or not isinstance(raw, str):
-        raise ValueError("url 必传且非空")
-    text = raw.strip()
-    if not text:
-        raise ValueError("url 必传且非空")
-    try:
-        parts = urlsplit(text)
-        host = parts.hostname
-        if host is None:
-            if "://" in text:  # 有 scheme 无 host（"https://" / "http:///p"）→ 非法
-                raise ValueError("url 含 scheme 但无 host")
-            host = urlsplit("//" + text).hostname  # 无 scheme（"target.com[:443]"）补 // 再解析
-    except ValueError as e:
-        raise ValueError(f"无法解析 url: {e}") from e
-    if not host:
-        raise ValueError("无法从 url 提取 host")
-    host = host.lower().rstrip(".")
-    try:
-        if not host.isascii():  # IDN → punycode
-            host = host.encode("idna").decode("ascii")
-    except UnicodeError as e:
-        raise ValueError(f"域名 IDNA 编码失败: {e}") from e
-    if not host or "/" in host or " " in host:
-        raise ValueError(f"非法 host: {host!r}")
-    return host
-
-
-# ─── 数据结构 ──────────────────────────────────────────────
 
 
 @dataclass
@@ -106,28 +61,103 @@ class JuliangError(RuntimeError):
     """供应商 API 调用失败（网络/业务码/凭证）。"""
 
 
-def _julang_sign(params: dict, key: str) -> str:
-    """官方签名：参数 ASCII 字典序 + '&key=' + MD5 小写。"""
-    raw = "&".join(f"{k}={v}" for k, v in sorted(params.items())) + f"&key={key}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
-def selftest_sign() -> bool:
-    """签名自测：官方文档 §1.2 演示数据（明文→期望 MD5）。"""
-    demo_params = {"city_name": 1, "ip_remain": 1, "num": 10,
-                   "result_type": "json", "trade_no": "1178311789392776"}
-    return _julang_sign(demo_params, "99064631962e4e838dac1143092f6112") == \
-        "8f35c3e56bf640cb2597ea2492ca62db"
-
-
-# ─── IP 池 ────────────────────────────────────────────────
 
 
 class ProxyPool:
-    """唯一簿记与状态实现。单例（模块级 _POOL），路由与 relay 进程内直呼。"""
+    logger = logging.getLogger("proxy_pool")
+    """（全局单例，get_instance() 获取。）"""
 
-    def __init__(self, state_path: Path | None = None):
-        self._path = state_path or (Path(DATA_DIR) / "proxy_state.json")
+    _instance: "ProxyPool | None" = None
+    _instance_lock = threading.Lock()
+
+    def __new__(cls) -> "ProxyPool":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    inst = super().__new__(cls)
+                    inst._init_once()
+                    cls._instance = inst
+        return cls._instance
+
+    @classmethod
+    def get_instance(cls) -> "ProxyPool":
+        return cls()
+
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        with cls._instance_lock:
+            cls._instance = None
+
+    @classmethod
+    def _create_fresh(cls, state_path: "Path | None" = None) -> "ProxyPool":
+        """构造独立实例（绕过单例——测试注入用; 生产代码禁用）。"""
+        inst = object.__new__(cls)
+        inst._init_once(state_path)
+        return inst
+
+    @classmethod
+    def _force_instance(cls, inst: "ProxyPool") -> None:
+        """测试注入: 强制替换单例。"""
+        with cls._instance_lock:
+            cls._instance = inst
+
+    @staticmethod
+    def selftest_sign() -> bool:
+        """签名自测：官方文档 §1.2 演示数据（明文→期望 MD5）。"""
+        demo_params = {"city_name": 1, "ip_remain": 1, "num": 10,
+                       "result_type": "json", "trade_no": "1178311789392776"}
+        return ProxyPool._julang_sign(demo_params, "99064631962e4e838dac1143092f6112") == \
+            "8f35c3e56bf640cb2597ea2492ca62db"
+
+
+    # ─── IP 池 ────────────────────────────────────────────────
+
+    @staticmethod
+    def _julang_sign(params: dict, key: str) -> str:
+        """官方签名：参数 ASCII 字典序 + '&key=' + MD5 小写。"""
+        raw = "&".join(f"{k}={v}" for k, v in sorted(params.items())) + f"&key={key}"
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def normalize_domain(raw: str) -> str:
+        """从任意 URL/host 形态提取归一化域名；无法提取时抛 ValueError（接口层转 400）。
+
+        规则：任意 scheme 只取 host；host 小写；剥端口/userinfo/trailing dot；
+        非 ASCII 转 IDNA；IP/localhost 原样保留。
+        """
+        if not raw or not isinstance(raw, str):
+            raise ValueError("url 必传且非空")
+        text = raw.strip()
+        if not text:
+            raise ValueError("url 必传且非空")
+        try:
+            parts = urlsplit(text)
+            host = parts.hostname
+            if host is None:
+                if "://" in text:  # 有 scheme 无 host（"https://" / "http:///p"）→ 非法
+                    raise ValueError("url 含 scheme 但无 host")
+                host = urlsplit("//" + text).hostname  # 无 scheme（"target.com[:443]"）补 // 再解析
+        except ValueError as e:
+            raise ValueError(f"无法解析 url: {e}") from e
+        if not host:
+            raise ValueError("无法从 url 提取 host")
+        host = host.lower().rstrip(".")
+        try:
+            if not host.isascii():  # IDN → punycode
+                host = host.encode("idna").decode("ascii")
+        except UnicodeError as e:
+            raise ValueError(f"域名 IDNA 编码失败: {e}") from e
+        if not host or "/" in host or " " in host:
+            raise ValueError(f"非法 host: {host!r}")
+        return host
+
+
+    # ─── IP 池簿记（唯一状态实现; 路由与 relay 经 get_instance 直呼）───
+
+    def _init_once(self, state_path: Path | None = None) -> None:
+        self._path = state_path or (Path(ConfigManager.get_instance().data_dir) / "proxy_state.json")
         self._state = PoolState()
         self._lock = asyncio.Lock()
         self._load()
@@ -151,7 +181,7 @@ class ProxyPool:
             )
             self._state = st
         except (ValueError, KeyError, TypeError) as e:
-            _log.warning("代理状态文件损坏，已重置（黑名单/冷却将重新学习）: %r", e)
+            ProxyPool.logger.warning("代理状态文件损坏，已重置（黑名单/冷却将重新学习）: %r", e)
             self._state = PoolState()
 
     def _persist(self) -> None:
@@ -160,16 +190,16 @@ class ProxyPool:
         import json
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write(self._path, json.dumps(asdict(self._state), ensure_ascii=False, indent=1))
+            ProcessLockUtil.atomic_write(self._path, json.dumps(asdict(self._state), ensure_ascii=False, indent=1))
         except OSError as e:
-            _log.warning("代理状态持久化失败（不影响本次操作，重启后状态回退）: %r", e)
+            ProxyPool.logger.warning("代理状态持久化失败（不影响本次操作，重启后状态回退）: %r", e)
 
     # ── 凭证 ──
 
     @staticmethod
     def credentials_configured() -> bool:
         cfg = config_store.read_all()
-        return bool(cfg.get(JULIANG_TRADE_NO_KEY)) and bool(cfg.get(JULIANG_API_KEY_KEY))
+        return bool(cfg.get(ConfigManager.get_instance().Keys.JULIANG_TRADE_NO)) and bool(cfg.get(ConfigManager.get_instance().Keys.JULIANG_API_KEY))
 
     # ── 供应商提取（3 次指数退避）──
 
@@ -177,14 +207,14 @@ class ProxyPool:
         if not self.credentials_configured():
             raise JuliangError("供应商凭证未配置（控制台配置页填写 JULIANG_TRADE_NO / JULIANG_API_KEY）")
         cfg = config_store.read_all()
-        params = {"trade_no": cfg[JULIANG_TRADE_NO_KEY], "num": 1, "pt": 1,
+        params = {"trade_no": cfg[ConfigManager.get_instance().Keys.JULIANG_TRADE_NO], "num": 1, "pt": 1,
                   "result_type": "json", "ip_remain": 1, "filter": 1}
-        params["sign"] = _julang_sign(params, cfg[JULIANG_API_KEY_KEY])
+        params["sign"] = ProxyPool._julang_sign(params, cfg[ConfigManager.get_instance().Keys.JULIANG_API_KEY])
         last_err = ""
         for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=15) as client:
-                    resp = await client.get(JULIANG_API_URL, params=params)
+                    resp = await client.get(ConfigManager.Protocol.JULIANG_API_URL, params=params)
                     data = resp.json()
                 if data.get("code") != 200:
                     raise JuliangError(f"供应商业务错误 {data.get('code')}: {data.get('msg', '')}")
@@ -196,7 +226,7 @@ class ProxyPool:
                 ip_part, _, remain_part = str(proxy_list[0]).partition(",")
                 now = time.time()
                 info = ProxyInfo(ip=ip_part, fetched_at=now,
-                                 expire_at=now + JULIANG_IP_TTL_SEC - JULIANG_TTL_MARGIN_SEC)
+                                 expire_at=now + ConfigManager.get_instance().proxy_tunables().ip_ttl_sec - ConfigManager.get_instance().proxy_tunables().ttl_margin_sec)
                 self._state.current = info
                 self._state.surplus = int(d.get("surplus_quantity", -1))
                 self._state.total_fetched += 1
@@ -235,13 +265,15 @@ class ProxyPool:
     def mark_bad(self, ip: str, reason: str = "bad_ip") -> None:
         """黑名单登记（rotate(reason=bad_ip) 内部调用；也可单独使用）。"""
         if ip and ip not in self._state.bad_ips:
-            _log.info("代理IP %s 进黑名单（原因: %s）", ip, reason)
+            ProxyPool.logger.info("代理IP %s 进黑名单（原因: %s）", ip, reason)
             self._state.bad_ips.append(ip)
             self._persist()
 
-    def domain_cool(self, domain_raw: str, minutes: float = DOMAIN_COOLDOWN_SEC / 60) -> str:
+    def domain_cool(self, domain_raw: str, minutes: float | None = None) -> str:
         """域名进冷却表（归一化后入键）；顺手清理已过期项。"""
-        domain = normalize_domain(domain_raw)  # ValueError → 接口层 400
+        domain = ProxyPool.normalize_domain(domain_raw)  # ValueError → 接口层 400
+        if minutes is None:
+            minutes = ConfigManager.get_instance().proxy_tunables().domain_cooldown_sec / 60
         now = time.time()
         self._state.domain_limited = {
             k: v for k, v in self._state.domain_limited.items() if v > now
@@ -252,7 +284,7 @@ class ProxyPool:
 
     def domain_cooled(self, domain_raw: str) -> bool:
         """relay 出口选择用：该域名当前是否在冷却期（归一化同源）。"""
-        domain = normalize_domain(domain_raw)
+        domain = ProxyPool.normalize_domain(domain_raw)
         until = self._state.domain_limited.get(domain)
         return bool(until and until > time.time())
 
@@ -270,8 +302,8 @@ class ProxyPool:
     def _record(self, reason: str, old: str | None, new: str | None) -> None:
         self._state.rotate_history.append(
             RotateEvent(ts=time.time(), reason=reason, old=old, new=new))
-        if len(self._state.rotate_history) > ROTATE_HISTORY_LIMIT:
-            self._state.rotate_history = self._state.rotate_history[-ROTATE_HISTORY_LIMIT:]
+        if len(self._state.rotate_history) > ConfigManager.get_instance().proxy_tunables().rotate_history_limit:
+            self._state.rotate_history = self._state.rotate_history[-ConfigManager.get_instance().proxy_tunables().rotate_history_limit:]
 
     def status(self) -> dict:
         cur = self._state.current
@@ -288,13 +320,3 @@ class ProxyPool:
             "rotate_history": [asdict(e) for e in self._state.rotate_history],
         }
 
-
-# 模块级单例（路由/relay 经 get_pool() 取同一实例）
-_POOL: ProxyPool | None = None
-
-
-def get_pool() -> ProxyPool:
-    global _POOL
-    if _POOL is None:
-        _POOL = ProxyPool()
-    return _POOL

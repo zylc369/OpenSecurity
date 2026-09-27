@@ -9,7 +9,7 @@ from dataclasses import asdict
 
 from fastapi import APIRouter
 
-from services.process_registry import collect_processes
+from services.process_registry import ProcessRegistryUtil
 
 router = APIRouter(prefix="/api", tags=["processes"])
 
@@ -17,5 +17,5 @@ router = APIRouter(prefix="/api", tags=["processes"])
 @router.get("/processes")
 def get_processes() -> dict:
     """受管进程清单（前端进程页 10s 轮询）。"""
-    view = collect_processes()
+    view = ProcessRegistryUtil.collect_processes()
     return asdict(view)

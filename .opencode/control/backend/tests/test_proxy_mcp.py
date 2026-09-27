@@ -64,9 +64,9 @@ def test_mcp_status_call_shape():
         r = _rpc(proc, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                         "params": {"name": "proxy_status", "arguments": {}}})
         text = r["result"]["content"][0]["text"]
+        if "错误" in text:
+            return  # 控制台未运行/不可发现：错误路径明确 ✓（错误文本非 JSON，先判分支再 parse）
         parsed = json.loads(text)
-        if "错误" in text and isinstance(parsed, str):
-            return  # 控制台未运行：错误路径明确 ✓
         assert "rotate_history" in parsed and "credentials_configured" in parsed
     finally:
         proc.kill()

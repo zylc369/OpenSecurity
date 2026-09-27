@@ -8,7 +8,7 @@ from dataclasses import asdict
 
 from fastapi import APIRouter, HTTPException
 
-from services import model_assets
+from services.model_assets import ModelAssetRegistry
 
 router = APIRouter(prefix="/api/models", tags=["models"])
 
@@ -17,16 +17,16 @@ router = APIRouter(prefix="/api/models", tags=["models"])
 async def list_models() -> dict:
     """全部模型资产状态（缓存/加载态/引用数）+ 整体硬件评估。"""
     return {
-        "models": [asdict(m) for m in model_assets.get_model_assets()],
-        "hardware_summary": asdict(model_assets.hardware_summary()),
-        "hf_endpoint": model_assets._hf_endpoint(),
+        "models": [asdict(m) for m in ModelAssetRegistry.get_instance().get_model_assets()],
+        "hardware_summary": asdict(ModelAssetRegistry.get_instance().hardware_summary()),
+        "hf_endpoint": ModelAssetRegistry.get_instance()._hf_endpoint(),
     }
 
 
 @router.post("/{model_id}/download")
 async def download_model(model_id: str) -> dict:
     """启动后台下载（幂等）。"""
-    ok = model_assets.start_download(model_id)
+    ok = ModelAssetRegistry.get_instance().start_download(model_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"未知模型 id: {model_id}")
     return {"ok": True, "model_id": model_id}

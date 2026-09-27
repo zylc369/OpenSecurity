@@ -34,9 +34,6 @@ from typing import Any, Protocol
 
 import numpy as np
 
-EMBEDDING_DIM = 1024
-DEFAULT_TOP_K = 5
-SCORE_THRESHOLD = 0.2
 
 
 class EmbedderLike(Protocol):
@@ -49,32 +46,37 @@ class EmbedderLike(Protocol):
 
     def encode(self, texts: Any, **kwargs: Any) -> "np.ndarray": ...
 
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS answers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    question TEXT NOT NULL,
-    answer TEXT NOT NULL,
-    type TEXT NOT NULL,
-    doc_type TEXT NOT NULL DEFAULT 'knowledge',
-    guide_type TEXT NOT NULL DEFAULT '',
-    code_lang TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL
-);
-"""
-
-INDEX_SQL = """
-CREATE INDEX IF NOT EXISTS idx_answers_doc_type ON answers(doc_type);
-CREATE INDEX IF NOT EXISTS idx_answers_code_lang ON answers(code_lang);
-"""
-
-MIGRATE_COLUMNS = [
-    ("guide_type", "TEXT NOT NULL DEFAULT ''"),
-    ("code_lang", "TEXT NOT NULL DEFAULT ''"),
-    ("flow_id", "TEXT DEFAULT NULL"),
-]
-
-
 class MemoryDB:
+    """向量存储（schema/阈值常量为类静态字段）。"""
+
+    EMBEDDING_DIM = 1024
+    DEFAULT_TOP_K = 5
+    SCORE_THRESHOLD = 0.2
+
+    SCHEMA_SQL = """
+    CREATE TABLE IF NOT EXISTS answers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        question TEXT NOT NULL,
+        answer TEXT NOT NULL,
+        type TEXT NOT NULL,
+        doc_type TEXT NOT NULL DEFAULT 'knowledge',
+        guide_type TEXT NOT NULL DEFAULT '',
+        code_lang TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL
+    );
+    """
+
+    INDEX_SQL = """
+    CREATE INDEX IF NOT EXISTS idx_answers_doc_type ON answers(doc_type);
+    CREATE INDEX IF NOT EXISTS idx_answers_code_lang ON answers(code_lang);
+    """
+
+    MIGRATE_COLUMNS = [
+        ("guide_type", "TEXT NOT NULL DEFAULT ''"),
+        ("code_lang", "TEXT NOT NULL DEFAULT ''"),
+        ("flow_id", "TEXT DEFAULT NULL"),
+    ]
+
     """向量存储：answers 表 + answer_vectors vec0 虚拟表。"""
 
     def __init__(self, db_path: Path, embedder: EmbedderLike):
@@ -93,12 +95,12 @@ class MemoryDB:
 
     def _init_schema(self) -> None:
         with self._lock:
-            self._conn.executescript(SCHEMA_SQL)
+            self._conn.executescript(self.SCHEMA_SQL)
             self._migrate_schema()
-            self._conn.executescript(INDEX_SQL)
+            self._conn.executescript(self.INDEX_SQL)
             self._conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS answer_vectors "
-                f"USING vec0(embedding float[{EMBEDDING_DIM}] distance_metric=cosine)"
+                f"USING vec0(embedding float[{self.EMBEDDING_DIM}] distance_metric=cosine)"
             )
             self._conn.commit()
 
@@ -106,7 +108,7 @@ class MemoryDB:
         """检查并添加缺失的列（向后兼容旧数据库）。"""
         col_info = {row[1]: row for row in self._conn.execute("PRAGMA table_info(answers)").fetchall()}
         columns = set(col_info.keys())
-        for col_name, col_def in MIGRATE_COLUMNS:
+        for col_name, col_def in self.MIGRATE_COLUMNS:
             if col_name not in columns:
                 self._conn.execute(f"ALTER TABLE answers ADD COLUMN {col_name} {col_def}")
             elif col_name == "flow_id":
@@ -128,12 +130,12 @@ class MemoryDB:
         同协议）。SQLite 访问另由 self._lock 串行，两者职责不同。
         """
         vec = self.embedder.encode(text, convert_to_numpy=True)
-        return struct.pack(f"{EMBEDDING_DIM}f", *vec.tolist())
+        return struct.pack(f"{MemoryDB.EMBEDDING_DIM}f", *vec.tolist())
 
     def _embed_batch(self, texts: list[str]) -> list[bytes]:
         """批量编码 → 向量字节流列表（search 多问题用）：一次前向、一次持锁。"""
         vecs = self.embedder.encode(texts, convert_to_numpy=True)
-        return [struct.pack(f"{EMBEDDING_DIM}f", *v.tolist()) for v in vecs]
+        return [struct.pack(f"{MemoryDB.EMBEDDING_DIM}f", *v.tolist()) for v in vecs]
 
     def store(
         self,
@@ -169,14 +171,17 @@ class MemoryDB:
         questions: list[str],
         doc_type: str = "knowledge",
         lang: str = "",
-        top_k: int = DEFAULT_TOP_K,
+        top_k: int | None = None,
         flow_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """对每个查询：按 cosine 找最近的，按 doc_type + lang/flow_id 过滤，再合并。
+        （top_k 默认值在方法体解析——类定义期默认参数无法引用同类。）
 
-        score < SCORE_THRESHOLD 的结果被过滤（不返回）。
+        score < self.SCORE_THRESHOLD 的结果被过滤（不返回）。
         flow_id 仅 doc_type=memory 且非 None 时生效（按任务隔离）；其他 doc_type 忽略 flow_id。
         """
+        if top_k is None:
+            top_k = MemoryDB.DEFAULT_TOP_K
         if not questions:
             return []
 
@@ -195,7 +200,7 @@ class MemoryDB:
                 ).fetchall()
                 for row_id, distance in rows:
                     score = 1.0 - float(distance)
-                    if score < SCORE_THRESHOLD:
+                    if score < self.SCORE_THRESHOLD:
                         continue
                     if row_id in seen:
                         if score > seen[row_id]["score"]:

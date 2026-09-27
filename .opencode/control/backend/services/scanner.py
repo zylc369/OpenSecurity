@@ -106,8 +106,8 @@ class Scanner:
 
     async def _scan_models(self) -> list[ModelAssetStatus]:
         """模型状态（收口：数据源 = services/model_assets.py，与 /api/models 同源）。"""
-        from services import model_assets
-        return model_assets.get_model_assets()
+        from services.model_assets import ModelAssetRegistry
+        return ModelAssetRegistry.get_instance().get_model_assets()
 
 
 # 模块级单例

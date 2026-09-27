@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter
 
 from config import is_dev_mode
+from services.model_assets import ModelAssetRegistry
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -21,16 +22,15 @@ async def get_system_info() -> dict:
     """运行环境信息。"""
     venv_path = str(Path(sys.prefix))
     hf_cache = str(Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")))
-    from services import model_assets
-    from services.process_lock import get_process_start_time
+    from services.process_lock import ProcessLockUtil
     return {
         "venv_path": venv_path,
         "venv_python": sys.executable,
         "python_version": platform.python_version(),
         "hf_cache_dir": hf_cache,
-        "hf_endpoint": model_assets._hf_endpoint(),
+        "hf_endpoint": ModelAssetRegistry.get_instance()._hf_endpoint(),
         "control_pid": os.getpid(),
-        "control_start_time": get_process_start_time(os.getpid()),
+        "control_start_time": ProcessLockUtil.get_process_start_time(os.getpid()),
         "dev_mode": is_dev_mode(),
         "platform": f"{platform.system()} {platform.machine()}",
         # backend 代码陈旧检测（指纹函数与 /api/health 同源——启动时冻结 vs 当前比对）

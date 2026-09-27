@@ -64,7 +64,7 @@ def pool_boundary(monkeypatch, tmp_path):
     monkeypatch.setattr(pp.httpx, "AsyncClient", FakeClient)
     monkeypatch.setattr(pp.ProxyPool, "credentials_configured",
                         staticmethod(lambda: True))  # 必须包 staticmethod（普通函数会绑定 self）
-    return pp.ProxyPool(state_path=tmp_path / "s.json")
+    return pp.ProxyPool._create_fresh(state_path=tmp_path / "s.json")
 
 
 def _ok_payload(ip="1.2.3.4:5678", remain="300", surplus=100, plist=None):
@@ -121,7 +121,7 @@ def test_persist_failure_does_not_break_operation(pool_boundary, monkeypatch, tm
     FakeClient.responses = [FakeResp(payload=_ok_payload(ip="9.9.9.9:1"))]
     def boom(*a, **kw):
         raise OSError("disk full")
-    monkeypatch.setattr(pp, "atomic_write", boom)
+    monkeypatch.setattr(pp.ProcessLockUtil, "atomic_write", boom)
     info = asyncio.run(pool_boundary.get(force_new=True))   # 不应抛
     assert info.ip == "9.9.9.9:1"
 
@@ -137,13 +137,13 @@ def test_persist_failure_does_not_break_operation(pool_boundary, monkeypatch, tm
     ("ws://v2.target.com:80", "v2.target.com"),
 ])
 def test_normalize_extra_forms(raw, expected):
-    assert pp.normalize_domain(raw) == expected
+    assert pp.ProxyPool.normalize_domain(raw) == expected
 
 
 def test_domain_cool_zero_minutes_expires_immediately(tmp_path, monkeypatch):
     import os, importlib, config
     monkeypatch.setenv("DATA_DIR", str(tmp_path)); importlib.reload(config); importlib.reload(pp)
-    pool = pp.ProxyPool(state_path=tmp_path / "s.json")
+    pool = pp.ProxyPool._create_fresh(state_path=tmp_path / "s.json")
     pool.domain_cool("target.com", minutes=0)
     assert pool.domain_cooled("target.com") is False  # 0 分钟=立即过期
 
@@ -162,7 +162,7 @@ def routes_env(monkeypatch, tmp_path):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     app = FastAPI(); app.include_router(rp.router)
-    pool = pp.ProxyPool(state_path=tmp_path / "s.json")
+    pool = pp.ProxyPool._create_fresh(state_path=tmp_path / "s.json")
 
     async def fake_fetch(_self):
         now = time.time()
@@ -170,7 +170,7 @@ def routes_env(monkeypatch, tmp_path):
         pool._state.current = info; pool._state.total_fetched += 1; pool._state.surplus = 50
         return info, 300
     type(pool)._fetch_from_julang = fake_fetch
-    rp.get_pool = lambda: pool
+    pp.ProxyPool._force_instance(pool)  # 单例注入（替代旧 get_pool patch）
     return TestClient(app), pool
 
 

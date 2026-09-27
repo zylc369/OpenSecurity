@@ -21,8 +21,8 @@ from fastapi import APIRouter
 BOOT_TOKEN = secrets.token_hex(4)
 from fastapi.responses import JSONResponse
 
-from services import model_loader
-from services.process_lock import get_process_start_time
+from services.model_loader import ModelInferenceService
+from services.process_lock import ProcessLockUtil
 
 router = APIRouter()
 
@@ -36,8 +36,8 @@ async def report_dev_url(payload: dict) -> dict:
     """
     port = payload.get("port")
     if isinstance(port, int) and 0 < port < 65536:
-        from services.frontend_port import frontend_ports
-        frontend_ports.register_vite_port(port)
+        from services.frontend_port import FrontendPortRegistry
+        FrontendPortRegistry.get_instance().register_vite_port(port)
         return {"ok": True, "port": port}
     return {"ok": False, "error": "invalid port"}
 
@@ -45,12 +45,12 @@ async def report_dev_url(payload: dict) -> dict:
 @router.get("/api/console-url")
 async def console_url() -> dict:
     """控制台前端真实地址（浏览器 TCP 顺延后插件/vite 从这里取）。"""
-    from services.frontend_port import frontend_ports
-    tcp_port = frontend_ports.tcp_port()
+    from services.frontend_port import FrontendPortRegistry
+    tcp_port = FrontendPortRegistry.get_instance().tcp_port()
     return {
-        "url": frontend_ports.console_url(),
+        "url": FrontendPortRegistry.get_instance().console_url(),
         "tcp_port": tcp_port,
-        "tcp_candidates": frontend_ports.tcp_candidates(),
+        "tcp_candidates": FrontendPortRegistry.get_instance().tcp_candidates(),
     }
 
 
@@ -59,7 +59,7 @@ def _identity() -> dict:
     return {
         "service": "opencode-control",
         "pid": os.getpid(),
-        "start_time": get_process_start_time(os.getpid()) or 0,
+        "start_time": ProcessLockUtil.get_process_start_time(os.getpid()) or 0,
         "boot_token": BOOT_TOKEN,
     }
 
@@ -85,7 +85,7 @@ async def health() -> JSONResponse:
     前端应提示重启控制台后端。
     """
     stale = _code_fingerprint() != _BOOT_FINGERPRINT
-    if not model_loader.is_models_ready():
+    if not ModelInferenceService.get_instance().is_models_ready():
         return JSONResponse(
             {"status": "loading", "code_stale": stale, **_identity()},
             status_code=503,

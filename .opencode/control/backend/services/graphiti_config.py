@@ -13,10 +13,11 @@
   冷门实体类型会被标为 Entity（兜底），语义搜索仍可找到。
 """
 import asyncio
-import os
 from pathlib import Path
 
 import numpy as np
+
+from services.config_manager import ConfigManager
 from graphiti_core.embedder.client import EmbedderClient
 from pydantic import BaseModel
 
@@ -69,78 +70,63 @@ CUSTOM_ENTITY_TYPES = {
 }
 
 
-def load_ai_env() -> None:
-    """读取 .opencode/.ai_env，setdefault 合并到 os.environ。
-
-    优先级：
-      1. 系统 env（最高，Plugin shell.env hook 注入的 DEEPSEEK_API_KEY 等）
-      2. .ai_env 文件（兜底，仅用于用户直接跑相关 MCP 不通过 Plugin 的场景）
-
-    日常运行时 Plugin 已经把 .ai_env 的配置注入到子进程环境变量，
-    此函数 setdefault 不会覆盖已存在的 key，只是兜底。
-    """
-    ai_env = Path(__file__).resolve().parents[3] / ".ai_env"  # services/ → backend/ → control/ → .opencode/
-    if not ai_env.is_file():
-        return
-    for line in ai_env.read_text("utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if key:
-            os.environ.setdefault(key, value.strip())
 
 
-def get_deepseek_api_key() -> str | None:
-    """获取 DeepSeek API key（从 .ai_env 或环境变量）。"""
-    load_ai_env()
-    return os.environ.get("DEEPSEEK_API_KEY")
 
+class GraphitiFactory:
+    """Graphiti 实例工厂（DeepSeek LLM + ConfigManager 配置; 静态方法类）。"""
 
-def create_graphiti():
-    """创建配置好的 Graphiti 实例（DeepSeek LLM + BGE-M3 embedding + BGE-Reranker）。
+    @staticmethod
+    def get_deepseek_api_key() -> str | None:
+        """获取 DeepSeek API key（从 .ai_env 或环境变量）。"""
+        cm = ConfigManager.get_instance()
+        return cm.get(cm.Keys.DEEPSEEK_API_KEY)
 
-    必须在 async 上下文中调用（graphiti-core 的初始化是 async）。
-    返回 (graphiti, error)：
-    - 成功：(graphiti_instance, None)
-    - 失败（缺 API key / 缺依赖）：(None, error_message)
-    """
-    from graphiti_core import Graphiti
-    from graphiti_core.llm_client.config import LLMConfig
+    @staticmethod
+    def create_graphiti():
+        """创建配置好的 Graphiti 实例（DeepSeek LLM + BGE-M3 embedding + BGE-Reranker）。
 
-    from services.llm_client import DeepSeekLLMClient
-    from services.reranker import BgeRerankerClient
+        必须在 async 上下文中调用（graphiti-core 的初始化是 async）。
+        返回 (graphiti, error)：
+        - 成功：(graphiti_instance, None)
+        - 失败（缺 API key / 缺依赖）：(None, error_message)
+        """
+        from graphiti_core import Graphiti
+        from graphiti_core.llm_client.config import LLMConfig
 
-    api_key = get_deepseek_api_key()
-    if not api_key:
-        return None, "DEEPSEEK_API_KEY 未配置（请在 .opencode/.ai_env 中设置）"
+        from services.llm_client import DeepSeekLLMClient
+        from services.reranker import BgeRerankerClient
 
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
-    small_model = os.environ.get("DEEPSEEK_SMALL_MODEL", "deepseek-flash")
+        api_key = GraphitiFactory.get_deepseek_api_key()
+        if not api_key:
+            return None, "DEEPSEEK_API_KEY 未配置（请在 .opencode/.ai_env 中设置）"
 
-    llm_config = LLMConfig(
-        api_key=api_key,
-        base_url="https://api.deepseek.com/anthropic",
-        model=model,
-        small_model=small_model,
-        temperature=0,
-    )
-    llm_client = DeepSeekLLMClient(config=llm_config)
+        cm = ConfigManager.get_instance()
+        model = cm.get(cm.Keys.DEEPSEEK_MODEL) or "deepseek-flash"
+        small_model = cm.get(cm.Keys.DEEPSEEK_SMALL_MODEL) or "deepseek-flash"
 
-    embedder = BgeM3Embedder()
+        llm_config = LLMConfig(
+            api_key=api_key,
+            base_url="https://api.deepseek.com/anthropic",
+            model=model,
+            small_model=small_model,
+            temperature=0,
+        )
+        llm_client = DeepSeekLLMClient(config=llm_config)
 
-    cross_encoder = BgeRerankerClient()
+        embedder = BgeM3Embedder()
 
-    graphiti = Graphiti(
-        uri="bolt://localhost:7687",
-        user="neo4j",
-        password="neo4j_password",
-        llm_client=llm_client,
-        embedder=embedder,
-        cross_encoder=cross_encoder,
-    )
-    return graphiti, None
+        cross_encoder = BgeRerankerClient()
+
+        graphiti = Graphiti(
+            uri="bolt://localhost:7687",
+            user="neo4j",
+            password="neo4j_password",
+            llm_client=llm_client,
+            embedder=embedder,
+            cross_encoder=cross_encoder,
+        )
+        return graphiti, None
 
 
 class BgeM3Embedder(EmbedderClient):
@@ -149,7 +135,7 @@ class BgeM3Embedder(EmbedderClient):
     替代 OpenAI embedding API——零成本、无网络依赖。
     输出 1024 维向量，与 graphiti-core 默认 EMBEDDING_DIM=1024 一致。
 
-    模型实例经 model_loader.get_embedder()（进程内单例，与 /embed 端点同源）。
+    模型实例经 ModelInferenceService.get_instance().get_embedder()（进程内单例，与 /embed 端点同源）。
     encode 是同步 CPU 调用，async 方法用 asyncio.to_thread 包装。
     """
 
@@ -158,8 +144,8 @@ class BgeM3Embedder(EmbedderClient):
 
     def _encode(self, text: str) -> "list[float]":
         """单文本 embed（串行由 model_loader 的 LockedEmbedder 保证）。"""
-        from services import model_loader
-        return model_loader.embed_sync(text)
+        from services.model_loader import ModelInferenceService
+        return ModelInferenceService.get_instance().embed_sync(text)
 
     async def create(self, input_data) -> list[float]:
         """生成 embedding 向量（async）。
@@ -193,5 +179,5 @@ class BgeM3Embedder(EmbedderClient):
         模型解析在 model_loader 内部线程安全（双重检查锁定单例），
         只把 encode 调用交给 to_thread（串行由 LockedEmbedder 保证）。
         """
-        from services import model_loader
+        from services.model_loader import ModelInferenceService
         return await asyncio.to_thread(model_loader.embed_batch_sync, input_data)

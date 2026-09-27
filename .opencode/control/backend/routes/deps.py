@@ -20,6 +20,7 @@ console_url 由 services/console_url.py 统一计算（唯一实现）。
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -29,11 +30,11 @@ from typing import Callable, TypeVar
 from fastapi import APIRouter
 
 from services import detect_py_deps, detect_tools
-from services.console_url import get_console_url
+from services.frontend_port import FrontendPortRegistry
 from services.detect_py_deps import PyPkgStatus
 from services.detect_tools import CompilerInfo, ToolStatus
 from services.docker_manager import DockerGlobal
-from services.model_assets import ModelAssetStatus
+from services.model_assets import ModelAssetRegistry
 
 router = APIRouter(prefix="/api/deps", tags=["deps"])
 
@@ -136,8 +137,7 @@ class DepsService:
             return docker_manager.scan_global()
 
         def _models() -> list[ModelAssetStatus]:
-            from services import model_assets
-            return model_assets.get_model_assets()
+                        return ModelAssetRegistry.get_instance().get_model_assets()
 
         with ThreadPoolExecutor(max_workers=5) as ex:
             f_py = ex.submit(self._safe, lambda: detect_py_deps.scan("all"), [])
@@ -235,7 +235,7 @@ class DepsService:
                 ready=not required_missing,
                 required_missing=required_missing,
                 optional_missing=optional_missing,
-                console_url=get_console_url(),
+                console_url=FrontendPortRegistry.get_instance().console_url(),
             ),
             python=pkgs,
             tools=tools,
@@ -295,8 +295,7 @@ def invalidate_deps_snapshot() -> None:
 
 def _register_invalidation_hooks() -> None:
     """模型下载完成回调 → 快照失效（依赖方向 routes → services 合法）。"""
-    from services import model_assets
-    model_assets.add_change_callback(lambda _mid: deps_service.invalidate())
+    ModelAssetRegistry.get_instance().add_change_callback(lambda _mid: deps_service.invalidate())
 
 
 _register_invalidation_hooks()

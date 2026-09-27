@@ -37,34 +37,51 @@ import sys
 import threading
 import time
 
-from config import EXIT_CODE_NORMAL, IS_WINDOWS, ipc_unix_socket_path
-
-RESTART_DELAY_SEC = 1.5   # 等 HTTP 响应送达前端
-WIN_HELPER_POLL_SEC = 0.2
-
-
-def _refresh_env_from_ai_env() -> None:
-    """重启前把 .ai_env 的当前值刷新进 os.environ（覆盖启动期旧值）。
-
-    execv / Windows helper 均继承当前进程环境：运行期 load_ai_env 的
-    setdefault 已把旧值固化进 os.environ，不刷新则改 .ai_env 后重启不生效
-    （2026/9/22 实测：DEEPSEEK_MODEL 改文件后重启仍是旧模型）。
-    .ai_env 读取收口在 config_store（唯一读写方）。
-    """
-    from services import config_store
-    for key, value in config_store.read_all().items():
-        os.environ[key] = value
-
+from services.config_manager import ConfigManager
 
 class ConsoleRestarter:
-    """控制台自重启调度器（模块级单例 console_restarter）。
+    """控制台自重启调度器（全局单例，get_instance() 获取）。
 
     _scheduled 防重复调度：重启按钮连点只生效一次。
     """
 
-    def __init__(self) -> None:
+    _instance: "ConsoleRestarter | None" = None
+    _instance_lock = threading.Lock()
+
+    RESTART_DELAY_SEC = 1.5   # 等 HTTP 响应送达前端
+    WIN_HELPER_POLL_SEC = 0.2
+
+    def __new__(cls) -> "ConsoleRestarter":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    inst = super().__new__(cls)
+                    inst._init_once()
+                    cls._instance = inst
+        return cls._instance
+
+    @classmethod
+    def get_instance(cls) -> "ConsoleRestarter":
+        return cls()
+
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        with cls._instance_lock:
+            cls._instance = None
+
+    def _init_once(self) -> None:
         self._lock = threading.Lock()
         self._scheduled = False
+
+    @staticmethod
+    def _refresh_env_from_ai_env() -> None:
+        """重启前把 .ai_env 的当前值刷新进 os.environ（覆盖启动期旧值）。
+
+        execv / Windows helper 均继承当前进程环境——不刷新则改 .ai_env 后
+        重启不生效。读取收口在 ConfigManager（.ai_env 唯一读写方）。
+        """
+        for key, value in ConfigManager.get_instance().get_all().items():
+            os.environ[key] = value
 
     def schedule(self) -> bool:
         """调度延迟重启。返回 False = 已有重启在途（重复调用）。"""
@@ -72,19 +89,19 @@ class ConsoleRestarter:
             if self._scheduled:
                 return False
             self._scheduled = True
-        logger.info("自重启已调度，%.1fs 后执行", RESTART_DELAY_SEC)
-        threading.Timer(RESTART_DELAY_SEC, self.perform).start()
+        logger.info("自重启已调度，%.1fs 后执行", self.RESTART_DELAY_SEC)
+        threading.Timer(self.RESTART_DELAY_SEC, self.perform).start()
         return True
 
     def perform(self) -> None:
         """执行重启（单独成方法：单测 monkeypatch 本方法验证调度链路）。"""
         try:
-            _refresh_env_from_ai_env()
+            self._refresh_env_from_ai_env()
         except Exception as e:  # 刷新失败不能阻断重启（按旧环境继续）
             logger.warning("重启前 .ai_env 刷新失败: %s", e)
-        if not IS_WINDOWS:
+        if not ConfigManager.get_instance().is_windows:
             try:
-                ipc_unix_socket_path().unlink(missing_ok=True)
+                ConfigManager.get_instance().ipc_unix_socket_path().unlink(missing_ok=True)
             except OSError:
                 pass
         if sys.platform == "win32":
@@ -106,7 +123,7 @@ class ConsoleRestarter:
             "pid=int(sys.argv[1])\n"
             "while True:\n"
             "    try:\n"
-            "        os.kill(pid, 0); time.sleep(" + str(WIN_HELPER_POLL_SEC) + ")\n"
+            "        os.kill(pid, 0); time.sleep(" + str(self.WIN_HELPER_POLL_SEC) + ")\n"
             "    except OSError:\n"
             "        break\n"
             "server=sys.argv[2]\n"
@@ -119,7 +136,7 @@ class ConsoleRestarter:
         subprocess.Popen(argv, creationflags=flags,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         logger.info("Windows 重启：helper 已 spawn，本进程退出")
-        os._exit(EXIT_CODE_NORMAL)
+        os._exit(ConfigManager.Protocol.EXIT_CODE_NORMAL)
 
 
 console_restarter = ConsoleRestarter()

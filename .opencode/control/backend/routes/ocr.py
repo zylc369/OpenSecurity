@@ -1,7 +1,7 @@
 """/api/ocr 路由：本地图像文字识别（glm-ocr，控制台持有模型）。
 
 消费方：mcp-servers/ocr/server.py（MCP 薄壳，extract 直调——懒加载对壳透明）。
-生命周期语义见 services/ocr_service.py（extract 懒加载 + 纯空闲 600s 自动卸载）。
+生命周期语义见 services/OcrService.get_instance().py（extract 懒加载 + 纯空闲 600s 自动卸载）。
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from services.ocr_service import ocr_service
+from services.ocr_service import OcrService
 
 router = APIRouter(prefix="/api/ocr", tags=["ocr"])
 
@@ -25,7 +25,7 @@ class ExtractRequest(BaseModel):
 async def extract(req: ExtractRequest) -> dict:
     """识图。未就绪自动加载（懒加载）; 自动刷新活跃时间。"""
     try:
-        text = await ocr_service.extract(req.image_b64, req.prompt)
+        text = await OcrService.get_instance().extract(req.image_b64, req.prompt)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except httpx.HTTPStatusError as e:
@@ -41,11 +41,11 @@ async def extract(req: ExtractRequest) -> dict:
 @router.get("/status")
 async def get_status() -> dict:
     """状态快照（前端模型页：backend/state/空闲窗口/错误/依赖就绪）。"""
-    return asdict(ocr_service.status())
+    return asdict(OcrService.get_instance().status())
 
 
 @router.post("/release")
 async def release() -> dict:
     """强制释放（前端模型页停止按钮）。"""
-    await ocr_service.force_release()
-    return {"ok": True, **asdict(ocr_service.status())}
+    await OcrService.get_instance().force_release()
+    return {"ok": True, **asdict(OcrService.get_instance().status())}

@@ -23,37 +23,75 @@ import subprocess
 import threading
 from pathlib import Path
 
-from config import (
-    BIND_HOST,
-    CONTROL_TCP_PORT_START,
-    TCP_CANDIDATE_COUNT,
-    EXIT_CODE_PORT_EXHAUSTED,
-    OPENCODE_ROOT,
-    is_dev_mode,
-)
+from services.config_manager import ConfigManager
 
 _PROBE_TIMEOUT_SEC = 0.3
 
 
-def _port_alive(port: int) -> bool:
-    """TCP 探测（双栈：vite/Node 17+ 可能只监听 [::1]）。无共享态，模块级纯函数。"""
-    for host in ("127.0.0.1", "::1"):
-        try:
-            with socket.create_connection((host, port), timeout=_PROBE_TIMEOUT_SEC):
-                return True
-        except OSError:
-            continue
-    return False
-
-
 class FrontendPortRegistry:
-    """前端可达端口的注册、查询与生命周期。"""
+    """前端可达端口的注册、查询与生命周期（全局单例）。"""
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
+    _instance: "FrontendPortRegistry | None" = None
+    _instance_lock = __import__("threading").Lock()
+
+    def __new__(cls) -> "FrontendPortRegistry":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    inst = super().__new__(cls)
+                    inst._init_once()
+                    cls._instance = inst
+        return cls._instance
+
+    @classmethod
+    def get_instance(cls) -> "FrontendPortRegistry":
+        return cls()
+
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        with cls._instance_lock:
+            cls._instance = None
+
+    def _init_once(self) -> None:
+        self._lock = __import__("threading").Lock()
         self._tcp_port: int | None = None        # 控制台浏览器通道（bind 后注册）
         self._vite_port: int | None = None       # vite dev（IPC 上报）
-        self._launch_lock = threading.Lock()     # vite 拉起防并发双拉
+        self._launch_lock = __import__("threading").Lock()  # vite 拉起防并发双拉
+
+    @staticmethod
+    def _port_alive(port: int) -> bool:
+        """TCP 探测（双栈：vite/Node 17+ 可能只监听 [::1]）。无共享态，模块级纯函数。"""
+        for host in ("127.0.0.1", "::1"):
+            try:
+                with socket.create_connection((host, port), timeout=_PROBE_TIMEOUT_SEC):
+                    return True
+            except OSError:
+                continue
+        return False
+
+
+    def effective_bind_host() -> str:
+        """实际绑定地址: 节点角色（CONTROL_API_KEY 已配置）→ 0.0.0.0（局域网可入）;
+        否则维持 127.0.0.1（默认仅本机，安全约束）。"""
+        try:
+            cm = ConfigManager.get_instance()
+            if (cm.get(cm.Keys.CONTROL_API_KEY) or "").strip():
+                return "0.0.0.0"
+        except Exception:  # noqa: BLE001 —— 配置读取异常 → 安全默认
+            pass
+        return ConfigManager.Protocol.BIND_HOST
+
+    @staticmethod
+    def effective_bind_host() -> str:
+        """实际绑定地址: 节点角色（CONTROL_API_KEY 已配置）→ 0.0.0.0（局域网可入）;
+        否则维持 127.0.0.1（默认仅本机，安全约束）。"""
+        try:
+            cm = ConfigManager.get_instance()
+            if (cm.get(cm.Keys.CONTROL_API_KEY) or "").strip():
+                return "0.0.0.0"
+        except Exception:  # noqa: BLE001 —— 配置读取异常 → 安全默认
+            pass
+        return ConfigManager.Protocol.BIND_HOST
 
     # ── 控制台 TCP 通道 ────────────────────────────────────
 
@@ -65,32 +103,32 @@ class FrontendPortRegistry:
         Raises:
             RuntimeError: 候选段全部被占。
         """
+        bind_host = self.effective_bind_host()
         last_err: OSError | None = None
         for port in self.tcp_candidates():
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind((BIND_HOST, port))
+                sock.bind((bind_host, port))
                 with self._lock:
                     self._tcp_port = port
-                logger.info("浏览器 TCP 绑定 127.0.0.1:%d", port)
+                logger.info("浏览器 TCP 绑定 %s:%d（%s）", bind_host, port,
+                            "节点模式-局域网开放" if bind_host == "0.0.0.0" else "仅本机")
                 return sock
             except OSError as e:
                 last_err = e
                 continue
         raise RuntimeError(
             f"TCP 候选段 {self.tcp_candidates()[0]}-{self.tcp_candidates()[-1]} "
-            f"全部被占用（exit code = {EXIT_CODE_PORT_EXHAUSTED}）：{last_err}"
+            f"全部被占用（exit code = {ConfigManager.Protocol.EXIT_CODE_PORT_EXHAUSTED}）：{last_err}"
         )
 
     @staticmethod
     def tcp_candidates() -> list[int]:
         """候选端口列表（CONTROL_TCP_PORT 环境变量可重定向起点，测试沙箱用）。"""
-        start = CONTROL_TCP_PORT_START
-        env_val = os.environ.get("CONTROL_TCP_PORT")
-        if env_val and env_val.isdigit():
-            start = int(env_val)
-        return list(range(start, start + TCP_CANDIDATE_COUNT))
+        return list(range(ConfigManager.get_instance().tcp_port_start(),
+                           ConfigManager.get_instance().tcp_port_start()
+                           + ConfigManager.Protocol.TCP_CANDIDATE_COUNT))
 
     def tcp_port(self) -> int | None:
         """控制台真实 TCP 端口（未 bind 返回 None）。"""
@@ -103,7 +141,7 @@ class FrontendPortRegistry:
         生产路径走 bind_and_register_tcp；本方法供测试/特殊编排复用。
         verify_alive=True 时探测端口有监听才注册（防误注册死端口）。
         """
-        if verify_alive and not _port_alive(port):
+        if verify_alive and not self._port_alive(port):
             return False
         with self._lock:
             self._tcp_port = port
@@ -129,10 +167,10 @@ class FrontendPortRegistry:
         """
         with self._lock:
             registered = self._vite_port
-        if registered and _port_alive(registered):
+        if registered and self._port_alive(registered):
             return registered
         for p in (5173, 5174, 5175):  # vite 冲突自动递增的候选段
-            if _port_alive(p):
+            if self._port_alive(p):
                 return p
         return None
 
@@ -147,7 +185,7 @@ class FrontendPortRegistry:
         开发态：vite 活着 → vite 端口；否则回退控制台 TCP。
         发布态：控制台 TCP。
         """
-        if is_dev_mode():
+        if ConfigManager.get_instance().is_dev_mode:
             vp = self.vite_port()
             if vp:
                 return f"http://localhost:{vp}"
@@ -164,12 +202,12 @@ class FrontendPortRegistry:
         """
         if self.vite_running():
             return True
-        if not OPENCODE_ROOT:
+        if not ConfigManager.get_instance().opencode_root:
             return False
         with self._launch_lock:
             if self.vite_running():  # 双检：并发调用只拉一次
                 return True
-            frontend_dir = Path(OPENCODE_ROOT) / "control" / "frontend"
+            frontend_dir = Path(ConfigManager.get_instance().opencode_root) / "control" / "frontend"
             vite_bin = frontend_dir / "node_modules" / ".bin" / "vite"
             if not vite_bin.is_file():
                 return False  # 依赖未装——dev 提示页指路
@@ -182,5 +220,4 @@ class FrontendPortRegistry:
             return True
 
 
-# 模块级单例 + 同名委托（消费方 `from services.frontend_port import frontend_ports`）
-frontend_ports = FrontendPortRegistry()
+

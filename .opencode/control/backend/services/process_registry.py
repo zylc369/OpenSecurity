@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass
 
 import psutil
 
-from services.frontend_port import frontend_ports
+from services.frontend_port import FrontendPortRegistry
 
 
 @dataclass
@@ -49,99 +49,103 @@ class ProcessRegistryView:
     processes: list[ProcessInfo]
 
 
-_FOOTPRINT_RE = re.compile(r"Footprint:\s*([\d.]+)\s*([BKMGT])")
-_UNIT_TO_MB = {"B": 1 / 1048576, "K": 1 / 1024, "M": 1.0, "G": 1024.0, "T": 1048576.0}
+class ProcessRegistryUtil:
+    """进程注册表工具（静态方法类; 常量为类静态字段）。"""
 
+    _FOOTPRINT_RE = re.compile(r"Footprint:\s+([\d.]+)\s*([BKMGT])")
+    _UNIT_TO_MB = {"B": 1 / 1048576, "K": 1 / 1024, "M": 1.0, "G": 1024.0, "T": 1048576.0}
 
-def _footprint_mb(pid: int) -> float | None:
-    """macOS phys_footprint（活动监视器"内存"列同口径）。非 darwin/失败返回 None。"""
-    if sys.platform != "darwin":
-        return None
-    try:
-        r = subprocess.run(["/usr/bin/footprint", str(pid)],
-                           capture_output=True, text=True, timeout=5)
-        m = _FOOTPRINT_RE.search(r.stdout)
-        if not m:
+    @staticmethod
+    def _footprint_mb(pid: int) -> float | None:
+        """macOS phys_footprint（活动监视器"内存"列同口径）。非 darwin/失败返回 None。"""
+        if sys.platform != "darwin":
             return None
-        return round(float(m.group(1)) * _UNIT_TO_MB[m.group(2)], 1)
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None
-
-
-def _pid_on_port(port: int) -> int | None:
-    """监听指定端口的进程 PID（反查；无监听/工具不可用返回 None）。
-
-    平台策略（实测结论）：
-      - Windows/Linux: psutil.net_connections（Windows 免 admin；
-        Linux 经 /proc 同用户进程免 root）
-      - macOS: psutil 全局连接表需要 root（AccessDenied）→ 用 lsof
-        （系统自带，可查本用户进程的 socket）
-    """
-    if sys.platform != "darwin":
         try:
-            for c in psutil.net_connections(kind="tcp"):
-                if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port:
-                    return c.pid
+            r = subprocess.run(["/usr/bin/footprint", str(pid)],
+                               capture_output=True, text=True, timeout=5)
+            m = ProcessRegistryUtil._FOOTPRINT_RE.search(r.stdout)
+            if not m:
+                return None
+            return round(float(m.group(1)) * ProcessRegistryUtil._UNIT_TO_MB[m.group(2)], 1)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
             return None
-        except (psutil.AccessDenied, psutil.Error):
-            pass   # Linux 受限环境 → lsof 兜底
-    try:
-        r = subprocess.run(["lsof", "-ti", f":{port}", "-sTCP:LISTEN"],
-                           capture_output=True, text=True, timeout=5)
-        out = r.stdout.strip().splitlines()
-        return int(out[0]) if out else None
-    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
-        return None
+
+    @staticmethod
+    def _pid_on_port(port: int) -> int | None:
+        """监听指定端口的进程 PID（反查；无监听/工具不可用返回 None）。
+
+        平台策略（实测结论）：
+          - Windows/Linux: psutil.net_connections（Windows 免 admin；
+            Linux 经 /proc 同用户进程免 root）
+          - macOS: psutil 全局连接表需要 root（AccessDenied）→ 用 lsof
+            （系统自带，可查本用户进程的 socket）
+        """
+        if sys.platform != "darwin":
+            try:
+                for c in psutil.net_connections(kind="tcp"):
+                    if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port:
+                        return c.pid
+                return None
+            except (psutil.AccessDenied, psutil.Error):
+                pass   # Linux 受限环境 → lsof 兜底
+        try:
+            r = subprocess.run(["lsof", "-ti", f":{port}", "-sTCP:LISTEN"],
+                               capture_output=True, text=True, timeout=5)
+            out = r.stdout.strip().splitlines()
+            return int(out[0]) if out else None
+        except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _ps_proc_info(pid: int) -> tuple[float | None, str, float | None]:
+        """安全读取 pid 的 RSS(MB)、命令行、footprint(MB)。进程消失返回 (None, "", None)。"""
+        try:
+            p = psutil.Process(pid)
+            mem = round(p.memory_info().rss / 1048576, 1)
+            cmd = " ".join(p.cmdline())[:200]
+            return mem, cmd, _footprint_mb(pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return None, "", None
+
+    @staticmethod
+    def collect_processes() -> ProcessRegistryView:
+        """汇总三个受管进程的当前快照。"""
+        procs: list[ProcessInfo] = []
+
+        # 1. 控制台主进程
+        own = os.getpid()
+        mem, cmd, fp = _ps_proc_info(own)
+        procs.append(ProcessInfo(
+            key="console",
+            name="控制台后端",
+            pid=own,
+            role="FastAPI 服务（deps/docker/config/models API）。BGE-M3 + BGE-Reranker 双模型常驻本进程内（Metal/GPU 映射 + 压缩页不体现在 RSS，看内存总量以 footprint 为准）",
+            status="running",
+            memory_mb=mem,
+            cmdline=cmd,
+            memory_footprint_mb=fp,
+        ))
 
 
-def _ps_proc_info(pid: int) -> tuple[float | None, str, float | None]:
-    """安全读取 pid 的 RSS(MB)、命令行、footprint(MB)。进程消失返回 (None, "", None)。"""
-    try:
-        p = psutil.Process(pid)
-        mem = round(p.memory_info().rss / 1048576, 1)
-        cmd = " ".join(p.cmdline())[:200]
-        return mem, cmd, _footprint_mb(pid)
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return None, "", None
+        # 3. vite dev server（独立进程组 spawn 时未记录 PID，按监听端口反查）
+        port = FrontendPortRegistry.get_instance().vite_port()
+        vpid = _pid_on_port(port) if port else None
+        if vpid is not None:
+            vmem, vcmd, vfp = _ps_proc_info(vpid)
+            vstatus = "running"
+        else:
+            vmem, vcmd, vfp, vstatus = None, "", None, ("running" if port else "stopped")
+        procs.append(ProcessInfo(
+            key="vite",
+            name="vite dev server",
+            pid=vpid,
+            role="前端开发服务器（CONTROL_FRONTEND_DEV=1 时由控制台自动拉起；独立进程组，控制台重启不连带退出）",
+            status=vstatus,
+            memory_mb=vmem,
+            cmdline=vcmd,
+            memory_footprint_mb=vfp,
+            extra=f"port={port}" if port else "",
+        ))
 
+        return ProcessRegistryView(generated_at=time.time(), processes=procs)
 
-def collect_processes() -> ProcessRegistryView:
-    """汇总三个受管进程的当前快照。"""
-    procs: list[ProcessInfo] = []
-
-    # 1. 控制台主进程
-    own = os.getpid()
-    mem, cmd, fp = _ps_proc_info(own)
-    procs.append(ProcessInfo(
-        key="console",
-        name="控制台后端",
-        pid=own,
-        role="FastAPI 服务（deps/docker/config/models API）。BGE-M3 + BGE-Reranker 双模型常驻本进程内（Metal/GPU 映射 + 压缩页不体现在 RSS，看内存总量以 footprint 为准）",
-        status="running",
-        memory_mb=mem,
-        cmdline=cmd,
-        memory_footprint_mb=fp,
-    ))
-
-
-    # 3. vite dev server（独立进程组 spawn 时未记录 PID，按监听端口反查）
-    port = frontend_ports.vite_port()
-    vpid = _pid_on_port(port) if port else None
-    if vpid is not None:
-        vmem, vcmd, vfp = _ps_proc_info(vpid)
-        vstatus = "running"
-    else:
-        vmem, vcmd, vfp, vstatus = None, "", None, ("running" if port else "stopped")
-    procs.append(ProcessInfo(
-        key="vite",
-        name="vite dev server",
-        pid=vpid,
-        role="前端开发服务器（CONTROL_FRONTEND_DEV=1 时由控制台自动拉起；独立进程组，控制台重启不连带退出）",
-        status=vstatus,
-        memory_mb=vmem,
-        cmdline=vcmd,
-        memory_footprint_mb=vfp,
-        extra=f"port={port}" if port else "",
-    ))
-
-    return ProcessRegistryView(generated_at=time.time(), processes=procs)

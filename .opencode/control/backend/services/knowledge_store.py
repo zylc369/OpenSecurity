@@ -5,7 +5,7 @@
   - agent 读写（POST /api/knowledge/search|store、/api/memory/search → 同步方法，
     FastAPI 线程池执行，MemoryDB._lock 串行 SQLite 访问）
 
-单实例：全进程只有一条 MemoryDB SQLite 连接（embedder=model_loader.get_embedder()
+单实例：全进程只有一条 MemoryDB SQLite 连接（embedder=ModelInferenceService.get_instance().get_embedder()
 返回的 LockedEmbedder，与 /embed 端点同源）。推理线程安全由 LockedEmbedder
 内部持锁串行保证（torch/MPS 并发推理堆损坏——2026-09-25 双 SIGSEGV 实证），
 _memory worker 与 graphiti 事件管道并发到达亦安全。非法条目（question/answer/type
@@ -23,13 +23,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config import DATA_DIR
-from services.knowledge_db import DEFAULT_TOP_K, MemoryDB
+from services.knowledge_db import MemoryDB
 
 DEFAULT_DB_PATH = Path(DATA_DIR) / "db" / "knowledge" / "knowledge.db"
-
-
-def log(msg: str) -> None:
-    logger.info("%s", msg)
 
 
 @dataclass(frozen=True)
@@ -42,6 +38,44 @@ class MemoryEntry:
 
 
 class KnowledgeStoreService:
+    """（全局单例，get_instance() 获取。）"""
+
+    _instance: "KnowledgeStoreService | None" = None
+    _instance_lock = threading.Lock()
+
+    def __new__(cls, db_path=None, embedder_factory=None) -> "KnowledgeStoreService":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    inst = super().__new__(cls)
+                    inst._init_once(db_path, embedder_factory)
+                    cls._instance = inst
+        return cls._instance
+
+    @classmethod
+    def get_instance(cls) -> "KnowledgeStoreService":
+        return cls()
+
+    @classmethod
+    def _create_fresh(cls, *args, **kwargs):
+        """构造独立实例（绕过单例——测试 fake 注入用; 生产代码禁用）。"""
+        inst = object.__new__(cls)
+        inst._init_once(*args, **kwargs)
+        return inst
+
+    @classmethod
+    def _force_instance(cls, inst: "KnowledgeStoreService") -> None:
+        """测试注入: 强制替换单例（fake 服务注入口）。"""
+        with cls._instance_lock:
+            cls._instance = inst
+
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        with cls._instance_lock:
+            if cls._instance is not None:
+                cls._instance.stop(timeout=5)
+            cls._instance = None
+
     """knowledge 向量库服务：惰性单例 MemoryDB + 写队列线程。
 
     线程安全：submit/同步方法只依赖 MemoryDB 内部 _lock；DB 实例引用的
@@ -49,7 +83,7 @@ class KnowledgeStoreService:
     注入点：db_path / embedder_factory（测试用 fake）。
     """
 
-    def __init__(self, db_path: Path | None = None, embedder_factory=None) -> None:
+    def _init_once(self, db_path=None, embedder_factory=None) -> None:
         self._db_path = db_path or DEFAULT_DB_PATH
         self._embedder_factory = embedder_factory  # () -> EmbedderLike；None = model_loader
         self._queue: queue.Queue[MemoryEntry | None] = queue.Queue()
@@ -88,7 +122,7 @@ class KnowledgeStoreService:
     def submit(self, entry: MemoryEntry) -> bool:
         """入队一条 memory 记录；字段非法返回 False。"""
         if not entry.question.strip() or not entry.answer.strip() or not entry.type.strip():
-            log(f"跳过非法条目: type={entry.type!r} question空={not entry.question.strip()} answer空={not entry.answer.strip()}")
+            logger.info(f"跳过非法条目: type={entry.type!r} question空={not entry.question.strip()} answer空={not entry.answer.strip()}")
             return False
         self._queue.put(entry)
         return True
@@ -105,16 +139,16 @@ class KnowledgeStoreService:
         if not questions:
             return {"error": "questions must be non-empty", "results": [], "count": 0}
         results = self._ensure_db().search(
-            questions, doc_type="knowledge", lang=lang, top_k=DEFAULT_TOP_K)
+            questions, doc_type="knowledge", lang=lang, top_k=MemoryDB.DEFAULT_TOP_K)
         return {"results": results, "count": len(results)}
 
     def store_knowledge(self, question: str, content: str, lang: str = "") -> dict:
         """存知识（存储前 anonymize 脱敏）。"""
-        from services.anonymizer import anonymize
+        from services.anonymizer import Anonymizer
         if not question.strip() or not content.strip():
             return {"stored": False, "error": "question and content must be non-empty"}
         row_id = self._ensure_db().store(
-            anonymize(question), anonymize(content), doc_type="knowledge", lang=lang)
+            Anonymizer.anonymize(question), Anonymizer.anonymize(content), doc_type="knowledge", lang=lang)
         return {"stored": True, "id": row_id}
 
     def search_memory(self, questions: list[str], flow_id: str | None = None) -> dict:
@@ -122,7 +156,7 @@ class KnowledgeStoreService:
         if not questions:
             return {"error": "questions must be non-empty", "results": [], "count": 0}
         results = self._ensure_db().search(
-            questions, doc_type="memory", top_k=DEFAULT_TOP_K, flow_id=flow_id)
+            questions, doc_type="memory", top_k=MemoryDB.DEFAULT_TOP_K, flow_id=flow_id)
         return {"results": results, "count": len(results)}
 
     # ── 内部 ──────────────────────────────────────────────
@@ -135,10 +169,10 @@ class KnowledgeStoreService:
             if self._embedder_factory is not None:
                 embedder = self._embedder_factory()
             else:
-                from services import model_loader
-                embedder = model_loader.get_embedder()
+                from services.model_loader import ModelInferenceService
+                embedder = ModelInferenceService.get_instance().get_embedder()
             self._db = MemoryDB(self._db_path, embedder)
-            log(f"MemoryDB 就绪 db={self._db_path}")
+            logger.info(f"MemoryDB 就绪 db={self._db_path}")
             return self._db
 
     def _run(self) -> None:
@@ -154,7 +188,7 @@ class KnowledgeStoreService:
                     flow_id=entry.flow_id,
                 )
             except Exception as e:  # 单条失败不退出 worker
-                log(f"store 失败: {type(e).__name__}: {e}")
+                logger.info(f"store 失败: {type(e).__name__}: {e}")
                 with self._db_lock:
                     if self._db is not None:
                         try:
@@ -171,26 +205,5 @@ class KnowledgeStoreService:
                 except Exception:
                     pass
                 self._db = None
-        log("worker 退出")
+        logger.info("worker 退出")
 
-
-# 模块级单例 + 同名委托（消费方零改动；测试可替换实例）
-_service = KnowledgeStoreService()
-
-
-def start() -> None:
-    _service.start()
-
-
-def submit_entry(entry: MemoryEntry) -> bool:
-    return _service.submit(entry)
-
-
-def service_instance() -> KnowledgeStoreService:
-    return _service
-
-
-def set_service(svc: KnowledgeStoreService) -> None:
-    """测试注入入口：替换模块级单例。"""
-    global _service
-    _service = svc

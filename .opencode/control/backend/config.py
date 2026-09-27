@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 import os
 import sys
 
@@ -64,6 +66,40 @@ def ipc_addr() -> str:
 EMBED_MODEL = "BAAI/bge-m3"
 RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 
+# ─── 远程模型卸载（一期: 模型远程化）─────────────────────
+# 远程三 KEY（本地侧）: 链接 / 开关 / 令牌——ENABLED 只能经切换按钮（先校验）写 1
+REMOTE_URL_KEY = "REMOTE_CONSOLE_URL"
+REMOTE_ENABLED_KEY = "REMOTE_CONSOLE_ENABLED"
+REMOTE_TOKEN_KEY = "REMOTE_CONSOLE_TOKEN"
+# 节点三 KEY（远程节点侧）: 局域网鉴权 / 常驻（禁自杀）/ 开机自启
+CONTROL_API_KEY_KEY = "CONTROL_API_KEY"
+CONTROL_RESIDENT_KEY = "CONTROL_RESIDENT"
+CONTROL_AUTOSTART_KEY = "CONTROL_AUTOSTART"
+# 链接可调参数的 .ai_env 键（值经 config_store.load_remote_tunables 读取，
+# 缺省/非法回退 RemoteTunables 默认值——不设第二套 env 配置通道）
+REMOTE_HEARTBEAT_INTERVAL_SEC_KEY = "REMOTE_HEARTBEAT_INTERVAL_SEC"
+REMOTE_FAIL_THRESHOLD_KEY = "REMOTE_FAIL_THRESHOLD"
+REMOTE_RECOVER_THRESHOLD_KEY = "REMOTE_RECOVER_THRESHOLD"
+REMOTE_UNLOAD_DELAY_SEC_KEY = "REMOTE_UNLOAD_DELAY_SEC"
+REMOTE_INFER_TIMEOUT_SEC_KEY = "REMOTE_INFER_TIMEOUT_SEC"
+REMOTE_PROBE_TIMEOUT_SEC_KEY = "REMOTE_PROBE_TIMEOUT_SEC"
+
+
+@dataclass(frozen=True)
+class RemoteTunables:
+    """远程链接可调参数（默认值唯一来源; .ai_env 配置优先）。
+
+    消费方: services/remote_link.py（每心跳周期经 config_store 重读——
+    修改 .ai_env 即时生效，无需重启）。
+    """
+
+    heartbeat_interval_sec: float = 5.0   # 心跳探测周期
+    fail_threshold: int = 2               # 连续失败→降级
+    recover_threshold: int = 3             # 连续成功→恢复
+    unload_delay_sec: float = 300.0        # 恢复后稳定期（此间无降级才卸载本地）
+    infer_timeout_sec: float = 30.0        # 推理请求超时
+    probe_timeout_sec: float = 3.0         # 健康探测超时
+
 # ─── 超时时间（毫秒/秒，按字段标注）──────────────────────
 MODEL_LOAD_TIMEOUT_SEC = 60        # 模型加载超时（Plugin 端等待）
 HEALTH_POLL_INTERVAL_SEC = 2       # /health 轮询间隔
@@ -71,8 +107,14 @@ IPC_BIND_WAIT_SEC = 8              # 并发启动败者等待胜者 bind 完成�
 
 # ─── 必要配置清单（缺一项则前端 banner 红色提醒）─────────
 # 用 dataclass 而非裸 dict，便于 IDE 类型提示和后续扩展。
-from dataclasses import dataclass
-from typing import Callable
+# 全部 .ai_env 键常量收口（ConfigField 与消费方统一引用，禁止裸字符串）
+DEEPSEEK_API_KEY_KEY = "DEEPSEEK_API_KEY"
+DEEPSEEK_MODEL_KEY = "DEEPSEEK_MODEL"
+IDA_PRO_HOME_KEY = "IDA_PRO_HOME"
+CONTROL_FRONTEND_DEV_KEY = "CONTROL_FRONTEND_DEV"
+RESUME_ANALYSIS_ENABLED_KEY = "RESUME_ANALYSIS_ENABLED"
+JULIANG_TRADE_NO_KEY = "JULIANG_TRADE_NO"
+JULIANG_API_KEY_KEY = "JULIANG_API_KEY"
 
 @dataclass
 class ConfigField:
@@ -84,17 +126,18 @@ class ConfigField:
     required: bool = True                   # 是否必要（缺失时 banner 提醒）
     validator: Callable[[str], tuple[bool, str]] | None = None  # 校验函数
     default_value: str = ""                 # 后端消费方的默认值（不配置时的行为，收口回传前端）
+    hidden: bool = False                    # 配置页隐藏（专属 TAB 管理的键，如远程资源）
 
 REQUIRED_CONFIGS: list[ConfigField] = [
     ConfigField(
-        key="DEEPSEEK_API_KEY",
+        key=DEEPSEEK_API_KEY_KEY,
         label="DeepSeek API 密钥",
         type="password",
         hint="获取地址：https://platform.deepseek.com/api-keys",
         # validator 在 config_store.validate_api_key 定义，避免循环 import
     ),
     ConfigField(
-        key="IDA_PRO_HOME",
+        key=IDA_PRO_HOME_KEY,
         label="IDA Pro 安装目录",
         type="path",
         hint="该目录下需有 idat 可执行文件",
@@ -106,7 +149,7 @@ REQUIRED_CONFIGS: list[ConfigField] = [
 # {"type": "text", "required": false, "label": key} 兜底。
 EXTRA_CONFIG_META: list[ConfigField] = [
     ConfigField(
-        key="DEEPSEEK_MODEL",
+        key=DEEPSEEK_MODEL_KEY,
         label="DeepSeek 模型名",
         type="text",
         hint="不配置默认 deepseek-flash（events MCP 提取模型；需要更强提取质量可改 deepseek-v4-pro）",
@@ -114,34 +157,132 @@ EXTRA_CONFIG_META: list[ConfigField] = [
         default_value="deepseek-flash",
     ),
     ConfigField(
-        key="CONTROL_FRONTEND_DEV",
+        key=CONTROL_FRONTEND_DEV_KEY,
         label="前端开发模式",
         type="bool",
         hint="1=vite dev(5173)，0/删除=发布态(dist/)。改后需重启控制台生效",
         required=False,
     ),
     ConfigField(
-        key="RESUME_ANALYSIS_ENABLED",
+        key=RESUME_ANALYSIS_ENABLED_KEY,
         label="分析续传开关",
         type="bool",
         hint="1=会话压缩后自动注入分析状态续传提示",
         required=False,
     ),
     ConfigField(
-        key="JULIANG_TRADE_NO",
+        key=JULIANG_TRADE_NO_KEY,
         label="代理IP供应商订单号",
         type="text",
         hint="代理 IP 池用（juliangip.com 企业版套餐的业务编号，会员中心-业务管理获取）",
         required=False,
     ),
     ConfigField(
-        key="JULIANG_API_KEY",
+        key=JULIANG_API_KEY_KEY,
         label="代理IP供应商 API 秘钥",
         type="password",
         hint="与订单号配套的 API Key（同页面获取）；两项都配置后 proxy MCP/代理池才可用",
         required=False,
     ),
 ]
+
+# 远程资源 TAB 专属管理的键（hidden=True: 不出现在配置页，由远程 TAB 差异化渲染）。
+REMOTE_TAB_CONFIGS: list[ConfigField] = [
+    ConfigField(
+        key=REMOTE_URL_KEY,
+        label="远程控制台链接",
+        type="text",
+        hint="远程节点（如 Mac Mini）控制台地址，如 http://192.168.1.20:9776",
+        required=False,
+        hidden=True,
+    ),
+    ConfigField(
+        key=REMOTE_TOKEN_KEY,
+        label="远程控制台令牌",
+        type="password",
+        hint="与远程节点 CONTROL_API_KEY 相同的值（Bearer 鉴权）",
+        required=False,
+        hidden=True,
+    ),
+    ConfigField(
+        key=REMOTE_ENABLED_KEY,
+        label="远程模型开关",
+        type="bool",
+        hint="1=模型推理优先走远程节点；只能经「切换远程」按钮（先校验）开启",
+        required=False,
+        hidden=True,
+    ),
+    ConfigField(
+        key=CONTROL_API_KEY_KEY,
+        label="本机控制台鉴权令牌",
+        type="password",
+        hint="配置后本控制台对局域网开放推理类 API（Bearer 校验）并绑 0.0.0.0；远程节点（Mac Mini）用",
+        required=False,
+        hidden=True,
+    ),
+    ConfigField(
+        key=CONTROL_RESIDENT_KEY,
+        label="控制台常驻",
+        type="bool",
+        hint="1=禁用心跳自杀机制（无 opencode 连接也不退出）；远程节点用",
+        required=False,
+        hidden=True,
+    ),
+    ConfigField(
+        key=CONTROL_AUTOSTART_KEY,
+        label="开机自动启动",
+        type="bool",
+        hint="1=安装 LaunchAgent 开机自启（macOS，需开启自动登录）；远程节点用",
+        required=False,
+        hidden=True,
+    ),
+]
+
+# 远程链接可调参数（hidden=True: 不出现在配置页; 值存 .ai_env 经 config_store 读取，
+# default_value 与 RemoteTunables 默认值同源生成——不设第二套配置通道）。
+def _remote_tunable_config_fields() -> list[ConfigField]:
+    _t = RemoteTunables()
+    return [
+        ConfigField(
+            key=REMOTE_HEARTBEAT_INTERVAL_SEC_KEY, label="远程心跳间隔（秒）",
+            type="text", required=False, hidden=True,
+            default_value=str(_t.heartbeat_interval_sec),
+            hint="远程节点健康探测周期; 修改 .ai_env 后下个周期生效",
+        ),
+        ConfigField(
+            key=REMOTE_FAIL_THRESHOLD_KEY, label="远程降级阈值（连续失败次数）",
+            type="text", required=False, hidden=True,
+            default_value=str(_t.fail_threshold),
+            hint="连续失败达此次数 → 降级本地",
+        ),
+        ConfigField(
+            key=REMOTE_RECOVER_THRESHOLD_KEY, label="远程恢复阈值（连续成功次数）",
+            type="text", required=False, hidden=True,
+            default_value=str(_t.recover_threshold),
+            hint="降级后连续成功达此次数 → 切回远程",
+        ),
+        ConfigField(
+            key=REMOTE_UNLOAD_DELAY_SEC_KEY, label="恢复后稳定期（秒）",
+            type="text", required=False, hidden=True,
+            default_value=str(_t.unload_delay_sec),
+            hint="切回远程后稳定此时长才卸载本地模型（释放内存）",
+        ),
+        ConfigField(
+            key=REMOTE_INFER_TIMEOUT_SEC_KEY, label="远程推理超时（秒）",
+            type="text", required=False, hidden=True,
+            default_value=str(_t.infer_timeout_sec),
+            hint="远程 embed/rerank/ocr 请求超时",
+        ),
+        ConfigField(
+            key=REMOTE_PROBE_TIMEOUT_SEC_KEY, label="远程探测超时（秒）",
+            type="text", required=False, hidden=True,
+            default_value=str(_t.probe_timeout_sec),
+            hint="健康探测请求超时（应远小于心跳间隔）",
+        ),
+    ]
+
+
+REMOTE_TUNABLE_CONFIGS: list[ConfigField] = _remote_tunable_config_fields()
 
 
 def _init_validators():
@@ -152,9 +293,9 @@ def _init_validators():
     """
     from services import config_store
     for cfg_field in REQUIRED_CONFIGS:
-        if cfg_field.key == "DEEPSEEK_API_KEY":
+        if cfg_field.key == DEEPSEEK_API_KEY_KEY:
             cfg_field.validator = config_store.validate_api_key
-        elif cfg_field.key == "IDA_PRO_HOME":
+        elif cfg_field.key == IDA_PRO_HOME_KEY:
             cfg_field.validator = config_store.validate_ida_pro_home
 
 # ─── 开发态开关 ───────────────────────────────────────────
@@ -164,7 +305,7 @@ def _init_validators():
 # 启用（1/true）→ 不挂载 dist/，走 Vite 5173；禁用 → 挂载 dist/。
 def is_dev_mode() -> bool:
     """启动期一次性读取（不走 config_store，避免循环依赖）。"""
-    env_val = os.environ.get("CONTROL_FRONTEND_DEV")
+    env_val = os.environ.get(CONTROL_FRONTEND_DEV_KEY)
     if env_val is not None:
         return env_val.strip().lower() in ("1", "true")
     if not OPENCODE_ROOT:
@@ -173,7 +314,7 @@ def is_dev_mode() -> bool:
     if not ai_env_path.exists():
         return False
     for line in ai_env_path.read_text(errors="ignore").splitlines():
-        if line.strip().startswith("CONTROL_FRONTEND_DEV="):
+        if line.strip().startswith(CONTROL_FRONTEND_DEV_KEY + "="):
             value = line.split("=", 1)[1].strip().lower()
             return value in ("1", "true")
     return False
@@ -189,9 +330,7 @@ EXIT_CODE_NORMAL = 0         # 正常退出（心跳表空，自杀）
 # 冲突 +1 顺延，真实端口写状态文件（entry 接口对外返回真实值）。
 PROXY_RELAY_PORT_START = 9676
 PROXY_RELAY_PORT_CANDIDATES = 10
-# 代理IP供应商（企业版）：凭证键名 + API 地址（凭证存 .ai_env，config_store 唯一读写）
-JULIANG_TRADE_NO_KEY = "JULIANG_TRADE_NO"
-JULIANG_API_KEY_KEY = "JULIANG_API_KEY"
+# 代理IP供应商（企业版）: API 地址（凭证键名见上方键常量区; 凭证存 .ai_env，config_store 唯一读写）
 JULIANG_API_URL = "http://v2.api.juliangip.com/company/dynamic/getips"
 # 轮换/寿命参数（实测依据见 requirements/evolve/2026-09-25-proxy-ip-manager.md 附录A）
 JULIANG_IP_TTL_SEC = 300.0        # 单 IP 存活（5 分钟档）

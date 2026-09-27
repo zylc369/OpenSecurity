@@ -32,7 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from config import is_dev_mode
-from services import model_loader
+from services.model_loader import ModelInferenceService
 
 
 _relay_supervise_task: "asyncio.Task | None" = None
@@ -68,8 +68,12 @@ def create_app() -> FastAPI:
             allow_headers=["*"],
         )
 
+    # API 鉴权中间件（后注册先执行——guard 先于 CORS/路由生效）
+    from services.api_guard import ApiGuardMiddleware
+    app.add_middleware(ApiGuardMiddleware)
+
     # 路由
-    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, processes, knowledge, events, heartbeat, proxy
+    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, processes, knowledge, events, heartbeat, proxy, remote
     app.include_router(embed.router)
     app.include_router(health.router)
     app.include_router(heartbeat.router)
@@ -87,6 +91,7 @@ def create_app() -> FastAPI:
     app.include_router(knowledge.router)
     app.include_router(events.router)
     app.include_router(proxy.router)
+    app.include_router(remote.router)
 
     # 前端静态文件（开发态跳过，发布态挂载 dist/）
     _mount_frontend(app)
@@ -99,9 +104,10 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def _start_writers() -> None:
         # 库服务线程（fire-and-forget 写队列；agent 读写按需惰性初始化）
-        from services import event_store, knowledge_store
-        knowledge_store.start()
-        event_store.start()
+        from services.event_store import EventStoreService
+        from services.knowledge_store import KnowledgeStoreService
+        KnowledgeStoreService.get_instance().start()
+        EventStoreService.get_instance().start()
 
     @app.on_event("startup")
     async def _warm_deps_snapshot() -> None:
@@ -109,11 +115,17 @@ def create_app() -> FastAPI:
         asyncio.get_running_loop().run_in_executor(None, warm_deps_snapshot)
 
     @app.on_event("startup")
+    async def _start_remote_link() -> None:
+        # 远程链接心跳（模型远程化: 探测/降级/恢复编排）
+        from services.remote_link import RemoteLinkService
+        RemoteLinkService.get_instance().start()
+
+    @app.on_event("startup")
     async def _start_proxy_relay() -> None:
         # relay（本地代理服务）supervisor：崩溃自动重拉（2 秒级），不拖垮主进程
         import asyncio
         import logging
-        from services import proxy_relay
+        from services.proxy_relay import ProxyRelay
         log = logging.getLogger("proxy_relay")
 
         async def _supervise() -> None:
@@ -121,17 +133,17 @@ def create_app() -> FastAPI:
             # 2 秒级自愈，不拖垮控制台主进程，需求 §8 步骤 3b 验证点）
             while True:
                 try:
-                    await proxy_relay.start_relay()
+                    await ProxyRelay.start_relay()
                 except Exception as e:
                     log.error("[proxy_relay] 启动失败(2s 后重试): %s", e)
                     await asyncio.sleep(2)
                     continue
                 while True:
                     await asyncio.sleep(2)
-                    srv = proxy_relay.current_server()
+                    srv = ProxyRelay.current_server()
                     if srv is None or not srv.sockets or srv.is_serving() is False:
                         log.warning("[proxy_relay] 服务失活，自动重拉监听")
-                        await proxy_relay.stop_relay()
+                        await ProxyRelay.stop_relay()
                         break
                 await asyncio.sleep(0.2)
 
@@ -142,8 +154,8 @@ def create_app() -> FastAPI:
     # 前端 404）。幂等：vite 已运行则跳过；拉起失败由 dev 提示页指路。
     from config import is_dev_mode as _is_dev
     if _is_dev():
-        from services.frontend_port import frontend_ports
-        frontend_ports.ensure_vite_dev()
+        from services.frontend_port import FrontendPortRegistry
+        FrontendPortRegistry.get_instance().ensure_vite_dev()
 
     return app
 
@@ -187,20 +199,18 @@ def main() -> None:
       5. 后台线程加载模型
       6. uvicorn.run
     """
-    from services.logging_setup import setup_logging
-    log = setup_logging()
+    from services.logging_setup import LogManager
+    log = LogManager.get_instance().setup()
     log.info("=" * 50)
     log.info("控制台启动（pid=%d, platform=%s）", os.getpid(), sys.platform)
 
     from config import EXIT_CODE_REUSE, EXIT_CODE_PORT_EXHAUSTED, EXIT_CODE_NORMAL, ipc_addr
-    from services.frontend_port import frontend_ports
-    from services.ipc_listener import (
-        start_ipc_listener, cleanup_ipc_listener, IpcStartStatus,
-    )
-    from services.heartbeat import HeartbeatTask, heartbeats
+    from services.frontend_port import FrontendPortRegistry
+    from services.ipc_listener import IpcListener, IpcStartStatus
+    from services.heartbeat import HeartbeatRegistry, HeartbeatTask
 
     # 步骤 2: IPC 监听（按枚举语义分支，不用 bool 猜）
-    status = start_ipc_listener()
+    status = IpcListener.get_instance().start()
     if status is IpcStartStatus.EXISTING_INSTANCE:
         log.info("IPC 通道已有实例运行（%s），本进程退出（exit code = %d）",
                  ipc_addr(), EXIT_CODE_REUSE)
@@ -215,21 +225,21 @@ def main() -> None:
 
     # 步骤 3: bind 浏览器 TCP 候选段（顺延）+ 注册真实端口（/api/console-url 对外）
     try:
-        sock = frontend_ports.bind_and_register_tcp()
+        sock = FrontendPortRegistry.get_instance().bind_and_register_tcp()
     except RuntimeError as e:
         log.error("%s", e)
-        cleanup_ipc_listener()
+        IpcListener.get_instance().cleanup()
         sys.exit(EXIT_CODE_PORT_EXHAUSTED)
 
     # 步骤 4: 启动心跳周期检测后台任务（表空过宽限 → 自杀）
     def shutdown():
         log.info("控制台 shutdown（清理 IPC + 退出）")
-        cleanup_ipc_listener()
+        IpcListener.get_instance().cleanup()
         # 用 os._exit 跳过任何 atexit hook（避免 uvicorn 优雅关闭阻塞）
         import os
         os._exit(EXIT_CODE_NORMAL)
 
-    heartbeat_task = HeartbeatTask(heartbeats, shutdown)
+    heartbeat_task = HeartbeatTask(HeartbeatRegistry.get_instance(), shutdown)
     heartbeat_task.start()
 
     # SIGTERM/SIGINT 也走 shutdown（清理 IPC socket + 退出）
@@ -243,7 +253,21 @@ def main() -> None:
     signal.signal(signal.SIGINT, _on_signal)
 
     # 步骤 5: 后台线程加载模型（B 方案核心）
-    model_loader.preload_embedder_background()
+    # - 远程已启用（ENABLED=1 且 URL 非空）→ 跳过本地预加载（由心跳判定:
+    #   REMOTE 保持不加载 / DEGRADED 走预热路径）——避免"重启白白加载再卸载"
+    # - 节点角色（CONTROL_API_KEY 已配置）→ 预加载全部三模型（专职资源节点）
+    from config import CONTROL_API_KEY_KEY, REMOTE_ENABLED_KEY, REMOTE_URL_KEY
+    from services import config_store
+    _api_key = (config_store.read(CONTROL_API_KEY_KEY) or "").strip()
+    _remote_enabled = (config_store.read_bool(REMOTE_ENABLED_KEY)
+                       and (config_store.read(REMOTE_URL_KEY) or "").strip())
+    if _api_key:
+        log.info("节点模式（CONTROL_API_KEY 已配置）: 预加载全部三模型")
+        ModelInferenceService.get_instance().preload_all_models_background()
+    elif _remote_enabled:
+        log.info("远程模型已启用: 跳过本地预加载（心跳判定后再决定加载）")
+    else:
+        ModelInferenceService.get_instance().preload_embedder_background()
 
     # 步骤 6: 启动 uvicorn（用预绑定的 socket；uvicorn 日志并入 root → 同文件）
     import uvicorn

@@ -11,7 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from services import knowledge_store
+from services.knowledge_store import KnowledgeStoreService, MemoryEntry
 
 router = APIRouter(prefix="/api")
 
@@ -42,7 +42,7 @@ class MemoryEntryIn(BaseModel):
 @router.post("/knowledge/search")
 def knowledge_search(req: KnowledgeSearchIn) -> dict:
     try:
-        return knowledge_store.service_instance().search_knowledge(req.questions, lang=req.lang)
+        return KnowledgeStoreService.get_instance().search_knowledge(req.questions, lang=req.lang)
     except Exception as e:
         # 降级契约与 events 路由一致：200 + error 结构，错误消息直达 LLM
         return {"error": f"knowledge_search failed: {e}", "results": [], "count": 0}
@@ -51,7 +51,7 @@ def knowledge_search(req: KnowledgeSearchIn) -> dict:
 @router.post("/knowledge/store")
 def knowledge_store_(req: KnowledgeStoreIn) -> dict:
     try:
-        return knowledge_store.service_instance().store_knowledge(
+        return KnowledgeStoreService.get_instance().store_knowledge(
             req.question, req.content, lang=req.lang)
     except Exception as e:
         return {"stored": False, "error": f"knowledge_store failed: {e}"}
@@ -60,15 +60,15 @@ def knowledge_store_(req: KnowledgeStoreIn) -> dict:
 @router.post("/memory/search")
 def memory_search(req: MemorySearchIn) -> dict:
     try:
-        return knowledge_store.service_instance().search_memory(req.questions, flow_id=req.flow_id)
+        return KnowledgeStoreService.get_instance().search_memory(req.questions, flow_id=req.flow_id)
     except Exception as e:
         return {"error": f"memory_search failed: {e}", "results": [], "count": 0}
 
 
 @router.post("/memory/entry", status_code=202)
 def memory_entry(req: MemoryEntryIn) -> dict:
-    queued = knowledge_store.submit_entry(
-        knowledge_store.MemoryEntry(
+    queued = KnowledgeStoreService.get_instance().submit_entry(
+        MemoryEntry(
             question=req.question, answer=req.answer,
             type=req.type, flow_id=req.flow_id))
     return {"queued": queued}

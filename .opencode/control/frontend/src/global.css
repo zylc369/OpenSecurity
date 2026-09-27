@@ -41,3 +41,12 @@ body {
 ::selection {
   background: rgba(10, 108, 255, 0.18);
 }
+
+/* ─── 远程资源 TAB: 降级红色闪烁（DEGRADED 一眼可见）────────── */
+@keyframes remote-degraded-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.remote-degraded-blink {
+  animation: remote-degraded-blink 1.2s ease-in-out infinite;
+}

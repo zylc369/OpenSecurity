@@ -14,6 +14,7 @@ import type {
   DockerScanGlobal, ScanResult, InstallResult,
   SystemInfo, ModelsResponse, FsCheckResult, ConfigMetaMap,
   ProcessRegistryView, HeartbeatsResponse,
+  RemoteLinkStatusView, SwitchResultView, NodeConfigView, AutostartView,
 } from "../types";
 
 const instance: AxiosInstance = axios.create({
@@ -147,6 +148,48 @@ export const api = {
 
   async stopContainer(name: string): Promise<{ success: boolean; message: string }> {
     const r = await instance.post(`/api/docker/containers/${encodeURIComponent(name)}/stop`);
+    return r.data;
+  },
+
+  // ─── /api/remote（远程资源 TAB）─────────────────────────
+  async getRemoteStatus(): Promise<RemoteLinkStatusView> {
+    const r = await instance.get<RemoteLinkStatusView>("/api/remote/status");
+    return r.data;
+  },
+
+  async switchRemote(target: "remote" | "local"): Promise<SwitchResultView> {
+    const r = await instance.post<SwitchResultView>("/api/remote/switch", { target });
+    return r.data;
+  },
+
+  async updateRemoteConfig(url: string, token: string): Promise<{ ok: boolean }> {
+    const r = await instance.put("/api/remote/config", { url, token });
+    return r.data;
+  },
+
+  /** 节点三 KEY（node=remote 经本控制台转发到远程节点） */
+  async getNodeConfig(node: "local" | "remote" = "remote"): Promise<NodeConfigView> {
+    const r = await instance.get<NodeConfigView>("/api/remote/node-config", {
+      params: { node },
+    });
+    return r.data;
+  },
+
+  async updateNodeConfig(
+    configs: Partial<Record<"CONTROL_RESIDENT" | "CONTROL_AUTOSTART" | "CONTROL_API_KEY", string>>,
+    node: "local" | "remote" = "remote",
+  ): Promise<{ ok: boolean; reboot_required: boolean; hint: string }> {
+    const r = await instance.put("/api/remote/node-config", { configs }, { params: { node } });
+    return r.data;
+  },
+
+  async getAutostart(node: "local" | "remote" = "remote"): Promise<AutostartView> {
+    const r = await instance.get<AutostartView>("/api/remote/autostart", { params: { node } });
+    return r.data;
+  },
+
+  async setAutostart(enable: boolean, node: "local" | "remote" = "remote"): Promise<AutostartView & { hint?: string }> {
+    const r = await instance.post("/api/remote/autostart", { enable }, { params: { node } });
     return r.data;
   },
 

@@ -83,6 +83,8 @@ const ConfigSection: React.FC = () => {
   const sortedGroups = useMemo(() => {
     if (!meta.data) return [];
     const keys = Object.entries(meta.data)
+      // hidden 键不进配置页（专属 TAB 管理，如远程资源的六项 KEY）
+      .filter(([, m]) => !m.hidden)
       .sort((a, b) => Number(b[1].required) - Number(a[1].required) || a[1].label.localeCompare(b[1].label))
       .map(([k]) => k);
     // 分组：组内保持 keys 顺序，未分组键各占一格

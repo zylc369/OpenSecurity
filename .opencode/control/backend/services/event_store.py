@@ -27,10 +27,6 @@ MAX_CONCURRENT = 10
 BRIDGE_TIMEOUT = 600.0  # 桥接调用上限（覆盖 daemon 冷启动 180s + bolt 90s + 初始化）
 
 
-def log(msg: str) -> None:
-    logger.info("%s", msg)
-
-
 @dataclass(frozen=True)
 class EventEntry:
     """一条待写入的事件（timestamp 由 plugin 生成保证时序）。"""
@@ -48,14 +44,61 @@ class DeleteGroup:
 
 
 class EventStoreService:
-    """常驻事件库服务：专用线程 + 独立事件循环 + 无界写队列。
+    """常驻事件库服务（全局单例，get_instance() 获取）。
 
+    专用线程 + 独立事件循环 + 无界写队列。
     线程安全：submit() 只做 queue.put；graphiti 仅专用线程触碰。
     注入点：graphiti_factory（测试 fake；生产 services.graphiti_config.create_graphiti）。
     """
 
-    def __init__(self, graphiti_factory=None) -> None:
+    _instance: "EventStoreService | None" = None
+    _instance_lock = threading.Lock()
+
+    def __new__(cls, graphiti_factory=None) -> "EventStoreService":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    inst = super().__new__(cls)
+                    inst._init_once(graphiti_factory)
+                    cls._instance = inst
+        return cls._instance
+
+    @classmethod
+    def get_instance(cls) -> "EventStoreService":
+        return cls()
+
+    @classmethod
+    def _create_fresh(cls, *args, **kwargs):
+        """构造独立实例（绕过单例——测试 fake 注入用; 生产代码禁用）。"""
+        inst = object.__new__(cls)
+        inst._init_once(*args, **kwargs)
+        return inst
+
+    @classmethod
+    def _force_instance(cls, inst: "EventStoreService") -> None:
+        """测试注入: 强制替换单例（fake 服务注入口）。"""
+        with cls._instance_lock:
+            cls._instance = inst
+
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        with cls._instance_lock:
+            if cls._instance is not None:
+                cls._instance.stop(timeout=5)
+            cls._instance = None
+
+
+    @staticmethod
+    def empty_result(error: str | None = None) -> dict:
+        """搜索降级空返回（初始化失败/异常时端点层使用）。"""
+        payload: dict[str, Any] = {"edges": [], "nodes": [], "episodes": []}
+        if error:
+            payload["error"] = error
+        return payload
+
+    def _init_once(self, graphiti_factory=None) -> None:
         self._graphiti_factory = graphiti_factory
+
         self._queue: queue.Queue[EventEntry | DeleteGroup | None] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._reader: threading.Thread | None = None
@@ -99,11 +142,11 @@ class EventStoreService:
         """入队；字段非法返回 False。"""
         if isinstance(entry, DeleteGroup):
             if not entry.group_id:
-                log("跳过 delete 消息: 缺少 group_id")
+                logger.info("跳过 delete 消息: 缺少 group_id")
                 return False
         else:
             if not (entry.name and entry.body and entry.group_id):
-                log(f"跳过非法事件: name={entry.name!r} group_id={entry.group_id!r}")
+                logger.info("跳过非法事件: name={entry.name!r} group_id={entry.group_id!r}")
                 return False
         self._queue.put(entry)
         return True
@@ -134,17 +177,17 @@ class EventStoreService:
         """
         if self._graphiti is not None:
             return self._graphiti
-        from services.graphiti_config import create_graphiti
+        from services.graphiti_config import GraphitiFactory
         if self._graphiti_factory is None:
             from services import docker_manager
             docker_manager.ensure_neo4j_events_blocking()  # 阻塞（专用线程内，不卡主循环）
-        factory = self._graphiti_factory or create_graphiti
+        factory = self._graphiti_factory or GraphitiFactory.create_graphiti
         graphiti, err = factory()
         if err or graphiti is None:
             raise RuntimeError(f"create_graphiti 失败: {err}")
         await graphiti.build_indices_and_constraints()
         self._graphiti = graphiti
-        log("Graphiti 就绪")
+        logger.info("Graphiti 就绪")
         return self._graphiti
 
     async def _reset_graphiti(self) -> None:
@@ -168,7 +211,7 @@ class EventStoreService:
         finally:
             loop.close()
             self._loop = None
-            log("worker 退出")
+            logger.info("worker 退出")
 
     def _reader_main(self, loop: asyncio.AbstractEventLoop) -> None:
         """读者线程：阻塞 get 队列 → call_soon_threadsafe 喂给专用循环。
@@ -206,7 +249,7 @@ class EventStoreService:
                 async with semaphore:
                     await EntityNode.delete_by_group_id(graphiti.driver, entry.group_id)
                     await EpisodicNode.delete_by_group_id(graphiti.driver, entry.group_id)
-                log(f"group deleted: {entry.group_id}")
+                logger.info("group deleted: {entry.group_id}")
             else:
                 from graphiti_core.nodes import EpisodeType
                 async with semaphore:
@@ -219,9 +262,9 @@ class EventStoreService:
                         group_id=entry.group_id,
                         entity_types=CUSTOM_ENTITY_TYPES,
                     )
-                log(f"episode added: {entry.name}")
+                logger.info("episode added: {entry.name}")
         except Exception as e:
-            log(f"写入失败（{entry.name if isinstance(entry, EventEntry) else 'delete'}）: {type(e).__name__}: {e}")
+            logger.info("写入失败（{entry.name if isinstance(entry, EventEntry) else 'delete'}）: {type(e).__name__}: {e}")
             await self._reset_graphiti()
 
     async def _main(self, loop: asyncio.AbstractEventLoop):
@@ -412,31 +455,3 @@ class EventStoreService:
         }
 
 
-def empty_result(error: str | None = None) -> dict:
-    """搜索降级空返回（初始化失败/异常时端点层使用）。"""
-    payload: dict[str, Any] = {"edges": [], "nodes": [], "episodes": []}
-    if error:
-        payload["error"] = error
-    return payload
-
-
-# 模块级单例 + 同名委托（消费方零改动；测试可替换实例）
-_service = EventStoreService()
-
-
-def start() -> None:
-    _service.start()
-
-
-def submit_entry(entry: EventEntry | DeleteGroup) -> bool:
-    return _service.submit(entry)
-
-
-def service_instance() -> EventStoreService:
-    return _service
-
-
-def set_service(svc: EventStoreService) -> None:
-    """测试注入入口：替换模块级单例。"""
-    global _service
-    _service = svc

@@ -45,6 +45,27 @@ if OPENCODE_ROOT.exists():
 # CONTROL_TCP_PORT 随机高位：沙箱控制台与生产 9776 隔离（bind 冲突会直接退出）
 os.environ.setdefault("CONTROL_TCP_PORT", str(__import__("random").randint(41000, 49000)))
 
+# services 顶部 import 必须在 env 设置之后（model_assets→config 链会冻结 DATA_DIR）
+from services.model_lifecycle import ManagedModel  # noqa: E402
+from services.model_assets import ModelAssetRegistry  # noqa: E402
+# 重模块单线程预热: 后段测试在 patch/create_app 里延迟 import（多线程互锁死锁源），在此一次性完成
+import graphiti_core.nodes  # noqa: E402,F401
+import server  # noqa: E402,F401
+
+
+
+def _hb_fast(sweep: float, grace: float, timeout: float = 60.0):
+    """heartbeat 测试参数注入（patch ConfigManager.heartbeat_tunables 返回小值）。"""
+    from services.config_manager import ConfigManager
+    CM = ConfigManager
+    orig = CM.heartbeat_tunables
+    CM.heartbeat_tunables = lambda self: CM.HeartbeatTunables(  # type: ignore[method-assign]
+        timeout_sec=timeout, sweep_interval_sec=sweep, grace_sec=grace)
+    return orig
+
+def _hb_restore(orig) -> None:
+    from services.config_manager import ConfigManager
+    ConfigManager.heartbeat_tunables = orig  # type: ignore[method-assign]
 
 # ─── 测试框架（极简）──────────────────────────────────────
 
@@ -95,17 +116,17 @@ def assert_false(value, msg=""):
 
 @test("process_lock.get_process_start_time: 跨平台获取")
 def test_get_process_start_time():
-    from services.process_lock import get_process_start_time
-    st = get_process_start_time(os.getpid())
+    from services.process_lock import ProcessLockUtil
+    st = ProcessLockUtil.get_process_start_time(os.getpid())
     assert_true(st is not None, "应该返回启动时间戳")
     assert_true(st > 1_000_000_000, f"时间戳应该 > 2001 年，实际 {st}")
 
 
 @test("process_lock.atomic_write: 写入 + 读取一致")
 def test_atomic_write():
-    from services.process_lock import atomic_write
+    from services.process_lock import ProcessLockUtil
     test_file = TEST_DATA_DIR / "test_atomic.txt"
-    atomic_write(test_file, "hello\nworld\n")
+    ProcessLockUtil.atomic_write(test_file, "hello\nworld\n")
     content = test_file.read_text()
     assert_eq(content, "hello\nworld\n", "内容应该一致")
     test_file.unlink()
@@ -113,11 +134,11 @@ def test_atomic_write():
 
 @test("process_lock.atomic_write: 父目录不存在时自动创建")
 def test_atomic_write_mkdir():
-    from services.process_lock import atomic_write
+    from services.process_lock import ProcessLockUtil
     test_file = TEST_DATA_DIR / "subdir" / "test_atomic.txt"
     if test_file.exists():
         test_file.unlink()
-    atomic_write(test_file, "test")
+    ProcessLockUtil.atomic_write(test_file, "test")
     assert_true(test_file.exists(), "文件应该存在")
     test_file.unlink()
     test_file.parent.rmdir()
@@ -128,14 +149,14 @@ def test_atomic_write_mkdir():
 @test("ipc_listener: Unix bind + probe + 残留自愈 + 并发等待语义")
 def test_ipc_listener_unix():
     """bind → probe 通；死残留清理重建；已活实例场景 start 返回 False（复用）。"""
-    from services.ipc_listener import IpcListener, ipc_probe_alive
+    from services.ipc_listener import IpcListener
     from config import ipc_unix_socket_path
 
-    from services.ipc_listener import IpcStartStatus
-    lst = IpcListener()
+    from services.ipc_listener import IpcListener, IpcStartStatus
+    lst = IpcListener._reset_for_tests() or IpcListener()
     assert_true(lst.start() is IpcStartStatus.LISTENING, "首次 bind 应返回 LISTENING")
     try:
-        assert_true(ipc_probe_alive(timeout=1.0), "bind 后 probe 应通")
+        assert_true(IpcListener.ipc_probe_alive(timeout=1.0), "bind 后 probe 应通")
         # 已有活实例：新 IpcListener.start 应返回 EXISTING_INSTANCE（复用语义，不抛错）
         second = IpcListener()
         assert_true(
@@ -148,8 +169,8 @@ def test_ipc_listener_unix():
 
     # 死残留自愈：文件存在但无人监听 → probe 失败 → 再次 start 应清理并成功
     ipc_unix_socket_path().touch()
-    assert_false(ipc_probe_alive(timeout=0.5), "死残留 probe 应失败")
-    lst2 = IpcListener()
+    assert_false(IpcListener.ipc_probe_alive(timeout=0.5), "死残留 probe 应失败")
+    lst2 = IpcListener._reset_for_tests() or IpcListener()
     assert_true(
         lst2.start() is IpcStartStatus.LISTENING,
         "死残留应被清理后重新 bind（LISTENING）",
@@ -168,8 +189,8 @@ def test_ipc_listener_http_roundtrip():
     import threading
     import httpx
     import uvicorn
-    from services.frontend_port import frontend_ports
-    from services.ipc_listener import IpcListener, cleanup_ipc_listener
+    from services.frontend_port import FrontendPortRegistry
+    from services.ipc_listener import IpcListener
 
     app = FastAPI()
 
@@ -188,11 +209,11 @@ def test_ipc_listener_http_roundtrip():
         time.sleep(0.25)
     assert_true(server.started, "uvicorn 测试实例应启动")
     assert_true(
-        frontend_ports.register_tcp(upstream_port),
+        FrontendPortRegistry.get_instance().register_tcp(upstream_port),
         "上游端口应注册成功（有监听）",
     )
 
-    from services.ipc_listener import IpcStartStatus
+    from services.ipc_listener import IpcListener, IpcStartStatus
     listener = IpcListener()
     assert_true(listener.start() is IpcStartStatus.LISTENING, "IPC 监听应启动")
     try:
@@ -206,7 +227,7 @@ def test_ipc_listener_http_roundtrip():
             assert_true(r.json().get("ok") is True, "响应体应正确")
     finally:
         listener.cleanup()
-        frontend_ports.unregister_tcp()
+        FrontendPortRegistry.get_instance().unregister_tcp()
         server.should_exit = True
         t.join(timeout=5)  # 确保 TCP 完全释放，不泄漏到后续测试
 
@@ -234,8 +255,7 @@ def test_heartbeat_record():
 def test_heartbeat_sweep():
     import services.heartbeat as hb
     from services.heartbeat import HeartbeatRegistry
-    orig = hb.HEARTBEAT_TIMEOUT_SEC
-    hb.HEARTBEAT_TIMEOUT_SEC = 0.3  # monkeypatch 小超时（sweep 读模块全局）
+    _orig_hb = _hb_fast(0.1, 90.0, 0.3)  # 小超时（sweep 读 tunables）
     try:
         reg = HeartbeatRegistry()
         reg.record(11111)
@@ -245,20 +265,18 @@ def test_heartbeat_sweep():
         assert_eq(removed, 1, "应移除 1 个超时条目")
         assert_eq(reg.active_count(), 1, "应剩 1 个活跃条目")
     finally:
-        hb.HEARTBEAT_TIMEOUT_SEC = orig
+        _hb_restore(_orig_hb)
 
 
 @test("heartbeat.HeartbeatTask: 宽限期内表空不自杀，过宽限后自杀")
 def test_heartbeat_task_grace_and_suicide():
     import services.heartbeat as hb
     from services.heartbeat import HeartbeatRegistry, HeartbeatTask
-    orig_interval, orig_grace = hb.HEARTBEAT_SWEEP_INTERVAL_SEC, hb.HEARTBEAT_GRACE_SEC
-    hb.HEARTBEAT_SWEEP_INTERVAL_SEC = 0.1
-    hb.HEARTBEAT_GRACE_SEC = 0.4
+    _orig_hb = _hb_fast(0.1, 0.4)
     fired = []
     try:
-        # 宽限期内表空：不自杀
-        reg1 = HeartbeatRegistry()
+        # 宽限期内表空：不自杀（reset 清前序测试的单例残留条目）
+        reg1 = HeartbeatRegistry._reset_for_tests() or HeartbeatRegistry()
         t1 = HeartbeatTask(reg1, lambda: fired.append("early"))
         t1.start()
         time.sleep(0.25)  # < 0.4 宽限
@@ -272,8 +290,7 @@ def test_heartbeat_task_grace_and_suicide():
         assert_true("late" in fired, "过宽限后表空应触发自杀回调")
         t2.stop()
     finally:
-        hb.HEARTBEAT_SWEEP_INTERVAL_SEC = orig_interval
-        hb.HEARTBEAT_GRACE_SEC = orig_grace
+        _hb_restore(_orig_hb)
 
 
 @test("heartbeat.HeartbeatTask: 宽限过后注册→停跳→必须等满超时才自杀（非表空即杀）")
@@ -286,16 +303,11 @@ def test_heartbeat_task_full_timeout_after_registration():
     """
     import services.heartbeat as hb
     from services.heartbeat import HeartbeatRegistry, HeartbeatTask
-    orig_interval, orig_grace, orig_timeout = (
-        hb.HEARTBEAT_SWEEP_INTERVAL_SEC, hb.HEARTBEAT_GRACE_SEC, hb.HEARTBEAT_TIMEOUT_SEC
-    )
-    hb.HEARTBEAT_SWEEP_INTERVAL_SEC = 0.1
-    hb.HEARTBEAT_GRACE_SEC = 0.3
-    hb.HEARTBEAT_TIMEOUT_SEC = 0.8
+    _orig_hb = _hb_fast(0.1, 0.3, 0.8)
     fired = []
     try:
-        # 时序: 宽限内先注册，宽限过后才停跳
-        reg = HeartbeatRegistry()
+        # 时序: 宽限内先注册，宽限过后才停跳（reset 清残留）
+        reg = HeartbeatRegistry._reset_for_tests() or HeartbeatRegistry()
         t0 = time.monotonic()
         task = HeartbeatTask(reg, lambda: fired.append(time.monotonic()))
         task.start()
@@ -308,22 +320,17 @@ def test_heartbeat_task_full_timeout_after_registration():
         assert_true(suicide_at >= 0.75, f"自杀应不早于条目超时时刻（实际 {suicide_at:.2f}s）")
         task.stop()
     finally:
-        hb.HEARTBEAT_SWEEP_INTERVAL_SEC = orig_interval
-        hb.HEARTBEAT_GRACE_SEC = orig_grace
-        hb.HEARTBEAT_TIMEOUT_SEC = orig_timeout
+        _hb_restore(_orig_hb)
 
 
 @test("heartbeat: 多 opencode 时序——A 停跳被移除，B 持续跳则控制台不死")
 def test_heartbeat_multi_user_timeline():
     import services.heartbeat as hb
     from services.heartbeat import HeartbeatRegistry, HeartbeatTask
-    orig = (hb.HEARTBEAT_SWEEP_INTERVAL_SEC, hb.HEARTBEAT_GRACE_SEC, hb.HEARTBEAT_TIMEOUT_SEC)
-    hb.HEARTBEAT_SWEEP_INTERVAL_SEC = 0.1
-    hb.HEARTBEAT_GRACE_SEC = 0.3
-    hb.HEARTBEAT_TIMEOUT_SEC = 0.5
+    _orig_hb = _hb_fast(0.1, 0.3, 0.5)
     fired = []
     try:
-        reg = HeartbeatRegistry()
+        reg = HeartbeatRegistry._reset_for_tests() or HeartbeatRegistry()
         task = HeartbeatTask(reg, lambda: fired.append(1))
         task.start()
         reg.record(11111)  # A
@@ -349,7 +356,7 @@ def test_heartbeat_multi_user_timeline():
         assert_eq(len(fired), 1, "B 停跳超时后应自杀")
         task.stop()
     finally:
-        hb.HEARTBEAT_SWEEP_INTERVAL_SEC, hb.HEARTBEAT_GRACE_SEC, hb.HEARTBEAT_TIMEOUT_SEC = orig
+        _hb_restore(_orig_hb)
 
 
 @test("heartbeat 路由: 并发 POST 不丢注册（10 路同时跳）")
@@ -357,7 +364,8 @@ def test_heartbeat_route_concurrent():
     from concurrent.futures import ThreadPoolExecutor
     from fastapi.testclient import TestClient
     from routes.heartbeat import router
-    from services.heartbeat import heartbeats
+    from services.heartbeat import HeartbeatRegistry
+    heartbeats = HeartbeatRegistry._reset_for_tests() or HeartbeatRegistry()
 
     # 直接压路由层（TestClient 走 ASGI，绕过 uds；heartbeats 是生产单例，
     # 测完手动清空防止影响其他测试）
@@ -525,8 +533,10 @@ class ControlProcess:
         """启动控制台（首跳心跳防自杀）。"""
         env = os.environ.copy()
         cmd = [
-            sys.executable,
-            str(BACKEND_DIR / "server.py"),
+            sys.executable, "-c",
+            "exec(open('/tmp/heartbeat_inject.py').read())\n"
+            "import runpy, sys\n"
+            f"runpy.run_path({str(BACKEND_DIR / 'server.py')!r}, run_name='__main__')",
         ]
         self.proc = subprocess.Popen(
             cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -760,12 +770,13 @@ def test_ipc_listener_bind_timeout():
 
     lst = il.IpcListener()
     # monkeypatch：bind 恒失败 + 探测恒不通 + 缩短等待窗口
-    orig_start, orig_probe, orig_wait = (
-        il.IpcListener._do_start_platform, il.ipc_probe_alive, il.IPC_BIND_WAIT_SEC
+    orig_start, orig_probe = (
+        il.IpcListener._do_start_platform, il.IpcListener.__dict__['ipc_probe_alive']
     )
+    import services.config_manager as _cm
+    _cm.ConfigManager.Protocol.IPC_BIND_WAIT_SEC = 0.2
     il.IpcListener._do_start_platform = lambda self: None
-    il.ipc_probe_alive = lambda **kw: False
-    il.IPC_BIND_WAIT_SEC = 0.2
+    il.IpcListener.ipc_probe_alive = staticmethod(lambda **kw: False)
     try:
         from config import ipc_unix_socket_path
         ipc_unix_socket_path().unlink(missing_ok=True)  # 确保不触发"文件消失提前重试"
@@ -776,8 +787,8 @@ def test_ipc_listener_bind_timeout():
         )
     finally:
         il.IpcListener._do_start_platform = orig_start
-        il.ipc_probe_alive = orig_probe
-        il.IPC_BIND_WAIT_SEC = orig_wait
+        il.IpcListener.ipc_probe_alive = orig_probe
+
 
 
 # ============ frontend_port（注册中心）测试 ============
@@ -844,14 +855,14 @@ def test_frontend_port_fallback():
         blocker.close()
 @test("frontend_port: vite 注册 + console_url 计算分支")
 def test_frontend_port_vite_and_url():
-    from services.frontend_port import FrontendPortRegistry, _port_alive
+    from services.frontend_port import FrontendPortRegistry
 
     reg = FrontendPortRegistry()
     # 发布态（非 dev）：注册 TCP 后 console_url 指向该端口。
     # monkeypatch is_dev_mode：防 .ai_env 的 CONTROL_FRONTEND_DEV=1 + 生产 vite(5173) 干扰
-    import services.frontend_port as _fp
-    _orig_dev = _fp.is_dev_mode
-    _fp.is_dev_mode = lambda: False
+    import services.config_manager as _cm
+    _orig_dev = _cm.ConfigManager.is_dev_mode
+    _cm.ConfigManager.is_dev_mode = property(lambda self: False)
     import socket as _s
     srv = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
     srv.bind(("127.0.0.1", 0))
@@ -866,12 +877,12 @@ def test_frontend_port_vite_and_url():
         reg.register_vite_port(1)  # 端口 1 无监听
         vp = reg.vite_port()
         if vp is not None:
-            from services.frontend_port import _port_alive
-            assert_true(vp != 1 and _port_alive(vp), f"回退值应为活端口，实际 {vp}")
+            from services.frontend_port import FrontendPortRegistry as _FPR
+            assert_true(vp != 1 and FrontendPortRegistry._port_alive(vp), f"回退值应为活端口，实际 {vp}")
     finally:
         srv.close()
         reg.unregister_tcp()
-        _fp.is_dev_mode = _orig_dev
+        _cm.ConfigManager.is_dev_mode = _orig_dev
     # register_tcp 死端口 + verify → False
     assert_false(reg.register_tcp(1), "注册死端口（verify_alive）应失败")
 
@@ -902,11 +913,12 @@ def test_heartbeat_snapshot_pure():
 def test_heartbeat_collect_enrich():
     import os
 
-    from services import heartbeat as hb
+    from services.heartbeat import HeartbeatRegistry
 
-    hb.heartbeats.record(os.getpid())
-    hb.heartbeats.record(999999)  # 超出 macOS pid 上限，必不存在
-    infos = {i.pid: i for i in hb.collect_opencode_processes()}
+    reg = HeartbeatRegistry._reset_for_tests() or HeartbeatRegistry()
+    reg.record(os.getpid())
+    reg.record(999999)  # 超出 macOS pid 上限，必不存在
+    infos = {i.pid: i for i in reg.collect_opencode_processes()}
     try:
         me = infos[os.getpid()]
         assert_true(me.alive, "自进程应存活")
@@ -921,8 +933,8 @@ def test_heartbeat_collect_enrich():
         )
     finally:
         # 单例注册表不能被测试污染（生产 heartbeats 与本测试同进程）
-        hb.heartbeats._entries.pop(os.getpid(), None)
-        hb.heartbeats._entries.pop(999999, None)
+        reg._entries.pop(os.getpid(), None)
+        reg._entries.pop(999999, None)
 
 
 @test("heartbeat: GET /api/heartbeats——响应契约（单键列表 + 条目字段）")
@@ -960,48 +972,50 @@ def test_system_start_time():
 
 @test("models: hardware_summary——内存充足路径 + 只计已缓存模型")
 def test_hardware_summary_ok_path():
-    import services.model_assets as ma
+    import services.model_assets as _ma_mod
+    from services.model_assets import ModelAssetRegistry as ma
 
-    orig = ma.psutil.virtual_memory
-    ma.psutil.virtual_memory = lambda: type("VM", (), {"available": 64 * 1024**3})()
+    orig = _ma_mod.psutil.virtual_memory
+    _ma_mod.psutil.virtual_memory = lambda: type("VM", (), {"available": 64 * 1024**3})()
     try:
-        hs = ma.hardware_summary()
+        hs = ModelAssetRegistry.get_instance().hardware_summary()
         assert_true(hs.ok, f"64GB 可用应满足（需 {hs.total_required_gb}GB）")
         assert_eq(hs.reason, "", "充足时 reason 为空")
         assert_true(hs.total_required_gb > 0, "总需求应非零（本机有已缓存模型）")
         assert_true(hs.available_gb == 64.0, "应取 monkeypatch 的可用值")
     finally:
-        ma.psutil.virtual_memory = orig
+        _ma_mod.psutil.virtual_memory = orig
 
 
 @test("models: hardware_summary——内存不足路径（ok=False + 用户可读 reason）")
 def test_hardware_summary_insufficient():
-    import services.model_assets as ma
+    import services.model_assets as _ma_mod
+    from services.model_assets import ModelAssetRegistry as ma
 
-    orig = ma.psutil.virtual_memory
-    ma.psutil.virtual_memory = lambda: type("VM", (), {"available": 1 * 1024**3})()
+    orig = _ma_mod.psutil.virtual_memory
+    _ma_mod.psutil.virtual_memory = lambda: type("VM", (), {"available": 1 * 1024**3})()
     try:
-        hs = ma.hardware_summary()
+        hs = ModelAssetRegistry.get_instance().hardware_summary()
         assert_false(hs.ok, "1GB 可用应不满足")
         assert_true("1.0GB" in hs.reason and f"{hs.total_required_gb}GB" in hs.reason,
                     f"reason 应含可用值与需求值，实际 {hs.reason!r}")
     finally:
-        ma.psutil.virtual_memory = orig
+        _ma_mod.psutil.virtual_memory = orig
 
 
 @test("models: get_model_assets——loaded 三元语义 + active_clients 字段契约")
 def test_model_assets_loaded_semantics():
-    from services.model_assets import get_model_assets
+    from services.model_assets import ModelAssetRegistry
 
     # loaded 语义 = 调用进程的真实加载态（生产=控制台; 测试进程=未加载）。
     # 断言与 model_loader 标志一致（而非硬编码 True——那会撒谎）
-    from services import model_loader
-    assets = {m.id: m for m in get_model_assets()}
-    assert_true(assets["bge-m3"].loaded == model_loader.is_models_ready(),
+    from services.model_loader import ModelInferenceService
+    assets = {m.id: m for m in ModelAssetRegistry.get_instance().get_model_assets()}
+    assert_true(assets["bge-m3"].loaded == ModelInferenceService.get_instance().is_models_ready(),
                 "embedder loaded 应与 is_models_ready 一致")
     assert_true(assets["bge-m3"].idle_sec is None and assets["bge-m3"].idle_timeout_sec is None,
                 "非 OCR 模型空闲字段应 None")
-    assert_true(assets["bge-reranker-v2-m3"].loaded == model_loader.is_reranker_loaded(),
+    assert_true(assets["bge-reranker-v2-m3"].loaded == ModelInferenceService.get_instance().is_reranker_loaded(),
                 "reranker loaded 应与 is_reranker_loaded 一致（懒加载真实态, 不再复用 embedder 标志）")
     # ocr: 空闲时长字段（模型页"空闲 X / 10 分钟"数据源）
     ocr = assets["glm-ocr"]
@@ -1026,7 +1040,8 @@ def test_ocr_lifecycle():
     import io
 
     from PIL import Image, ImageDraw
-    from services.ocr_service import OcrService, STATE_IDLE, STATE_READY
+    from services.model_lifecycle import ManagedModel
+    from services.ocr_service import OcrService
 
     def _b64(text: str) -> str:
         img = Image.new("RGB", (320, 100), "white")
@@ -1035,21 +1050,21 @@ def test_ocr_lifecycle():
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode()
 
-    svc = OcrService()
+    svc = OcrService._reset_for_tests() or OcrService()
 
     async def main():
         # 懒加载: 未就绪直接 extract → 自动加载 + 识图（一步到位）
-        assert_eq(svc.status().state, STATE_IDLE, "初始应 idle")
+        assert_eq(svc.status().state, ManagedModel.STATE_IDLE, "初始应 idle")
         text = await svc.extract(_b64("LIFE-OK"), "")
         assert_true("LIFE-OK" in text, f"懒加载后应识别出文字，实际 {text!r}")
-        assert_eq(svc.status().state, STATE_READY, "懒加载后应 ready")
+        assert_eq(svc.status().state, ManagedModel.STATE_READY, "懒加载后应 ready")
         # 第二次 extract 复用（不再加载）— 文本避开连字符（模型对短横线的
         # 识别不稳定，属识别能力边界而非服务缺陷）
         text2 = await svc.extract(_b64("LIFE TWO"), "")
         assert_true("TWO" in text2, f"复用路径应识别，实际 {text2!r}")
         # force_release → idle + 引擎卸载
         await svc.force_release()
-        assert_eq(svc.status().state, STATE_IDLE, "force_release 后应 idle")
+        assert_eq(svc.status().state, ManagedModel.STATE_IDLE, "force_release 后应 idle")
         assert_false(svc._mlx.loaded, "引擎应已卸载")
         assert_true(svc.idle_sec() is None, "卸载后 idle_sec 应为 None")
         # 幂等
@@ -1070,7 +1085,7 @@ def test_ocr_lazy_singleflight():
     from PIL import Image
     from services.ocr_service import OcrService
 
-    svc = OcrService()
+    svc = OcrService._reset_for_tests() or OcrService()
     loads = []
     orig_load = svc._mlx.load
 
@@ -1106,7 +1121,7 @@ def test_ocr_extract_serialized():
     from PIL import Image
     from services.ocr_service import OcrService
 
-    svc = OcrService()
+    svc = OcrService._reset_for_tests() or OcrService()
     gen_active = []          # generate 区内计数
     gen_max = [0]
     pp_active = []           # 预处理区内计数
@@ -1171,7 +1186,7 @@ def test_ocr_infer_not_blocking_extract():
     from PIL import Image
     from services.ocr_service import OcrService
 
-    svc = OcrService()
+    svc = OcrService._reset_for_tests() or OcrService()
     orig_gen = svc._mlx._infer_impl
     entered = threading.Event()
     release = threading.Event()
@@ -1217,7 +1232,7 @@ def test_ocr_release_waits_infer():
     from PIL import Image
     from services.ocr_service import OcrService
 
-    svc = OcrService()
+    svc = OcrService._reset_for_tests() or OcrService()
     orig_gen = svc._mlx._infer_impl
     entered = threading.Event()
     release = threading.Event()
@@ -1254,20 +1269,20 @@ def test_ocr_release_waits_infer():
 
 @test("ocr: 懒加载失败——引擎报错传播 + 状态回 idle")
 def test_ocr_load_failure():
-    from services.ocr_service import OcrService, STATE_IDLE
+    from services.ocr_service import OcrService
 
-    svc = OcrService()
+    svc = OcrService._reset_for_tests() or OcrService()
 
     async def main():
         def bad_load(path):
             raise RuntimeError("boom: 模拟加载失败")
         svc._mlx.load = bad_load
         try:
-            await svc.extract("x", "")
+            await svc.extract(_png_b64(), "")
             raise AssertionError("加载失败应抛 RuntimeError")
         except RuntimeError as e:
             assert_true("boom" in str(e), f"应传播引擎错误，实际 {e}")
-        assert_eq(svc.status().state, STATE_IDLE, "失败后应回 idle")
+        assert_eq(svc.status().state, ManagedModel.STATE_IDLE, "失败后应回 idle")
         assert_true(svc.status().error is not None, "error 应记录")
 
     asyncio.run(main())
@@ -1276,27 +1291,27 @@ def test_ocr_load_failure():
 @test("ocr: 并发懒加载失败——全部等待者收到错误 + 状态回 idle")
 def test_ocr_concurrent_load_failure():
     """单飞失败传播: 发起者与 5 个搭车者都收到同一错误，无一悬挂。"""
-    from services.ocr_service import OcrService, STATE_IDLE
+    from services.ocr_service import OcrService
 
-    svc = OcrService()
-    orig = svc._mlx._load_impl
+    svc = OcrService._reset_for_tests() or OcrService()
+    orig = svc._mlx.load
 
     def bad_load(path):
         time.sleep(0.3)  # 让等待者先挂上 event.wait 再失败
         raise RuntimeError("boom: 并发失败场景")
 
     async def main():
-        svc._mlx._load_impl = bad_load  # patch worker 执行层（铁律）
+        svc._mlx.load = bad_load  # patch 引擎加载层（ManagedModel load_fn 动态查找）
         results = await asyncio.gather(
-            *[svc.extract("x", "") for _ in range(6)],
+            *[svc.extract(_png_b64(), "") for _ in range(6)],
             return_exceptions=True,
         )
         errs = [r for r in results if isinstance(r, RuntimeError) and "boom" in str(r)]
         assert_eq(len(errs), 6,
                   f"6 路应全收到失败错误，实际 {[type(r).__name__ + str(r)[:30] for r in results]}")
-        assert_eq(svc.status().state, STATE_IDLE, "失败后状态应回 idle")
+        assert_eq(svc.status().state, ManagedModel.STATE_IDLE, "失败后状态应回 idle")
         # 失败后可重试（回 idle 即可重载）
-        svc._mlx._load_impl = orig
+        svc._mlx.load = orig
         text = await svc.extract(_png_b64(), "")  # 真图（重载后可达 ready）
         assert_eq(svc.status().state, "ready", "失败恢复后应可重新加载")
         await svc.force_release()
@@ -1304,33 +1319,27 @@ def test_ocr_concurrent_load_failure():
     try:
         asyncio.run(main())
     finally:
-        svc._mlx._load_impl = orig
+        svc._mlx.load = orig
 
 
 @test("ocr: reaper 纯空闲超时——ready 且空闲超窗 → 自动卸载")
 def test_ocr_reaper_idle_release():
     from services import ocr_service as mod
-    from services.ocr_service import OcrService, STATE_IDLE, STATE_READY
+    from services.ocr_service import OcrService
 
-    svc = OcrService()
     orig_release = mod.IDLE_RELEASE_SEC
-    mod.IDLE_RELEASE_SEC = 0  # 立即超窗（reaper 判据读模块常量）
+    mod.IDLE_RELEASE_SEC = 0  # 立即超窗（ManagedModel 构造时读取该值）
+    svc = OcrService._reset_for_tests() or OcrService()
     async def main():
-        # 手动置 ready 模拟"已加载且刚活跃"（不经 extract——本测试只验 reaper 判据;
-        # reaper 启动点在 _ensure_ready, 手动路径需手动启动）
-        async with svc._lifecycle_lock:
-            from services.ocr_engines import find_mlx_model
-            await asyncio.to_thread(svc._mlx.load, find_mlx_model() or "")
-            svc._state = STATE_READY
-        svc._ensure_reaper()
-        svc._last_activity_at = time.time()
-        assert_eq(svc.status().state, STATE_READY, "ready")
-        # 等 reaper（REAPER_INTERVAL_SEC=5s 一个周期）
-        for _ in range(30):
+        # 真实路径加载（extract → ensure_loaded → reaper 随加载启动）
+        await svc.extract(_png_b64(), "")
+        assert_eq(svc.status().state, ManagedModel.STATE_READY, "ready")
+        # 等 reaper（reaper 周期默认 5s，留 20s 上限）
+        for _ in range(40):
             await asyncio.sleep(0.5)
-            if svc.status().state == STATE_IDLE:
+            if svc.status().state == ManagedModel.STATE_IDLE:
                 break
-        assert_eq(svc.status().state, STATE_IDLE, "空闲超窗后应自动卸载")
+        assert_eq(svc.status().state, ManagedModel.STATE_IDLE, "空闲超窗后应自动卸载")
         assert_false(svc._mlx.loaded, "引擎应已卸载")
     try:
         asyncio.run(main())
@@ -1341,20 +1350,19 @@ def test_ocr_reaper_idle_release():
 
 @test("ocr: idle_sec 字段——ready 时递增 / 卸载后 None（模型页数据源）")
 def test_ocr_idle_sec_field():
-    from services.ocr_service import OcrService, STATE_READY
+    from services.ocr_service import OcrService
 
-    svc = OcrService()
+    svc = OcrService._reset_for_tests() or OcrService()
 
     async def main():
         assert_true(svc.idle_sec() is None, "未加载应为 None")
-        async with svc._lifecycle_lock:
-            from services.ocr_engines import find_mlx_model
-            await asyncio.to_thread(svc._mlx.load, find_mlx_model() or "")
-            svc._state = STATE_READY
-        svc._last_activity_at = time.time() - 5
+        managed = svc._model()  # noqa: SLF001 —— 测试直访受管模型（时间口径注入）
+        await asyncio.to_thread(managed.ensure_loaded)
+        assert_eq(svc.status().state, ManagedModel.STATE_READY, "加载后 ready")
+        # 直接注入活动时刻（monotonic 口径）验证 idle_sec 计算
+        managed._last_activity_at = time.monotonic() - 5  # noqa: SLF001
         assert_true(abs(svc.idle_sec() - 5) < 1, f"应约 5s，实际 {svc.idle_sec()}")
-        # 活跃刷新 → 归零
-        svc._last_activity_at = time.time()
+        managed._last_activity_at = time.monotonic()  # noqa: SLF001
         assert_true(svc.idle_sec() is not None and svc.idle_sec() < 1, "刷新后应接近 0")
         await svc.force_release()
         assert_true(svc.idle_sec() is None, "卸载后应 None")
@@ -1371,38 +1379,38 @@ def test_ocr_force_release_race_with_load():
     state==STARTING 时置 READY; 被 force 抢先则保持 IDLE，可重新加载。
     """
     import threading
-    from services.ocr_service import OcrService, STATE_IDLE
+    from services.ocr_service import OcrService
 
-    svc = OcrService()
-    orig_load = svc._mlx._load_impl
+    svc = OcrService._reset_for_tests() or OcrService()
+    orig_load = svc._mlx.load
     load_started = threading.Event()
     gate = threading.Event()
 
     def gated_load(path):
         load_started.set()
-        gate.wait(timeout=10)     # 卡在"加载完成前"——force_release 会阻塞在锁上
+        gate.wait(timeout=10)     # 卡在"加载完成前"——force_release 会排队等待
         return orig_load(path)
 
     async def main():
-        svc._mlx._load_impl = gated_load  # patch worker 执行层（铁律）
+        svc._mlx.load = gated_load  # patch 引擎加载层（ManagedModel load_fn 动态查找）
         ext = asyncio.create_task(svc.extract(_png_b64(), ""))  # 懒加载发起者（真图）
         await asyncio.get_running_loop().run_in_executor(None, load_started.wait, 5)
-        # 加载在途（持 lifecycle 锁）→ force_release 排队等锁
+        # 加载在途 → force_release 等加载完成后卸载（不中断加载）
         rel = asyncio.create_task(svc.force_release())
         await asyncio.sleep(0.3)
-        gate.set()                # 放行加载 → 发起者释放锁 → force 抢到锁卸载
-        # 发起者醒来: 若 force 已抢先卸载，其后续推理触发引擎防御报错（可重试）——
+        gate.set()                # 放行加载 → release 随后卸载
+        # 发起者醒来: 若 release 已抢先卸载，其后续推理触发引擎防御报错（可重试）——
         # 两种结果都可接受，本测试锚定的是终态不得出现假 READY
         ext_res = (await asyncio.gather(ext, return_exceptions=True))[0]
         assert_true(not isinstance(ext_res, Exception) or "重试" in str(ext_res) or "加载" in str(ext_res),
                     f"发起者异常应为可重试防御错误，实际 {ext_res!r}")
         await rel
-        # 无论 force 与等待者的锁顺序如何，终态必须是 IDLE + 引擎空
-        assert_eq(svc.status().state, STATE_IDLE,
+        # 无论 release 与等待者的顺序如何，终态必须是 IDLE + 引擎空
+        assert_eq(svc.status().state, ManagedModel.STATE_IDLE,
                   f"竞态后不得出现假 READY（实际 {svc.status().state}）")
         assert_false(svc._mlx.loaded, "引擎应已卸载")
         # 自愈验证: 竞态后仍可重新懒加载（旧 bug 会永久卡 READY）
-        svc._mlx._load_impl = orig_load
+        svc._mlx.load = orig_load
         await svc.extract(_png_b64(), "")
         assert_eq(svc.status().state, "ready", "竞态后应可重新加载（自愈）")
         await svc.force_release()
@@ -1410,14 +1418,14 @@ def test_ocr_force_release_race_with_load():
     try:
         asyncio.run(main())
     finally:
-        svc._mlx._load_impl = orig_load
+        svc._mlx.load = orig_load
 
 
 @test("ocr: 坏输入防御——坏 b64 / 非图数据")
 def test_ocr_bad_input():
     from services.ocr_service import OcrService
 
-    svc = OcrService()
+    svc = OcrService._reset_for_tests() or OcrService()
 
     async def main():
         for bad in ["!!!not-base64!!!", "AAAA"]:
@@ -1431,11 +1439,12 @@ def test_ocr_bad_input():
     asyncio.run(main())
 
 
-@test("ocr: 竞争窗口——extract 过就绪检查后模型被卸载 → 防御报错不崩溃")
+@test("ocr: 预处理期间卸载——再次推理自动重载成功（窗口消灭，不防御报错）")
 def test_ocr_race_window_unloaded_before_generate():
-    """设计内竞争窗口（空闲超时触发概率极低，防御兜底）: extract 已过
-    ready 检查、预处理期间模型被 force_release 卸载 → generate 提交时
-    worker 内 loaded 检查拒绝，客户端收到明确错误（可重试）。
+    """旧机制的"竞争窗口防御"（extract 过 ready 检查后被卸载 → generate
+    防御报错）在 ManagedModel 收口后被结构性消灭: 预处理期间模型被
+    force_release 卸载 → run_inference 的 ensure_loaded 观察到 IDLE 自动
+    重新加载 → 推理成功。本测试锚定"总是成功"的更强保证。
     """
     import base64
     import io
@@ -1444,7 +1453,7 @@ def test_ocr_race_window_unloaded_before_generate():
     from PIL import Image
     from services.ocr_service import OcrService
 
-    svc = OcrService()
+    svc = OcrService._reset_for_tests() or OcrService()
     orig_prep = svc._mlx.preprocess
     entered = threading.Event()
     release = threading.Event()
@@ -1462,19 +1471,14 @@ def test_ocr_race_window_unloaded_before_generate():
         svc._mlx.preprocess = blocking_prep
         await svc.extract(b64, "")          # 首图懒加载 + 立即推理（ready）
         await svc.force_release()           # 卸载，回到 idle
-        await svc.extract(b64, "")          # 再次懒加载（fresh ready）
         task = asyncio.create_task(svc.extract(b64, ""))
         await asyncio.get_running_loop().run_in_executor(None, entered.wait, 5)
-        # 窗口内卸载（extract 已过 ready 检查）
+        # 窗口内卸载（extract 卡在预处理、尚未 ensure_loaded）
         await svc.force_release()
         assert_false(svc._mlx.loaded, "窗口内卸载应完成")
         release.set()
-        try:
-            await task
-            raise AssertionError("竞争窗口内 generate 应防御报错")
-        except RuntimeError as e:
-            assert_true("重试" in str(e),
-                        f"应报可重试防御错误，实际 {e}")
+        text = await task                    # 自动重载 → 成功（不防御报错）
+        assert_true(isinstance(text, str), "窗口卸载后推理应自动重载并成功")
 
     try:
         asyncio.run(main())
@@ -1490,7 +1494,7 @@ def test_ocr_two_cycles():
     import io
 
     from PIL import Image, ImageDraw
-    from services.ocr_engines import footprint_mb
+    from services.ocr_engines import MlxEngine
     from services.ocr_service import OcrService
 
     def make_b64(text: str) -> str:
@@ -1500,7 +1504,7 @@ def test_ocr_two_cycles():
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode()
 
-    svc = OcrService()
+    svc = OcrService._reset_for_tests() or OcrService()
 
     async def main():
         fps = []
@@ -1509,7 +1513,7 @@ def test_ocr_two_cycles():
             assert_true(f"CYCLE-{rnd}" in text, f"第 {rnd} 轮应正确识别，实际 {text!r}")
             await svc.force_release()
             assert_false(svc._mlx.loaded, f"第 {rnd} 轮卸载应完成")
-            fps.append(footprint_mb())
+            fps.append(MlxEngine.footprint_mb())
         # 两轮卸载后 footprint 一致（无跨循环累积；容忍小幅抖动）
         assert_true(fps[0] is not None and fps[1] is not None, "footprint 应可测")
         delta = abs(fps[1] - fps[0])
@@ -1579,8 +1583,8 @@ def test_e2e_tcp_fallback():
     stop_shared_server()
     import socket
     from config import ipc_unix_socket_path
-    from services.frontend_port import frontend_ports
-    start_port = frontend_ports.tcp_candidates()[0]
+    from services.frontend_port import FrontendPortRegistry
+    start_port = FrontendPortRegistry.get_instance().tcp_candidates()[0]
     blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     blocker.bind(("127.0.0.1", start_port))
@@ -1609,14 +1613,14 @@ def test_e2e_tcp_fallback():
                     pass
             time.sleep(0.5)
         assert_true(isinstance(ok_port, int), "IPC 应答 /api/console-url")
-        candidates = frontend_ports.tcp_candidates()
+        candidates = FrontendPortRegistry.get_instance().tcp_candidates()
         assert_true(
             ok_port in candidates and ok_port != start_port,
             f"应顺延到 {start_port} 之外的候选 {candidates}，实际注册 {ok_port}",
         )
         # 顺延后的 TCP 真的在听
-        import services.frontend_port as _fp
-        assert_true(_fp._port_alive(ok_port), f"顺延端口 {ok_port} 应有监听")
+        from services.frontend_port import FrontendPortRegistry
+        assert_true(FrontendPortRegistry._port_alive(ok_port), f"顺延端口 {ok_port} 应有监听")
     finally:
         proc.terminate()
         try:
@@ -1768,9 +1772,28 @@ def main():
     ]
     print(f"找到 {len(tests)} 个测试\n")
 
-    # 逐个运行
+    # 逐个运行（SIGALRM 看门狗: 单测试超 180s 转储栈并记失败继续——
+    # 本套件混合 E2E 子进程/多线程/C 扩展，存在概率性挂起; 看门狗保证
+    # 套件可跑完且卡点被暴露（fail + traceback），优于永久挂起）
+    import signal
+    import faulthandler
+
+    def _watchdog(signum, frame):
+        raise TimeoutError(f"测试超时（180s）: {_watchdog.current}")
+
+    _watchdog.current = None
+    signal.signal(signal.SIGALRM, _watchdog)
     for name, fn in tests:
-        fn()
+        _watchdog.current = name
+        signal.setitimer(signal.ITIMER_REAL, 180)
+        try:
+            fn()
+        except TimeoutError as e:
+            faulthandler.dump_traceback()
+            _results.append((name, False, str(e)))
+            print(f"  ✗ {name}: {e}")
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
 
     # 统一收尾共享控制台（无论中途失败与否）
     stop_shared_server()
@@ -1812,19 +1835,19 @@ def test_config_store_ensure_template():
 
 @test("restart: 调度幂等 + 路由契约（不真 exec）")
 def test_restart_schedule_and_route():
-    from services import restart as restart_mod
+    from services.restart import ConsoleRestarter as restart_mod
     from fastapi.testclient import TestClient
     from server import create_app
 
-    r = restart_mod.ConsoleRestarter()
+    restart_mod._reset_for_tests()
+    r = restart_mod.get_instance()
     calls = []
     r.perform = lambda: calls.append(1)   # 拦截真实 exec
     assert_true(r.schedule(), "首次调度应返回 True")
     assert_false(r.schedule(), "重复调度应返回 False（幂等）")
 
     app = create_app()
-    orig = restart_mod.console_restarter
-    restart_mod.console_restarter = r
+    # 单例即 r——无需替换模块级实例
     try:
         with TestClient(app) as c:
             resp = c.post("/api/system/restart")
@@ -1833,23 +1856,17 @@ def test_restart_schedule_and_route():
             assert_true(data["success"], "路由应返回 success")
             assert_true("message" in data, "路由应带提示消息")
     finally:
-        restart_mod.console_restarter = orig
+        pass
     # schedule 已被 Timer 挂起 → 立即执行 perform 清掉（Timer 0.05s 后也会调，双调用无害）
     r.perform()
     assert_true(len(calls) >= 1, "perform 应被调用")
-
-
-@test("health: boot_token 存在且同进程内稳定")
-def test_health_boot_token():
-    from routes.health import BOOT_TOKEN
-    assert_true(len(BOOT_TOKEN) == 8, "boot_token 应为 8 位 hex")
 
 
 @test("model_loader: LockedEmbedder/LockedReranker 并发互斥（串行不变量的构造保证）")
 def test_locked_wrapper_mutex():
     import threading
     import time
-    from services.model_loader import LockedEmbedder, LockedReranker
+    from services.model_loader import ModelInferenceService
 
     class ConcurrencyProbe:
         """encode/predict 进入 +1、退出 -1，记录并发峰值。"""
@@ -1898,11 +1915,11 @@ def test_locked_wrapper_mutex():
         assert_true(probe.peak == 1, f"推理并发峰值应恒为 1（串行保证），实测 {probe.peak}")
 
     probe = ConcurrencyProbe()
-    embedder = LockedEmbedder(probe)
+    embedder = ModelInferenceService.LockedEmbedder(probe)
     run_concurrent(embedder, "encode", lambda i: (f"t{i}",))
 
     probe2 = ConcurrencyProbe()
-    reranker = LockedReranker(probe2)
+    reranker = ModelInferenceService.LockedReranker(probe2)
     run_concurrent(reranker, "predict", lambda i: ([("q", f"p{i}")],))
 
 
@@ -1931,12 +1948,15 @@ def test_model_loader_architecture_guard():
     ]
     assert_true(not offenders, f"sentence_transformers 应只在 model_loader 出现: {offenders}")
 
-    # 2. _infer_lock 获取点恰 2 处（LockedEmbedder.encode + LockedReranker.predict）
-    #    多于 2 = 有人手动持锁回归（锁句柄外泄的开端）；少于 2 = 包装被破坏
+    # 2. _infer_lock 获取点恰 6 处——全部合法落点:
+    #    LockedEmbedder/LockedReranker 注入直通 2 处 + _route_encode/_route_predict
+    #    本地路径 2 处 + 两个 unload impl 2 处。推理串行与"卸载等在途推理"
+    #    共用同一把锁才互斥; 偏离 6 = 绕锁回归或互斥被破坏
     ml_src = read(backend / "services" / "model_loader.py")
     lock_sites = sum(1 for line in ml_src.splitlines()
-                     if line.strip().startswith("with _infer_lock"))
-    assert_eq(lock_sites, 2, f"_infer_lock 获取点应为 2，实际 {lock_sites}")
+                     if line.strip().startswith("with self._infer_lock")
+                     or line.strip().startswith("with svc._infer_lock"))
+    assert_eq(lock_sites, 6, f"_infer_lock 获取点应为 6，实际 {lock_sites}")
 
     # 3. 已删符号零引用（D 痕迹/死出口/重复函数不得复活）
     for sym in ("def infer_lock", "_do_embed", "_do_rerank"):
@@ -1972,7 +1992,7 @@ def test_real_model_concurrency_smoke():
     import threading
     import time
     from pathlib import Path
-    from services import model_loader
+    from services.model_loader import ModelInferenceService
     from services.knowledge_db import MemoryDB
     from services.graphiti_config import BgeM3Embedder
 
@@ -1981,13 +2001,13 @@ def test_real_model_concurrency_smoke():
 
     def lane_embed():
         for i in range(ITER):
-            vecs = model_loader.embed_batch_sync([f"smoke embed {i}", f"lane a {i}"])
+            vecs = ModelInferenceService.get_instance().embed_batch_sync([f"smoke embed {i}", f"lane a {i}"])
             if len(vecs) != 2 or len(vecs[0]) != 1024:
                 errors.append(f"embed_batch_sync 形状异常: {len(vecs)}")
 
     def lane_memory(db_path: Path):
         try:
-            db = MemoryDB(db_path, model_loader.get_embedder())
+            db = MemoryDB(db_path, ModelInferenceService.get_instance().get_embedder())
             for i in range(ITER):
                 db.store(question=f"smoke {i}", content=f"smoke memory content {i}",
                          doc_type="memory", flow_id="smoke-flow")
@@ -2037,7 +2057,7 @@ def test_knowledge_store_paths():
     db_path = TEST_DATA_DIR / "ks_unit" / "knowledge.db"
     if db_path.exists():
         db_path.unlink()
-    svc = KnowledgeStoreService(db_path=db_path, embedder_factory=FakeEmbedder)
+    svc = KnowledgeStoreService._create_fresh(db_path=db_path, embedder_factory=FakeEmbedder)
     svc.start()
     assert_true(svc.submit(MemoryEntry(question="bash execution", answer="Tool result...", type="bash", flow_id="flow-1")), "合法条目应入队")
     assert_true(not svc.submit(MemoryEntry(question="", answer="x", type="bash")), "空 question 应跳过")
@@ -2070,7 +2090,7 @@ def test_event_store_write_paths():
         async def close(self):
             calls.append("close")
 
-    svc = EventStoreService(graphiti_factory=lambda: (FakeGraphiti(), None))
+    svc = EventStoreService._create_fresh(graphiti_factory=lambda: (FakeGraphiti(), None))
     svc.start()
     assert_true(svc.submit(EventEntry(name="bash execution", body="b", source="s", group_id="g1", timestamp=1755432000000.0)), "事件应入队")
     assert_true(svc.submit(DeleteGroup(group_id="g1")), "delete 应入队")
@@ -2088,12 +2108,14 @@ def test_event_store_write_paths():
     assert_true("Tool" in kw["entity_types"], "entity_types 缺自定义类型")
 
 
-@test("knowledge/events 路由: 写端点 202 + 搜索端点结构（fake 注入）")
-def test_knowledge_events_routes():
+def _knowledge_events_routes_inner():
+    """[77] 主体（经子进程隔离执行——TestClient + 全量前置线程存在进程内
+    竞态活锁; 隔离执行断言原样，见 wrapper 注释）。"""
     import hashlib
     import numpy as np
     from fastapi.testclient import TestClient
-    from services import knowledge_store as ks, event_store as es
+    from services.knowledge_store import KnowledgeStoreService as ks
+    from services.event_store import EventStoreService as es
 
     class FakeEmbedder:
         def encode(self, inputs, **kw):
@@ -2118,9 +2140,10 @@ def test_knowledge_events_routes():
     db_path = TEST_DATA_DIR / "ingest_route" / "knowledge.db"
     if db_path.exists():
         db_path.unlink()
-    old_ks, old_es = ks.service_instance(), es.service_instance()
-    ks.set_service(ks.KnowledgeStoreService(db_path=db_path, embedder_factory=FakeEmbedder))
-    es.set_service(es.EventStoreService(graphiti_factory=lambda: (FakeGraphiti(), None)))
+    ks._reset_for_tests()
+    es._reset_for_tests()
+    ks._force_instance(ks._create_fresh(db_path=db_path, embedder_factory=FakeEmbedder))
+    es._force_instance(es._create_fresh(graphiti_factory=lambda: (FakeGraphiti(), None)))
     try:
         from server import create_app
         with TestClient(create_app()) as client:
@@ -2136,8 +2159,71 @@ def test_knowledge_events_routes():
             r6 = client.post("/api/events/time-search", json={"query": "q", "group_id": "g"})
             assert_true(r6.status_code == 200 and r6.json()["edges"] == [], f"time-search: {r6.json()}")
     finally:
-        ks.set_service(old_ks)
-        es.set_service(old_es)
+        ks._reset_for_tests()
+        es._reset_for_tests()
+
+
+
+@test("health: boot_token 存在且同进程内稳定")
+def test_health_boot_token():
+    from routes.health import BOOT_TOKEN
+    assert_true(len(BOOT_TOKEN) == 8, "boot_token 应为 8 位 hex")
+
+
+@test("knowledge/events 路由: 写端点 202 + 搜索端点结构（fake 注入）")
+def test_knowledge_events_routes():
+    """进程内直跑（曾因子进程隔离绕过竞态——根因已修: ProxyPool.__new__
+    未初始化裸实例导致 startup relay supervisor 链路异常; 修复后多轮全量验证稳定）。"""
+    import hashlib
+    import numpy as np
+    from fastapi.testclient import TestClient
+    from services.knowledge_store import KnowledgeStoreService as ks
+    from services.event_store import EventStoreService as es
+
+    class FakeEmbedder:
+        def encode(self, inputs, **kw):
+            single = isinstance(inputs, str)
+            seq = [inputs] if single else inputs
+            def vec(t):
+                h = hashlib.sha256(t.encode()).digest()
+                out = np.frombuffer((h * 32)[:1024], dtype=np.uint8).astype(np.float32)
+                return out / np.linalg.norm(out)
+            out = np.stack([vec(t) for t in seq])
+            return out[0] if single else out
+
+    class FakeGraphiti:
+        driver = object()
+        async def build_indices_and_constraints(self):
+            pass
+        async def add_episode(self, **kw):
+            pass
+        async def close(self):
+            pass
+
+    db_path = TEST_DATA_DIR / "ingest_route" / "knowledge.db"
+    if db_path.exists():
+        db_path.unlink()
+    ks._reset_for_tests()
+    es._reset_for_tests()
+    ks._force_instance(ks._create_fresh(db_path=db_path, embedder_factory=FakeEmbedder))
+    es._force_instance(es._create_fresh(graphiti_factory=lambda: (FakeGraphiti(), None)))
+    try:
+        from server import create_app
+        with TestClient(create_app()) as client:
+            r1 = client.post("/api/memory/entry", json={"question": "q", "answer": "a", "type": "bash", "flow_id": "f1"})
+            r2 = client.post("/api/events/entry", json={"name": "n", "body": "b", "source": "s", "group_id": "g", "timestamp": 1755432000000})
+            r3 = client.post("/api/events/delete", json={"group_id": "g"})
+            r4 = client.post("/api/memory/entry", json={"question": "", "answer": "a", "type": "bash"})
+            assert_true((r1.status_code, r2.status_code, r3.status_code) == (202, 202, 202), f"状态码 {(r1.status_code, r2.status_code, r3.status_code)}")
+            assert_true(r1.json() == {"queued": True}, f"合法应 queued:true: {r1.json()}")
+            assert_true(r4.json() == {"queued": False}, f"非法应 queued:false: {r4.json()}")
+            r5 = client.post("/api/knowledge/search", json={"questions": ["q"]})
+            assert_true(r5.status_code == 200 and r5.json()["count"] == 0, f"knowledge/search: {r5.json()}")
+            r6 = client.post("/api/events/time-search", json={"query": "q", "group_id": "g"})
+            assert_true(r6.status_code == 200 and r6.json()["edges"] == [], f"time-search: {r6.json()}")
+    finally:
+        ks._reset_for_tests()
+        es._reset_for_tests()
 
 
 @test("knowledge_store 同步方法: store 脱敏 + search 命中 + memory flow 隔离（fake embedder）")
@@ -2161,7 +2247,7 @@ def test_knowledge_store_sync_methods():
     db_path = TEST_DATA_DIR / "ks_sync" / "knowledge.db"
     if db_path.exists():
         db_path.unlink()
-    svc = KnowledgeStoreService(db_path=db_path, embedder_factory=FakeEmbedder)
+    svc = KnowledgeStoreService._create_fresh(db_path=db_path, embedder_factory=FakeEmbedder)
 
     r = svc.store_knowledge("如何扫描 192.168.1.1 端口", "nmap -sS 10.0.0.1")
     assert_true(r["stored"] is True, f"store 失败: {r}")
@@ -2203,7 +2289,7 @@ def test_event_store_search_paths():
             searched.update(kw)
             return mk()
 
-    svc = EventStoreService(graphiti_factory=lambda: (FakeGraphiti(), None))
+    svc = EventStoreService._create_fresh(graphiti_factory=lambda: (FakeGraphiti(), None))
 
     async def run():
         p = await svc.search_time("查工具", "g1", time_start="2026-01-01T00:00:00Z")

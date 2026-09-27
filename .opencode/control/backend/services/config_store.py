@@ -13,8 +13,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from config import OPENCODE_ROOT, REQUIRED_CONFIGS
-from services.process_lock import atomic_write
+from config import (
+    OPENCODE_ROOT,
+    REMOTE_FAIL_THRESHOLD_KEY,
+    REMOTE_HEARTBEAT_INTERVAL_SEC_KEY,
+    REMOTE_INFER_TIMEOUT_SEC_KEY,
+    REMOTE_PROBE_TIMEOUT_SEC_KEY,
+    REMOTE_RECOVER_THRESHOLD_KEY,
+    REMOTE_UNLOAD_DELAY_SEC_KEY,
+    REQUIRED_CONFIGS,
+    RemoteTunables,
+)
+from services.process_lock import ProcessLockUtil
 
 
 def _ai_env_path() -> Path:
@@ -50,7 +60,7 @@ def ensure_template() -> bool:
     if path.exists():
         return False
     try:
-        atomic_write(path, _TEMPLATE)
+        ProcessLockUtil.atomic_write(path, _TEMPLATE)
         return True
     except OSError:
         return False
@@ -108,6 +118,46 @@ def read(key: str) -> str | None:
     return read_all().get(key)
 
 
+def read_bool(key: str) -> bool:
+    """读布尔配置（"1"/"true"（大小写不敏感）为真，其余为假）。
+
+    布尔解析唯一收口——消费方禁止各自手写 `.strip().lower() in (...)`。
+    """
+    return (read(key) or "").strip().lower() in ("1", "true")
+
+
+def load_remote_tunables() -> RemoteTunables:
+    """读远程链接可调参数（.ai_env 配置优先，缺省/非法回退默认值）。
+
+    元数据（键清单/默认值展示）见 config.REMOTE_TUNABLE_CONFIGS;
+    每次调用重读——remote_link 心跳周期取值，改配置即时生效。
+    """
+    import logging
+    vals = read_all()
+    defaults = RemoteTunables()
+    log = logging.getLogger(__name__)
+
+    def _num(key: str, default: float | int, as_int: bool):
+        raw = (vals.get(key) or "").strip()
+        if not raw:
+            return default
+        try:
+            return int(float(raw)) if as_int else float(raw)
+        except ValueError:
+            log.warning("配置 %s=%r 非法（应为数字），回退默认 %s", key, raw, default)
+            return default
+
+    return RemoteTunables(
+        heartbeat_interval_sec=_num(REMOTE_HEARTBEAT_INTERVAL_SEC_KEY,
+                                    defaults.heartbeat_interval_sec, as_int=False),
+        fail_threshold=_num(REMOTE_FAIL_THRESHOLD_KEY, defaults.fail_threshold, as_int=True),
+        recover_threshold=_num(REMOTE_RECOVER_THRESHOLD_KEY, defaults.recover_threshold, as_int=True),
+        unload_delay_sec=_num(REMOTE_UNLOAD_DELAY_SEC_KEY, defaults.unload_delay_sec, as_int=False),
+        infer_timeout_sec=_num(REMOTE_INFER_TIMEOUT_SEC_KEY, defaults.infer_timeout_sec, as_int=False),
+        probe_timeout_sec=_num(REMOTE_PROBE_TIMEOUT_SEC_KEY, defaults.probe_timeout_sec, as_int=False),
+    )
+
+
 def write(updates: dict[str, str]) -> dict[str, str]:
     """批量更新配置（保留原有注释 + 其他未改动的字段）。
 
@@ -143,7 +193,7 @@ def write(updates: dict[str, str]) -> dict[str, str]:
             new_lines.append(f"{key}={value}")
 
     # 原子写
-    atomic_write(_ai_env_path(), "\n".join(new_lines) + "\n")
+    ProcessLockUtil.atomic_write(_ai_env_path(), "\n".join(new_lines) + "\n")
     return configs
 
 
@@ -168,7 +218,7 @@ def delete(key: str) -> dict[str, str]:
                 continue
         new_lines.append(line)
 
-    atomic_write(_ai_env_path(), "\n".join(new_lines) + "\n")
+    ProcessLockUtil.atomic_write(_ai_env_path(), "\n".join(new_lines) + "\n")
     configs.pop(key, None)
     return configs
 

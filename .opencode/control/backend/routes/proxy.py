@@ -13,8 +13,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from config import PROXY_RELAY_PORT_START
-from services.proxy_pool import JuliangError, get_pool
+from services.config_manager import ConfigManager
+from services.proxy_pool import JuliangError, ProxyPool
 
 router = APIRouter(prefix="/api/proxy", tags=["proxy"])
 
@@ -37,16 +37,16 @@ class RotateBody(BaseModel):
 def _relay_port() -> int:
     """relay 真实端口：优先 relay 注册值（步骤 3a 起生效），否则配置起点。"""
     try:
-        from services.proxy_relay import relay_port
+        from services.proxy_relay import ProxyRelay
         return relay_port()
     except Exception:
-        return PROXY_RELAY_PORT_START
+        return ConfigManager.Protocol.PROXY_RELAY_PORT_START
 
 
 @router.get("/status")
 async def proxy_status() -> dict:
     """全量状态（含 rotate_history——判定 SOP 第一步，铁律一）。"""
-    st = get_pool().status()
+    st = ProxyPool.get_instance().status()
     st["relay_port"] = _relay_port()
     return st
 
@@ -59,12 +59,12 @@ async def proxy_rotate(body: RotateBody | None = None) -> dict:
     if reason not in _VALID_REASONS:
         raise HTTPException(400, f"reason 必须为 {_VALID_REASONS}")
     try:
-        info = await get_pool().rotate(reason)
-        from services.proxy_relay import graceful_close_upstreams
-        await graceful_close_upstreams()
+        info = await ProxyPool.get_instance().rotate(reason)
+        from services.proxy_relay import ProxyRelay
+        await ProxyRelay.graceful_close_upstreams()
     except JuliangError as e:
         raise HTTPException(422, str(e)) from e
-    st = get_pool().status()
+    st = ProxyPool.get_instance().status()
     return {"current": info.ip, "expire_in_sec": st["expire_in_sec"],
             "surplus": st["surplus"], "reason": reason}
 
@@ -74,10 +74,10 @@ async def proxy_mode(body: ModeBody) -> dict:
     """全局粗开关 direct↔proxy（校验枚举，记 history）。切换后优雅关闭存量。"""
     if body.mode not in ("direct", "proxy"):
         raise HTTPException(400, "mode 必须为 direct 或 proxy")
-    result = get_pool().set_mode(body.mode)
+    result = ProxyPool.get_instance().set_mode(body.mode)
     try:
-        from services.proxy_relay import graceful_close_upstreams
-        await graceful_close_upstreams()
+        from services.proxy_relay import ProxyRelay
+        await ProxyRelay.graceful_close_upstreams()
     except Exception as e:
         import logging
         logging.getLogger("proxy_routes").debug("模式切换后关闭存量隧道跳过（relay 未启动属正常）: %r", e)
@@ -90,7 +90,7 @@ async def proxy_domain_limited(body: DomainLimitedBody) -> dict:
     if not body.url or not body.url.strip():
         raise HTTPException(400, "url 必传")
     try:
-        domain = get_pool().domain_cool(body.url, body.minutes)
+        domain = ProxyPool.get_instance().domain_cool(body.url, body.minutes)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return {"ok": True, "domain": domain}
@@ -101,7 +101,7 @@ async def proxy_entry() -> dict:
     """代理入口（端口读真实值）。仅 proxy 模式下确保池内有可用 IP——
     direct 模式流量走本机不需要 IP，避免白白提取浪费配额（冷却域场景由
     relay 建隧道时惰性提取兜底）。"""
-    pool = get_pool()
+    pool = ProxyPool.get_instance()
     warning = None
     if pool.status()["mode"] == "proxy":
         try:

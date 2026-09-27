@@ -18,6 +18,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
 from services import proxy_pool as pp
+from services.config_manager import ConfigManager
 
 
 # ─── 归一化全表（需求 §5.1）────────────────────────────────
@@ -38,7 +39,7 @@ from services import proxy_pool as pp
     ("https://目标站.com/", "xn--iwvq54a91c.com"),    # IDN→punycode（目标站.com 实测值）
 ])
 def test_normalize_domain_ok(raw, expected):
-    assert pp.normalize_domain(raw) == expected
+    assert pp.ProxyPool.normalize_domain(raw) == expected
 
 
 @pytest.mark.parametrize("raw", [
@@ -51,14 +52,14 @@ def test_normalize_domain_ok(raw, expected):
 ])
 def test_normalize_domain_reject(raw):
     with pytest.raises(ValueError):
-        pp.normalize_domain(raw)
+        pp.ProxyPool.normalize_domain(raw)
 
 
 # ─── 签名自测（官方文档 §1.2 演示数据）──────────────────────
 
 
 def test_sign_selftest_official():
-    assert pp.selftest_sign() is True
+    assert pp.ProxyPool.selftest_sign() is True
 
 
 # ─── 状态机（mock 代理IP供应商 API）────────────────────────────────
@@ -70,6 +71,7 @@ class FakeJuliang:
 
     def __init__(self, pool: pp.ProxyPool, ips: list[str]):
         self.calls = 0
+        t = ConfigManager.get_instance().proxy_tunables()
         pool_ref, ip_list, calls = pool, list(ips), self
 
         async def fake_fetch(_self):
@@ -80,7 +82,7 @@ class FakeJuliang:
             now = time.time()
             info = pp.ProxyInfo(
                 ip=ip, fetched_at=now,
-                expire_at=now + pp.JULIANG_IP_TTL_SEC - pp.JULIANG_TTL_MARGIN_SEC)
+                expire_at=now + t.ip_ttl_sec - t.ttl_margin_sec)
             pool_ref._state.current = info
             pool_ref._state.surplus = 9000 - calls.calls
             pool_ref._state.total_fetched += 1
@@ -95,7 +97,7 @@ def pool(tmp_path, monkeypatch):
     import importlib, config
     importlib.reload(config)
     importlib.reload(pp)
-    p = pp.ProxyPool(state_path=tmp_path / "proxy_state.json")
+    p = pp.ProxyPool._create_fresh(state_path=tmp_path / "proxy_state.json")
     return p
 
 
@@ -125,7 +127,7 @@ def test_pool_lifecycle(pool):
 
         # 持久化往返：重建实例读同一状态文件
         pp.ProxyPool._fetch_from_julang = original
-        pool2 = pp.ProxyPool(state_path=pool._path)
+        pool2 = pp.ProxyPool._create_fresh(state_path=pool._path)
         assert pool2._state.current.ip == "3.3.3.3:3"
         assert pool2._state.bad_ips == ["1.1.1.1:1"]
         assert pool2._state.total_fetched == 3
@@ -160,14 +162,15 @@ def test_credentials_missing_no_crash(pool, monkeypatch):
 
 
 def test_history_limit(pool, tmp_path):
-    for i in range(pp.ROTATE_HISTORY_LIMIT + 10):
+    t = ConfigManager.get_instance().proxy_tunables()
+    for i in range(t.rotate_history_limit + 10):
         pool._record("agent_rotate", f"old{i}", f"new{i}")
-    assert len(pool._state.rotate_history) == pp.ROTATE_HISTORY_LIMIT
-    assert pool._state.rotate_history[-1].new == f"new{pp.ROTATE_HISTORY_LIMIT + 9}"
+    assert len(pool._state.rotate_history) == t.rotate_history_limit
+    assert pool._state.rotate_history[-1].new == f"new{t.rotate_history_limit + 9}"
 
 
 def test_state_file_corruption_reset(pool, tmp_path):
     pool._persist()
     pool._path.write_text("{broken json!!")
-    pool3 = pp.ProxyPool(state_path=pool._path)
+    pool3 = pp.ProxyPool._create_fresh(state_path=pool._path)
     assert pool3._state.mode == "direct" and pool3._state.current is None

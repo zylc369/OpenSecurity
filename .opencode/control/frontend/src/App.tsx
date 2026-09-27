@@ -42,6 +42,7 @@ import ToolsSection from "./sections/ToolsSection";
 import ConfigSection from "./sections/ConfigSection";
 import ProcessSection from "./sections/ProcessSection";
 import OpencodeSection from "./sections/OpencodeSection";
+import RemoteSection from "./sections/RemoteSection";
 import InstallOrchestrator, {
   InstallTask,
 } from "./sections/InstallOrchestrator";
@@ -58,13 +59,15 @@ import { api } from "./api/client";
 
 const { Header, Content } = Layout;
 
-// ─── 页级 Tab（环境总览 / 运行状态）── hash 路由 ───────────────
-// "#/runtime" → 运行状态页; 其余（无 hash / 旧 #section-* 锚点）→ 环境总览。
-// 旧书签 #section-models 点入时 hashchange 触发回落 overview + 原生锚点滚动。
-type PageKey = "overview" | "runtime";
+// ─── 页级 Tab（环境总览 / 运行状态 / 远程资源）── hash 路由 ───────────
+// "#/runtime" → 运行状态页; "#/remote" → 远程资源页; 其余 → 环境总览。
+type PageKey = "overview" | "runtime" | "remote";
 
 function pageFromHash(): PageKey {
-  return window.location.hash === "#/runtime" ? "runtime" : "overview";
+  const h = window.location.hash;
+  if (h === "#/runtime") return "runtime";
+  if (h === "#/remote") return "remote";
+  return "overview";
 }
 
 /** docker pull 的 SSE 包装为 Promise（编排器用）——以 __done__ exit_code 为权威标志 */
@@ -133,8 +136,8 @@ const App: React.FC = () => {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   const switchPage = (key: string) => {
-    if (key === "runtime") {
-      window.location.hash = "#/runtime"; // 触发 hashchange → setPage（幂等）
+    if (key === "runtime" || key === "remote") {
+      window.location.hash = key === "runtime" ? "#/runtime" : "#/remote"; // 触发 hashchange → setPage（幂等）
     } else {
       // 清 hash: 设 hash="" 会残留 "#"，用 replaceState 干净移除（不触发 hashchange，手动 set）
       history.replaceState(null, "", window.location.pathname + window.location.search);
@@ -530,13 +533,14 @@ const App: React.FC = () => {
               硬件
             </Button>
           </Popover>
-          {/* 页级切换：环境总览（静态环境）/ 运行状态（动态运行时）*/}
+          {/* 页级切换：环境总览（静态环境）/ 运行状态（动态运行时）/ 远程资源（远程模型卸载）*/}
           <Segmented
             value={page}
             onChange={(v) => switchPage(v as string)}
             options={[
               { label: "环境总览", value: "overview" },
               { label: "运行状态", value: "runtime" },
+              { label: "远程资源", value: "remote" },
             ]}
           />
         </div>
@@ -869,7 +873,7 @@ const App: React.FC = () => {
 
         </Row>
         </>
-        ) : (
+        ) : page === "runtime" ? (
         /* 运行状态页：动态运行时信息（连接的 opencode / 管理进程），2 列网格
            （与环境总览同布局语言）+ 页级统一刷新（一次刷新全部卡片）。 */
         <>
@@ -899,6 +903,10 @@ const App: React.FC = () => {
             </Col>
           </Row>
         </>
+        ) : (
+        /* 远程资源页：模型远程化管理（远程连接 / 当前模式 / 远程节点管理）。
+           自轮询（5s）后端状态机单一事实源，不依赖本页刷新信号。 */
+        <RemoteSection />
         )}
       </Content>
 

@@ -11,7 +11,7 @@ import time
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from services import event_store
+from services.event_store import EventStoreService, EventEntry, DeleteGroup
 
 router = APIRouter(prefix="/api/events")
 
@@ -70,8 +70,8 @@ class EntitySearchIn(BaseModel):
 
 @router.post("/entry", status_code=202)
 async def events_entry(req: EventEntryIn) -> dict:
-    queued = event_store.submit_entry(
-        event_store.EventEntry(
+    queued = EventStoreService.get_instance().submit_entry(
+        EventEntry(
             name=req.name, body=req.body, source=req.source,
             group_id=req.group_id,
             timestamp=req.timestamp if req.timestamp is not None else time.time() * 1000))
@@ -80,58 +80,58 @@ async def events_entry(req: EventEntryIn) -> dict:
 
 @router.post("/delete", status_code=202)
 async def events_delete(req: EventDeleteIn) -> dict:
-    queued = event_store.submit_entry(event_store.DeleteGroup(group_id=req.group_id))
+    queued = EventStoreService.get_instance().submit_entry(DeleteGroup(group_id=req.group_id))
     return {"queued": queued}
 
 
 @router.post("/time-search")
 async def time_search(req: TimeSearchIn) -> dict:
     try:
-        return await event_store.service_instance().search_time(
+        return await EventStoreService.get_instance().search_time(
             req.query, req.group_id,
             time_start=req.time_start, time_end=req.time_end,
             max_results=req.max_results)
     except Exception as e:
-        return event_store.empty_result(f"time_search failed: {e}")
+        return EventStoreService.empty_result(f"time_search failed: {e}")
 
 
 @router.post("/entity-relationships-search")
 async def entity_relationships_search(req: EntityRelationsIn) -> dict:
     try:
-        return await event_store.service_instance().search_entity_relationships(
+        return await EventStoreService.get_instance().search_entity_relationships(
             req.query, req.group_id,
             center_node_uuid=req.center_node_uuid, max_depth=req.max_depth,
             node_labels=req.node_labels, edge_types=req.edge_types,
             max_results=req.max_results)
     except Exception as e:
-        return event_store.empty_result(f"entity_relationships_search failed: {e}")
+        return EventStoreService.empty_result(f"entity_relationships_search failed: {e}")
 
 
 @router.post("/diverse-results-search")
 async def diverse_results_search(req: DiverseIn) -> dict:
     try:
-        return await event_store.service_instance().search_diverse(
+        return await EventStoreService.get_instance().search_diverse(
             req.query, req.group_id,
             diversity_level=req.diversity_level, max_results=req.max_results)
     except Exception as e:
-        return event_store.empty_result(f"diverse_results_search failed: {e}")
+        return EventStoreService.empty_result(f"diverse_results_search failed: {e}")
 
 
 @router.post("/episode-context-search")
 async def episode_context_search(req: EpisodeContextIn) -> dict:
     try:
-        return await event_store.service_instance().search_episode_context(
+        return await EventStoreService.get_instance().search_episode_context(
             req.query, req.group_id, max_results=req.max_results)
     except Exception as e:
-        return event_store.empty_result(f"episode_context_search failed: {e}")
+        return EventStoreService.empty_result(f"episode_context_search failed: {e}")
 
 
 @router.post("/entity-search")
 async def entity_search(req: EntitySearchIn) -> dict:
     try:
-        return await event_store.service_instance().search_entities(
+        return await EventStoreService.get_instance().search_entities(
             req.query, req.group_id,
             node_labels=req.node_labels, min_mentions=req.min_mentions,
             edge_types=req.edge_types, max_results=req.max_results)
     except Exception as e:
-        return event_store.empty_result(f"entity_search failed: {e}")
+        return EventStoreService.empty_result(f"entity_search failed: {e}")

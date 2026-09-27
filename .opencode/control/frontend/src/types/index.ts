@@ -241,9 +241,62 @@ export interface ConfigMetaItem {
   required: boolean;
   /** 不配置时后端消费方使用的默认值（空串 = 无默认，必须配置） */
   default_value: string;
+  /** true = 不在配置页渲染（专属 TAB 管理，如远程资源的六项 KEY） */
+  hidden: boolean;
 }
 
 export type ConfigMetaMap = Record<string, ConfigMetaItem>;
+
+// ─── /api/remote（远程资源 TAB）────────────────────────────
+
+export type RemoteLinkState = "off" | "remote" | "degraded";
+
+export interface RemoteModelFingerprint {
+  repo_id: string;
+  snapshot: string;
+  loaded: boolean;
+}
+
+export interface RemoteHealthSummary {
+  service: string;
+  version: string;
+  latency_ms: number;
+  models: RemoteModelFingerprint[];
+}
+
+export interface RemoteLinkStatusView {
+  enabled: boolean;
+  url: string;
+  token_configured: boolean;
+  token_prefix: string;
+  state: RemoteLinkState;
+  fail_streak: number;
+  recover_streak: number;
+  last_ok_at: number | null;
+  last_fail_reason: string | null;
+  remote_health: RemoteHealthSummary | null;
+  local_models: Record<string, string>;
+  unload_countdown_sec: number | null;
+}
+
+export interface SwitchResultView {
+  ok: boolean;
+  error?: string;
+  detail?: string;
+  warnings: string[];
+}
+
+export interface NodeConfigView {
+  CONTROL_RESIDENT: string;
+  CONTROL_AUTOSTART: string;
+  CONTROL_API_KEY: string; // 脱敏（前 6 位）
+}
+
+export interface AutostartView {
+  supported: boolean;
+  installed: boolean;
+  loaded: boolean;
+}
 
 // ─── /api/processes ───────────────────────────────────────
 
