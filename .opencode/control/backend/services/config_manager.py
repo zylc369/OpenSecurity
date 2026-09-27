@@ -277,6 +277,10 @@ class ConfigManager:
         self._atomic_write(self.ai_env_path, "\n".join(new_lines) + "\n")
         return configs
 
+    def set_one(self, key: str, value: str) -> dict[str, str]:
+        """更新单个配置（等价 set({key: value}）; 测试 monkeypatch 锚点）。"""
+        return self.set({key: value})
+
     def delete(self, key: str) -> dict[str, str]:
         configs, raw_lines = self._read_with_comments()
         if key not in configs:

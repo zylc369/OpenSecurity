@@ -17,7 +17,7 @@ import asyncio
 import logging
 import time
 
-from services.config_manager import ConfigManager
+from services import config_manager
 from services.proxy_pool import JuliangError, ProxyPool
 
 
@@ -91,8 +91,8 @@ class ProxyRelay:
             return
         ProxyRelay._rotate_gate = asyncio.Lock()  # 随监听生命周期重建（绑定当前循环，防跨循环残留）
         ProxyRelay._proxy_conn_count = 0
-        start = ConfigManager.Protocol.PROXY_RELAY_PORT_START
-        for port in range(start, start + ConfigManager.Protocol.PROXY_RELAY_PORT_CANDIDATES):
+        start = config_manager.ConfigManager.Protocol.PROXY_RELAY_PORT_START
+        for port in range(start, start + config_manager.ConfigManager.Protocol.PROXY_RELAY_PORT_CANDIDATES):
             try:
                 ProxyRelay._server = await asyncio.start_server(ProxyRelay._handle_client, "127.0.0.1", port)
                 ProxyRelay._port = port
@@ -155,7 +155,7 @@ class ProxyRelay:
         domain = ProxyPool.normalize_domain(host)  # 与控制接口同一归一化（收口）
         use_proxy = pool.domain_cooled(domain) or pool.status()["mode"] == "proxy"
         if use_proxy:
-            threshold = ConfigManager.get_instance().proxy_tunables().rotate_conn_threshold
+            threshold = config_manager.ConfigManager.get_instance().proxy_tunables().rotate_conn_threshold
             info = await pool.get()  # 缓存复用；过期/黑名单自动提取（惰性）
             ProxyRelay._proxy_conn_count += 1
             if ProxyRelay._proxy_conn_count >= threshold:

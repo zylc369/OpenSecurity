@@ -3,7 +3,7 @@
 状态: OFF（未启用/未配置） | REMOTE（启用且健康） | DEGRADED（启用但失效）
 
 心跳（asyncio task，server lifespan 启动）:
-  周期与阈值经 config_store.load_remote_tunables() 每轮重读（.ai_env 配置，
+  周期与阈值经 ConfigManager.get_instance().remote_tunables() 每轮重读（.ai_env 配置，
   改后即时生效; 键清单/默认值见 config.REMOTE_TUNABLE_CONFIGS）:
     • 连续失败达 fail_threshold（含请求级失败反馈）:
         REMOTE → DEGRADED + 后台预热本地三模型（降级）
@@ -28,12 +28,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from config import (
-    REMOTE_ENABLED_KEY,
-    REMOTE_TOKEN_KEY,
-    REMOTE_URL_KEY,
-    RemoteTunables,
-)
+from services.config_manager import ConfigManager
 from services.logging_setup import LogManager
 from services.ocr_engines import MlxEngine
 from services.remote_client import RemoteConsoleClient, RemoteHealthInfo
@@ -43,13 +38,13 @@ logger = LogManager.get_instance().setup_auxiliary("remote_link", "remote-link.l
 
 
 def _tunables() -> RemoteTunables:
-    """远程链接可调参数（config_store.load_remote_tunables 委托）。
+    """远程链接可调参数（ConfigManager 委托）。
 
     独立成模块级函数的原因: 单测注入点（monkeypatch 本函数替换小阈值，
     与 _read_config 同模式）——不设 env 覆盖通道（配置唯一收口 .ai_env）。
     """
-    from services import config_store
-    return config_store.load_remote_tunables()
+    from services.config_manager import ConfigManager
+    return ConfigManager.get_instance().remote_tunables()
 
 
 @dataclass
@@ -134,20 +129,20 @@ class RemoteLinkService:
         self._task: "asyncio.Task | None" = None
 
     def _read_config(self) -> tuple[str, bool, str]:
-        """读远程三 KEY（config_store 唯一读写方）。"""
-        from services import config_store
-        url = (config_store.read(REMOTE_URL_KEY) or "").strip()
-        enabled = config_store.read_bool(REMOTE_ENABLED_KEY)
-        token = (config_store.read(REMOTE_TOKEN_KEY) or "").strip()
+        """读远程三 KEY（ConfigManager 唯一读写方）。"""
+        from services.config_manager import ConfigManager
+        url = (ConfigManager.get_instance().get(ConfigManager.Keys.REMOTE_CONSOLE_URL) or "").strip()
+        enabled = (ConfigManager.get_instance().get(ConfigManager.Keys.REMOTE_CONSOLE_ENABLED) or "").strip().lower() in ("1", "true")
+        token = (ConfigManager.get_instance().get(ConfigManager.Keys.REMOTE_CONSOLE_TOKEN) or "").strip()
         return url, enabled, token
 
     def _local_fingerprints(self) -> dict[str, str]:
         """本地模型指纹（repo_id → snapshot hash; HF 缓存目录名，不加载模型）。"""
         from pathlib import Path
-        from config import EMBED_MODEL, RERANKER_MODEL
+        
         hub = Path.home() / ".cache" / "huggingface" / "hub"
         result: dict[str, str] = {}
-        for repo in (EMBED_MODEL, RERANKER_MODEL):
+        for repo in (ConfigManager.Protocol.EMBED_MODEL, ConfigManager.Protocol.RERANKER_MODEL):
             repo_dir = repo.replace("/", "--")
             snaps = list(hub.glob(f"models--{repo_dir}/snapshots/*"))
             result[repo] = snaps[0].name if snaps else ""
@@ -335,8 +330,8 @@ class RemoteLinkService:
                 warnings.append(f"模型 {m.repo_id} 版本不一致（本地 {local[m.repo_id][:8]}… / "
                                 f"远程 {m.snapshot[:8]}…）——向量空间可能漂移")
 
-        from services import config_store
-        config_store.write_one(REMOTE_ENABLED_KEY, "1")
+        from services.config_manager import ConfigManager
+        ConfigManager.get_instance().set_one(ConfigManager.Keys.REMOTE_CONSOLE_ENABLED, "1")
         self.reload_config()
         # 立即评估（校验刚成功 → 单次定态 REMOTE）
         with self._lock:
@@ -351,8 +346,8 @@ class RemoteLinkService:
 
     def switch_to_local(self) -> SwitchResult:
         """写 ENABLED=0 → OFF。本地模型保持加载（不卸载）。"""
-        from services import config_store
-        config_store.write_one(REMOTE_ENABLED_KEY, "0")
+        from services.config_manager import ConfigManager
+        ConfigManager.get_instance().set_one(ConfigManager.Keys.REMOTE_CONSOLE_ENABLED, "0")
         with self._lock:
             self._state = self.STATE_OFF
             self._cancel_unload_locked()

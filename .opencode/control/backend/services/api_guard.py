@@ -22,7 +22,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from config import CONTROL_API_KEY_KEY
+from services.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +58,8 @@ class ApiGuardMiddleware(BaseHTTPMiddleware):
         if self._is_local(host):
             return await call_next(request)
 
-        from services import config_store
-        api_key = (config_store.read(CONTROL_API_KEY_KEY) or "").strip()
+        cm = ConfigManager.get_instance()
+        api_key = (cm.get(cm.Keys.CONTROL_API_KEY) or "").strip()
         if not api_key:
             logger.warning("鉴权拒绝（未配置 CONTROL_API_KEY）: host=%s path=%s", host, request.url.path)
             return JSONResponse(

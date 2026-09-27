@@ -52,172 +52,6 @@ class PyPkgField:
     version_via_import: bool = False  # True: 版本经 import 探测（pip 名与 distribution 不一致特例）
 
 
-PYTHON_PACKAGES: list[PyPkgField] = [
-    # ── 控制台 + 基础设施（agents=all） ──
-    PyPkgField(name="fastapi", pip_name="fastapi", agents=["all"],
-               description="控制台 Web 框架"),
-    PyPkgField(name="uvicorn", pip_name="uvicorn", agents=["all"],
-               description="控制台 ASGI 服务器（fastapi 不自带，必须显式安装）"),
-    PyPkgField(name="psutil", pip_name="psutil", agents=["all"],
-               description="进程/内存监控库，控制台资源管理依赖"),
-    PyPkgField(name="pywin32", pip_name="pywin32", agents=["all"], platforms=("win32",),
-               description="Windows 命名管道（控制台 IPC 监听 + MCP 管道代理）"),
-    PyPkgField(name="mlx-vlm", pip_name="mlx-vlm", agents=["all"], platforms=("darwin",),
-               description="MLX 视觉模型库（OCR 进程内推理；Apple Silicon 专属）"),
-    PyPkgField(name="numpy", pip_name="numpy", agents=["all"],
-               description="数值计算库，embed 接口返回值"),
-    PyPkgField(name="httpx", pip_name="httpx", agents=["all"],
-               description="HTTP 客户端库，MCP→控制台通信"),
-    PyPkgField(name="anthropic", pip_name="anthropic", agents=["all"], version_spec="<1",
-               description="控制台 events 提取 LLM 客户端（llm_client 顶层 import，"
-                           "DeepSeek anthropic 兼容端点；曾靠旧依赖树巧合带入，"
-                           "venv 重建后缺失导致 events 提取崩——2026/9/15 重建测试发现。"
-                           "钉 <1：1.x 移除 create 的 temperature 参数导致提取全崩，"
-                           "graphiti/llm_client 按 0.x API 编写——2026/9/22 定位）"),
-    PyPkgField(name="huggingface_hub", pip_name="huggingface_hub", agents=["all"],
-               description="模型缓存扫描与下载（控制台模型资产页）"),
-    PyPkgField(name="mcp", pip_name="mcp", agents=["all"], version_spec="<2",
-               description="MCP 协议库，knowledge/events/ocr server 依赖"
-                           "（钉 <2: 2.x 将 FastMCP 改名 MCPServer，server 均用 v1 API）"),
-    PyPkgField(name="sentence_transformers", pip_name="sentence-transformers", agents=["all"],
-               description="嵌入模型库，加载 BGE-M3 模型依赖"),
-    PyPkgField(name="sse_starlette", pip_name="sse-starlette", agents=["all"],
-               description="控制台 SSE 推送（docker pull 进度）"),
-    PyPkgField(name="sqlite_vec", pip_name="sqlite-vec", agents=["all"],
-               description="SQLite 向量扩展，knowledge MCP 向量存储依赖"),
-    PyPkgField(name="graphiti_core", pip_name="graphiti-core", agents=["all"],
-               description="Graphiti 时序知识图谱库，events MCP server 依赖"),
-    PyPkgField(name="pyautogui", pip_name="pyautogui", agents=["all"],
-               description="GUI 自动化（鼠标/键盘模拟）"),
-    PyPkgField(name="pyperclip", pip_name="pyperclip", agents=["all"],
-               description="跨平台剪贴板操作"),
-    PyPkgField(name="playwright", pip_name="playwright", agents=["all"],
-               description="无头浏览器自动化框架"),
-    PyPkgField(name="markdownify", pip_name="markdownify", agents=["all"],
-               description="HTML 转 Markdown"),
-    PyPkgField(name="requests", pip_name="requests", agents=["all"],
-               description="HTTP 客户端库"),
-    PyPkgField(name="bs4", pip_name="beautifulsoup4", agents=["all"],
-               description="HTML/XML 解析库（BeautifulSoup4）"),
-    PyPkgField(name="lxml", pip_name="lxml", agents=["all"],
-               description="高性能 XML/HTML 解析器"),
-    PyPkgField(name="sympy", pip_name="sympy", agents=["all"],
-               description="符号数学库（CRT/数论构造）"),
-    # ── 二进制/密码学分析包 ──
-    PyPkgField(name="angr", pip_name="angr",
-               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
-               description="二进制分析/符号执行框架"),
-    PyPkgField(name="triton", pip_name="triton-library", platforms=("linux", "win32"),
-               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
-               description="动态二进制分析框架（符号执行/污点分析）"),
-    PyPkgField(name="z3", pip_name="z3-solver",
-               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis", "ai-security-analysis"],
-               description="Z3 定理证明器（约束求解）"),
-    PyPkgField(name="capstone", pip_name="capstone",
-               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
-               description="多架构反汇编框架"),
-    PyPkgField(name="unicorn", pip_name="unicorn",
-               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis", "ai-security-analysis"],
-               description="多架构 CPU 模拟器（Shellcode 测试）"),
-    PyPkgField(name="gmpy2", pip_name="gmpy2",
-               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis", "ai-security-analysis"],
-               description="高精度算术库（大整数/模幂/素性检测）"),
-    PyPkgField(name="frida", pip_name="frida",
-               agents=["binary-analysis", "mobile-analysis"],
-               description="动态插桩工具包（Hook/内存读写）"),
-    PyPkgField(name="PIL", pip_name="Pillow",
-               agents=["binary-analysis", "mobile-analysis"],
-               description="图像处理库（GUI 截图）"),
-    # ── OCR 链路 ──
-    PyPkgField(name="pymupdf", pip_name="pymupdf", agents=["all"],
-               description="PDF 文本层提取与页面渲染（OCR 前置分流）"),
-    # ── 知识库引用的分析依赖（knowledge-base 正文直接 import；随项目走） ──
-    PyPkgField(name="pwn", pip_name="pwntools", agents=["binary-analysis"],
-               description="pwn 全流程（ROP 构造/远程 IO/ELF 操作），pwn-methodology 主依赖"),
-    PyPkgField(name="qiling", pip_name="qiling", agents=["binary-analysis"],
-               description="OS 层模拟（PE/ELF 全系统仿真+syscall hook）"),
-    PyPkgField(name="pefile", pip_name="pefile", agents=["binary-analysis"],
-               description="PE 解析（malware-analysis 配置提取/节表分析）"),
-    PyPkgField(name="lief", pip_name="lief", agents=["binary-analysis"],
-               description="ELF/PE/Mach-O 程序化修补（process-patch-reference）"),
-    PyPkgField(name="elftools", pip_name="pyelftools", agents=["binary-analysis"],
-               description="ELF 解析（readelf 脚本化/符号表提取）"),
-    PyPkgField(name="Crypto", pip_name="pycryptodome",
-               agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
-               description="密码学算法复现（AES/RSA/哈希，crypto-validation-patterns）"),
-    PyPkgField(name="volatility3", pip_name="volatility3", agents=["binary-analysis"],
-               description="内存取证全命令族，disk-memory-forensics 主依赖"),
-    PyPkgField(name="hashpumpy", pip_name="hashpumpy", agents=["web-analysis"],
-               description="哈希长度扩展攻击"),
-    PyPkgField(name="sqlmap", pip_name="sqlmap",
-               agents=["web-analysis", "binary-analysis"],
-               description="SQL 注入自动化"),
-    PyPkgField(name="dirsearch", pip_name="dirsearch", agents=["web-analysis"],
-               description="目录/路径爆破"),
-    PyPkgField(name="wafw00f", pip_name="wafw00f", agents=["web-analysis"],
-               description="WAF 产品指纹识别"),
-    PyPkgField(name="arjun", pip_name="arjun", agents=["web-analysis"],
-               description="HTTP 隐藏参数发现"),
-    PyPkgField(name="flask_unsign", pip_name="flask-unsign", agents=["web-analysis"],
-               description="Flask session cookie 解码/伪造/爆破，ssti/jwt-attacks"),
-    PyPkgField(name="semgrep", pip_name="semgrep", agents=["web-analysis"],
-               description="规则化代码审计（多语言源码审计）"),
-    PyPkgField(name="pyotp", pip_name="pyotp", agents=["web-analysis"],
-               description="TOTP/HOTP 生成（2FA 测试），jwt-attacks"),
-    PyPkgField(name="dns", pip_name="dnspython",
-               agents=["binary-analysis", "web-analysis"],
-               description="DNS 协议库（AXFR/隧道解析脚本，network-forensics"),
-    PyPkgField(name="impacket", pip_name="impacket", agents=["binary-analysis"],
-               description="Windows 协议套件（psexec/secretsdump/ntlmrelayx 等）"),
-    PyPkgField(name="binwalk", pip_name="binwalk", agents=["binary-analysis"],
-               description="固件/文件签名扫描与提取（packer-handling/platform-reversing）"),
-    PyPkgField(name="hashid", pip_name="hashid", agents=["binary-analysis"],
-               description="哈希类型识别（ad-domain-attacks 哈希模式判别）"),
-    PyPkgField(name="Registry", pip_name="python-registry", agents=["binary-analysis"],
-               description="Windows 注册表 hive 程序化解析"),
-    PyPkgField(name="mitmproxy", pip_name="mitmproxy", agents=["web-analysis", "mobile-analysis"],
-               description="HTTP(S) 拦截代理（mitmdump CLI，CSP/移动抓包）"),
-    PyPkgField(name="Evtx", pip_name="python-evtx", agents=["binary-analysis"],
-               description="Windows EVTX 事件日志解析（forensics-methodology）"),
-    PyPkgField(name="pytsk3", pip_name="pytsk3", agents=["binary-analysis"],
-               description="Sleuth Kit 库（fls/icat/istat 磁盘镜像遍历提取，disk-memory-forensics）"),
-    PyPkgField(name="yara", pip_name="yara-python", agents=["binary-analysis"],
-               description="YARA 规则扫描（malware-analysis 特征匹配）"),
-    PyPkgField(name="ropper", pip_name="ropper", agents=["binary-analysis"],
-               description="ROP gadget"),
-    PyPkgField(name="ROPgadget", pip_name="ROPgadget", agents=["binary-analysis"],
-               description="ROP gadget"),
-    PyPkgField(name="patchelf", pip_name="patchelf", agents=["binary-analysis"],
-               description="ELF 修补（patchelf CLI，pwn-methodology ROP 链构建）"),
-    PyPkgField(name="xortool", pip_name="xortool", agents=["binary-analysis", "crypto-analysis"],
-               description="XOR 密钥长度/明文分析（classical-crypto/steganography）"),
-    PyPkgField(name="pypykatz", pip_name="pypykatz", agents=["binary-analysis"],
-               description="LSASS/注册表凭据提取（mimikatz 纯 python 等效，windows-forensics）"),
-    PyPkgField(name="scapy", pip_name="scapy", agents=["binary-analysis", "web-analysis"],
-               description="pcap 构造/解析（network-forensics，tshark 附录的 venv 路径）"),
-    PyPkgField(name="reflutter", pip_name="reflutter", agents=["mobile-analysis"],
-               description="Flutter SSL pinning 绕过重打包（cross-platform-frameworks）"),
-    PyPkgField(name="hbctool", pip_name="hbctool", agents=["mobile-analysis"],
-               description="Hermes 字节码反编译/disasm（cross-platform-frameworks）"),
-    PyPkgField(name="frida", pip_name="frida-tools", agents=["binary-analysis", "mobile-analysis"],
-               description="动态插桩全套 CLI（frida/frida-ps/frida-trace/frida-strace/frida-server 推送, frida 体系主依赖）"),
-    PyPkgField(name="awscli", pip_name="awscli", agents=["web-analysis"],
-               description="AWS CLI（S3 接管验证/桶操作, subdomain-takeover）"),
-    PyPkgField(name="lsassy", pip_name="lsassy", agents=["binary-analysis"],
-               description="LSASS 远程/本地凭据提取（纯 python，mimikatz 等效）"),
-    PyPkgField(name="mitm6", pip_name="mitm6", agents=["binary-analysis"],
-               description="IPv6 DNS 欺骗→NTLMv2 中继（AD 攻击链）"),
-    PyPkgField(name="py7zr", pip_name="py7zr", agents=["binary-analysis"],
-               description="7z 归档解压（hashcat 官方包/ImageMagick portable 处理）"),
-    PyPkgField(name="uncompyle6", pip_name="uncompyle6", agents=["binary-analysis"],
-               description="Python 字节码反编译（≤py3.8; 高版本用 pycdc 容器路径）"),
-    # ── conda 安装器（必需；服务端按 installer 字段走 conda install 命令） ──
-    PyPkgField(name="sage", pip_name="sagemath-standard", installer="conda",
-               conda_name="sage",
-               agents=["crypto-analysis"], version_via_import=True,
-               description="数学软件系统（格归约/椭圆曲线）—— conda 安装"),
-]
-
 
 # ═══ 检测 ═════════════════════════════════════════════════
 
@@ -237,7 +71,232 @@ class PyPkgStatus:
 
 
 class PyDepsDetector:
-    """Python 依赖检测器（import 调用与 CLI 子命令共用同一 scan）。"""
+    """Python 依赖检测器（全局单例; import 调用与 CLI 子命令共用同一 scan）。"""
+
+    _instance: "PyDepsDetector | None" = None
+    _instance_lock = __import__("threading").Lock()
+
+    def __new__(cls) -> "PyDepsDetector":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+
+    @classmethod
+    def get_instance(cls) -> "PyDepsDetector":
+        return cls()
+
+
+    PYTHON_PACKAGES: list[PyPkgField] = [
+        # ── 控制台 + 基础设施（agents=all） ──
+        PyPkgField(name="fastapi", pip_name="fastapi", agents=["all"],
+                   description="控制台 Web 框架"),
+        PyPkgField(name="uvicorn", pip_name="uvicorn", agents=["all"],
+                   description="控制台 ASGI 服务器（fastapi 不自带，必须显式安装）"),
+        PyPkgField(name="psutil", pip_name="psutil", agents=["all"],
+                   description="进程/内存监控库，控制台资源管理依赖"),
+        PyPkgField(name="pywin32", pip_name="pywin32", agents=["all"], platforms=("win32",),
+                   description="Windows 命名管道（控制台 IPC 监听 + MCP 管道代理）"),
+        PyPkgField(name="mlx-vlm", pip_name="mlx-vlm", agents=["all"], platforms=("darwin",),
+                   description="MLX 视觉模型库（OCR 进程内推理；Apple Silicon 专属）"),
+        PyPkgField(name="numpy", pip_name="numpy", agents=["all"],
+                   description="数值计算库，embed 接口返回值"),
+        PyPkgField(name="httpx", pip_name="httpx", agents=["all"],
+                   description="HTTP 客户端库，MCP→控制台通信"),
+        PyPkgField(name="anthropic", pip_name="anthropic", agents=["all"], version_spec="<1",
+                   description="控制台 events 提取 LLM 客户端（llm_client 顶层 import，"
+                               "DeepSeek anthropic 兼容端点；曾靠旧依赖树巧合带入，"
+                               "venv 重建后缺失导致 events 提取崩——2026/9/15 重建测试发现。"
+                               "钉 <1：1.x 移除 create 的 temperature 参数导致提取全崩，"
+                               "graphiti/llm_client 按 0.x API 编写——2026/9/22 定位）"),
+        PyPkgField(name="huggingface_hub", pip_name="huggingface_hub", agents=["all"],
+                   description="模型缓存扫描与下载（控制台模型资产页）"),
+        PyPkgField(name="mcp", pip_name="mcp", agents=["all"], version_spec="<2",
+                   description="MCP 协议库，knowledge/events/ocr server 依赖"
+                               "（钉 <2: 2.x 将 FastMCP 改名 MCPServer，server 均用 v1 API）"),
+        PyPkgField(name="sentence_transformers", pip_name="sentence-transformers", agents=["all"],
+                   description="嵌入模型库，加载 BGE-M3 模型依赖"),
+        PyPkgField(name="sse_starlette", pip_name="sse-starlette", agents=["all"],
+                   description="控制台 SSE 推送（docker pull 进度）"),
+        PyPkgField(name="sqlite_vec", pip_name="sqlite-vec", agents=["all"],
+                   description="SQLite 向量扩展，knowledge MCP 向量存储依赖"),
+        PyPkgField(name="graphiti_core", pip_name="graphiti-core", agents=["all"],
+                   description="Graphiti 时序知识图谱库，events MCP server 依赖"),
+        PyPkgField(name="pyautogui", pip_name="pyautogui", agents=["all"],
+                   description="GUI 自动化（鼠标/键盘模拟）"),
+        PyPkgField(name="pyperclip", pip_name="pyperclip", agents=["all"],
+                   description="跨平台剪贴板操作"),
+        PyPkgField(name="playwright", pip_name="playwright", agents=["all"],
+                   description="无头浏览器自动化框架"),
+        PyPkgField(name="markdownify", pip_name="markdownify", agents=["all"],
+                   description="HTML 转 Markdown"),
+        PyPkgField(name="requests", pip_name="requests", agents=["all"],
+                   description="HTTP 客户端库"),
+        PyPkgField(name="bs4", pip_name="beautifulsoup4", agents=["all"],
+                   description="HTML/XML 解析库（BeautifulSoup4）"),
+        PyPkgField(name="lxml", pip_name="lxml", agents=["all"],
+                   description="高性能 XML/HTML 解析器"),
+        PyPkgField(name="sympy", pip_name="sympy", agents=["all"],
+                   description="符号数学库（CRT/数论构造）"),
+        # ── 二进制/密码学分析包 ──
+        PyPkgField(name="angr", pip_name="angr",
+                   agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
+                   description="二进制分析/符号执行框架"),
+        PyPkgField(name="triton", pip_name="triton-library", platforms=("linux", "win32"),
+                   agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
+                   description="动态二进制分析框架（符号执行/污点分析）"),
+        PyPkgField(name="z3", pip_name="z3-solver",
+                   agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis", "ai-security-analysis"],
+                   description="Z3 定理证明器（约束求解）"),
+        PyPkgField(name="capstone", pip_name="capstone",
+                   agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
+                   description="多架构反汇编框架"),
+        PyPkgField(name="unicorn", pip_name="unicorn",
+                   agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis", "ai-security-analysis"],
+                   description="多架构 CPU 模拟器（Shellcode 测试）"),
+        PyPkgField(name="gmpy2", pip_name="gmpy2",
+                   agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis", "ai-security-analysis"],
+                   description="高精度算术库（大整数/模幂/素性检测）"),
+        PyPkgField(name="frida", pip_name="frida",
+                   agents=["binary-analysis", "mobile-analysis"],
+                   description="动态插桩工具包（Hook/内存读写）"),
+        PyPkgField(name="PIL", pip_name="Pillow",
+                   agents=["binary-analysis", "mobile-analysis"],
+                   description="图像处理库（GUI 截图）"),
+        # ── OCR 链路 ──
+        PyPkgField(name="pymupdf", pip_name="pymupdf", agents=["all"],
+                   description="PDF 文本层提取与页面渲染（OCR 前置分流）"),
+        # ── 知识库引用的分析依赖（knowledge-base 正文直接 import；随项目走） ──
+        PyPkgField(name="pwn", pip_name="pwntools", agents=["binary-analysis"],
+                   description="pwn 全流程（ROP 构造/远程 IO/ELF 操作），pwn-methodology 主依赖"),
+        PyPkgField(name="qiling", pip_name="qiling", agents=["binary-analysis"],
+                   description="OS 层模拟（PE/ELF 全系统仿真+syscall hook）"),
+        PyPkgField(name="pefile", pip_name="pefile", agents=["binary-analysis"],
+                   description="PE 解析（malware-analysis 配置提取/节表分析）"),
+        PyPkgField(name="lief", pip_name="lief", agents=["binary-analysis"],
+                   description="ELF/PE/Mach-O 程序化修补（process-patch-reference）"),
+        PyPkgField(name="elftools", pip_name="pyelftools", agents=["binary-analysis"],
+                   description="ELF 解析（readelf 脚本化/符号表提取）"),
+        PyPkgField(name="Crypto", pip_name="pycryptodome",
+                   agents=["binary-analysis", "mobile-analysis", "web-analysis", "crypto-analysis"],
+                   description="密码学算法复现（AES/RSA/哈希，crypto-validation-patterns）"),
+        PyPkgField(name="volatility3", pip_name="volatility3", agents=["binary-analysis"],
+                   description="内存取证全命令族，disk-memory-forensics 主依赖"),
+        PyPkgField(name="hashpumpy", pip_name="hashpumpy", agents=["web-analysis"],
+                   description="哈希长度扩展攻击"),
+        PyPkgField(name="sqlmap", pip_name="sqlmap",
+                   agents=["web-analysis", "binary-analysis"],
+                   description="SQL 注入自动化"),
+        PyPkgField(name="dirsearch", pip_name="dirsearch", agents=["web-analysis"],
+                   description="目录/路径爆破"),
+        PyPkgField(name="wafw00f", pip_name="wafw00f", agents=["web-analysis"],
+                   description="WAF 产品指纹识别"),
+        PyPkgField(name="arjun", pip_name="arjun", agents=["web-analysis"],
+                   description="HTTP 隐藏参数发现"),
+        PyPkgField(name="flask_unsign", pip_name="flask-unsign", agents=["web-analysis"],
+                   description="Flask session cookie 解码/伪造/爆破，ssti/jwt-attacks"),
+        PyPkgField(name="semgrep", pip_name="semgrep", agents=["web-analysis"],
+                   description="规则化代码审计（多语言源码审计）"),
+        PyPkgField(name="pyotp", pip_name="pyotp", agents=["web-analysis"],
+                   description="TOTP/HOTP 生成（2FA 测试），jwt-attacks"),
+        PyPkgField(name="dns", pip_name="dnspython",
+                   agents=["binary-analysis", "web-analysis"],
+                   description="DNS 协议库（AXFR/隧道解析脚本，network-forensics"),
+        PyPkgField(name="impacket", pip_name="impacket", agents=["binary-analysis"],
+                   description="Windows 协议套件（psexec/secretsdump/ntlmrelayx 等）"),
+        PyPkgField(name="binwalk", pip_name="binwalk", agents=["binary-analysis"],
+                   description="固件/文件签名扫描与提取（packer-handling/platform-reversing）"),
+        PyPkgField(name="hashid", pip_name="hashid", agents=["binary-analysis"],
+                   description="哈希类型识别（ad-domain-attacks 哈希模式判别）"),
+        PyPkgField(name="Registry", pip_name="python-registry", agents=["binary-analysis"],
+                   description="Windows 注册表 hive 程序化解析"),
+        PyPkgField(name="mitmproxy", pip_name="mitmproxy", agents=["web-analysis", "mobile-analysis"],
+                   description="HTTP(S) 拦截代理（mitmdump CLI，CSP/移动抓包）"),
+        PyPkgField(name="Evtx", pip_name="python-evtx", agents=["binary-analysis"],
+                   description="Windows EVTX 事件日志解析（forensics-methodology）"),
+        PyPkgField(name="pytsk3", pip_name="pytsk3", agents=["binary-analysis"],
+                   description="Sleuth Kit 库（fls/icat/istat 磁盘镜像遍历提取，disk-memory-forensics）"),
+        PyPkgField(name="yara", pip_name="yara-python", agents=["binary-analysis"],
+                   description="YARA 规则扫描（malware-analysis 特征匹配）"),
+        PyPkgField(name="ropper", pip_name="ropper", agents=["binary-analysis"],
+                   description="ROP gadget"),
+        PyPkgField(name="ROPgadget", pip_name="ROPgadget", agents=["binary-analysis"],
+                   description="ROP gadget"),
+        PyPkgField(name="patchelf", pip_name="patchelf", agents=["binary-analysis"],
+                   description="ELF 修补（patchelf CLI，pwn-methodology ROP 链构建）"),
+        PyPkgField(name="xortool", pip_name="xortool", agents=["binary-analysis", "crypto-analysis"],
+                   description="XOR 密钥长度/明文分析（classical-crypto/steganography）"),
+        PyPkgField(name="pypykatz", pip_name="pypykatz", agents=["binary-analysis"],
+                   description="LSASS/注册表凭据提取（mimikatz 纯 python 等效，windows-forensics）"),
+        PyPkgField(name="scapy", pip_name="scapy", agents=["binary-analysis", "web-analysis"],
+                   description="pcap 构造/解析（network-forensics，tshark 附录的 venv 路径）"),
+        PyPkgField(name="reflutter", pip_name="reflutter", agents=["mobile-analysis"],
+                   description="Flutter SSL pinning 绕过重打包（cross-platform-frameworks）"),
+        PyPkgField(name="hbctool", pip_name="hbctool", agents=["mobile-analysis"],
+                   description="Hermes 字节码反编译/disasm（cross-platform-frameworks）"),
+        PyPkgField(name="frida", pip_name="frida-tools", agents=["binary-analysis", "mobile-analysis"],
+                   description="动态插桩全套 CLI（frida/frida-ps/frida-trace/frida-strace/frida-server 推送, frida 体系主依赖）"),
+        PyPkgField(name="awscli", pip_name="awscli", agents=["web-analysis"],
+                   description="AWS CLI（S3 接管验证/桶操作, subdomain-takeover）"),
+        PyPkgField(name="lsassy", pip_name="lsassy", agents=["binary-analysis"],
+                   description="LSASS 远程/本地凭据提取（纯 python，mimikatz 等效）"),
+        PyPkgField(name="mitm6", pip_name="mitm6", agents=["binary-analysis"],
+                   description="IPv6 DNS 欺骗→NTLMv2 中继（AD 攻击链）"),
+        PyPkgField(name="py7zr", pip_name="py7zr", agents=["binary-analysis"],
+                   description="7z 归档解压（hashcat 官方包/ImageMagick portable 处理）"),
+        PyPkgField(name="uncompyle6", pip_name="uncompyle6", agents=["binary-analysis"],
+                   description="Python 字节码反编译（≤py3.8; 高版本用 pycdc 容器路径）"),
+        # ── conda 安装器（必需；服务端按 installer 字段走 conda install 命令） ──
+        PyPkgField(name="sage", pip_name="sagemath-standard", installer="conda",
+                   conda_name="sage",
+                   agents=["crypto-analysis"], version_via_import=True,
+                   description="数学软件系统（格归约/椭圆曲线）—— conda 安装"),
+    ]
+
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        with cls._instance_lock:
+            cls._instance = None
+
+    @staticmethod
+
+    def one_click_installable() -> set[str]:
+        """可一键安装的包名集合（/api/install 白名单的唯一数据源）。
+
+        唯一清单中当前平台适用的全部包（必需包修复重装 + 可选包补装）。
+        installer 字段（pip/conda）只决定服务端执行哪条安装命令，
+        不影响"能否一键安装"——控制台环境本身就有 conda（venv 由它创建）。
+        """
+        return {
+            pkg.pip_name
+            for pkg in PyDepsDetector.PYTHON_PACKAGES
+            if PyDepsDetector._platform_matches(pkg)
+        }
+
+
+    # ─── macOS libomp 去重（OMP Error #15 根治）──────────────────
+    #
+    # 背景：macOS 无系统级 OpenMP → pip wheel 各自携带 libomp.dylib（torch、
+    # sklearn 等），conda 建环境时另装一份到 <venv>/lib/。macOS dyld 按
+    # 「路径+UUID」判定镜像——不同构建的同名副本被当作独立库各自加载，
+    # 第二份初始化时触发 OpenMP 的 duplicate-init 自杀保护：
+    #   OMP: Error #15 → SIGABRT（进程秒崩，stderr 才能看到）
+    # （Linux 无此问题：链接器按 soname 全局去重。）
+    #
+    # 方案：以 torch wheel 的副本为 canonical，把 venv 内其余 libomp.dylib
+    # 副本替换为指向它的 symlink。不修改二进制 → 无 macOS 签名失效问题。
+    # 幂等：已指向 canonical 的 symlink 跳过；pip 重装 wheel 会还原成真实
+    # 文件（可能换构建），重跑本函数自愈。备份后缀 .condabak（仅首次，
+    # 不覆盖以保留最早原始副本）。
+    # 注意：KMP_DUPLICATE_LIB_OK=TRUE 无效——本环境实测 import 可过但
+    # 并行计算 SIGSEGV（pytorch#83540 同报）。
+
+    @staticmethod
+
+    def required_packages() -> list[PyPkgField]:
+        """必需包集（install 子命令的安装清单：required 且当前平台适用）。"""
+        return [p for p in PyDepsDetector.PYTHON_PACKAGES if p.required and PyDepsDetector._platform_matches(p)]
 
     def scan(self, agent: str = "all", python_exe: str | None = None) -> list[PyPkgStatus]:
         """检测 Python 包安装状态。
@@ -249,7 +308,7 @@ class PyDepsDetector:
         python_exe = python_exe or sys.executable
         return [
             self._detect_one(pkg, python_exe)
-            for pkg in PYTHON_PACKAGES
+            for pkg in PyDepsDetector.PYTHON_PACKAGES
             if self._platform_matches(pkg) and self._agent_matches(pkg, agent)
         ]
 
@@ -312,49 +371,7 @@ class PyDepsDetector:
         return "all" in pkg.agents or agent in pkg.agents
 
 
-_detector = PyDepsDetector()
 
-
-def scan(agent: str = "all", python_exe: str | None = None) -> list[PyPkgStatus]:
-    """模块级委托（兼容既有消费方）。"""
-    return _detector.scan(agent, python_exe)
-
-
-def required_packages() -> list[PyPkgField]:
-    """必需包集（install 子命令的安装清单：required 且当前平台适用）。"""
-    return [p for p in PYTHON_PACKAGES if p.required and PyDepsDetector._platform_matches(p)]
-
-
-def one_click_installable() -> set[str]:
-    """可一键安装的包名集合（/api/install 白名单的唯一数据源）。
-
-    唯一清单中当前平台适用的全部包（必需包修复重装 + 可选包补装）。
-    installer 字段（pip/conda）只决定服务端执行哪条安装命令，
-    不影响"能否一键安装"——控制台环境本身就有 conda（venv 由它创建）。
-    """
-    return {
-        pkg.pip_name
-        for pkg in PYTHON_PACKAGES
-        if PyDepsDetector._platform_matches(pkg)
-    }
-
-
-# ─── macOS libomp 去重（OMP Error #15 根治）──────────────────
-#
-# 背景：macOS 无系统级 OpenMP → pip wheel 各自携带 libomp.dylib（torch、
-# sklearn 等），conda 建环境时另装一份到 <venv>/lib/。macOS dyld 按
-# 「路径+UUID」判定镜像——不同构建的同名副本被当作独立库各自加载，
-# 第二份初始化时触发 OpenMP 的 duplicate-init 自杀保护：
-#   OMP: Error #15 → SIGABRT（进程秒崩，stderr 才能看到）
-# （Linux 无此问题：链接器按 soname 全局去重。）
-#
-# 方案：以 torch wheel 的副本为 canonical，把 venv 内其余 libomp.dylib
-# 副本替换为指向它的 symlink。不修改二进制 → 无 macOS 签名失效问题。
-# 幂等：已指向 canonical 的 symlink 跳过；pip 重装 wheel 会还原成真实
-# 文件（可能换构建），重跑本函数自愈。备份后缀 .condabak（仅首次，
-# 不覆盖以保留最早原始副本）。
-# 注意：KMP_DUPLICATE_LIB_OK=TRUE 无效——本环境实测 import 可过但
-# 并行计算 SIGSEGV（pytorch#83540 同报）。
 def _fix_macos_libomp():
     """macOS: 统一 venv 内 libomp.dylib 到 torch 的副本。install 收尾自动跑。"""
     if sys.platform != "darwin":

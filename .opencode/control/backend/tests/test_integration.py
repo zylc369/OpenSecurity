@@ -217,9 +217,9 @@ def test_multi_opencode_sharing():
         # 验证心跳表含两个 bun 的引用（测试侧再跳一次，active 应 ≥3:
         # 2 个 bun 首跳 + 本测试进程——心跳路由响应携带当前 active 数）
         import httpx
-        from config import ipc_unix_socket_path
+        from services.config_manager import ConfigManager
         with httpx.Client(
-            transport=httpx.HTTPTransport(uds=str(ipc_unix_socket_path())), timeout=5,
+            transport=httpx.HTTPTransport(uds=str(ConfigManager.get_instance().ipc_unix_socket_path())), timeout=5,
         ) as c:
             r = c.post("http://localhost/api/heartbeat", json={"pid": os.getpid()})
             active = r.json().get("active", -1)

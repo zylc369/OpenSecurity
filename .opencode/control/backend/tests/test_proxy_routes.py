@@ -58,7 +58,7 @@ class FakeClient:
 @pytest.fixture
 def pool_boundary(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    import importlib, config
+    import importlib, services.config_manager as config
     importlib.reload(config)
     importlib.reload(pp)
     monkeypatch.setattr(pp.httpx, "AsyncClient", FakeClient)
@@ -141,7 +141,7 @@ def test_normalize_extra_forms(raw, expected):
 
 
 def test_domain_cool_zero_minutes_expires_immediately(tmp_path, monkeypatch):
-    import os, importlib, config
+    import os, importlib, services.config_manager as config
     monkeypatch.setenv("DATA_DIR", str(tmp_path)); importlib.reload(config); importlib.reload(pp)
     pool = pp.ProxyPool._create_fresh(state_path=tmp_path / "s.json")
     pool.domain_cool("target.com", minutes=0)
@@ -154,7 +154,7 @@ def test_domain_cool_zero_minutes_expires_immediately(tmp_path, monkeypatch):
 @pytest.fixture
 def routes_env(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    import importlib, config
+    import importlib, services.config_manager as config
     importlib.reload(config)
     importlib.reload(pp)
     import routes.proxy as rp

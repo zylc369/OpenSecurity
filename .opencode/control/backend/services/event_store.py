@@ -180,7 +180,7 @@ class EventStoreService:
         from services.graphiti_config import GraphitiFactory
         if self._graphiti_factory is None:
             from services import docker_manager
-            docker_manager.ensure_neo4j_events_blocking()  # 阻塞（专用线程内，不卡主循环）
+            docker_manager.DockerManager.ensure_neo4j_events_blocking()  # 阻塞（专用线程内，不卡主循环）
         factory = self._graphiti_factory or GraphitiFactory.create_graphiti
         graphiti, err = factory()
         if err or graphiti is None:

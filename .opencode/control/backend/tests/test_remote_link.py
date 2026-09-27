@@ -192,10 +192,11 @@ def test_note_request_failure():
 
 @test("remote_link: switch_to_remote 校验失败不置位 / 成功置位")
 def test_switch_to_remote():
-    import services.config_store as cs
+    import services.config_manager as cs
     written = {}
-    orig_write = cs.write_one
-    cs.write_one = lambda k, v: written.update({k: v}) or {}
+    _cmi = cs.ConfigManager.get_instance()
+    orig_write = _cmi.set_one
+    _cmi.set_one = lambda k, v: written.update({k: v}) or {}
     try:
         async def run():
             svc = _mk_service()
@@ -214,15 +215,16 @@ def test_switch_to_remote():
             assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE, "切换后 REMOTE")
         asyncio.run(run())
     finally:
-        cs.write_one = orig_write
+        _cmi.set_one = orig_write
 
 
 @test("remote_link: switch_to_local → OFF 且不触发卸载")
 def test_switch_to_local():
-    import services.config_store as cs
+    import services.config_manager as cs
     written = {}
-    orig_write = cs.write_one
-    cs.write_one = lambda k, v: written.update({k: v}) or {}
+    _cmi = cs.ConfigManager.get_instance()
+    orig_write = _cmi.set_one
+    _cmi.set_one = lambda k, v: written.update({k: v}) or {}
     try:
         svc = _mk_service()
         svc._state = rl_module.RemoteLinkService.STATE_REMOTE  # noqa: SLF001
@@ -233,7 +235,7 @@ def test_switch_to_local():
         assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_OFF, "状态 OFF")
         assert_true(svc.status().unload_countdown_sec is None, "卸载被取消")
     finally:
-        cs.write_one = orig_write
+        _cmi.set_one = orig_write
 
 
 @test("remote_link: reload_config 重建 client + 计数清零")

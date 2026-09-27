@@ -7,8 +7,8 @@
   • import: from services import detect_tools → detect_tools.install_all() 等
 
 注意：
-  • IDA_PRO_HOME 通过 config_store 读（配置收口）
-  • 其他工具（apktool/jadx 等）通过 shutil.which 检测 PATH，未命中回落 CMD_DIR
+  • IDA_PRO_HOME 通过 ConfigManager 读（配置收口）
+  • 其他工具（apktool/jadx 等）通过 shutil.which 检测 PATH，未命中回落 ToolsEnv.CMD_DIR
   • 自动安装产物落 ~/bw-security-analysis/bin（插件注入 PATH）/ tools/（源码与 jar）
 """
 from __future__ import annotations
@@ -34,30 +34,32 @@ from dataclasses import dataclass, field
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services import config_store  # noqa: E402 —— 自举后可见
+from services.config_manager import ConfigManager  # noqa: E402 —— 自举后可见
 
-# 安装目录（与 detect_py_deps.CACHE_DIR 同值；刻意本地定义不 import，避免服务模块间耦合）
-CACHE_DIR = os.path.expanduser("~/bw-security-analysis")
-CMD_DIR = os.path.join(CACHE_DIR, "bin")         # 命令目录: 可执行入口（wrapper+单二进制，插件注入 PATH）; 与 TOOLS_HOME_DIR 平级
-TOOLS_HOME_DIR = os.path.join(CACHE_DIR, "tools")  # 工具"家"目录: 克隆仓库/jar/运行时（node/dotnet/...），非源码
-WORDLISTS_DIR = os.path.join(CACHE_DIR, "wordlists")  # 字典统一落点（插件注入 $WORDLISTS_DIR; 容器 wrapper 挂载）
+class ToolsEnv:
+    """工具环境常量与平台推导（静态方法类; 目录刻意本地定义不跨模块 import）。"""
 
+    CACHE_DIR = os.path.expanduser("~/bw-security-analysis")
+    CMD_DIR = os.path.join(CACHE_DIR, "bin")           # 命令目录: 可执行入口（wrapper+单二进制，插件注入 PATH）
+    TOOLS_HOME_DIR = os.path.join(CACHE_DIR, "tools")  # 工具"家"目录: 克隆仓库/jar/运行时（node/dotnet/...）
+    WORDLISTS_DIR = os.path.join(CACHE_DIR, "wordlists")  # 字典统一落点（插件注入 $ToolsEnv.WORDLISTS_DIR）
 
-def _opencode_root() -> str:
-    """OPENCODE_ROOT 推导: 环境变量 → 从本文件路径回溯（backend/services → .opencode）。"""
-    env = os.environ.get("OPENCODE_ROOT")
-    if env:
-        return env
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    @staticmethod
+    def _opencode_root() -> str:
+        """OPENCODE_ROOT 推导: 环境变量 → 从本文件路径回溯（backend/services → .opencode）。"""
+        env = os.environ.get("OPENCODE_ROOT")
+        if env:
+            return env
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-
-def _plat_key() -> str:
-    """当前平台键: darwin-arm64 / darwin-amd64 / linux-arm64 / linux-amd64 / win-amd64。"""
-    mach = platform.machine().lower()
-    arch = "arm64" if mach in ("arm64", "aarch64") else "amd64"
-    syst = {"darwin": "darwin", "linux": "linux", "windows": "win"}.get(
-        platform.system().lower(), platform.system().lower())
-    return f"{syst}-{arch}"
+    @staticmethod
+    def _plat_key() -> str:
+        """当前平台键: darwin-arm64 / darwin-amd64 / linux-arm64 / linux-amd64 / win-amd64。"""
+        mach = platform.machine().lower()
+        arch = "arm64" if mach in ("arm64", "aarch64") else "amd64"
+        syst = {"darwin": "darwin", "linux": "linux", "windows": "win"}.get(
+            platform.system().lower(), platform.system().lower())
+        return f"{syst}-{arch}"
 
 
 @dataclass
@@ -180,7 +182,7 @@ class NodeRecipe:
     """Node.js 运行时配方（目录结构安装: node + npm + npx 三 wrapper）。
 
     npm 是目录树（lib/node_modules/npm），单文件 bins 机制装不了——
-    解包整个官方归档到 TOOLS_HOME_DIR/node/，CMD_DIR 下生成三个 wrapper。
+    解包整个官方归档到 ToolsEnv.TOOLS_HOME_DIR/node/，ToolsEnv.CMD_DIR 下生成三个 wrapper。
     版本锁 LTS（npm 10 要求 node >= 18.17）。
     """
     version: str
@@ -189,14 +191,14 @@ class NodeRecipe:
 
 @dataclass
 class DirRecipe:
-    """直链归档 → 内容平铺解压到 TOOLS_HOME_DIR/<dest>/（官方文件布局原样，PATH 由 plugin 注入）。
+    """直链归档 → 内容平铺解压到 ToolsEnv.TOOLS_HOME_DIR/<dest>/（官方文件布局原样，PATH 由 plugin 注入）。
 
     适用: 官方 zip 内含顶层目录（如 platform-tools/）但要求落点是跨平台固定目录名的工具。
     不变式: <dest>/ 目录存在 ⟺ 安装时 PATH 无该工具（skip 分支清理残留维护，同 NodeRecipe）。
     """
     name: str
     urls: dict[str, str] = field(default_factory=dict)  # 平台键前缀（darwin/linux/win）→ 直链
-    dest: str = ""                                      # TOOLS_HOME_DIR 下固定目录名
+    dest: str = ""                                      # ToolsEnv.TOOLS_HOME_DIR 下固定目录名
     marker: str = ""                                    # 目录内标志性文件（幂等/plugin 探测，win 自动补 .exe）
     strip_top: bool = True                              # True=剥掉归档顶层目录，内容平铺
 
@@ -205,9 +207,9 @@ class DirRecipe:
 class DotnetRecipe:
     """dotnet runtime + nuget 工具组合（.NET 生态 CLI 工具的本机跨平台方案）。
 
-    runtime 官方归档解压 TOOLS_HOME_DIR/dotnet/（官方目录原样，NodeRecipe 同模式；
+    runtime 官方归档解压 ToolsEnv.TOOLS_HOME_DIR/dotnet/（官方目录原样，NodeRecipe 同模式；
     多工具共享同一 runtime 目录，第二个 .NET 工具只装 nupkg 部分）。
-    nuget 包（nupkg=zip）取 tools/<net_target>/any/ 解包到 TOOLS_HOME_DIR/<name>/。
+    nuget 包（nupkg=zip）取 tools/<net_target>/any/ 解包到 ToolsEnv.TOOLS_HOME_DIR/<name>/。
     CMD_DIR wrapper: exec dotnet <name>.dll。net6.0 目标在 runtime 8（LTS→2026-11）roll-forward 可跑。
     """
     name: str
@@ -234,15 +236,15 @@ class DotnetRecipe:
 
 @dataclass
 class WordlistRecipe:
-    """字典下载配方（数据文件，非命令）。落点 WORDLISTS_DIR/<target>。
+    """字典下载配方（数据文件，非命令）。落点 ToolsEnv.WORDLISTS_DIR/<target>。
 
     三源（互斥）: repo=git clone --depth 1（目录型）; url=直链下载（文件型）;
     source=仓库内目录复制（随 git 走的精选数据，如 .opencode/wordlists/cn/）。
-    感知通道: 插件 shell.env 注入 $WORDLISTS_DIR; 容器 wrapper 自动挂载
+    感知通道: 插件 shell.env 注入 $ToolsEnv.WORDLISTS_DIR; 容器 wrapper 自动挂载
     wordlists/seclists → /usr/share/seclists（kali 惯例路径）。
     """
     name: str
-    target: str          # WORDLISTS_DIR 下落点（目录名或文件名）
+    target: str          # ToolsEnv.WORDLISTS_DIR 下落点（目录名或文件名）
     repo: str = ""       # git clone 源（owner/repo）
     url: str = ""        # 直链（文件型）
     source: str = ""     # 仓库内相对路径（OPENCODE_ROOT 起，目录型）
@@ -254,7 +256,7 @@ class GitBashRecipe:
 
     opencode 在 Windows 默认 shell = PowerShell（vendor shell.ts: pwsh > powershell >
     GitBash > cmd），而 AI 命令语法（$VAR）/ sh wrapper / install.sh / sed 全依赖 bash
-    ——本配方下载最新 PortableGit（.7z.exe 自解压，无需 7-Zip）到 CMD_DIR/git-portable/
+    ——本配方下载最新 PortableGit（.7z.exe 自解压，无需 7-Zip）到 ToolsEnv.CMD_DIR/git-portable/
     （官方目录原样，约 300MB），并把项目级 opencode.json 的 shell 配置为便携版 bash.exe。
 
     不探测系统 Git（自己装自己的——版本统一、行为确定）;
@@ -268,7 +270,7 @@ class GitBashRecipe:
 @dataclass
 class JdkRecipe:
     """Temurin JDK 便携运行时配方（ Adoptium API 免版本直链，三平台 tar.gz/zip，
-    零 root 零系统侵入，落 TOOLS_HOME_DIR/jdk/）。消费方（ghidra 等 java 工具）的
+    零 root 零系统侵入，落 ToolsEnv.TOOLS_HOME_DIR/jdk/）。消费方（ghidra 等 java 工具）的
     wrapper 注入 JAVA_HOME 指向此目录；不生成 bin wrapper（避免遮蔽系统 java）。
     同 DotnetRecipe 先例: 共享目录，多 java 工具只装一次。
     """
@@ -289,7 +291,7 @@ class JdkRecipe:
 class DockerRecipe:
     """容器工具配方（调研见 knowledge-base/docker-toolbox.md）。
 
-    wrapper 落 CMD_DIR: docker run（entrypoint 降权/卷挂载/路径重写/trap 防孤儿容器）。
+    wrapper 落 ToolsEnv.CMD_DIR: docker run（entrypoint 降权/卷挂载/路径重写/trap 防孤儿容器）。
     多工具共享镜像: image 相同的 recipe 只 build 一次（image_exists 幂等）。
     """
     name: str                        # 工具名（=容器内命令名）
@@ -305,14 +307,14 @@ class PrebuiltRecipe:
     """随仓库携带的预编译二进制（macOS Xcode/clang 编译产物，放 .opencode/tools/）。
 
     适用: 必须 macOS 工具链编译、容器无法构建的工具（class-dump/optool 类 Mach-O 工具）。
-    安装 = 拷贝到 CMD_DIR + chmod。
+    安装 = 拷贝到 ToolsEnv.CMD_DIR + chmod。
     platforms 默认 ["darwin"]: Mach-O 产物在 linux/win 上无法执行——
     安装守卫跳过 + 检测层 ToolField 需同标 platforms（防假可用）。
     """
     name: str
     source: str                       # 相对 OPENCODE_ROOT 的二进制路径
     platforms: list[str] = field(default_factory=lambda: ["darwin"])
-    jar: bool = False                 # True: 产物是自包含 jar → 拷 TOOLS_HOME_DIR +
+    jar: bool = False                 # True: 产物是自包含 jar → 拷 ToolsEnv.TOOLS_HOME_DIR +
                                       #   java wrapper（便携 JDK 优先; 三平台可跑）
     jar_cp: bool = False              # True: jar 无 Main-Class（marshalsec 类）→ -cp 模式，
                                       #   调用方首参为主类（对齐上游 README 用法）
@@ -460,7 +462,7 @@ class GemRecipe:
 class SrcRecipe:
     """源码编译工具（无预编译产物、PM 无包: pycdc/pcapfix 类）。
 
-    build_sys: "cmake" | "autotools"; 产物 bins 从构建树递归定位到 CMD_DIR。
+    build_sys: "cmake" | "autotools"; 产物 bins 从构建树递归定位到 ToolsEnv.CMD_DIR。
     前置: gcc/make（CLT 或 PM）; cmake 类工具另需 cmake（PkgToolRecipe 提供）。
     """
     name: str
@@ -473,7 +475,7 @@ class SrcRecipe:
 class ScriptRecipe:
     """内联编排脚本配方（无产物下载——纯组合宿主已有工具，如 qemu-gdb）。
 
-    body 写入 CMD_DIR/<name> + chmod; prereq_cmds 缺任一 → failed 给 PM 安装提示。
+    body 写入 ToolsEnv.CMD_DIR/<name> + chmod; prereq_cmds 缺任一 → failed 给 PM 安装提示。
     适用: 组合调试/联动类工具（价值在编排逻辑而非二进制）。
     """
     name: str
@@ -558,7 +560,7 @@ def installable_tools() -> "list":
         "linux-amd64": "linux", "win-amd64": "windows"}, bins=["GoReSym"]),
     # ── .NET 反编译（dotnet runtime 8 LTS + nuget nupkg net6.0 目标） ──
     DotnetRecipe(name="ilspycmd", nuget_name="ilspycmd", nuget_version="8.2.0.7535"),
-    # ── 字典（$WORDLISTS_DIR 落点; 容器 wrapper 挂载 seclists → /usr/share/seclists） ──
+    # ── 字典（$ToolsEnv.WORDLISTS_DIR 落点; 容器 wrapper 挂载 seclists → /usr/share/seclists） ──
     WordlistRecipe(name="seclists", target="seclists", repo="danielmiessler/SecLists"),
     WordlistRecipe(name="rockyou", target="rockyou.txt",
                    url="https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt"),
@@ -920,6 +922,27 @@ EXTERNAL_TOOLS.extend([
 
 
 class ToolsScanner:
+    """（全局单例，get_instance() 获取。）"""
+
+    _instance: "ToolsScanner | None" = None
+    _instance_lock = __import__("threading").Lock()
+
+    def __new__(cls) -> "ToolsScanner":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+
+    @classmethod
+    def get_instance(cls) -> "ToolsScanner":
+        return cls()
+
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        with cls._instance_lock:
+            cls._instance = None
+
     """外部工具 + 编译器扫描器。
 
     scan_all_parallel：全量并行扫描一次返回 {name: ToolStatus}
@@ -1069,9 +1092,9 @@ class ToolsScanner:
         return tool.install_hint or f"{tool.name} 未安装，请参考官方文档"
 
     def resolve_tool_path(self, tool: ToolField) -> tuple[str, bool]:
-        """解析工具路径：env_var 模式（config_store 读）或 PATH which。"""
+        """解析工具路径：env_var 模式（ConfigManager 读）或 PATH which。"""
         if tool.env_var:
-            home = config_store.read(tool.env_var) or ""
+            home = ConfigManager.get_instance().get(tool.env_var) or ""
             if home:
                 exe = tool.executable
                 if os.name == "nt" and exe and not exe.endswith(".exe"):
@@ -1083,8 +1106,8 @@ class ToolsScanner:
         resolved = shutil.which(tool.name)
         if resolved:
             return resolved, True
-        # 回落: CMD_DIR 安装的二进制/wrapper（后端进程无插件注入的 PATH，需显式查）
-        bin_cand = os.path.join(CMD_DIR, tool.name + (".exe" if os.name == "nt" else ""))
+        # 回落: ToolsEnv.CMD_DIR 安装的二进制/wrapper（后端进程无插件注入的 PATH，需显式查）
+        bin_cand = os.path.join(ToolsEnv.CMD_DIR, tool.name + (".exe" if os.name == "nt" else ""))
         if os.path.isfile(bin_cand):
             return bin_cand, True
         return (tool.name, False)
@@ -1134,10 +1157,31 @@ _UA = {"User-Agent": "OpenSecurity-installer"}
 
 
 class ToolsInstaller:
+    """（全局单例，get_instance() 获取。）"""
+
+    _instance: "ToolsInstaller | None" = None
+    _instance_lock = __import__("threading").Lock()
+
+    def __new__(cls) -> "ToolsInstaller":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+
+    @classmethod
+    def get_instance(cls) -> "ToolsInstaller":
+        return cls()
+
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        with cls._instance_lock:
+            cls._instance = None
+
     """INSTALLABLE_TOOLS 清单的安装器（幂等; 单工具失败不中断整体）。
 
-    产物布局: 二进制 → CMD_DIR; jar/克隆仓库 → TOOLS_HOME_DIR/<name>/ + CMD_DIR wrapper。
-    幂等: PATH 已有同名命令 或 CMD_DIR 产物齐全 → 跳过（--force 重装）。
+    产物布局: 二进制 → ToolsEnv.CMD_DIR; jar/克隆仓库 → ToolsEnv.TOOLS_HOME_DIR/<name>/ + ToolsEnv.CMD_DIR wrapper。
+    幂等: PATH 已有同名命令 或 ToolsEnv.CMD_DIR 产物齐全 → 跳过（--force 重装）。
     """
 
     TIMEOUT = 120  # 单请求超时（秒）——大文件下载分块流式写
@@ -1158,8 +1202,8 @@ case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
   ;; esac
 NAME="{NAME}-$$-$(date +%s)-$(od -An -N2 -tu2 /dev/urandom 2>/dev/null | tr -d " ")"
 # 参数中工作目录/字典目录前缀 → 容器视角路径
-# （AI 统一写 $WORDLISTS_DIR/xxx 一套心智，wrapper 自动重写——容器内无需该环境变量）
-# 多形式匹配: AI 传参可能是 $(pwd) 的 MSYS 形态、$WORDLISTS_DIR 的 Windows 形态、或 $HOME 形态
+# （AI 统一写 $ToolsEnv.WORDLISTS_DIR/xxx 一套心智，wrapper 自动重写——容器内无需该环境变量）
+# 多形式匹配: AI 传参可能是 $(pwd) 的 MSYS 形态、$ToolsEnv.WORDLISTS_DIR 的 Windows 形态、或 $HOME 形态
 # ⚠ 空模式防护: 变量为空（如 wrapper 在无 plugin 注入的手动终端跑）时 s|^|repl| 会给所有参数
 #   加前缀——必须动态构造 sed 表达式，空变量规则自动跳过
 WL_MSYS="$HOME/bw-security-analysis/wordlists"
@@ -1172,7 +1216,7 @@ RW_SED=""
 _rw_add w "$DIR" /work
 _rw_add wl "$WL_MSYS" /usr/share/wordlists-host
 _rw_add wlw "$WL_WIN" /usr/share/wordlists-host
-_rw_add envwl "$WORDLISTS_DIR" /usr/share/wordlists-host
+_rw_add envwl "$ToolsEnv.WORDLISTS_DIR" /usr/share/wordlists-host
 rw_path() { if [ -n "$RW_SED" ]; then printf %s "$1" | sed "$RW_SED"; else printf %s "$1"; fi; }
 ARGS=""; for a in "$@"; do ARGS="$ARGS $(rw_path "$a")"; done
 
@@ -1341,15 +1385,15 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         if shutil.which(name):
             return f"PATH 已有 {name}（已安装，跳过）"
         if bins and all(os.path.exists(self._bin_path(b)) for b in bins):
-            return f"{CMD_DIR} 产物已齐全"
+            return f"{ToolsEnv.CMD_DIR} 产物已齐全"
         return None
 
     @staticmethod
     def _bin_path(bin_name: str) -> str:
-        """CMD_DIR 产物路径（Windows 自动补 .exe）。"""
+        """ToolsEnv.CMD_DIR 产物路径（Windows 自动补 .exe）。"""
         if os.name == "nt" and not bin_name.endswith(".exe") and "." not in bin_name:
             bin_name += ".exe"
-        return os.path.join(CMD_DIR, bin_name)
+        return os.path.join(ToolsEnv.CMD_DIR, bin_name)
 
     # ── GitHub Releases ──
 
@@ -1361,7 +1405,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             jerr = self._java_check(getattr(r, "java_min", 0))
             if jerr:
                 return InstallResult(r.name, "skipped", jerr)
-        plat = _plat_key()
+        plat = ToolsEnv._plat_key()
         if r.kind != "jar" and plat not in r.plats:
             return InstallResult(r.name, "skipped", f"平台 {plat} 无配方")
         if r.kind == "jar":
@@ -1388,10 +1432,10 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         asset = self._match_assets(assets, [r.jar_kw], r.excl)[0] if self._match_assets(assets, [r.jar_kw], r.excl) else None
         if not asset:
             return InstallResult(r.name, "failed", f"{r.repo}@{tag} 无 jar 资产")
-        dst_dir = os.path.join(TOOLS_HOME_DIR, r.name)
+        dst_dir = os.path.join(ToolsEnv.TOOLS_HOME_DIR, r.name)
         os.makedirs(dst_dir, exist_ok=True)
         jar_path = os.path.join(dst_dir, asset)
-        wrapper = os.path.join(CMD_DIR, r.name)
+        wrapper = os.path.join(ToolsEnv.CMD_DIR, r.name)
         # java 解析: 便携 tools/jdk 优先（绝对路径硬编码进 wrapper，无系统 java 的机器也能跑）
         javabin, _ = self._resolve_java()
         java_argv = [javabin, "-jar", jar_path] if javabin else ["java", "-jar", jar_path]
@@ -1406,9 +1450,9 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     def _install_tree(self, r: ReleaseRecipe, url: str, asset: str, data: bytes | None = None,
                       entry: str = "") -> InstallResult:
-        """整归档解压到 TOOLS_HOME_DIR/<name>/，wrapper 指向 entry（默认取 r.entry）。"""
+        """整归档解压到 ToolsEnv.TOOLS_HOME_DIR/<name>/，wrapper 指向 entry（默认取 r.entry）。"""
         entry = entry or r.entry
-        dst = os.path.join(TOOLS_HOME_DIR, r.name)
+        dst = os.path.join(ToolsEnv.TOOLS_HOME_DIR, r.name)
         if os.path.isdir(dst) and os.path.exists(os.path.join(dst, entry)):
             return InstallResult(r.name, "skipped", "源码树已存在")
         if data is None:
@@ -1443,14 +1487,14 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     # ── git / pip ──
 
     def _install_git(self, r: GitRecipe, force: bool) -> InstallResult:
-        prefix = _plat_key().split("-")[0]
+        prefix = ToolsEnv._plat_key().split("-")[0]
         if r.platforms and prefix not in r.platforms:
             return InstallResult(r.name, "skipped", f"平台 {prefix} 非本配方目标（回落 docker）")
         if r.prereq_cmd and not shutil.which(r.prereq_cmd):
             return InstallResult(r.name, "failed",
                                  f"需要 {r.prereq_cmd} 运行时（linux: {PM_PREFIX or '<PM>'} install -y {r.prereq_cmd}; "
                                  f"mac: brew install {r.prereq_cmd}）")
-        dst = os.path.join(TOOLS_HOME_DIR, r.name)
+        dst = os.path.join(ToolsEnv.TOOLS_HOME_DIR, r.name)
         entry_abs = os.path.join(dst, r.entry)
         if r.pip_pkg:  # 包模式: 克隆后 pip install（console script 直接落 venv bin）
             if not force and shutil.which(r.name):
@@ -1462,7 +1506,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                            f"https://github.com/{r.repo}", dst])
             self._run([self._venv_python(), "-m", "pip", "install", "-q", dst])
             return InstallResult(r.name, "installed", f"clone {r.repo} + pip install")
-        wrapper = os.path.join(CMD_DIR, r.name)
+        wrapper = os.path.join(ToolsEnv.CMD_DIR, r.name)
         if os.path.exists(entry_abs) and not force:
             if not os.path.exists(wrapper):  # 克隆在而 wrapper 缺（历史失败残留）→ 只补 wrapper
                 self._install_git_wrapper(r, dst, entry_abs)
@@ -1512,7 +1556,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         skip = self._already(r.name, r.bins, force)
         if skip:
             return InstallResult(r.name, "skipped", skip)
-        plat = _plat_key()
+        plat = ToolsEnv._plat_key()
         url = r.urls.get(plat)
         if not url:
             return InstallResult(r.name, "skipped", f"平台 {plat} 无直链配方（需为该平台补充 urls）")
@@ -1531,13 +1575,13 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     # ── Node.js 运行时（目录结构安装） ──
 
     def _install_node(self, r: NodeRecipe, force: bool) -> InstallResult:
-        """解包官方归档到 TOOLS_HOME_DIR/node/，CMD_DIR 生成 node/npm/npx wrapper。"""
+        """解包官方归档到 ToolsEnv.TOOLS_HOME_DIR/node/，ToolsEnv.CMD_DIR 生成 node/npm/npx wrapper。"""
         if not force:
             skip = self._node_skip_reason()
             if skip:
                 # 本机 node 合格: 清理历史残留（tools/node 目录 + bin/ 三个 wrapper）
                 # —— 保证"tools/node 目录存在 ⟺ 本机 node 不可用"，plugin 据此决定是否注入 PATH
-                stale = os.path.join(TOOLS_HOME_DIR, "node")
+                stale = os.path.join(ToolsEnv.TOOLS_HOME_DIR, "node")
                 if os.path.isdir(stale):
                     shutil.rmtree(stale)
                 for b in ("node", "npm", "npx"):
@@ -1545,10 +1589,10 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                     if os.path.exists(p):
                         os.remove(p)
                 return InstallResult("node", "skipped", skip + "; 已清理历史残留")
-            if os.path.isdir(os.path.join(TOOLS_HOME_DIR, "node")):
+            if os.path.isdir(os.path.join(ToolsEnv.TOOLS_HOME_DIR, "node")):
                 return InstallResult("node", "skipped", "tools/node 官方目录已解包")
 
-        syst, arch = _plat_key().split("-")
+        syst, arch = ToolsEnv._plat_key().split("-")
         arch = {"amd64": "x64", "arm64": "arm64"}.get(arch, arch)
         if syst == "win":
             asset = f"node-v{r.version}-win-{arch}.zip"
@@ -1564,7 +1608,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, asset)
             self._write(self._download(url), path)
-            dest = os.path.join(TOOLS_HOME_DIR, "node")
+            dest = os.path.join(ToolsEnv.TOOLS_HOME_DIR, "node")
             if os.path.isdir(dest):
                 shutil.rmtree(dest)
             os.makedirs(dest, exist_ok=True)
@@ -1581,14 +1625,14 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         # 官方目录原样使用（不生成 wrapper）: darwin/linux 的 bin/ 内 node 与 npm/npx 软链同目录
         # （shebang #!/usr/bin/env node 在同目录命中）; win 的 npm.cmd 优先同目录 node.exe（官方兜底）。
         # PATH 注入由 plugin shell.env 完成: 检测本目录存在 → 注入 bin/（posix）或根目录（win）。
-        inst_dir = os.path.join(TOOLS_HOME_DIR, "node", plat_dir)
+        inst_dir = os.path.join(ToolsEnv.TOOLS_HOME_DIR, "node", plat_dir)
         return InstallResult("node", "installed", f"v{r.version} LTS 官方目录 → {inst_dir}（plugin 注入 PATH）")
 
     # npm 10（v22 LTS 配套）要求的最低 node 版本; 更老的 node 会被跳过逻辑静默接受导致 npm install 失败
     NODE_MIN = (18, 17, 0)
 
     def _node_skip_reason(self) -> str | None:
-        """PATH 有 node+npm 且版本 >= 18.17 才跳过; 老版本返回 None（继续装 v22 到 CMD_DIR，PATH 遮蔽老 node）。"""
+        """PATH 有 node+npm 且版本 >= 18.17 才跳过; 老版本返回 None（继续装 v22 到 ToolsEnv.CMD_DIR，PATH 遮蔽老 node）。"""
         node, npm = shutil.which("node"), shutil.which("npm")
         if not (node and npm):
             return None
@@ -1596,16 +1640,16 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=15).stdout.strip()
             ver = tuple(int(x) for x in out.lstrip("v").split(".")[:3])
         except (ValueError, subprocess.SubprocessError):
-            return f"PATH node 版本不可解析，装 v22 到 {CMD_DIR}"
+            return f"PATH node 版本不可解析，装 v22 到 {ToolsEnv.CMD_DIR}"
         if ver >= self.NODE_MIN:
             return f"PATH 已有 node {out} + npm（>= 18.17 满足 npm 10）"
-        return None  # 老版本: 不跳过，CMD_DIR 装 v22（plugin PATH 序 toolBin 在前，遮蔽老 node）
+        return None  # 老版本: 不跳过，ToolsEnv.CMD_DIR 装 v22（plugin PATH 序 toolBin 在前，遮蔽老 node）
 
     # ── 直链归档 → 固定目录（官方布局原样） ──
 
     def _install_dir(self, r: DirRecipe, force: bool) -> InstallResult:
-        """adb 类工具: PATH 无命令 → 下载官方 zip 内容平铺到 TOOLS_HOME_DIR/<dest>/。"""
-        dest = os.path.join(TOOLS_HOME_DIR, r.dest)
+        """adb 类工具: PATH 无命令 → 下载官方 zip 内容平铺到 ToolsEnv.TOOLS_HOME_DIR/<dest>/。"""
+        dest = os.path.join(ToolsEnv.TOOLS_HOME_DIR, r.dest)
         if not force:
             if shutil.which(r.name):
                 # 本机已有（系统/手动安装）: 清理残留，维护"目录存在 ⟺ PATH 无该工具"（plugin 据此注入）
@@ -1616,10 +1660,10 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             if os.path.isdir(dest) and os.path.exists(os.path.join(dest, marker)):
                 return InstallResult(r.name, "skipped", f"{dest} 已解包")
 
-        syst = _plat_key().split("-")[0]
+        syst = ToolsEnv._plat_key().split("-")[0]
         url = r.urls.get(syst) or r.urls.get(syst.split("-")[0])
         if not url:
-            return InstallResult(r.name, "failed", f"平台 {_plat_key()} 无下载直链")
+            return InstallResult(r.name, "failed", f"平台 {ToolsEnv._plat_key()} 无下载直链")
 
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "dl.zip")
@@ -1654,19 +1698,19 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         return InstallResult(r.name, "installed", f"官方目录 → {dest}（plugin 注入 PATH）")
 
     def _install_prebuilt(self, r: PrebuiltRecipe, force: bool) -> InstallResult:
-        """仓库内预编译二进制 → 拷贝 CMD_DIR（平台不匹配跳过——Mach-O 跨平台不可执行）。"""
+        """仓库内预编译二进制 → 拷贝 ToolsEnv.CMD_DIR（平台不匹配跳过——Mach-O 跨平台不可执行）。"""
         if r.platforms and sys.platform not in r.platforms:
             return InstallResult(r.name, "skipped", f"平台 {sys.platform} 不适用（{'/'.join(r.platforms)} 专用）")
         if not force and os.path.exists(self._bin_path(r.name)):
-            return InstallResult(r.name, "skipped", "CMD_DIR 已存在")
-        src = os.path.join(_opencode_root(), r.source)
+            return InstallResult(r.name, "skipped", "ToolsEnv.CMD_DIR 已存在")
+        src = os.path.join(ToolsEnv._opencode_root(), r.source)
         if not os.path.isfile(src):
             return InstallResult(r.name, "failed", f"预编译产物缺失: {r.source}（需 macOS 环境执行 tools/build-class-dump.sh 重建）")
         if r.jar:  # 自包含 jar: 拷 tools/<name>/ + java -jar wrapper（跨平台）
             javabin, _ = self._resolve_java()
             if not javabin:
                 return InstallResult(r.name, "skipped", "需要 java（install.sh 会装便携 JDK）")
-            dst_dir = os.path.join(TOOLS_HOME_DIR, r.name)
+            dst_dir = os.path.join(ToolsEnv.TOOLS_HOME_DIR, r.name)
             os.makedirs(dst_dir, exist_ok=True)
             jar_path = os.path.join(dst_dir, os.path.basename(r.source))
             if r.jar_cp:
@@ -1674,28 +1718,28 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             else:
                 self._wrapper(r.name, [javabin, "-jar", jar_path])
             return InstallResult(r.name, "installed", f"{r.source} + java wrapper")
-        os.makedirs(CMD_DIR, exist_ok=True)
+        os.makedirs(ToolsEnv.CMD_DIR, exist_ok=True)
         shutil.copyfile(src, self._bin_path(r.name))
         self._chmodx(self._bin_path(r.name))
-        return InstallResult(r.name, "installed", f"{r.source} → CMD_DIR")
+        return InstallResult(r.name, "installed", f"{r.source} → ToolsEnv.CMD_DIR")
 
     # ── .NET runtime + nuget 工具 ──
 
     def _install_dotnet(self, r: DotnetRecipe, force: bool) -> InstallResult:
         """runtime（共享目录）+ nupkg 工具 + wrapper。"""
         wrapper = self._bin_path(r.name)
-        dll = os.path.join(TOOLS_HOME_DIR, r.name, f"{r.name}.dll")
+        dll = os.path.join(ToolsEnv.TOOLS_HOME_DIR, r.name, f"{r.name}.dll")
         if not force and os.path.exists(wrapper) and os.path.exists(dll):
             return InstallResult(r.name, "skipped", "wrapper + dll 已存在")
-        dotnet_exe = os.path.join(TOOLS_HOME_DIR, "dotnet",
+        dotnet_exe = os.path.join(ToolsEnv.TOOLS_HOME_DIR, "dotnet",
                                   "dotnet.exe" if os.name == "nt" else "dotnet")
         # 1. runtime（共享: 已解包则跳过，多 .NET 工具只装一次）
         if not os.path.exists(dotnet_exe):
-            url = r.runtime_url(_plat_key())
+            url = r.runtime_url(ToolsEnv._plat_key())
             if not url:
-                return InstallResult(r.name, "failed", f"平台 {_plat_key()} 无 runtime 直链")
+                return InstallResult(r.name, "failed", f"平台 {ToolsEnv._plat_key()} 无 runtime 直链")
             data = self._download(url)
-            dest = os.path.join(TOOLS_HOME_DIR, "dotnet")
+            dest = os.path.join(ToolsEnv.TOOLS_HOME_DIR, "dotnet")
             os.makedirs(dest, exist_ok=True)
             if url.endswith(".zip"):
                 with zipfile.ZipFile(io.BytesIO(data)) as zf:
@@ -1712,7 +1756,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         nupkg_url = r._NUGET_URL.format(name=r.nuget_name, ver=r.nuget_version)
         if not os.path.exists(dll):
             data = self._download(nupkg_url)
-            tool_dir = os.path.join(TOOLS_HOME_DIR, r.name)
+            tool_dir = os.path.join(ToolsEnv.TOOLS_HOME_DIR, r.name)
             os.makedirs(tool_dir, exist_ok=True)
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
                 prefix = f"tools/{r.net_target}/any/"
@@ -1736,8 +1780,8 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         # 3. wrapper: exec dotnet <name>.dll
         #     DOTNET_ROLL_FORWARD=LatestMajor: net6.0 目标 dll 在 runtime 8 上跨两个大版本
         #     前滚的必要条件（默认 Minor 只允许 6→7; 微软官方支持场景）
-        os.makedirs(CMD_DIR, exist_ok=True)
-        wpath = os.path.join(CMD_DIR, r.name)
+        os.makedirs(ToolsEnv.CMD_DIR, exist_ok=True)
+        wpath = os.path.join(ToolsEnv.CMD_DIR, r.name)
         body = ("#!/bin/sh\n"
                 "export DOTNET_ROLL_FORWARD=LatestMajor\n"
                 f'exec "{dotnet_exe}" "{dll}" "$@"\n')
@@ -1750,15 +1794,15 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     # ── 字典 ──
 
     def _install_wordlist(self, r: WordlistRecipe, force: bool) -> InstallResult:
-        """字典三源: repo 克隆 / url 下载 / 仓库内目录复制 → WORDLISTS_DIR/<target>。"""
-        dest = os.path.join(WORDLISTS_DIR, r.target)
+        """字典三源: repo 克隆 / url 下载 / 仓库内目录复制 → ToolsEnv.WORDLISTS_DIR/<target>。"""
+        dest = os.path.join(ToolsEnv.WORDLISTS_DIR, r.target)
         if not force:
             if r.url:  # 文件型: 存在且非空
                 if os.path.isfile(dest) and os.path.getsize(dest) > 0:
                     return InstallResult(r.name, "skipped", f"{dest} 已存在")
             elif os.path.isdir(dest) and os.listdir(dest):  # 目录型: 非空
                 return InstallResult(r.name, "skipped", f"{dest} 已存在")
-        os.makedirs(WORDLISTS_DIR, exist_ok=True)
+        os.makedirs(ToolsEnv.WORDLISTS_DIR, exist_ok=True)
         if r.repo:
             if not shutil.which("git"):
                 return InstallResult(r.name, "failed", "git 命令不存在")
@@ -1773,7 +1817,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             return InstallResult(r.name, "installed",
                                  f"下载 {len(data) // 1048576}MB → {dest}")
         if r.source:
-            src = os.path.join(_opencode_root(), r.source)
+            src = os.path.join(ToolsEnv._opencode_root(), r.source)
             if not os.path.isdir(src):
                 return InstallResult(r.name, "failed", f"仓库内源缺失: {r.source}")
             if os.path.isdir(dest):
@@ -1787,7 +1831,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     @staticmethod
     def _configure_opencode_shell(bash_exe: str) -> str:
         """写项目级 opencode.json 的 shell 键（JSON 合并保留其他键）。返回结果描述。"""
-        path = os.path.join(_opencode_root(), "opencode.json")
+        path = os.path.join(ToolsEnv._opencode_root(), "opencode.json")
         cfg: dict = {}
         if os.path.isfile(path):
             try:
@@ -1807,12 +1851,12 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         """Windows: 下载最新 PortableGit 便携版（按 CPU 架构）+ 写 shell 配置。"""
         if sys.platform != "win32":
             return InstallResult(r.name, "skipped", f"平台 {sys.platform} 无需 Git Bash")
-        portable_dir = os.path.join(CMD_DIR, "git-portable")
+        portable_dir = os.path.join(ToolsEnv.CMD_DIR, "git-portable")
         portable_bash = os.path.join(portable_dir, "bin", "bash.exe")
         if os.path.isfile(portable_bash) and not force:
             note = self._configure_opencode_shell(portable_bash)
             return InstallResult(r.name, "skipped", f"便携版已就绪; {note}")
-        plat = _plat_key()   # win-amd64 / win-arm64
+        plat = ToolsEnv._plat_key()   # win-amd64 / win-arm64
         kw = {"win-amd64": ["portablegit", "64-bit"],
               "win-arm64": ["portablegit", "arm64"]}.get(plat)
         if not kw:
@@ -1866,7 +1910,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
         返回 (java_bin, java_home); 无则 (None, None)。
         """
-        home = os.path.join(TOOLS_HOME_DIR, "jdk")
+        home = os.path.join(ToolsEnv.TOOLS_HOME_DIR, "jdk")
         java_name = "java.exe" if os.name == "nt" else "java"
         if os.path.isdir(home):
             cands = [home] + [os.path.join(home, d) for d in os.listdir(home)
@@ -1883,17 +1927,17 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     # ── JDK 便携运行时 ──
 
     def _install_jdk(self, r: JdkRecipe, force: bool) -> InstallResult:
-        """Adoptium 免版本直链 → 解包 TOOLS_HOME_DIR/jdk/（共享，已装则跳过）。"""
+        """Adoptium 免版本直链 → 解包 ToolsEnv.TOOLS_HOME_DIR/jdk/（共享，已装则跳过）。"""
         java_name = "java.exe" if os.name == "nt" else "java"
-        dest = os.path.join(TOOLS_HOME_DIR, "jdk")
+        dest = os.path.join(ToolsEnv.TOOLS_HOME_DIR, "jdk")
         marker = None
         if os.path.isdir(dest):
             jb, _ = self._resolve_java()
             if jb and not force:
                 return InstallResult(r.name, "skipped", f"便携 JDK 已存在（{jb}）")
-        url = r.url(_plat_key())
+        url = r.url(ToolsEnv._plat_key())
         if not url:
-            return InstallResult(r.name, "skipped", f"平台 {_plat_key()} 无 Adoptium 配方")
+            return InstallResult(r.name, "skipped", f"平台 {ToolsEnv._plat_key()} 无 Adoptium 配方")
         asset = "jdk.zip" if url.endswith(".zip") else ("jdk.tar.gz" if "windows" not in url else "jdk.zip")
         data = self._download(url)  # Adoptium API 302 → 实际归档
         tmp = tempfile.mkdtemp(prefix="inst-jdk-")
@@ -1938,7 +1982,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         return InstallResult(r.name, "installed", f"gem {r.gem or r.name} → {hits[-1]}")
 
     def _install_src(self, r: SrcRecipe, force: bool) -> InstallResult:
-        """git clone → 构建（cmake|autotools）→ bins 递归定位到 CMD_DIR。"""
+        """git clone → 构建（cmake|autotools）→ bins 递归定位到 ToolsEnv.CMD_DIR。"""
         if shutil.which(r.name):
             self._remove_stale_wrapper(r.name)
             return InstallResult(r.name, "skipped", f"PATH 已有 {r.name}")
@@ -1949,7 +1993,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         if r.build_sys == "cmake" and not shutil.which("cmake"):
             return InstallResult(r.name, "failed",
                                  f"需要 cmake（{PM_PREFIX or '<PM>'} install -y cmake / brew install cmake）")
-        dst = os.path.join(TOOLS_HOME_DIR, r.name)
+        dst = os.path.join(ToolsEnv.TOOLS_HOME_DIR, r.name)
         if os.path.isdir(dst) and not force:
             return InstallResult(r.name, "skipped", "源码树已存在")
         if os.path.isdir(dst):
@@ -1968,7 +2012,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             self._run(["make", "-j{}".format(os.cpu_count() or 2)])
         finally:
             os.chdir(saved)
-        os.makedirs(CMD_DIR, exist_ok=True)
+        os.makedirs(ToolsEnv.CMD_DIR, exist_ok=True)
         placed = []
         for b in r.bins:
             found = self._find_file(dst, b)
@@ -1981,14 +2025,14 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         return InstallResult(r.name, "installed", f"build {r.repo} → {','.join(placed)}")
 
     def _install_script(self, r: ScriptRecipe, force: bool) -> InstallResult:
-        """内联脚本 → CMD_DIR（prereq 缺失给精确安装提示）。"""
+        """内联脚本 → ToolsEnv.CMD_DIR（prereq 缺失给精确安装提示）。"""
         missing = [c for c in r.prereq_cmds if not shutil.which(c)]
         if missing:
             hint = {"darwin": f"brew install {' '.join(missing)}",
                     "linux": f"{PM_PREFIX or 'sudo <PM> install -y'} {' '.join(missing)}"}.get(
-                        _plat_key().split('-')[0], "请安装: " + ' '.join(missing))
+                        ToolsEnv._plat_key().split('-')[0], "请安装: " + ' '.join(missing))
             return InstallResult(r.name, "failed", f"缺 {'/'.join(missing)} → {hint}")
-        path = os.path.join(CMD_DIR, r.name)
+        path = os.path.join(ToolsEnv.CMD_DIR, r.name)
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(r.body)
         self._chmodx(path)
@@ -1999,7 +2043,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     def _install_pkgtool(self, r: PkgToolRecipe, force: bool) -> InstallResult:
         """按平台分发: mac=brew 自动安装（失败回落 docker）/ linux=手动（Phase0 已保证
         或单工具模式给命令提示）/ win 与"该平台 PM 无包"=docker 回落。"""
-        prefix = _plat_key().split("-")[0]
+        prefix = ToolsEnv._plat_key().split("-")[0]
         if shutil.which(r.name):
             self._remove_stale_wrapper(r.name)
             return InstallResult(r.name, "skipped", f"PATH 已有 {r.name}（系统/PM 安装）")
@@ -2024,18 +2068,18 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         return self._install_docker(r.docker_spec(), force)
 
     def _remove_stale_wrapper(self, name: str) -> None:
-        """系统/PM 已提供真身时，清理 CMD_DIR 的陈旧 docker wrapper。
+        """系统/PM 已提供真身时，清理 ToolsEnv.CMD_DIR 的陈旧 docker wrapper。
 
-        关键: CMD_DIR 在 PATH 首段，残留 wrapper 会永久遮蔽系统原生版
+        关键: ToolsEnv.CMD_DIR 在 PATH 首段，残留 wrapper 会永久遮蔽系统原生版
         （性能陷阱实例: brew Metal hashcat 被容器 CPU 版遮蔽 17 倍差距）。
-        仅当"排除 CMD_DIR 后 PATH 仍能解析到真身"才清理。
+        仅当"排除 ToolsEnv.CMD_DIR 后 PATH 仍能解析到真身"才清理。
         """
         w = self._bin_path(name)
         if not os.path.exists(w):
             return
         exe = name + (".exe" if os.name == "nt" else "")
         for d in os.environ.get("PATH", "").split(os.pathsep):
-            if not d or os.path.abspath(d or ".") == os.path.abspath(CMD_DIR):
+            if not d or os.path.abspath(d or ".") == os.path.abspath(ToolsEnv.CMD_DIR):
                 continue
             cand = os.path.join(d, exe)
             if os.path.isfile(cand) and os.access(cand, os.X_OK):
@@ -2044,7 +2088,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     def _install_docker(self, r: DockerRecipe, force: bool) -> InstallResult:
         """容器工具: docker 缺失→skip 提示; 镜像缺→build（同镜像幂等一次）; 生成 wrapper。"""
-        wrapper = os.path.join(CMD_DIR, r.name)
+        wrapper = os.path.join(ToolsEnv.CMD_DIR, r.name)
         if not force and os.path.exists(wrapper):
             return InstallResult(r.name, "skipped", "wrapper 已存在")
         if not shutil.which("docker"):
@@ -2076,7 +2120,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     @staticmethod
     def _docker_build(r: DockerRecipe) -> InstallResult:
         """docker build（context = Dockerfile 所在目录）。"""
-        df = os.path.join(_opencode_root(), r.dockerfile)
+        df = os.path.join(ToolsEnv._opencode_root(), r.dockerfile)
         if not os.path.isfile(df):
             return InstallResult(r.name, "failed", f"Dockerfile 不存在: {r.dockerfile}")
         try:
@@ -2091,12 +2135,12 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     def _docker_wrapper(self, r: DockerRecipe) -> None:
         """docker run wrapper（docker-toolbox.md §6 蓝本: 唯一名+trap/降权/路径重写/wordlists）。"""
-        os.makedirs(CMD_DIR, exist_ok=True)
+        os.makedirs(ToolsEnv.CMD_DIR, exist_ok=True)
         net = "--network host " if r.net_host else ""
         extra = (" ".join(r.extra_args) + " ") if r.extra_args else ""
         # 统一 sh wrapper（Windows 走 Git Bash/WSL 执行——与 install.sh 同前提;
         # 历史 .cmd 分支已删: 双语言维护腐化快且无法实测，见 docker-toolbox.md）
-        path = os.path.join(CMD_DIR, r.name)
+        path = os.path.join(ToolsEnv.CMD_DIR, r.name)
         if r.long_running:
             longcheck = (
                 'if [ -z "$EXPLICIT_WT" ]; then\n'
@@ -2134,7 +2178,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     def _qemu_gdb_wrapper(self, r: DockerRecipe) -> None:
         """qemu gdbstub 调试 wrapper（docker-toolbox.md §4: binfmt ptrace 失效的唯一可行模式）。"""
-        path = os.path.join(CMD_DIR, r.name)
+        path = os.path.join(ToolsEnv.CMD_DIR, r.name)
         body = self._QEMU_TMPL.replace("{IMAGE}", r.image)
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(body)
@@ -2143,8 +2187,8 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     # ── 底层操作 ──
 
     def _place_from_archive(self, r, data: bytes, asset: str) -> None:
-        """归档/裸二进制 → 提取 r.bins 到 CMD_DIR（归档内递归按名查找）。"""
-        os.makedirs(CMD_DIR, exist_ok=True)
+        """归档/裸二进制 → 提取 r.bins 到 ToolsEnv.CMD_DIR（归档内递归按名查找）。"""
+        os.makedirs(ToolsEnv.CMD_DIR, exist_ok=True)
         lower = asset.lower()
         is_archive = any(lower.endswith(s) for s in
                          (".tar.gz", ".tgz", ".tar.xz", ".zip", ".gz"))
@@ -2274,13 +2318,13 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     def _wrapper(self, name: str, argv: list[str], cwd: str = "", envp: str = "",
                  exports: dict[str, str] | None = None) -> None:
-        """生成 CMD_DIR sh wrapper，幂等覆盖; cwd 先 cd; envp 附加 PYTHONPATH;
+        """生成 ToolsEnv.CMD_DIR sh wrapper，幂等覆盖; cwd 先 cd; envp 附加 PYTHONPATH;
         exports 追加任意环境变量（如 ghidra 的 JAVA_HOME → 便携 JDK）。
 
         统一 sh（Windows 走 Git Bash/WSL 执行——与 docker wrapper/install.sh 同前提，单语言维护）。
         """
-        os.makedirs(CMD_DIR, exist_ok=True)
-        path = os.path.join(CMD_DIR, name)
+        os.makedirs(ToolsEnv.CMD_DIR, exist_ok=True)
+        path = os.path.join(ToolsEnv.CMD_DIR, name)
         body = "#!/bin/sh\n"
         if cwd:
             body += f'cd "{cwd}"\n'
@@ -2299,9 +2343,9 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     def _venv_python() -> str:
         """venv 解释器路径（与 detect_py_deps.VENV_DIR 同值推导; 无 venv 时回落当前解释器）。"""
         if os.name == "nt":
-            cand = os.path.join(CACHE_DIR, ".venv", "Scripts", "python.exe")
+            cand = os.path.join(ToolsEnv.CACHE_DIR, ".venv", "Scripts", "python.exe")
         else:
-            cand = os.path.join(CACHE_DIR, ".venv", "bin", "python")
+            cand = os.path.join(ToolsEnv.CACHE_DIR, ".venv", "bin", "python")
         return cand if os.path.exists(cand) else sys.executable
 
     @staticmethod
@@ -2312,105 +2356,3 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
 
 # 模块级单例 + 兼容委托（既有消费方零改动）
-_scanner = ToolsScanner()
-
-
-def scan_tool(tool: ToolField) -> ToolStatus:
-    return _scanner.scan_tool(tool)
-
-
-def scan_agent(agent_name: str) -> list[ToolStatus]:
-    return _scanner.scan_agent(agent_name)
-
-
-def scan_all() -> dict[str, list[ToolStatus]]:
-    return _scanner.scan_all()
-
-
-def scan_all_parallel() -> dict[str, ToolStatus]:
-    return _scanner.scan_all_parallel()
-
-
-def detect_compiler() -> CompilerInfo:
-    return _scanner.detect_compiler()
-
-
-# 安装器模块级单例 + 兼容委托
-_installer = ToolsInstaller()
-
-
-def install_tool(name: str, force: bool = False) -> InstallResult:
-    return _installer.install_tool(name, force=force)
-
-
-def install_all(force: bool = False) -> list[InstallResult]:
-    return _installer.install_all(force=force)
-
-
-def list_installable() -> list[str]:
-    return [r.name for r in installable_tools()]
-
-
-def _main() -> int:
-    parser = argparse.ArgumentParser(
-        description="外部工具检测 + 自动安装",
-        usage="detect_tools.py <command> [options]\n\n"
-              "子命令:\n"
-              "  scan                检测工具状态（按 agent）\n"
-              "  install             安装 INSTALLABLE_TOOLS 清单（幂等）\n"
-              "  list-installable    列出可自动安装的工具",
-    )
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    sc = sub.add_parser("scan", help="检测工具状态")
-    sc.add_argument("--agent", default="all", help="agent 名（all=全部）")
-
-    ic = sub.add_parser("install", help="安装全部可自动安装工具")
-    ic.add_argument("--tool", default=None, help="只装指定工具（默认全部）")
-    ic.add_argument("--force", action="store_true", help="忽略幂等跳过条件重装")
-
-    sub.add_parser("list-installable", help="列出可自动安装清单")
-
-    args = parser.parse_args()
-
-    if args.command == "list-installable":
-        for n in list_installable():
-            print(n)
-        return 0
-
-    if args.command == "install":
-        if args.tool:
-            results = [install_tool(args.tool, force=args.force)]
-        else:
-            print("[*] 开始安装 INSTALLABLE_TOOLS 清单（单工具失败不中断）...")
-            results = install_all(force=args.force)
-        ok = sum(1 for r in results if r.status == "installed")
-        skip = sum(1 for r in results if r.status == "skipped")
-        fail = [r for r in results if r.status == "failed"]
-        for r in results:
-            mark = {"installed": "+", "skipped": "*", "failed": "-"}[r.status]
-            print(f"[{mark}] {r.name:20s} {r.status:10s} {r.detail}")
-        print(f"[*] 完成: 安装 {ok} / 跳过 {skip} / 失败 {len(fail)}")
-        if fail:
-            print("[!] 以下工具安装失败（知识库命令依赖它们，修复后单独重装）:")
-            for r in fail:
-                print(f"    python control/backend/services/detect_tools.py install --tool {r.name}")
-            return 1
-        return 0
-
-    # scan
-    if args.agent == "all":
-        for agent, statuses in scan_all().items():
-            print(f"── {agent}")
-            for s in statuses:
-                mark = "+" if s.available else ("*" if s.skipped else "-")
-                print(f"  [{mark}] {s.name:20s} {s.version or '':16s} {s.description}")
-    else:
-        for s in scan_agent(args.agent):
-            mark = "+" if s.available else ("*" if s.skipped else "-")
-            print(f"[{mark}] {s.name:20s} {s.version or '':16s} {s.description}")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(_main())

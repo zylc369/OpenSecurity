@@ -22,8 +22,12 @@ def _patch_threshold(n: int):
     """轮换阈值注入（tunables 读 ConfigManager——patch 其 proxy_tunables）。
 
     用后必须调 _restore_threshold（防测试间污染）。
+    经 pr 模块取 ConfigManager（routes 测试可能 reload 过 config_manager——
+    直接 from import 会拿到旧类对象导致 patch 不生效）。
     """
-    from services.config_manager import ConfigManager
+    from services import proxy_relay as _prl
+    import sys as _sys
+    ConfigManager = _sys.modules["services.config_manager"].ConfigManager
     global _ORIG_TUNABLES
     _ORIG_TUNABLES = ConfigManager.__dict__["proxy_tunables"]
     t = ConfigManager.get_instance().proxy_tunables()
@@ -37,7 +41,8 @@ _ORIG_TUNABLES = None
 
 
 def _restore_threshold():
-    from services.config_manager import ConfigManager
+    import sys as _sys
+    ConfigManager = _sys.modules["services.config_manager"].ConfigManager
     if _ORIG_TUNABLES is not None:
         ConfigManager.proxy_tunables = _ORIG_TUNABLES
 

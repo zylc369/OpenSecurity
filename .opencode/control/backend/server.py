@@ -31,7 +31,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from config import is_dev_mode
+from services.config_manager import ConfigManager
 from services.model_loader import ModelInferenceService
 
 
@@ -45,13 +45,10 @@ def create_app() -> FastAPI:
       - 单元测试（不启动 uvicorn）
       - 后续步骤扩展（加更多路由 include_router）
     """
-    # 延迟绑定 validator（避免 config ↔ config_store 循环 import）
-    from config import _init_validators
-    _init_validators()
+    # 配置收口于 ConfigManager（无循环 import）
 
-    # 首次运行创建 .ai_env 带注释模板（配置收口：config_store 是唯一读写方）
-    from services import config_store
-    config_store.ensure_template()
+    # 首次运行创建 .ai_env 带注释模板（配置收口：ConfigManager 唯一读写方）
+    ConfigManager.get_instance().ensure_template()
 
     app = FastAPI(
         title="OpenSecurity Control",
@@ -60,7 +57,7 @@ def create_app() -> FastAPI:
     )
 
     # CORS：开发态允许 Vite 5173 跨域访问；发布态同源不需要
-    if is_dev_mode():
+    if ConfigManager.get_instance().is_dev_mode:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -152,7 +149,7 @@ def create_app() -> FastAPI:
 
     # 开发态自动拉起 vite dev server（此前依赖手动启动，控制台重启后
     # 前端 404）。幂等：vite 已运行则跳过；拉起失败由 dev 提示页指路。
-    from config import is_dev_mode as _is_dev
+    from services.config_manager import ConfigManager as _is_dev
     if _is_dev():
         from services.frontend_port import FrontendPortRegistry
         FrontendPortRegistry.get_instance().ensure_vite_dev()
@@ -162,7 +159,7 @@ def create_app() -> FastAPI:
 
 def _mount_frontend(app: FastAPI) -> None:
     """根据 is_dev_mode 决定是否挂载前端 dist/。"""
-    if is_dev_mode():
+    if ConfigManager.get_instance().is_dev_mode:
         # 开发态：不挂载，/ 返回 dev 提示
         @app.get("/")
         async def dev_hint():
@@ -204,7 +201,7 @@ def main() -> None:
     log.info("=" * 50)
     log.info("控制台启动（pid=%d, platform=%s）", os.getpid(), sys.platform)
 
-    from config import EXIT_CODE_REUSE, EXIT_CODE_PORT_EXHAUSTED, EXIT_CODE_NORMAL, ipc_addr
+    from services.config_manager import ConfigManager
     from services.frontend_port import FrontendPortRegistry
     from services.ipc_listener import IpcListener, IpcStartStatus
     from services.heartbeat import HeartbeatRegistry, HeartbeatTask
@@ -213,15 +210,15 @@ def main() -> None:
     status = IpcListener.get_instance().start()
     if status is IpcStartStatus.EXISTING_INSTANCE:
         log.info("IPC 通道已有实例运行（%s），本进程退出（exit code = %d）",
-                 ipc_addr(), EXIT_CODE_REUSE)
-        sys.exit(EXIT_CODE_REUSE)
+                 ConfigManager.get_instance().ipc_addr(), ConfigManager.Protocol.EXIT_CODE_REUSE)
+        sys.exit(ConfigManager.Protocol.EXIT_CODE_REUSE)
         return
     if status is IpcStartStatus.BIND_TIMEOUT:
         log.error("IPC bind 失败且等待窗口耗尽（%s），本进程退出（exit code = %d）",
-                  ipc_addr(), EXIT_CODE_PORT_EXHAUSTED)
-        sys.exit(EXIT_CODE_PORT_EXHAUSTED)
+                  ConfigManager.get_instance().ipc_addr(), ConfigManager.Protocol.EXIT_CODE_PORT_EXHAUSTED)
+        sys.exit(ConfigManager.Protocol.EXIT_CODE_PORT_EXHAUSTED)
         return
-    log.info("IPC 监听已启动：%s", ipc_addr())
+    log.info("IPC 监听已启动：%s", ConfigManager.get_instance().ipc_addr())
 
     # 步骤 3: bind 浏览器 TCP 候选段（顺延）+ 注册真实端口（/api/console-url 对外）
     try:
@@ -229,7 +226,7 @@ def main() -> None:
     except RuntimeError as e:
         log.error("%s", e)
         IpcListener.get_instance().cleanup()
-        sys.exit(EXIT_CODE_PORT_EXHAUSTED)
+        sys.exit(ConfigManager.Protocol.EXIT_CODE_PORT_EXHAUSTED)
 
     # 步骤 4: 启动心跳周期检测后台任务（表空过宽限 → 自杀）
     def shutdown():
@@ -237,7 +234,7 @@ def main() -> None:
         IpcListener.get_instance().cleanup()
         # 用 os._exit 跳过任何 atexit hook（避免 uvicorn 优雅关闭阻塞）
         import os
-        os._exit(EXIT_CODE_NORMAL)
+        os._exit(ConfigManager.Protocol.EXIT_CODE_NORMAL)
 
     heartbeat_task = HeartbeatTask(HeartbeatRegistry.get_instance(), shutdown)
     heartbeat_task.start()
@@ -256,11 +253,10 @@ def main() -> None:
     # - 远程已启用（ENABLED=1 且 URL 非空）→ 跳过本地预加载（由心跳判定:
     #   REMOTE 保持不加载 / DEGRADED 走预热路径）——避免"重启白白加载再卸载"
     # - 节点角色（CONTROL_API_KEY 已配置）→ 预加载全部三模型（专职资源节点）
-    from config import CONTROL_API_KEY_KEY, REMOTE_ENABLED_KEY, REMOTE_URL_KEY
-    from services import config_store
-    _api_key = (config_store.read(CONTROL_API_KEY_KEY) or "").strip()
-    _remote_enabled = (config_store.read_bool(REMOTE_ENABLED_KEY)
-                       and (config_store.read(REMOTE_URL_KEY) or "").strip())
+    _cm = ConfigManager.get_instance()
+    _api_key = (_cm.get(_cm.Keys.CONTROL_API_KEY) or "").strip()
+    _remote_enabled = ((_cm.get(_cm.Keys.REMOTE_CONSOLE_ENABLED) or "").strip().lower() in ("1", "true")
+                       and (_cm.get(_cm.Keys.REMOTE_CONSOLE_URL) or "").strip())
     if _api_key:
         log.info("节点模式（CONTROL_API_KEY 已配置）: 预加载全部三模型")
         ModelInferenceService.get_instance().preload_all_models_background()

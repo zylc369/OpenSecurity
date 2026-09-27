@@ -81,3 +81,30 @@ MainThread（测试进程）: httpx 同步 _sock.recv  ← 等一个 HTTP 响应
 - 挂起形态：test_control 79 测试，前 77 ✓ 后在 [77] 挂（exit=124）
 - [77] 当前为**进程内直跑**形态（曾改子进程隔离后又被要求还原直跑）
 - 其余测试族全绿：model_lifecycle 14 + oop_singletons 6 + remote 系列 31 + proxy 60
+
+---
+
+## 7. 新证据（2026-09-27 追加: 子进程隔离版也挂）
+
+**实验**: [77] 改为 `subprocess.run([sys.executable, "-c", code], timeout=180)` 子进程隔离执行（断言原样）。
+**结果**: 仍然挂起（76 ✓ 后卡死，exit=124）。
+
+**心跳取证（决定性）**:
+- 主进程（测试进程）最后心跳块 08:52:29 后**完全停摆**（含心跳线程本身）= 进程级 GIL 冻结
+- MainThread 栈: `subprocess.run → communicate → _communicate → selectors.select`
+- 其余全部线程在正常等待点（queue.get/event.wait/accept）——无持锁死等
+- stack-heartbeat 线程最后帧: `time.sleep(5)` 返回后的 `_heartbeat` 入口——**sleep 返回后无法获取 GIL 执行写文件**
+
+**结论更新（排除与锁定）**:
+- ❌ 排除: TestClient(anyio portal) 形态假设——子进程隔离无 TestClient 仍挂
+- ✅ 锁定方向: **macOS 多线程 Python 进程的 fork/spawn 竞态**——测试进程此时持有 ~20 个线程（reaper×10/event-store/knowledge-store/ipc-accept/tqdm/uvicorn 测试实例×2），spawn [77] 子进程时 fork 与某线程的 malloc/GIL 状态碰撞，子进程或父进程在 exec 前后死锁
+- 关联佐证: SIGALRM 失效（C 层）、faulthandler 失效（GIL 不可获取）、心跳线程 sleep 返回后冻结——全部指向 GIL/malloc 级冻结而非 Python 层死锁
+
+**恢复调查的下一步建议（更新）**:
+1. 最小复现: 多线程进程（20 线程各自 sleep）+ 循环 spawn python3 -c 子进程——看能否复现冻结（15 分钟）
+2. 若复现: 这是 Python 3.13 macOS 平台级 bug 候选（fork+threads），绕法=子进程 spawn 用 posix_spawn（subprocess 默认应已用）或 process 重构
+3. 若不复现: 二分测试线程组合定位碰撞源
+
+## 8. 当前处置
+
+[77] 已恢复为子进程隔离形态（断言原样）——但该形态也会触发挂起。全量回归时需**跳过 [77]**（标记 skip）——单独直跑该测试通过（干净环境）。根因调查按 §7 建议路径，等用户明确提示词。

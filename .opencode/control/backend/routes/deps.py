@@ -134,15 +134,15 @@ class DepsService:
         """
         def _docker() -> DockerGlobal:
             from services import docker_manager
-            return docker_manager.scan_global()
+            return docker_manager.DockerManager.scan_global()
 
         def _models() -> list[ModelAssetStatus]:
                         return ModelAssetRegistry.get_instance().get_model_assets()
 
         with ThreadPoolExecutor(max_workers=5) as ex:
-            f_py = ex.submit(self._safe, lambda: detect_py_deps.scan("all"), [])
-            f_tools = ex.submit(self._safe, detect_tools.scan_all_parallel, {})
-            f_cc = ex.submit(self._safe, detect_tools.detect_compiler,
+            f_py = ex.submit(self._safe, lambda: detect_py_deps.PyDepsDetector.get_instance().scan("all"), [])
+            f_tools = ex.submit(self._safe, detect_tools.ToolsScanner.get_instance().scan_all_parallel, {})
+            f_cc = ex.submit(self._safe, detect_tools.ToolsScanner.get_instance().detect_compiler,
                              CompilerInfo.unavailable())
             f_docker = ex.submit(self._safe, _docker, DockerGlobal.unavailable())
             f_models = ex.submit(self._safe, _models, [])
@@ -276,7 +276,7 @@ class DepsService:
 
     @staticmethod
     def _tool_belongs(t, agent: str) -> bool:
-        return (agent == "all" or agent in t.agents) and detect_tools.ToolsScanner._platform_matches(t)
+        return (agent == "all" or agent in t.agents) and detect_tools.ToolsScanner.get_instance()._platform_matches(t)
 
 
 # 模块级单例
@@ -308,7 +308,7 @@ _register_invalidation_hooks()
 async def get_all_deps() -> dict[str, list[dict]]:
     """所有 agent 的工具状态（前端依赖页用）。"""
     return {agent: [asdict(t) for t in tools]
-            for agent, tools in detect_tools.scan_all().items()}
+            for agent, tools in detect_tools.ToolsScanner.get_instance().scan_all().items()}
 
 
 @router.get("/{agent}")

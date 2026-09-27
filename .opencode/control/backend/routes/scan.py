@@ -5,7 +5,7 @@ from dataclasses import asdict
 
 from fastapi import APIRouter, Query
 
-from services.scanner import get_scanner
+from services.scanner import Scanner
 
 router = APIRouter(prefix="/api/scan", tags=["scan"])
 
@@ -17,7 +17,7 @@ async def scan_all(force_refresh: bool = Query(False)) -> dict:
     Args:
         force_refresh: 强制刷新缓存。
     """
-    result = await get_scanner().scan_all(force_refresh=force_refresh)
+    result = await Scanner.get_instance().scan_all(force_refresh=force_refresh)
     return {
         "agents": {agent: [asdict(t) for t in tools]
                    for agent, tools in result.agents.items()},

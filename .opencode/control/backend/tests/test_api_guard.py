@@ -64,12 +64,13 @@ def test_local_allows_all():
 @test("api_guard: 局域网 + 白名单 + 正确 token → 放行; 错误 token → 401")
 def test_lan_whitelist_token():
     import services.api_guard as guard
-    import services.config_store as cs
+    import services.config_manager as cs
     app = _mk_app()
     c_ok = _client(app, token="right-key-123")
     c_bad = _client(app, token="wrong-key")
-    orig_read, orig_local = cs.read, guard.ApiGuardMiddleware.__dict__['_is_local']
-    cs.read = lambda key: "right-key-123" if key == "CONTROL_API_KEY" else None
+    _cmi = cs.ConfigManager.get_instance()
+    orig_read, orig_local = _cmi.get, guard.ApiGuardMiddleware.__dict__['_is_local']
+    _cmi.get = lambda key: "right-key-123" if key == "CONTROL_API_KEY" else None
     guard.ApiGuardMiddleware._is_local = classmethod(lambda cls, host: False)  # 伪造非本机
     try:
         assert_eq(c_ok.post("/embed").status_code, 200, "正确 token 白名单放行")
@@ -77,18 +78,19 @@ def test_lan_whitelist_token():
         assert_eq(c_bad.post("/embed").status_code, 401, "错误 token 401")
         assert_eq(c_ok.get("/api/remote/health/").status_code, 200, "尾斜杠容忍")
     finally:
-        cs.read = orig_read
+        _cmi.get = orig_read
         guard.ApiGuardMiddleware._is_local = orig_local
 
 
 @test("api_guard: 局域网 + 非白名单路径 → 403（管理面不暴露）")
 def test_lan_admin_forbidden():
     import services.api_guard as guard
-    import services.config_store as cs
+    import services.config_manager as cs
     app = _mk_app()
     c = _client(app, token="right-key-123")
-    orig_read, orig_local = cs.read, guard.ApiGuardMiddleware.__dict__['_is_local']
-    cs.read = lambda key: "right-key-123" if key == "CONTROL_API_KEY" else None
+    _cmi = cs.ConfigManager.get_instance()
+    orig_read, orig_local = _cmi.get, guard.ApiGuardMiddleware.__dict__['_is_local']
+    _cmi.get = lambda key: "right-key-123" if key == "CONTROL_API_KEY" else None
     guard.ApiGuardMiddleware._is_local = classmethod(lambda cls, host: False)
     try:
         assert_eq(c.get("/api/config").status_code, 403, "管理面 403")
@@ -97,24 +99,25 @@ def test_lan_admin_forbidden():
         # 相似路径不误放行（精确匹配）
         assert_eq(c.post("/embedding").status_code, 403, "/embedding 不在白名单")
     finally:
-        cs.read = orig_read
+        _cmi.get = orig_read
         guard.ApiGuardMiddleware._is_local = orig_local
 
 
 @test("api_guard: 未配置 CONTROL_API_KEY → 局域网全 403")
 def test_lan_no_key_all_forbidden():
     import services.api_guard as guard
-    import services.config_store as cs
+    import services.config_manager as cs
     app = _mk_app()
     c = _client(app, token="whatever")
-    orig_read, orig_local = cs.read, guard.ApiGuardMiddleware.__dict__['_is_local']
-    cs.read = lambda key: None
+    _cmi = cs.ConfigManager.get_instance()
+    orig_read, orig_local = _cmi.get, guard.ApiGuardMiddleware.__dict__['_is_local']
+    _cmi.get = lambda key: None
     guard.ApiGuardMiddleware._is_local = classmethod(lambda cls, host: False)
     try:
         assert_eq(c.post("/embed").status_code, 403, "无 key 白名单也 403")
         assert_eq(c.get("/api/config").status_code, 403, "无 key 管理面 403")
     finally:
-        cs.read = orig_read
+        _cmi.get = orig_read
         guard.ApiGuardMiddleware._is_local = orig_local
 
 

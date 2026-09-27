@@ -191,9 +191,8 @@ class HeartbeatTask:
     def _read_resident() -> bool:
         """读 CONTROL_RESIDENT 配置（缺省 False）。"""
         try:
-            from config import CONTROL_RESIDENT_KEY
-            from services import config_store
-            return config_store.read_bool(CONTROL_RESIDENT_KEY)
+            cm = ConfigManager.get_instance()
+            return (cm.get(cm.Keys.CONTROL_RESIDENT) or "").strip().lower() in ("1", "true")
         except Exception:  # noqa: BLE001 —— 配置读取异常 → 默认非常驻
             return False
 

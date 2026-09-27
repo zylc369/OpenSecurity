@@ -1,4 +1,4 @@
-"""routes/remote 端点单元测试（TestClient 本机来源; remote_link/config_store fake 注入）。
+"""routes/remote 端点单元测试（TestClient 本机来源; remote_link/ConfigManager fake 注入）。
 
 覆盖（需求文档 §3.1 步骤 15 验证点）:
   1. node-config 仅三 KEY 白名单（其他 key 422 拒绝）
@@ -100,10 +100,11 @@ def test_health_fingerprints():
 
 @test("routes/remote: switch 失败不置位 / 成功置位 ENABLED")
 def test_switch_paths():
-    import services.config_store as cs
+    import services.config_manager as cs
     written = {}
-    orig_write = cs.write_one
-    cs.write_one = lambda k, v: written.update({k: v}) or {}
+    _cmi = cs.ConfigManager.get_instance()
+    orig_write = _cmi.set_one
+    _cmi.set_one = lambda k, v: written.update({k: v}) or {}
     try:
         # 失败路径
         _fake_remote_link(ok_probe=False)
@@ -131,7 +132,7 @@ def test_switch_paths():
         r = c.post("/api/remote/switch", json={"target": "xxx"})
         assert_eq(r.status_code, 422, "非法 target 422")
     finally:
-        cs.write_one = orig_write
+        _cmi.set_one = orig_write
 
 
 @test("routes/remote: node-config 三 KEY 白名单 + API_KEY 脱敏")
@@ -145,10 +146,11 @@ def test_node_config_whitelist():
     assert_true("CONTROL_RESIDENT" in d["detail"], f"错误信息指明白名单: {d['detail']}")
 
     # 合法写入（本机）
-    import services.config_store as cs
+    import services.config_manager as cs
     written = {}
-    orig_write = cs.write
-    cs.write = lambda updates: written.update(updates) or updates
+    _cmi = cs.ConfigManager.get_instance()
+    orig_write = _cmi.set
+    _cmi.set = lambda updates: written.update(updates) or updates
     try:
         r = c.put("/api/remote/node-config",
                   json={"configs": {"CONTROL_RESIDENT": "1", "CONTROL_AUTOSTART": "0"}})
@@ -158,30 +160,32 @@ def test_node_config_whitelist():
         r = c.put("/api/remote/node-config", json={"configs": {"CONTROL_API_KEY": "abc"}})
         assert_true(r.json()["reboot_required"], "API_KEY 变更提示重启")
     finally:
-        cs.write = orig_write
+        _cmi.set = orig_write
 
     # 读取脱敏
-    orig_read = cs.read
-    cs.read = lambda key: {"CONTROL_API_KEY": "secret123", "CONTROL_RESIDENT": "1"}.get(key)
+    _cmi2 = cs.ConfigManager.get_instance()
+    orig_read = _cmi2.get
+    _cmi.get = lambda key: {"CONTROL_API_KEY": "secret123", "CONTROL_RESIDENT": "1"}.get(key)
     try:
         r = c.get("/api/remote/node-config")
         d = r.json()
         assert_eq(d.get("CONTROL_API_KEY"), "secret", "API_KEY 脱敏为前 6 位")
     finally:
-        cs.read = orig_read
+        _cmi.get = orig_read
 
 
 @test("routes/remote: /config 更新触发热重载")
 def test_config_reload():
     import services.remote_link as rl_module
-    import services.config_store as cs
+    import services.config_manager as cs
     calls = []
     svc = rl_module.RemoteLinkService.get_instance()
     orig = svc.reload_config
     # 隔离: patch config_store.write（路由层调 write 而非 write_one——
     # 不 patch 会把测试值写进真实 .ai_env，污染生产配置）
-    orig_write = cs.write
-    cs.write = lambda updates: dict(updates)  # noqa: E731
+    _cmi = cs.ConfigManager.get_instance()
+    orig_write = _cmi.set
+    _cmi.set = lambda updates: dict(updates)  # noqa: E731
     try:
         _fake_remote_link()
         svc.reload_config = lambda: calls.append(1)
@@ -194,7 +198,7 @@ def test_config_reload():
         assert_eq(r.status_code, 422)
     finally:
         svc.reload_config = orig
-        cs.write = orig_write
+        _cmi.set = orig_write
 
 
 if __name__ == "__main__":

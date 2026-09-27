@@ -94,7 +94,7 @@ class FakeJuliang:
 @pytest.fixture
 def pool(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    import importlib, config
+    import importlib, services.config_manager as config
     importlib.reload(config)
     importlib.reload(pp)
     p = pp.ProxyPool._create_fresh(state_path=tmp_path / "proxy_state.json")

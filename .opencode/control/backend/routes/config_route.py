@@ -7,7 +7,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from services import config_store
+from services.config_manager import ConfigManager
 from routes.deps import invalidate_deps_snapshot
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -26,7 +26,7 @@ class SingleConfigUpdate(BaseModel):
 @router.get("")
 async def get_all_configs() -> dict[str, str]:
     """获取全部配置。"""
-    return config_store.read_all()
+    return ConfigManager.get_instance().get_all()
 
 
 @router.get("/meta")
@@ -38,9 +38,6 @@ async def get_config_meta() -> dict[str, dict]:
     type 枚举: password（密文+眼睛）/ path（存在性徽标）/ text / bool。
     hidden=True 的键不进配置页（专属 TAB 管理 / 仅 .ai_env 手编，如远程资源）。
     """
-    from config import (
-        REQUIRED_CONFIGS, EXTRA_CONFIG_META, REMOTE_TAB_CONFIGS, REMOTE_TUNABLE_CONFIGS,
-    )
 
     meta: dict[str, dict] = {}
     for field in [*REQUIRED_CONFIGS, *EXTRA_CONFIG_META, *REMOTE_TAB_CONFIGS, *REMOTE_TUNABLE_CONFIGS]:
@@ -53,7 +50,7 @@ async def get_config_meta() -> dict[str, dict]:
             "hidden": field.hidden,
         }
     # .ai_env 中存在但无元数据的键 → text 兜底（保证 meta 覆盖全部键）
-    for key in config_store.read_all():
+    for key in ConfigManager.get_instance().get_all():
         if key not in meta:
             meta[key] = {"label": key, "type": "text", "hint": "", "required": False,
                          "default_value": "", "hidden": False}
@@ -64,13 +61,13 @@ async def get_config_meta() -> dict[str, dict]:
 async def get_required_status() -> dict[str, dict]:
     """获取必要配置完整性（前端 banner 用，keyed dict 契约）。"""
     from dataclasses import asdict
-    return {c.key: asdict(c) for c in config_store.required_status()}
+    return {c.key: asdict(c) for c in ConfigManager.get_instance().required_status()}
 
 
 @router.get("/{key}")
 async def get_config(key: str) -> dict[str, str]:
     """获取单个配置。"""
-    value = config_store.read(key)
+    value = ConfigManager.get_instance().get(key)
     if value is None:
         raise HTTPException(status_code=404, detail=f"配置项 {key} 不存在")
     return {"key": key, "value": value}
@@ -82,11 +79,11 @@ def _guard_protected_keys(keys) -> None:
     通用配置写接口不得绕过 remote_link.switch_to_remote 的校验路径
     （未校验的 ENABLED=1 会让心跳直接把路由切到未验证的远程节点）。
     """
-    from config import REMOTE_ENABLED_KEY
-    if REMOTE_ENABLED_KEY in keys:
+    
+    if ConfigManager.get_instance().Keys.REMOTE_CONSOLE_ENABLED in keys:
         raise HTTPException(
             status_code=422,
-            detail=f"{REMOTE_ENABLED_KEY} 只能经「切换远程」按钮写入（先校验后置位）",
+            detail=f"{ConfigManager.get_instance().Keys.REMOTE_CONSOLE_ENABLED} 只能经「切换远程」按钮写入（先校验后置位）",
         )
 
 
@@ -94,7 +91,7 @@ def _guard_protected_keys(keys) -> None:
 async def update_configs(req: ConfigUpdate) -> dict[str, str]:
     """批量更新配置。"""
     _guard_protected_keys(req.configs.keys())
-    result = config_store.write(req.configs)
+    result = ConfigManager.get_instance().set(req.configs)
     invalidate_deps_snapshot()  # IDA_PRO_HOME 等影响工具检测项
     return result
 
@@ -103,7 +100,7 @@ async def update_configs(req: ConfigUpdate) -> dict[str, str]:
 async def update_config(key: str, req: SingleConfigUpdate) -> dict[str, str]:
     """更新单个配置。"""
     _guard_protected_keys([key])
-    result = config_store.write_one(key, req.value)
+    result = ConfigManager.get_instance().set({key: req.value})
     invalidate_deps_snapshot()
     return result
 
@@ -111,6 +108,6 @@ async def update_config(key: str, req: SingleConfigUpdate) -> dict[str, str]:
 @router.delete("/{key}")
 async def delete_config(key: str) -> dict[str, str]:
     """删除单个配置。"""
-    result = config_store.delete(key)
+    result = ConfigManager.get_instance().delete(key)
     invalidate_deps_snapshot()
     return result

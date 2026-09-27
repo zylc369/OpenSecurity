@@ -23,8 +23,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from services.config_manager import ConfigManager
-from services import config_store
+from services import config_manager
 from services.process_lock import ProcessLockUtil
 
 
@@ -157,7 +156,7 @@ class ProxyPool:
     # ─── IP 池簿记（唯一状态实现; 路由与 relay 经 get_instance 直呼）───
 
     def _init_once(self, state_path: Path | None = None) -> None:
-        self._path = state_path or (Path(ConfigManager.get_instance().data_dir) / "proxy_state.json")
+        self._path = state_path or (Path(config_manager.ConfigManager.get_instance().data_dir) / "proxy_state.json")
         self._state = PoolState()
         self._lock = asyncio.Lock()
         self._load()
@@ -198,23 +197,23 @@ class ProxyPool:
 
     @staticmethod
     def credentials_configured() -> bool:
-        cfg = config_store.read_all()
-        return bool(cfg.get(ConfigManager.get_instance().Keys.JULIANG_TRADE_NO)) and bool(cfg.get(ConfigManager.get_instance().Keys.JULIANG_API_KEY))
+        cfg = config_manager.ConfigManager.get_instance().get_all()
+        return bool(cfg.get(config_manager.ConfigManager.get_instance().Keys.JULIANG_TRADE_NO)) and bool(cfg.get(config_manager.ConfigManager.get_instance().Keys.JULIANG_API_KEY))
 
     # ── 供应商提取（3 次指数退避）──
 
     async def _fetch_from_julang(self) -> tuple[ProxyInfo, int]:
         if not self.credentials_configured():
             raise JuliangError("供应商凭证未配置（控制台配置页填写 JULIANG_TRADE_NO / JULIANG_API_KEY）")
-        cfg = config_store.read_all()
-        params = {"trade_no": cfg[ConfigManager.get_instance().Keys.JULIANG_TRADE_NO], "num": 1, "pt": 1,
+        cfg = config_manager.ConfigManager.get_instance().get_all()
+        params = {"trade_no": cfg[config_manager.ConfigManager.get_instance().Keys.JULIANG_TRADE_NO], "num": 1, "pt": 1,
                   "result_type": "json", "ip_remain": 1, "filter": 1}
-        params["sign"] = ProxyPool._julang_sign(params, cfg[ConfigManager.get_instance().Keys.JULIANG_API_KEY])
+        params["sign"] = ProxyPool._julang_sign(params, cfg[config_manager.ConfigManager.get_instance().Keys.JULIANG_API_KEY])
         last_err = ""
         for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=15) as client:
-                    resp = await client.get(ConfigManager.Protocol.JULIANG_API_URL, params=params)
+                    resp = await client.get(config_manager.ConfigManager.Protocol.JULIANG_API_URL, params=params)
                     data = resp.json()
                 if data.get("code") != 200:
                     raise JuliangError(f"供应商业务错误 {data.get('code')}: {data.get('msg', '')}")
@@ -226,7 +225,7 @@ class ProxyPool:
                 ip_part, _, remain_part = str(proxy_list[0]).partition(",")
                 now = time.time()
                 info = ProxyInfo(ip=ip_part, fetched_at=now,
-                                 expire_at=now + ConfigManager.get_instance().proxy_tunables().ip_ttl_sec - ConfigManager.get_instance().proxy_tunables().ttl_margin_sec)
+                                 expire_at=now + config_manager.ConfigManager.get_instance().proxy_tunables().ip_ttl_sec - config_manager.ConfigManager.get_instance().proxy_tunables().ttl_margin_sec)
                 self._state.current = info
                 self._state.surplus = int(d.get("surplus_quantity", -1))
                 self._state.total_fetched += 1
@@ -273,7 +272,7 @@ class ProxyPool:
         """域名进冷却表（归一化后入键）；顺手清理已过期项。"""
         domain = ProxyPool.normalize_domain(domain_raw)  # ValueError → 接口层 400
         if minutes is None:
-            minutes = ConfigManager.get_instance().proxy_tunables().domain_cooldown_sec / 60
+            minutes = config_manager.ConfigManager.get_instance().proxy_tunables().domain_cooldown_sec / 60
         now = time.time()
         self._state.domain_limited = {
             k: v for k, v in self._state.domain_limited.items() if v > now
@@ -302,8 +301,8 @@ class ProxyPool:
     def _record(self, reason: str, old: str | None, new: str | None) -> None:
         self._state.rotate_history.append(
             RotateEvent(ts=time.time(), reason=reason, old=old, new=new))
-        if len(self._state.rotate_history) > ConfigManager.get_instance().proxy_tunables().rotate_history_limit:
-            self._state.rotate_history = self._state.rotate_history[-ConfigManager.get_instance().proxy_tunables().rotate_history_limit:]
+        if len(self._state.rotate_history) > config_manager.ConfigManager.get_instance().proxy_tunables().rotate_history_limit:
+            self._state.rotate_history = self._state.rotate_history[-config_manager.ConfigManager.get_instance().proxy_tunables().rotate_history_limit:]
 
     def status(self) -> dict:
         cur = self._state.current

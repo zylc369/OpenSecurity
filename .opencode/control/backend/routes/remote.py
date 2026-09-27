@@ -19,15 +19,7 @@ from dataclasses import asdict
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from config import (
-    CONTROL_API_KEY_KEY,
-    CONTROL_AUTOSTART_KEY,
-    CONTROL_RESIDENT_KEY,
-    EMBED_MODEL,
-    REMOTE_TOKEN_KEY,
-    REMOTE_URL_KEY,
-    RERANKER_MODEL,
-)
+from services.config_manager import ConfigManager
 from services.remote_link import RemoteLinkService
 
 router = APIRouter(prefix="/api/remote", tags=["remote"])
@@ -70,15 +62,14 @@ class RemoteConfigUpdate(BaseModel):
 @router.put("/config")
 async def update_config(req: RemoteConfigUpdate) -> dict:
     """写远程链接 URL/TOKEN 并热重载（ENABLED 只能经 switch——D10）。"""
-    from services import config_store
     updates: dict[str, str] = {}
     if req.url != "":
-        updates[REMOTE_URL_KEY] = req.url.strip()
+        updates[ConfigManager.Keys.REMOTE_CONSOLE_URL] = req.url.strip()
     if req.token != "":
-        updates[REMOTE_TOKEN_KEY] = req.token.strip()
+        updates[ConfigManager.Keys.REMOTE_CONSOLE_TOKEN] = req.token.strip()
     if not updates:
         raise HTTPException(status_code=422, detail="无可更新字段")
-    config_store.write(updates)
+    ConfigManager.get_instance().set(updates)
     RemoteLinkService.get_instance().reload_config()
     return {"ok": True, "updated": sorted(updates.keys())}
 
@@ -98,8 +89,7 @@ def _forward_or_local(node: str):
 
 
 def _remote_url_configured() -> bool:
-    from services import config_store
-    return bool((config_store.read(REMOTE_URL_KEY) or "").strip())
+    return bool((ConfigManager.get_instance().get(ConfigManager.Keys.REMOTE_CONSOLE_URL) or "").strip())
 
 
 def _fingerprint_payload() -> dict:
@@ -110,11 +100,11 @@ def _fingerprint_payload() -> dict:
     fps = RemoteLinkService.get_instance()._local_fingerprints()
     return {
         "service": "opencode-control",
-        "version": f"{platform.system()}/{EMBED_MODEL}",
+        "version": f"{platform.system()}/{ConfigManager.Protocol.EMBED_MODEL}",
         "models": [
-            {"repo_id": EMBED_MODEL, "snapshot": fps.get(EMBED_MODEL, ""),
+            {"repo_id": ConfigManager.Protocol.EMBED_MODEL, "snapshot": fps.get(ConfigManager.Protocol.EMBED_MODEL, ""),
              "loaded": ModelInferenceService.get_instance().embedder_status().state == "ready"},
-            {"repo_id": RERANKER_MODEL, "snapshot": fps.get(RERANKER_MODEL, ""),
+            {"repo_id": ConfigManager.Protocol.RERANKER_MODEL, "snapshot": fps.get(ConfigManager.Protocol.RERANKER_MODEL, ""),
              "loaded": ModelInferenceService.get_instance().reranker_status().state == "ready"},
             {"repo_id": "glm-ocr", "snapshot": fps.get("glm-ocr", ""),
              "loaded": OcrService.get_instance().status().state == "ready"},
@@ -150,7 +140,7 @@ async def _forward_call(fn, *args):
         raise HTTPException(status_code=502, detail=f"转发失败: {e}")
 
 
-_NODE_CONFIG_KEYS = frozenset({CONTROL_RESIDENT_KEY, CONTROL_AUTOSTART_KEY, CONTROL_API_KEY_KEY})
+_NODE_CONFIG_KEYS = frozenset({ConfigManager.Keys.CONTROL_RESIDENT, ConfigManager.Keys.CONTROL_AUTOSTART, ConfigManager.Keys.CONTROL_API_KEY})
 
 
 @router.get("/node-config")
@@ -159,11 +149,10 @@ async def get_node_config(node: str = Query(default="local")) -> dict:
     client = _forward_or_local(node)
     if client is not None:
         return await _forward_get(client, "/api/remote/node-config")
-    from services import config_store
     result: dict[str, str] = {}
     for key in sorted(_NODE_CONFIG_KEYS):
-        val = (config_store.read(key) or "").strip()
-        if key == CONTROL_API_KEY_KEY and val:
+        val = (ConfigManager.get_instance().get(key) or "").strip()
+        if key == ConfigManager.Keys.CONTROL_API_KEY and val:
             val = val[:6]  # 脱敏
         result[key] = val
     return result
@@ -182,9 +171,8 @@ async def put_node_config(req: NodeConfigUpdate, node: str = Query(default="loca
     client = _forward_or_local(node)
     if client is not None:
         return await _forward_call(client.put_node_config, req.configs)
-    from services import config_store
-    config_store.write({k: v.strip() for k, v in req.configs.items()})
-    changed_binding = CONTROL_API_KEY_KEY in req.configs
+    ConfigManager.get_instance().set({k: v.strip() for k, v in req.configs.items()})
+    changed_binding = ConfigManager.Keys.CONTROL_API_KEY in req.configs
     return {"ok": True, "reboot_required": changed_binding,
             "hint": "CONTROL_API_KEY 变更后需重启控制台生效（绑定地址与鉴权）" if changed_binding else ""}
 

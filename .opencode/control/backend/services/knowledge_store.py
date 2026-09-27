@@ -22,10 +22,10 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from config import DATA_DIR
+from services.config_manager import ConfigManager
 from services.knowledge_db import MemoryDB
 
-DEFAULT_DB_PATH = Path(DATA_DIR) / "db" / "knowledge" / "knowledge.db"
+DEFAULT_DB_PATH = Path(ConfigManager.get_instance().data_dir) / "db" / "knowledge" / "knowledge.db"
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 import shutil
 
-from services.detect_py_deps import PYTHON_PACKAGES, one_click_installable
+from services.detect_py_deps import PyDepsDetector
 from routes.deps import invalidate_deps_snapshot
 
 
@@ -57,7 +57,7 @@ async def install_package(req: InstallRequest) -> dict:
     安全：包名必须在白名单内。
     """
     pkg = req.package.strip()
-    if pkg not in one_click_installable():
+    if pkg not in PyDepsDetector.one_click_installable():
         raise HTTPException(
             status_code=400,
             detail=f"包 {pkg} 不在白名单内（唯一清单 detect_py_deps.PYTHON_PACKAGES）。控制台只允许安装预定义的包。"

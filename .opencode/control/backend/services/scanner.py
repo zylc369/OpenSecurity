@@ -18,7 +18,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 
-from services import config_store, detect_py_deps, detect_tools, docker_manager
+from services import detect_py_deps, detect_tools, docker_manager
+from services.config_manager import ConfigManager
 from services.detect_py_deps import PyPkgStatus
 from services.detect_tools import ToolStatus
 from services.docker_manager import DockerGlobal
@@ -29,7 +30,7 @@ from services.model_assets import ModelAssetStatus
 class GlobalResources:
     """全局资源（docker + 配置 + Python 包 + 模型）。"""
     docker: DockerGlobal = field(default_factory=DockerGlobal.unavailable)
-    required_configs: list = field(default_factory=list)   # config_store.required_status 返回
+    required_configs: list = field(default_factory=list)   # ConfigManager.get_instance().required_status 返回
     python_packages: list[PyPkgStatus] = field(default_factory=list)
     models: list[ModelAssetStatus] = field(default_factory=list)
 
@@ -43,9 +44,32 @@ class ScanResult:
 
 
 class Scanner:
+    """（全局单例，get_instance() 获取。）"""
+
+    _instance: "Scanner | None" = None
+    _instance_lock = __import__("threading").Lock()
+
+    def __new__(cls) -> "Scanner":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    inst = super().__new__(cls)
+                    inst._init_once()
+                    cls._instance = inst
+        return cls._instance
+
+    @classmethod
+    def get_instance(cls) -> "Scanner":
+        return cls()
+
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        with cls._instance_lock:
+            cls._instance = None
+
     """扫描协调器（单例）。"""
 
-    def __init__(self):
+    def _init_once(self):
         self._cache: ScanResult | None = None
         self._cache_time: float = 0
         self._scanning: bool = False
@@ -83,10 +107,10 @@ class Scanner:
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=8) as executor:
             # 并行扫描所有 agent + 全局
-            agent_task = loop.run_in_executor(executor, detect_tools.scan_all)
-            docker_task = loop.run_in_executor(executor, docker_manager.scan_global)
-            config_task = loop.run_in_executor(executor, config_store.required_status)
-            pydeps_task = loop.run_in_executor(executor, detect_py_deps.scan)
+            agent_task = loop.run_in_executor(executor, detect_tools.ToolsScanner.get_instance().scan_all)
+            docker_task = loop.run_in_executor(executor, docker_manager.DockerManager.scan_global)
+            config_task = loop.run_in_executor(executor, ConfigManager.get_instance().required_status)
+            pydeps_task = loop.run_in_executor(executor, lambda: detect_py_deps.PyDepsDetector.get_instance().scan())
 
             agents = await agent_task
             docker = await docker_task
@@ -109,11 +133,3 @@ class Scanner:
         from services.model_assets import ModelAssetRegistry
         return ModelAssetRegistry.get_instance().get_model_assets()
 
-
-# 模块级单例
-scanner = Scanner()
-
-
-def get_scanner() -> Scanner:
-    """获取扫描器单例。"""
-    return scanner
