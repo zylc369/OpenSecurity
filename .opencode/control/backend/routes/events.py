@@ -62,7 +62,9 @@ class EpisodeContextIn(BaseModel):
 class EntitySearchIn(BaseModel):
     query: str
     group_id: str
-    node_labels: list[str]
+    # 必填 + min_length=1: 无效输入显式 422 拒绝（与 MCP 层契约一致）。
+    # 空列表无过滤语义（曾混入非法 Cypher 'n:' → 空 error 结果）
+    node_labels: list[str] = Field(min_length=1)
     min_mentions: int = Field(default=0, ge=0)
     edge_types: list[str] | None = None
     max_results: int = 25

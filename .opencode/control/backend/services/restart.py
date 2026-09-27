@@ -5,9 +5,8 @@
 
 POSIX 方案（延迟 1.5s 后 os.execv）：
   - 同 PID、同进程组——plugin 侧零感知（IPC/socket 连续）
-  - execv 继承当前 os.environ：运行期 load_ai_env 的 setdefault 已把启动期旧值
-    固化，若不在 exec 前按 .ai_env 刷新，改配置后重启不生效
-    （2026/9/22 实测：DEEPSEEK_MODEL 改文件后重启仍是旧模型）
+  - 配置生效无需 env 刷新: .ai_env 键（source=ai_env）由新进程经
+    ConfigManager 直接读文件，env 同名值不参与读取
   - socket fd 因 CLOEXEC 在 exec 瞬间关闭 → TCP 短暂释放 → 新实例重绑
   - 关键陷阱：exec 不改变 PID，若不删 IPC socket 文件，新实例的
     残留自愈（connect 失败 → unlink）虽然兜得住，但显式清理更干净
@@ -73,16 +72,6 @@ class ConsoleRestarter:
         self._lock = threading.Lock()
         self._scheduled = False
 
-    @staticmethod
-    def _refresh_env_from_ai_env() -> None:
-        """重启前把 .ai_env 的当前值刷新进 os.environ（覆盖启动期旧值）。
-
-        execv / Windows helper 均继承当前进程环境——不刷新则改 .ai_env 后
-        重启不生效。读取收口在 ConfigManager（.ai_env 唯一读写方）。
-        """
-        for key, value in ConfigManager.get_instance().get_all().items():
-            os.environ[key] = value
-
     def schedule(self) -> bool:
         """调度延迟重启。返回 False = 已有重启在途（重复调用）。"""
         with self._lock:
@@ -94,11 +83,11 @@ class ConsoleRestarter:
         return True
 
     def perform(self) -> None:
-        """执行重启（单独成方法：单测 monkeypatch 本方法验证调度链路）。"""
-        try:
-            self._refresh_env_from_ai_env()
-        except Exception as e:  # 刷新失败不能阻断重启（按旧环境继续）
-            logger.warning("重启前 .ai_env 刷新失败: %s", e)
+        """执行重启（单独成方法：单测 monkeypatch 本方法验证调度链路）。
+
+        无需刷新 env: .ai_env 键（source=ai_env）由新进程经 ConfigManager
+        直接读文件，env 同名值不参与读取。
+        """
         if not ConfigManager.get_instance().is_windows:
             try:
                 ConfigManager.get_instance().ipc_unix_socket_path().unlink(missing_ok=True)

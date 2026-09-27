@@ -690,9 +690,55 @@ def test_e2e_config_meta():
     for key in ("DEEPSEEK_API_KEY", "IDA_PRO_HOME", "DEEPSEEK_MODEL"):
         assert_true(key in data, f"meta 缺 {key}")
         field = data[key]
-        for prop in ("label", "type", "required", "default_value", "hidden"):
+        for prop in ("label", "type", "required", "default_value", "hidden", "source"):
             assert_true(prop in field, f"{key}.{prop} 缺失")
     assert_true(data["DEEPSEEK_API_KEY"]["required"], "API_KEY 应 required")
+    assert_eq(data["DEEPSEEK_API_KEY"]["source"], "ai_env", "source 应标注 ai_env")
+
+
+@test("E2E: 全端点冒烟——所有 GET 路由非 5xx")
+def test_e2e_all_endpoints_smoke():
+    """NameError/ImportError 级回归的霸王防线: 枚举 app 全部 GET 路由逐个请求，
+    5xx = 路由体内引用了不存在的名称/模块（import 不炸调用才炸——曾致
+    /api/config/meta 500 且零测试覆盖）。400/404 合法（校验层正常工作）。
+    路径参数统一填 dummy。新端点自动纳入（无需逐个补用例）。"""
+    import re as _re
+    from server import create_app
+    cp = get_shared_server()
+    for _ in range(60):   # 就绪等待（503=模型加载中——同 E2E 段惯例）
+        if cp.client.get("http://localhost/health", timeout=3).status_code == 200:
+            break
+        time.sleep(1)
+    # 拦截 create_app 的 vite 拉起（真 .ai_env dev=1 时会同步 spawn detached
+    # vite 进程，超越测试生命周期——"仅取路由清单"必须无此副作用）
+    import services.frontend_port as _fp
+    _orig_vite = _fp.FrontendPortRegistry.ensure_vite_dev
+    _fp.FrontendPortRegistry.ensure_vite_dev = lambda self: None  # type: ignore[method-assign]
+    try:
+        app = create_app()   # 测试进程内构建——仅取路由清单（vite 已拦截）
+        # 展开挂载结构: 业务路由以 _IncludedRouter 包装（original_router 持真实清单）
+        all_routes = []
+        for r in app.routes:
+            if type(r).__name__ == "_IncludedRouter":
+                all_routes.extend(r.original_router.routes)
+            else:
+                all_routes.append(r)
+        checked = 0
+        for route in all_routes:
+            methods = getattr(route, "methods", None) or set()
+            if "GET" not in methods:
+                continue
+            path = getattr(route, "path", "")
+            if not path:
+                continue
+            real_path = _re.sub(r"\{[^}]+\}", "SMOKE_DUMMY", path)
+            r = cp.client.get(f"http://localhost{real_path}", timeout=30)
+            assert_true(r.status_code < 500,
+                        f"GET {real_path} → {r.status_code}: {r.text[:120]}")
+            checked += 1
+        assert_true(checked >= 20, f"应枚举到足够端点（现网 25+），实际 {checked}")
+    finally:
+        _fp.FrontendPortRegistry.ensure_vite_dev = _orig_vite  # type: ignore[method-assign]
 
 
 @test("E2E: GET /api/scan 全量扫描")
@@ -1818,32 +1864,95 @@ def test_e2e_scan_cache():
     assert_true(dur2 < dur1, f"缓存应更快：first={dur1:.2f}s cached={dur2:.2f}s")
 
 
-@test("config.is_dev_mode: 环境变量优先 + 默认 False")
+@test("config.is_dev_mode: .ai_env 权威 + env 仅兜底 + 默认 False")
 def test_dev_mode_default():
-    # is_dev_mode 优先读环境变量 CONTROL_FRONTEND_DEV（高于 .ai_env）——
-    # 测试通过环境变量注入，不落地修改真实 .ai_env（防 kill -9 时无法还原）。
+    # source=ai_env 语义: .ai_env 定义了 CONTROL_FRONTEND_DEV → 文件是权威
+    # （env 同名值不参与）; 文件未定义 → env 兜底（CI 注入通道）。
+    # 沙箱: 临时 OPENCODE_ROOT + 自写 .ai_env（不碰生产文件）。
     import os as _os
+    import tempfile
     from services.config_manager import ConfigManager
 
-    saved = _os.environ.get("CONTROL_FRONTEND_DEV")
+    saved_env = _os.environ.get("CONTROL_FRONTEND_DEV")
+    saved_root = _os.environ.get("OPENCODE_ROOT")
     try:
-        _os.environ["CONTROL_FRONTEND_DEV"] = "0"
-        ConfigManager._reset_for_tests()
-        assert_false(ConfigManager.get_instance().is_dev_mode, "env=0 应 False")
-        _os.environ["CONTROL_FRONTEND_DEV"] = "1"
-        ConfigManager._reset_for_tests()
-        assert_true(ConfigManager.get_instance().is_dev_mode, "env=1 应 True")
-        _os.environ["CONTROL_FRONTEND_DEV"] = "true"
-        ConfigManager._reset_for_tests()
-        assert_true(ConfigManager.get_instance().is_dev_mode, "env=true 应 True")
+        with tempfile.TemporaryDirectory() as td:
+            fake_env = Path(td) / ".ai_env"
+            _os.environ["OPENCODE_ROOT"] = td
+            # 场景 1: 文件定义 1，env 同名 0 → 文件权威（env 不参与）
+            fake_env.write_text("CONTROL_FRONTEND_DEV=1\n", encoding="utf-8")
+            _os.environ["CONTROL_FRONTEND_DEV"] = "0"
+            ConfigManager._reset_for_tests()
+            assert_true(ConfigManager.get_instance().is_dev_mode,
+                        "文件=1 + env=0 → 应 True（.ai_env 权威）")
+            # 场景 2: 文件定义 0，env 同名 1 → 文件权威
+            fake_env.write_text("CONTROL_FRONTEND_DEV=0\n", encoding="utf-8")
+            _os.environ["CONTROL_FRONTEND_DEV"] = "1"
+            ConfigManager._reset_for_tests()
+            assert_false(ConfigManager.get_instance().is_dev_mode,
+                         "文件=0 + env=1 → 应 False（env 不压制文件）")
+            # 场景 3: 文件未定义 → env 兜底生效
+            fake_env.unlink()
+            _os.environ["CONTROL_FRONTEND_DEV"] = "true"
+            ConfigManager._reset_for_tests()
+            assert_true(ConfigManager.get_instance().is_dev_mode, "无文件 + env=true → True（兜底）")
+            # 场景 4: 两者皆无 → 默认 False
+            _os.environ.pop("CONTROL_FRONTEND_DEV", None)
+            ConfigManager._reset_for_tests()
+            assert_false(ConfigManager.get_instance().is_dev_mode, "无文件无 env → 默认 False")
     finally:
-        if saved is None:
+        if saved_env is None:
             _os.environ.pop("CONTROL_FRONTEND_DEV", None)
         else:
-            _os.environ["CONTROL_FRONTEND_DEV"] = saved
+            _os.environ["CONTROL_FRONTEND_DEV"] = saved_env
+        if saved_root is None:
+            _os.environ.pop("OPENCODE_ROOT", None)
+        else:
+            _os.environ["OPENCODE_ROOT"] = saved_root
+        ConfigManager._reset_for_tests()
 
 
-# ============ 运行所有测试 ============
+@test("config.is_dev_mode 消费行为: 值 → create_app 拉起 vite 分支")
+def test_dev_mode_consumer_vite():
+    """配置值测试 ≠ 消费行为测试: 锚定'配置值 → 消费分支'完整链路——
+    曾因把 ConfigManager 类当谓词（构造恒真）致生产每次启动都 spawn vite。
+    拦截点在 FrontendPortRegistry.ensure_vite_dev（不真 spawn 进程）。"""
+    import os as _os
+    import tempfile
+    import services.config_manager as _cm
+    import services.frontend_port as _fp
+
+    called = []
+    orig = _fp.FrontendPortRegistry.ensure_vite_dev
+    _fp.FrontendPortRegistry.ensure_vite_dev = lambda self: called.append(1)  # type: ignore[method-assign]
+    saved_root = _os.environ.get("OPENCODE_ROOT")
+    saved_dev = _os.environ.pop("CONTROL_FRONTEND_DEV", None)
+    try:
+        from server import create_app
+        with tempfile.TemporaryDirectory() as td:
+            env_file = Path(td) / ".ai_env"
+            _os.environ["OPENCODE_ROOT"] = td
+            # dev=0 → 不拉 vite
+            env_file.write_text("CONTROL_FRONTEND_DEV=0\n", encoding="utf-8")
+            _cm.ConfigManager._reset_for_tests()
+            create_app()
+            assert_true(len(called) == 0, f"dev=0 时 create_app 不得拉 vite（实际调用 {len(called)} 次）")
+            # 对照: dev=1 → 拉起
+            env_file.write_text("CONTROL_FRONTEND_DEV=1\n", encoding="utf-8")
+            _cm.ConfigManager._reset_for_tests()
+            called.clear()
+            create_app()
+            assert_true(len(called) == 1, f"dev=1 时 create_app 应拉 vite（实际调用 {len(called)} 次）")
+    finally:
+        _fp.FrontendPortRegistry.ensure_vite_dev = orig  # type: ignore[method-assign]
+        if saved_root is None:
+            _os.environ.pop("OPENCODE_ROOT", None)
+        else:
+            _os.environ["OPENCODE_ROOT"] = saved_root
+        if saved_dev is not None:
+            _os.environ["CONTROL_FRONTEND_DEV"] = saved_dev
+        _cm.ConfigManager._reset_for_tests()
+
 
 def main():
     print("=" * 60)
@@ -2071,6 +2180,94 @@ def test_model_loader_architecture_guard():
                  for i, line in enumerate(p.read_text().splitlines())
                  if line.strip().startswith("def model")]
     assert_true(not prop_hits, f"不得定义 .model property（裸引用出口）: {prop_hits}")
+
+
+@test("架构守护: staticmethod-self + 路由裸名——运行时才炸的名称引用静态防线")
+def test_contract_scan_name_references():
+    """NameError 类缺陷（staticmethod 引 self / 路由体内引用不存在的模块级
+    常量）import 不炸、调用才炸——调用路径没被测试覆盖就是盲区。AST 全量
+    扫描封死两类形态（曾致降级预热必炸与配置页 500 两类生产故障）。"""
+    import ast
+    from pathlib import Path
+    backend = Path(__file__).resolve().parents[1]
+    problems = []
+
+    # 规则 1: @staticmethod 体内引用 self
+    # 作用域规则: 嵌套函数/Lambda 参数含 self → 该子树合法（self 指参数）;
+    # 参数无 self → 体内 self 引用 = 闭包引用外层（不存在）→ 违规
+    def _iter_self_refs(fn) -> list:
+        refs = []
+
+        def _visit(n):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                if any(getattr(a, "arg", None) == "self" for a in n.args.args):
+                    return  # 嵌套参数含 self → 子树合法
+            if isinstance(n, ast.Name) and n.id == "self":
+                refs.append(n)
+                return
+            for child in ast.iter_child_nodes(n):
+                _visit(child)
+
+        for stmt in fn.body:
+            _visit(stmt)
+        return refs
+
+    for p in sorted((backend / "services").glob("*.py")):
+        tree = ast.parse(p.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and any(
+                    isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list):
+                for ref in _iter_self_refs(node):
+                    problems.append(f"{p.name}:{ref.lineno} staticmethod {node.name} 引用 self")
+
+    # 规则 2: 路由模块函数体内的大写裸名必须在模块顶层或函数局部有绑定
+    for p in sorted((backend / "routes").glob("*.py")):
+        tree = ast.parse(p.read_text())
+        module_bound = set()
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for a in node.names:
+                    module_bound.add((a.asname or a.name).split(".")[0])
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        module_bound.add(t.id)
+            elif isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                module_bound.add(node.name)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # 局部绑定全形态收集（防合法代码误报）: 赋值/标注赋值/增量赋值/
+                # 海象/for 目标/comprehension 目标/except as/with as/参数名/函数内 import
+                local_bound = {a.arg for a in node.args.args}
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Assign):
+                        for t in sub.targets:
+                            if isinstance(t, ast.Name):
+                                local_bound.add(t.id)
+                    elif isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
+                        local_bound.add(sub.target.id)
+                    elif isinstance(sub, ast.AugAssign) and isinstance(sub.target, ast.Name):
+                        local_bound.add(sub.target.id)
+                    elif isinstance(sub, ast.NamedExpr) and isinstance(sub.target, ast.Name):
+                        local_bound.add(sub.target.id)
+                    elif isinstance(sub, (ast.For, ast.AsyncFor)) and isinstance(sub.target, ast.Name):
+                        local_bound.add(sub.target.id)
+                    elif isinstance(sub, ast.comprehension) and isinstance(sub.target, ast.Name):
+                        local_bound.add(sub.target.id)
+                    elif isinstance(sub, ast.ExceptHandler) and sub.name:
+                        local_bound.add(sub.name)
+                    elif isinstance(sub, ast.withitem) and isinstance(sub.optional_vars, ast.Name):
+                        local_bound.add(sub.optional_vars.id)
+                    elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                        for a in sub.names:
+                            local_bound.add((a.asname or a.name).split(".")[0])
+                for sub in ast.walk(node):
+                    if (isinstance(sub, ast.Name) and sub.id.isupper()
+                            and isinstance(sub.ctx, ast.Load)
+                            and sub.id not in module_bound and sub.id not in local_bound):
+                        problems.append(f"{p.name}:{sub.lineno} 大写裸名 {sub.id} 无定义（模块级/局部均未绑定）")
+
+    assert_true(not problems, f"名称引用契约违规 {len(problems)} 处:\n" + "\n".join(problems[:10]))
 
 
 @test("e2e 冒烟: 真模型三路并发 embed×memory×graphiti-embedder（OPENSECURITY_E2E_SMOKE=1 启用，零污染）")

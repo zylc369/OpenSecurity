@@ -85,6 +85,14 @@ def post(path: str, body: dict, timeout: int = 30) -> dict:
     return r.json()
 
 
+def post_raw(path: str, body: dict, timeout: int = 30) -> tuple[int, dict]:
+    """返回 (状态码, 响应体)——契约测试必须看状态码（曾把 422 误读为空结果）。"""
+    c = _get_client()
+    c.timeout = timeout
+    r = c.post(path, json=body)
+    return r.status_code, (r.json() if r.headers.get("content-type", "").startswith("application/json") else {})
+
+
 def poll(fn, timeout: float, first_interval: float = 2.0, max_interval: float = 8.0,
          desc: str = "条件") -> object:
     """密集轮询提前退出：fn() 真值即返回；超时抛 AssertionError。
@@ -235,6 +243,13 @@ def test_events_roundtrip():
     tools = [n["name"] for n in d["nodes"]]
     assert_true(any("frida" in n.lower() for n in tools), f"无 frida 实体: {tools}")
     center = next(n for n in d["nodes"] if "frida" in n["name"].lower())
+
+    # node_labels 契约回归锚点: 必填 + min_length=1——缺失/空列表必须显式
+    # 422 拒绝（无效输入不得静默返回空结果; 曾被验证脚本把 422 误读为"空"）
+    d_rej = post_raw("/api/events/entity-search", {"query": "frida", "group_id": gid})
+    assert_true(d_rej[0] == 422, f"缺 node_labels 应 422 拒绝，实际 {d_rej[0]}")
+    d_empty = post_raw("/api/events/entity-search", {"query": "frida", "group_id": gid, "node_labels": []})
+    assert_true(d_empty[0] == 422, f"空 node_labels 应 422 拒绝，实际 {d_empty[0]}")
 
     # BFS（bug1 修复的回归锚点：origin 参数 + 真边）
     d = mcp_shell_tool("events", "entity_relationships_search", {

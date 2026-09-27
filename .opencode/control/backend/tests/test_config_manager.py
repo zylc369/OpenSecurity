@@ -96,11 +96,13 @@ def test_bootstrap_props():
     assert_eq(cm.opencode_root, str(_SANDBOX))
     assert_true(isinstance(cm.is_windows, bool))
     assert_true(cm.ipc_addr().endswith(cm.Protocol.IPC_UNIX_SOCKET_NAME) or cm.is_windows)
-    # env 优先于 .ai_env（防 kill -9 污染开发机开关）
+    # env 兜底语义: .ai_env 未定义该键时 env 注入生效（CI/无文件环境通道;
+    # 沙箱无 .ai_env → 本断言走兜底路径。文件定义时文件权威的完整语义
+    # 见 test_control 的 test_dev_mode_default 四场景）
     os.environ[cm.Bootstrap.FRONTEND_DEV_ENV] = "1"
     ConfigManager._reset_for_tests()
     cm2 = ConfigManager.get_instance()
-    assert_true(cm2.is_dev_mode, "env 优先")
+    assert_true(cm2.is_dev_mode, "env 兜底生效")
     del os.environ[cm.Bootstrap.FRONTEND_DEV_ENV]
 
 

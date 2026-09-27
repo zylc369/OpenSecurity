@@ -27,7 +27,7 @@ def _install_command(pip_name: str) -> list[str] | None:
     conda: conda install -p <venv> -y <conda_name>（venv 由 conda 创建，PATH 上有 conda）
     未知包名返回 None（白名单二次校验兜底）。
     """
-    entry = next((p for p in PYTHON_PACKAGES if p.pip_name == pip_name), None)
+    entry = next((p for p in PyDepsDetector.PYTHON_PACKAGES if p.pip_name == pip_name), None)
     if entry is None:
         return None
     if entry.installer == "conda":

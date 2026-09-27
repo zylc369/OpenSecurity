@@ -102,3 +102,39 @@
 - 整改: 数据/生命周期路径 7 处补 warning（坏库重建/graphiti close/搜索重试/embedder·reranker 释放失败/快照预热/relay 回落）; 辅助采集/降级默认 10 处补 debug（close 类/回调/状态采集/安全默认）; routes/deps.py 补 logger（已有）、routes/proxy.py 补 import logging + logger（L85 函数内局部 import 骗过存在性检查的坑）
 - 合法静默保留: queue.Empty/进程不存在/探测超时（预期语义）、as e 进响应体（有去向）、CancelledError re-raise（生命周期信号非错误）
 - 验证: test_control 82/82（E2E 子进程启动曾因 proxy.py NameError 挂 22 项——修复后全绿）; 生产控制台重启
+
+## 追加（2026-09-27 晚八）：配置来源黑名单制（用户方案）——.ai_env 键 env 不再参与读取
+方案（用户裁决）: 所有 .ai_env 键归 .ai_env 管——ConfigField 新增 source 字段（默认 "ai_env"）标注来源; .ai_env 定义了某键 → 文件权威（env 同名值不参与），未定义 → env 兜底（CI 注入通道）
+实施:
+- ConfigField +source 字段; _read_dev_mode_once 语义反转（.ai_env 优先）; config_meta() 输出带 source（前端可选消费）
+- _refresh_env_from_ai_env 删除（env 优先语义废除后失去存在理由）——业务键不再被主动刷进 os.environ，子进程/docker env 泄露面归零（API keys 不再进任意子进程）
+- 测试: test_dev_mode_default 四场景沙箱化（临时 OPENCODE_ROOT + 自写 .ai_env: 文件1+env0/文件0+env1/无文件env兜底/双无默认False）; meta 测试加 source 断言
+- 事故与恢复: 批量 replace 误删顶层 main()（index 锚点匹配到 async def main 子串 + 旧结构 main 在 is_dev_mode 之后）——从 HEAD 提取恢复（main 今日未改过 = HEAD 版正确）
+验证: test_control 82/82; config_manager 5/5; e2e_remote 三模型全链路 ✓; 生产重启（.ai_env dev=1 → vite 单实例，文件权威语义行为不变）; env 泄露检查: 控制台 env 业务键仅来自上游 shell 自带（不再主动扩散）
+
+## 追加（2026-09-27 晚九）：测试盲区防御四件套实施 + 2 个新生产 bug
+按复盘六大模式（A patch 作弊/B 运行时名称/C 端点枚举/D 配置消费/E 生成物/F 矩阵/G 循环逐段）落地:
+1. 契约扫描用例（2 AST 规则: staticmethod-体内-self 手动递归作用域感知扫描; 路由大写裸名模块级+局部双绑定检查）——**上线即抓 bug #9**: routes/install.py:30 裸名 PYTHON_PACKAGES（实为 PyDepsDetector 类属性）→ 安装端点 500
+2. 全端点 GET 冒烟（_IncludedRouter.original_router 展开枚举 + 路径参数 dummy 化 + 就绪等待）——**上线即抓 bug #10**: process_registry 4 处裸名（_ps_proc_info/_footprint_mb/_pid_on_port 类内静态互调漏类前缀）→ /api/processes（前端进程页数据源）一直 500
+3. dev 消费行为断言（dev=0/1 → create_app 的 ensure_vite_dev 调用分支，拦截协作者不真 spawn）
+4. 知识沉淀: $AGENT_DIR/knowledge-base/testing-blind-spot-patterns.md（七模式 场景/识别/防御 三段式 + 防御资产索引 + 排查指引）
+防作弊闭环: 三项均完成注入-必红-还原验证（裸名注入/NameError 端点注入/恒真谓词注入）
+验证: test_control 85/85（82→85）; config_manager/api_guard/remote_link 全绿; 生产重启（/api/processes 修复生效）
+
+## 追加（2026-09-27 晚十）：review 修复 6 项（四件套复审）
+1. [中] 冒烟测试 create_app 会真拉 vite（dev=1 时 spawn detached 进程）→ patch ensure_vite_dev 拦截（try/finally 还原）
+2. [低] config_meta fallback 分支（用户自加键）补 source 字段（前端统一读取防 undefined）
+3. [低] test_config_manager 陈旧注释（"env 优先"已废）→ 更新为 env 兜底语义（指向 test_dev_mode_default 完整覆盖）
+4. [低] 两新测试 OPENCODE_ROOT 为 None 时不还原（临时目录泄漏进 os.environ）→ None 时 pop（与 CONTROL_FRONTEND_DEV 一致）
+5. [备注] AST 扫描器 local_bound 扩展 6 种绑定形态（AnnAssign/AugAssign/海象/with as/函数内 import/参数名）——防未来合法代码误报
+6. [备注] restart.py 墓碑注释清理（"曾有的...已删"历史叙述删除，保留现行"无需刷新"机制解释）
+验证: test_control 85/85; config_manager 5/5; 全量跑 vite 零新增; 生产重启（meta source 全覆盖 ✓）
+
+## 追加（2026-09-27 晚十一→更正）：自检发现的"bug #11"系误诊——原接口契约本就正确
+- 原判断（已废弃）: "graphiti 无 label 过滤返回空" → 用 default_factory=["Entity"] 掩盖
+- 更正真相: 旧契约 node_labels 必填——不传/null 时 pydantic 本就显式 422 拒绝; "搜到空"是自检脚本只解析 nodes 字段把 422 误读为空结果（未查状态码/error 字段）; [] 空列表经非法 Cypher 'n:' → 异常 → empty_result。直调对照证明 store(node_labels=None) 本就命中——graphiti 无过滤语义正确
+- 最终修复: 回滚 default_factory → 必填 + min_length=1（空列表显式 422）; e2e_real 锚点改为"缺失/空列表必须 422"（新增 post_raw 助手——契约测试必须看状态码）
+- 三重教训入库: ① 验证脚本必须检查 HTTP 状态码与 error 字段 ② 归因前必须做直调对照（API 层症状≠库层原因）③ 不得用魔法默认值"修复"正确的必填契约
+- 重启教训（同日三次假重启）: 运维走正式通道（POST /api/system/restart 的 execv 原子语义天然无竞态）; 任何重启后必须验证 /health.pid/boot_token
+- env 污染链闭合: security-analysis.ts:1276 有意将 .ai_env 全键（除 CONTROL_*）注入 agent shell.env（设计功能——agent bash 需要 API key）; 控制台污染仅发生在"用带注入键的 shell 启动控制台"场景（自检时开发者 nohup 所致）; 标准链路（plugin spawn）无业务键; 本轮以 env -i 最小集重启验证零残留
+- 自检其余结论: 9 端点全 200; 启动零错误; 心跳注册正常; embed/rerank/events 写链/实体提取全通; vite 单实例; env 业务键来自上游 opencode 进程继承（机制上无主动扩散; 可选加固: TS spawn 白名单化——待决策）

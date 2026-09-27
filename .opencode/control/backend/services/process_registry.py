@@ -103,7 +103,7 @@ class ProcessRegistryUtil:
             p = psutil.Process(pid)
             mem = round(p.memory_info().rss / 1048576, 1)
             cmd = " ".join(p.cmdline())[:200]
-            return mem, cmd, _footprint_mb(pid)
+            return mem, cmd, ProcessRegistryUtil._footprint_mb(pid)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return None, "", None
 
@@ -114,7 +114,7 @@ class ProcessRegistryUtil:
 
         # 1. 控制台主进程
         own = os.getpid()
-        mem, cmd, fp = _ps_proc_info(own)
+        mem, cmd, fp = ProcessRegistryUtil._ps_proc_info(own)
         procs.append(ProcessInfo(
             key="console",
             name="控制台后端",
@@ -129,9 +129,9 @@ class ProcessRegistryUtil:
 
         # 3. vite dev server（独立进程组 spawn 时未记录 PID，按监听端口反查）
         port = FrontendPortRegistry.get_instance().vite_port()
-        vpid = _pid_on_port(port) if port else None
+        vpid = ProcessRegistryUtil._pid_on_port(port) if port else None
         if vpid is not None:
-            vmem, vcmd, vfp = _ps_proc_info(vpid)
+            vmem, vcmd, vfp = ProcessRegistryUtil._ps_proc_info(vpid)
             vstatus = "running"
         else:
             vmem, vcmd, vfp, vstatus = None, "", None, ("running" if port else "stopped")

@@ -64,8 +64,8 @@ class ConfigManager:
         """进程引导参数（唯一 env 读取点）。
 
         DATA_DIR/OPENCODE_ROOT/CONTROL_TCP_PORT 由 Plugin spawn 或测试进程注入;
-        CONTROL_FRONTEND_DEV 的 env 优先级用于测试/CI 不落地改 .ai_env
-        （kill -9 时无法还原文件，会永久污染开发机开关）。
+        CONTROL_FRONTEND_DEV 仅在 .ai_env 未定义该键时读 env（CI/无文件环境
+        注入通道——文件一旦定义即为权威，env 同名值不参与）。
         """
 
         DATA_DIR_ENV = "DATA_DIR"
@@ -182,6 +182,8 @@ class ConfigManager:
         validator: Callable[[str], tuple[bool, str]] | None = None
         default_value: str = ""                 # 不配置时后端默认值（回传前端）
         hidden: bool = False                    # 配置页隐藏（专属 TAB 管理）
+        source: str = "ai_env"                  # 配置来源: ai_env=文件权威
+                                                # （env 同名值不参与读取）
 
     # ═══════════════ 实例状态与构造 ═══════════════
 
@@ -192,17 +194,17 @@ class ConfigManager:
         self._dev_mode = self._read_dev_mode_once()
 
     def _read_dev_mode_once(self) -> bool:
-        """启动期一次性读取（env 优先于 .ai_env——见 Bootstrap 注释）。"""
+        """启动期一次性读取（.ai_env 优先——source=ai_env 键的文件是权威，
+        env 同名值不参与; 文件未定义时 env 兜底——CI/无 .ai_env 环境注入通道）。"""
+        path = self.ai_env_path
+        if path.exists():
+            key = self.Keys.CONTROL_FRONTEND_DEV
+            for line in path.read_text(errors="ignore").splitlines():
+                if line.strip().startswith(key + "="):
+                    return line.split("=", 1)[1].strip().lower() in ("1", "true")
         env_val = os.environ.get(self.Bootstrap.FRONTEND_DEV_ENV)
         if env_val is not None:
             return env_val.strip().lower() in ("1", "true")
-        path = self.ai_env_path
-        if not path.exists():
-            return False
-        key = self.Keys.CONTROL_FRONTEND_DEV
-        for line in path.read_text(errors="ignore").splitlines():
-            if line.strip().startswith(key + "="):
-                return line.split("=", 1)[1].strip().lower() in ("1", "true")
         return False
 
     # ═══════════════ 引导属性 ═══════════════
@@ -524,12 +526,13 @@ DEEPSEEK_API_KEY=
             meta[field.key] = {
                 "label": field.label, "type": field.type, "hint": field.hint,
                 "required": field.required, "default_value": field.default_value,
-                "hidden": field.hidden,
+                "hidden": field.hidden, "source": field.source,
             }
         for key in self.get_all():
             if key not in meta:
                 meta[key] = {"label": key, "type": "text", "hint": "",
-                             "required": False, "default_value": "", "hidden": False}
+                             "required": False, "default_value": "", "hidden": False,
+                             "source": "ai_env"}
         return meta
 
     @dataclass(frozen=True)

@@ -53,3 +53,4 @@ async def restart_console() -> dict:
         "scheduled": scheduled,
         "message": "重启已调度，新实例就绪前接口短暂不可用（模型重载需几十秒）",
     }
+
