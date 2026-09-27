@@ -16,7 +16,7 @@
 
 ### 改动 1: `web-analysis/knowledge-base/ssrf-advanced.md` §4 gopher 节
 
-- line 74 "gopher 协议四坑" 改为 "五坑"，追加第 ⑤ 坑:
+- line 74 "gopher 协议四坑" 改为 "五坑"，追加第 ⑤ 坑（后经二次评审增补第 ⑥ 坑至"六坑"，见 §6）:
   - **机制**: libcurl 发送 gopher selector 前对其做百分号解码——body 中的 `%XX`（3 字符）线上只占 1 字节。手工按编码前字符串计算 Content-Length → CL 虚大 → 服务端按 CL 永久等待 body
   - **症状**: SSRF 目标表现为"挂起"（fetcher 超时、0 字节、无响应头），与请求行/头无关、与 content 无关
   - **防护**: CL 按**解码后**字节数计算（`len(unquote_to_bytes(body))`——与 libcurl percent-decode 对齐，任意 `%XX` 含非 UTF-8 字节按单字节还原; 禁用 str 版 `unquote()`——非 UTF-8 字节替换成 U+FFFD 重编码 3 字节，CL 虚大）; 或 body 避开 `%` 字符（JSON body 经 `json.dumps` 产出不含 `%XX`，天然安全）; 或直接用 `$AGENT_DIR/scripts/web_helpers.py` 的 `build_gopher_url`（自动修正 CL 且对请求行/头 `%` 二次编码，坑结构性消除）
@@ -135,3 +135,6 @@
 3. **改名**: §2 改动 3 的"CTF 靶机定位"实施后改为"兄弟子域定位"（知识中性化）
 4. **断言集**: 临时脚本扩至 19 项（新增二进制 `%XX` CL 逐字节还原、`%25XX` 保留路径、头部 `%` 保留、重复 CL 去重、新旧公式差异证据）; 期间修掉断言计数器恒不加一的复制粘贴错误（模式 I 实例，已注入自检验证）
 5. **制度化**: testing-blind-spot-patterns.md 新增模式 H（不可见字节三联征 + git 考古纪律）与模式 I（自我声称子声称同构性）; evolve prompt 规则 1 `.md` 检查行追加字节扫描
+6. **测试转正**（用户决策，作废 §3.1 步骤 4 的"临时目录不进仓库"约束）: 断言集转正为 `web-analysis/scripts/test_web_helpers.py`，最终 25 项（含 T9 加固边界三项），`$PYTHON_CMD` 直接运行、exit code 语义正确。落位说明: 该目录此前无测试（仓库既有测试集中在 `control/backend/tests/`），agent scripts/ 内测试为新惯例——贴近被测模块、零测试框架依赖
+7. **CTF 中性化 as-built**（用户决策的范围扩展，超出 §2 原始改动面）: web-methodology.md §1.2"复杂题目→复杂目标"、§1.5 标题与导语通用化（admin bot/受害者会话/审批机器人; flag 降为数据实例）、§1.5.2 标题; nextjs-analysis.md §4 标题; bot-patterns.md L77"题目附件→目标附件"; agents/web-analysis.md L172/L181 索引同步。保留判定: L258 CTF-only 触发条件、L277 语境对照
+8. **二次评审增补**（task `ses_f1c6c83adffedBLXEL9BiODlgX`）: ①gopher 第六坑——libcurl ≥ 8.22.0 拒绝解码后含 CR/LF 的 selector（本地 curl 8.22.0 实证 rc=3 且不发起连接），新版 fetcher 上整条技法失效，本地验证须旧 curl 或裸 socket; selector 尾部固定追加 CRLF 的事实（本地实证 `b'HELLO\r\n'`）入 L68 与 docstring ②build_gopher_url 加固: 头块无空行终止直接 ValueError（原先静默产出挂起帧）、空 body 移除遗留 CL、畸形 `Content-Length :`（冒号前空格）归一而非追加第二个 ③模块 docstring 补 gopher 构造能力与测试指引
