@@ -653,7 +653,7 @@ def _main() -> int:
         return 0
 
     # scan
-    result = scan(agent=args.agent, python_exe=args.python)
+    result = PyDepsDetector.get_instance().scan(agent=args.agent, python_exe=args.python)
     if args.json:
         print(json.dumps({
             "agent": args.agent,

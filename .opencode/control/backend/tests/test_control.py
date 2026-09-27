@@ -677,6 +677,20 @@ def test_e2e_required_status():
     assert_true("DEEPSEEK_API_KEY" in data, "应有 DEEPSEEK_API_KEY 状态")
 
 
+@test("CLI 真链路: detect_py_deps scan（env-check 第一层消费链）")
+def test_cli_deps_scan_consumer():
+    """插件会话自举检查的真实消费链: venv python 跑 detect_py_deps.py scan
+    → exit 0。曾因 CLI 入口裸调用 NameError（HTTP 路由正常/CLI 必炸）被
+    fail-closed 误报为"依赖缺失"，拦截所有 agent 会话。"""
+    import subprocess
+    venv_py = Path(sys.executable)
+    r = subprocess.run(
+        [str(venv_py), str(Path(__file__).resolve().parents[1] / "services" / "detect_py_deps.py"), "scan"],
+        capture_output=True, text=True, timeout=120)
+    assert_eq(r.returncode, 0,
+              f"scan 应 exit 0（stderr 尾: {r.stderr[-200:] if r.stderr else '空'}）")
+
+
 @test("E2E: GET /api/config/meta 配置页元数据")
 def test_e2e_config_meta():
     """配置页渲染唯一数据源（曾因引用已删模块级常量 500——页面永久"加载中"，
@@ -2266,6 +2280,32 @@ def test_contract_scan_name_references():
                             and isinstance(sub.ctx, ast.Load)
                             and sub.id not in module_bound and sub.id not in local_bound):
                         problems.append(f"{p.name}:{sub.lineno} 大写裸名 {sub.id} 无定义（模块级/局部均未绑定）")
+
+    # 规则 3: CLI 入口函数（main/_main）体内的裸函数调用必须可解析
+    # （模块级 def / import 绑定 / 类静态方法调用之外的裸调用 = 运行时 NameError
+    # ——曾致 detect_py_deps scan CLI 入口必炸、被 env-check fail-closed 误报为缺依赖）
+    import builtins
+    _BUILTINS = set(dir(builtins))
+    for p in sorted((backend / "services").glob("*.py")):
+        src_text = p.read_text()
+        if "if __name__" not in src_text:
+            continue
+        tree = ast.parse(src_text)
+        # 模块级绑定: def/class/import（import 的 asname/name 均算）
+        bound = set()
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
+                bound.add(node.name)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for a in node.names:
+                    bound.add((a.asname or a.name).split(".")[0])
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name in ("main", "_main"):
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
+                        n = sub.func.id
+                        if n not in bound and n not in _BUILTINS:
+                            problems.append(f"{p.name}:{sub.lineno} CLI 入口裸调用 {n}() 未定义")
 
     assert_true(not problems, f"名称引用契约违规 {len(problems)} 处:\n" + "\n".join(problems[:10]))
 

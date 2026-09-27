@@ -138,3 +138,10 @@
 - 重启教训（同日三次假重启）: 运维走正式通道（POST /api/system/restart 的 execv 原子语义天然无竞态）; 任何重启后必须验证 /health.pid/boot_token
 - env 污染链闭合: security-analysis.ts:1276 有意将 .ai_env 全键（除 CONTROL_*）注入 agent shell.env（设计功能——agent bash 需要 API key）; 控制台污染仅发生在"用带注入键的 shell 启动控制台"场景（自检时开发者 nohup 所致）; 标准链路（plugin spawn）无业务键; 本轮以 env -i 最小集重启验证零残留
 - 自检其余结论: 9 端点全 200; 启动零错误; 心跳注册正常; embed/rerank/events 写链/实体提取全通; vite 单实例; env 业务键来自上游 opencode 进程继承（机制上无主动扩散; 可选加固: TS spawn 白名单化——待决策）
+
+## 追加（2026-09-27 晚十二）：bug #12——detect_py_deps CLI 入口裸调用（切换 agent 被自举检查拦截）
+- 现象: 用户切 web-analysis agent → env-check 第一层报"Python 必需依赖不完整"
+- 真相: 依赖完整——CLI 入口 `_main()` 调裸名 `scan`（OOP 收进 PyDepsDetector 类时漏改，同型第 12 个）→ NameError exit 1 → 插件 fail-closed 把链路故障当缺包拦截。自批次 F 起就坏，今天用户首次切 agent 才触发（HTTP 路由正常掩盖 CLI 入口——盲区模式 C 变体: 入口形态枚举缺 CLI）
+- 修复: `PyDepsDetector.get_instance().scan(...)`; 全项目 CLI 入口扫描（4 个 __main__ 文件）确认无其他真裸名（asdict/any 为扫描器漏查 import/内置的误报）
+- 双层防御: ① 契约扫描新增规则 3——CLI 入口函数（main/_main）裸函数调用必须可解析（含 import 绑定与内置收集）② 新增 CLI 真链路消费测试（venv python 跑 scan 断言 exit 0——env-check 第一层的真实消费链）
+- 验证: scan 62 包全 [+] exit 0; test_control 87/87（85→87）
