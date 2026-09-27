@@ -86,6 +86,8 @@ class ConfigManager:
         RESUME_ANALYSIS_ENABLED = "RESUME_ANALYSIS_ENABLED"
         JULIANG_TRADE_NO = "JULIANG_TRADE_NO"
         JULIANG_API_KEY = "JULIANG_API_KEY"
+        GITHUB_TOKEN = "GITHUB_TOKEN"
+        HF_ENDPOINT = "HF_ENDPOINT"
         # 远程模型卸载: 本地侧三键
         REMOTE_CONSOLE_URL = "REMOTE_CONSOLE_URL"
         REMOTE_CONSOLE_ENABLED = "REMOTE_CONSOLE_ENABLED"
@@ -310,6 +312,11 @@ DEEPSEEK_API_KEY=
 # events MCP 模型配置（可选，按需修改）
 # DEEPSEEK_MODEL=deepseek-flash      # 核心提取模型（需要更强提取质量改成 deepseek-v4-pro）
 # DEEPSEEK_SMALL_MODEL=deepseek-flash # 时间戳推断模型
+
+# GitHub API 令牌（可选，外部工具下载加速防 60 次/小时配额耗尽；未配置时兜底 gh auth token）
+# GITHUB_TOKEN=
+# HuggingFace 端点（可选，国内直连不稳时配置镜像，如 https://hf-mirror.com）
+# HF_ENDPOINT=
 """
 
     def ensure_template(self) -> bool:
@@ -442,6 +449,16 @@ DEEPSEEK_API_KEY=
             self.ConfigField(
                 key=k.JULIANG_API_KEY, label="代理IP供应商 API 秘钥", type="password",
                 hint="与订单号配套的 API Key（同页面获取）；两项都配置后 proxy MCP/代理池才可用",
+                required=False,
+            ),
+            self.ConfigField(
+                key=k.GITHUB_TOKEN, label="GitHub API 令牌", type="password",
+                hint="外部工具下载加速（防未认证 60 次/小时配额耗尽）；未配置时兜底 gh auth token",
+                required=False,
+            ),
+            self.ConfigField(
+                key=k.HF_ENDPOINT, label="HuggingFace 端点", type="text",
+                hint="国内直连不稳时配置镜像，如 https://hf-mirror.com",
                 required=False,
             ),
         ]

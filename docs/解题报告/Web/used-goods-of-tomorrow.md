@@ -13,11 +13,21 @@
 
 > 名词说明：**flag** 指比赛的最终目标字符串（本题格式为 `sun{...}`），拿到它就代表解出本题。**GraphQL** 是一种 API 查询语言：客户端用一条 JSON 请求（query / mutation）精确描述要读、要改什么数据，服务端按 schema（类型系统）执行。其中 **query** 是"读操作"，**mutation** 是"写操作"。**BFLA**（Broken Function Level Authorization，功能级授权缺失）指"接口本身存在，但没做权限检查，谁都能调"。
 
+## 目录
+
+- [一、这道题在做什么](#一这道题在做什么)
+- [二、攻击链总览](#二攻击链总览)
+- [三、完整复现](#三完整复现)
+- [四、复现脚本](#四复现脚本)
+- [五、防御建议](#五防御建议)
+- [六、总结](#六总结)
+- [附录：原始证据](#附录原始证据)
+
 ## 一、这道题在做什么
 
 题面：太空时代的二手市场 Tomorrow-Mart 与 FutureBank 合作，新用户注册送 500 credits；"谁会第一个成为百万富翁，买下 Founders' Vault 的地契？"
 
-站点是一个商店：主页列出 5 件商品，其中 Lot #4042「Founders' Vault Deed」售价 **1,000,000 credits**，其余商品 45～380 credits；新账号只有 **500 credits**。按正常玩法攒 1M 遥遥无期——而前端 `/static/app.js` 显示全部业务走 `POST /graphql`，认证用 `Authorization: Bearer <token>`。枚举 GraphQL schema 后目标就很清楚：`Receipt` 类型自带 `flag` 字段——**买下 Lot #4042 的收据里直接回 flag**。题目的实质是：绕过余额校验，以 0 代价成交。
+站点是一个商店：主页列出 5 件商品，其中 Lot #4042「Founders' Vault Deed」售价 **1,000,000 credits**，其余商品 45～380 credits；新账号只有 **500 credits**。按正常玩法攒 1M 遥遥无期，而前端 `/static/app.js` 显示全部业务走 `POST /graphql`，认证用 `Authorization: Bearer <token>`。枚举 GraphQL schema 后目标就很清楚：`Receipt` 类型自带 `flag` 字段，**买下 Lot #4042 的收据里直接回 flag**。题目的实质是：绕过余额校验，以 0 代价成交。
 
 ### 商品清单（`listings` 查询实测）
 
@@ -61,7 +71,7 @@ Receipt { success: true, pricePaid: 0, flag: "sun{1_l0v3_fr33_stuff}" }
 对应漏洞类型：
 
 1. **未授权功能级访问（BFLA）**：供应商终端诊断 mutation 未做认证，任何匿名用户可调；
-2. **敏感信息泄露**：诊断接口返回 master vendorKey——服务端"终端认证"的唯一凭证；
+2. **敏感信息泄露**：诊断接口返回 master vendorKey，即服务端"终端认证"的唯一凭证；
 3. **业务逻辑绕过**：内部 100% 折扣码可被任意顾客使用，0 元买下本应"百万富翁"才能购得的目标商品。
 
 ## 三、完整复现
@@ -87,9 +97,9 @@ curl -sk -X POST https://usedgoods.web.2026.sunshinectf.games/graphql \
 
 返回全部 query / mutation 名称与参数（接口清单见第一章表）。三个值得注意的类型：
 
-- `PromoCode { code, description, percentOff, appliesTo }`——`percentOff` 是可直接滥用的数值型折扣；
-- `VendorDiagnostics { terminalId, status, firmware, vendorKey, note }`——**直接把 vendorKey 放进返回类型**；
-- `Receipt { success, message, listingId, pricePaid, flag }`——**flag 就在购买收据里**。
+- `PromoCode { code, description, percentOff, appliesTo }`：其中 `percentOff` 是可直接滥用的数值型折扣；
+- `VendorDiagnostics { terminalId, status, firmware, vendorKey, note }`：**直接把 vendorKey 放进返回类型**；
+- `Receipt { success, message, listingId, pricePaid, flag }`：**flag 就在购买收据里**。
 
 ### 3.3 漏洞点①：诊断 mutation 未授权泄露 master vendorKey
 
@@ -113,7 +123,7 @@ mutation { vendorTerminalSync { terminalId status firmware vendorKey note } }
 要点：
 
 - 完全无认证，匿名可调（`terminalId` 省略/"1"/""三种调用都成功，均返回同一 master key）；
-- `note` 字段自述 **"Remember to disable this endpoint before public launch."**——开发者自己知道这是没关的调试入口；
+- `note` 字段自述 **"Remember to disable this endpoint before public launch."**：开发者自己知道这是没关的调试入口；
 - 泄露的 key 前缀 `VND-MASTER` 表明它不止能"认证某台终端"，而是主密钥。
 
 ### 3.4 漏洞点②：master key 拉取内部优惠码
@@ -133,7 +143,7 @@ query { promoCodes(vendorKey: "VND-MASTER-21d5f80206dffb6fa9ad5722") {
 | ATOMIC-25 | 25 | 1001 | Appliance clearance: 25% off the Atomic Toaster. |
 | **FOUNDERS-100** | **100** | **4042** | **Founders' comp — 100% off Lot #4042. Internal use only.** |
 
-反例对照：错误 vendorKey 被服务端正确拒绝——`"Vendor master key rejected. promoCodes is restricted to authenticated vendor terminals."`。说明 master key 是真特权凭证，不是"谁都能过"。
+反例对照：错误 vendorKey 被服务端正确拒绝：`"Vendor master key rejected. promoCodes is restricted to authenticated vendor terminals."`。说明 master key 是真特权凭证，不是"谁都能过"。
 
 ### 3.5 漏洞点③：内部 100% 优惠码 0 元购拿 flag
 
@@ -216,24 +226,32 @@ print("[+] FLAG =", order["flag"])
 
 ```
 [1] vendorKey = VND-MASTER-21d5f80206dffb6fa9ad5722 | Diagnostics nominal. Remember to disable this endpoint before public launch.
-[2] promo: {'code': 'SCOUT-10', 'percentOff': 10, 'appliesTo': None}
-[2] promo: {'code': 'ATOMIC-25', 'percentOff': 25, 'appliesTo': '1001'}
-[2] promo: {'code': 'FOUNDERS-100', 'percentOff': 100, 'appliesTo': '4042'}
+[2] promo: {'appliesTo': None, 'code': 'SCOUT-10', 'percentOff': 10}
+[2] promo: {'appliesTo': '1001', 'code': 'ATOMIC-25', 'percentOff': 25}
+[2] promo: {'appliesTo': '4042', 'code': 'FOUNDERS-100', 'percentOff': 100}
 [3] pricePaid = 0
 [+] FLAG = sun{1_l0v3_fr33_stuff}
 ```
 
 ## 五、防御建议
 
-1. **给所有"内部/调试/供应商"接口加认证与授权**：GraphQL 中逐字段（per-field）授权——`vendorTerminalSync` 应要求终端认证或直接下线（`note` 自己都写了 "disable this endpoint before public launch"）；
+1. **给所有"内部/调试/供应商"接口加认证与授权**：GraphQL 中逐字段（per-field）授权：`vendorTerminalSync` 应要求终端认证或直接下线（`note` 自己都写了 "disable this endpoint before public launch"）；
 2. **密钥不出域**：vendorKey 属于服务端凭证，不应出现在任何响应类型的字段里（`VendorDiagnostics.vendorKey` 字段本身就该删）；
 3. **对特权数据二次校验**：`promoCodes` 的返回应限定"该终端可用的公开码"，内部码（`percentOff` ≥ 阈值 / 标注 Internal）不应对非内部身份可见；
 4. **折扣逻辑加护栏**：服务端校验优惠码的适用范围与使用者身份（内部码需内部身份）；折扣后价格下限钳制（≥0），避免负数/超额折扣；关键商品不允许叠加内部码；
 5. **上线前回归检查**：`introspection` 是否该开随题设定，但所有 mutation 必须无认证逐个过一遍（本链根因即"mutation 漏加 auth"）。
 
-## 六、附录：原始证据
+## 六、总结
 
-全部原始响应存于本次任务目录（`workspace/20260927_160838_e8ba_web-analysis/evidence/`）：
+**核心教训**：三个漏洞都不是高深技巧，而是三种常见的授权缺失叠在一起：调试/内部接口忘了加认证、特权凭证被放进响应字段、特权数据（内部折扣码）对普通用户开放。解题动作本身只有三次 GraphQL 调用：枚举 schema 找可疑接口、逐个测"不登录能不能调"、顺着泄露的凭证把特权数据变成绕过余额校验的钥匙。这类题通用的检查顺序是：**先枚举全部接口（含隐藏字段），再逐接口做无认证调用**，而不是只盯着前端页面找输入端。
+
+**攻击链回顾**：`vendorTerminalSync`（无认证）泄露 master vendorKey → `promoCodes(vendorKey)` 列出内部 100% off 码 → `placeOrder(4042, FOUNDERS-100)` 以 0 credits 买下目标商品，收据里的 `flag` 字段即答案。反例对照（无码购买被余额校验拦截、错误 vendorKey 被拒）说明漏洞边界在"授权"而不在"业务逻辑本身"。
+
+**工具链**：`curl`（现场探测与逐条重放，见 3.1 与附录）；Python `requests`（完整可复现脚本，见第四章）。全程无需特殊工具，GraphQL introspection 输出本身就是"接口文档"。
+
+## 附录：原始证据
+
+全部原始响应存于本次任务目录（`~/bw-security-analysis/workspace/20260927_160838_e8ba_web-analysis/evidence/`）：
 
 | 文件 | 内容 |
 |---|---|
@@ -254,7 +272,7 @@ curl -sk -X POST https://usedgoods.web.2026.sunshinectf.games/graphql \
   -H 'Content-Type: application/json' \
   -d '{"query":"query { promoCodes(vendorKey: \"VND-MASTER-21d5f80206dffb6fa9ad5722\") { code percentOff appliesTo } }"}'
 
-# ③ 0 元购（需任意账号 token）——拿 flag
+# ③ 0 元购（需任意账号 token），拿到 flag
 curl -sk -X POST https://usedgoods.web.2026.sunshinectf.games/graphql \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <你的 token>' \

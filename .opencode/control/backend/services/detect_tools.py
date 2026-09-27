@@ -2220,8 +2220,9 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     @staticmethod
     def _github_token() -> str:
         """GitHub API 认证（防未认证 60 次/小时配额耗尽——冷装一次全量会打满）。
-        优先 GITHUB_TOKEN 环境变量，兜底 gh auth token（已登录 gh 的机器零配置）。"""
-        tok = os.environ.get("GITHUB_TOKEN")
+        从 .ai_env 的 GITHUB_TOKEN 读取（ConfigManager，无 env 通道），
+        未配置时兜底 gh auth token（已登录 gh 的机器零配置）。"""
+        tok = ConfigManager.get_instance().get("GITHUB_TOKEN")
         if tok:
             return tok
         try:

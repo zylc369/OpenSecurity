@@ -177,8 +177,8 @@ class ModelAssetRegistry:
 
 
     def _hf_endpoint(self) -> str:
-        """HF 端点：环境变量 > .ai_env > 官方默认。"""
-        val = os.environ.get("HF_ENDPOINT") or ConfigManager.get_instance().get("HF_ENDPOINT") or ""
+        """HF 端点：.ai_env > 官方默认（env 通道已删）。"""
+        val = ConfigManager.get_instance().get("HF_ENDPOINT") or ""
         return val.strip() or "https://huggingface.co"
 
 

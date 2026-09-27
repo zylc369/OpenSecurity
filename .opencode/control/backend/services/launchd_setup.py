@@ -77,6 +77,23 @@ class LaunchdManager:
         log_dir = Path(cm.data_dir) / "logs"
         oc_root = os.environ.get("OPENCODE_ROOT") or str(server_py.parents[2])
         data_dir = os.environ.get("DATA_DIR") or str(cm.data_dir)
+        # 与 plugin spawn 白名单（buildSpawnEnv）语义对齐: launchd 默认 PATH 是
+        # 系统安全路径（无 venv/node/brew），控制台子进程（vite/外部工具）需要
+        # 完整 PATH; HOME 供 Path.home/expanduser 主路径。OFFLINE 不进 plist——
+        # server.py setdefault 单一来源。PATH/HOME 缺失 = spawn 链异常（白名单
+        # 必含），fail-fast 而非静默塞默认值（死 PATH 会让远程节点难排查）。
+        env_path = os.environ.get("PATH")
+        env_home = os.environ.get("HOME")
+        if not env_path or not env_home:
+            raise RuntimeError(
+                f"生成 launchd plist 需要进程 env 含 PATH/HOME（当前: "
+                f"PATH={'有' if env_path else '缺失'}, HOME={'有' if env_home else '缺失'}）"
+                "——spawn 白名单链路异常，拒绝生成带默认死值的 plist"
+            )
+        # plist 是 XML: PATH 为自由格式用户文本，含 &/< 时须转义否则 launchctl load 失败
+        from xml.sax.saxutils import escape as _xml_escape
+        env_path = _xml_escape(env_path)
+        env_home = _xml_escape(env_home)
         return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
         "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -95,6 +112,10 @@ class LaunchdManager:
         <string>{oc_root}</string>
         <key>DATA_DIR</key>
         <string>{data_dir}</string>
+        <key>PATH</key>
+        <string>{env_path}</string>
+        <key>HOME</key>
+        <string>{env_home}</string>
     </dict>
     <key>WorkingDirectory</key>
     <string>{server_py.parents[1]}</string>

@@ -1878,6 +1878,40 @@ def test_e2e_scan_cache():
     assert_true(dur2 < dur1, f"缓存应更快：first={dur1:.2f}s cached={dur2:.2f}s")
 
 
+@test("GITHUB_TOKEN: .ai_env 配置通道（无 env 通道）+ detect_tools 消费")
+def test_github_token_config_path():
+    """GITHUB_TOKEN 走 .ai_env 配置通道（spawn env 白名单化的前置迁移:
+    env 直读通道已删, detect_tools 从 ConfigManager 读）。沙箱同 dev_mode 用例。"""
+    import os as _os
+    import tempfile
+    from services.config_manager import ConfigManager
+
+    saved_root = _os.environ.get("OPENCODE_ROOT")
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            fake_env = Path(td) / ".ai_env"
+            fake_env.write_text("GITHUB_TOKEN=ghp_sandbox_test_123\n", encoding="utf-8")
+            _os.environ["OPENCODE_ROOT"] = td
+            ConfigManager._reset_for_tests()
+            assert_eq(ConfigManager.get_instance().get("GITHUB_TOKEN"),
+                      "ghp_sandbox_test_123", ".ai_env 配置应可读")
+            # env 通道已收敛: 即使进程 env 有同名值也不参与（source=ai_env）
+            _os.environ["GITHUB_TOKEN"] = "ghp_should_be_ignored"
+            assert_eq(ConfigManager.get_instance().get("GITHUB_TOKEN"),
+                      "ghp_sandbox_test_123", "env 同名值不应覆盖 .ai_env")
+            _os.environ.pop("GITHUB_TOKEN", None)
+            # 消费方真链路: detect_tools 取 token 优先 .ai_env 值
+            from services.detect_tools import ToolsInstaller
+            assert_eq(ToolsInstaller._github_token(), "ghp_sandbox_test_123",
+                      "detect_tools 应从 ConfigManager 拿到 .ai_env 的 GITHUB_TOKEN")
+    finally:
+        if saved_root is None:
+            _os.environ.pop("OPENCODE_ROOT", None)
+        else:
+            _os.environ["OPENCODE_ROOT"] = saved_root
+        ConfigManager._reset_for_tests()
+
+
 @test("config.is_dev_mode: .ai_env 权威 + env 仅兜底 + 默认 False")
 def test_dev_mode_default():
     # source=ai_env 语义: .ai_env 定义了 CONTROL_FRONTEND_DEV → 文件是权威

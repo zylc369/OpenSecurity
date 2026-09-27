@@ -42,6 +42,19 @@ import 不报错、单测没覆盖到那条调用路径 → 生产首次调用�
 一个用例覆盖现在和未来所有入口（新端点自动纳入）;
 5xx 断言恰好抓 NameError/ImportError 级（400/404 是校验层正常工作，合法）。
 
+**变体——同一功能多种入口形态**: 入口不只有 HTTP 一种形态。
+`detect_py_deps` 的检测能力同时暴露为 HTTP 路由（`/api/deps`）和
+CLI 子命令（`detect_py_deps.py scan`），HTTP 冒烟全部通过时 CLI 入口
+仍可能是坏的（OOP 重构把函数收进类，CLI `_main()` 里的裸调用漏改，
+NameError → exit 1 → 消费方 fail-closed 把链路故障误报为"依赖缺失"）。
+入口形态清单: HTTP 路由 / MCP 工具 / IPC 命令 / CLI 子命令（`__main__`）/ 定时任务。
+**怎么防（双静态+动态）**: ① 契约扫描覆盖 CLI 入口函数（`main`/`_main`）
+体内裸函数调用的可解析性（模块 def/class/import 绑定 + 内置之外即违规）;
+② 为每个**真实存在的消费链**做一次消费行为测试——插件自举检查走 CLI
+就测 CLI（venv python 直跑断言 exit 0），不要只测自己熟悉的 HTTP 形态。
+冒烟遍历 `app.routes` 前先问: 这个代码还有别的入口注册表吗（argparse
+子命令表、MCP `@mcp.tool` 清单、IPC handler 表）？逐一对照。
+
 ## 模式 D: 配置的值测试 ≠ 消费行为测试
 
 **什么场景**: 测了配置 getter 的返回语义（env=0 → False），

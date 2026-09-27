@@ -493,6 +493,55 @@ def test_stale_sock_self_healing():
 
 # ============ 运行所有测试 ============
 
+# ============ 场景 6：spawn env 白名单——父环境污染不影响子进程 ============
+
+@test("场景6: 控制台子进程 env 白名单（父环境敏感键免疫）")
+def test_spawn_env_whitelist():
+    """故意在 bun 父环境注入敏感/杂键，断言控制台子进程 environ 只含白名单。
+    防回归: buildSpawnEnv 从 {...process.env} 改为显式白名单的自动化防线。"""
+    cleanup_state()
+    proc = None
+    try:
+        # 污染父环境: 业务键 + conda 系杂键（真实污染链的形态）
+        polluted = bun_env(extra={
+            "DEEPSEEK_API_KEY": "FAKE_SECRET_TEST_123",
+            "JULIANG_API_KEY": "FAKE_JULIANG_TEST",
+            "KMP_DUPLICATE_LIB_OK": "TRUE",
+            "CONDA_DEFAULT_ENV": "base",
+        })
+        proc = subprocess.Popen(
+            ["bun", "-e", BUN_START_KEEP],
+            cwd=str(WORKSPACE_ROOT),
+            env=polluted,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        cpid = wait_control_pid(proc, timeout=30)
+        if cpid is None:
+            raise AssertionError("bun 启动控制台失败")
+        print(f"    [setup] 控制台 pid={cpid}（父环境已注入 4 个污染键）")
+
+        # 断言: 子进程 environ（ps eww = execve 快照）
+        out = subprocess.run(["ps", "eww", str(cpid)], capture_output=True, text=True).stdout
+        keys = {tok.split("=", 1)[0] for tok in out.split() if "=" in tok and not tok.startswith("/")}
+        whitelist = {"OPENCODE_ROOT", "DATA_DIR", "PATH", "HOME"}
+        missing = whitelist - keys
+        assert_true(not missing, f"白名单键缺失: {missing}")
+        leaked = [k for k in ("DEEPSEEK_API_KEY", "JULIANG_API_KEY",
+                              "KMP_DUPLICATE_LIB_OK", "CONDA_DEFAULT_ENV") if k in keys]
+        assert_true(not leaked, f"污染键泄漏进控制台: {leaked}")
+        # 总数上界（宽松: 允许运行时自动补的 LC_CTYPE/__CF* 等 ≤4 个）
+        assert_true(len(keys) <= 8, f"environ 键数异常膨胀: {sorted(keys)}")
+        print(f"    environ 恰好: {sorted(keys & whitelist)}，污染键 0")
+    finally:
+        if proc is not None:
+            try: proc.kill()
+            except: pass
+            try: proc.wait(timeout=3)
+            except: pass
+        cleanup_state()
+
+
 def main():
     print("=" * 60)
     print("opencode-control 集成测试")

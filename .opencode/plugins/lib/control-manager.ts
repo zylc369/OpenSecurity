@@ -107,6 +107,38 @@ export async function getControlIdentity(): Promise<ControlIdentity | null> {
  */
 let inFlightStart: Promise<boolean> | null = null;
 
+/**
+ * spawn 控制台/MCP 子进程的最小环境白名单。
+ *
+ * 语义: 无论 opencode 主进程 env 含什么（shell 导出的密钥/conda 键等），
+ * 子进程环境恒为本函数返回的显式最小集——业务键泄漏面归零，环境确定性
+ * 不依赖"用户 shell 恰好干净"。
+ *
+ * darwin/linux: PATH（工具搜索/vite shebang 找 node/子进程 exec）+
+ *   HOME（Path.home/expanduser 顶层 CACHE_DIR/git）+ 2 个引导键。
+ *   刻意排除: TMPDIR（tempfile 自回退 /tmp）、LANG（回退 C locale 可接受）、
+ *   HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE（控制台 server.py setdefault 单一来源；
+ *   MCP server 零 huggingface import 不需要）。
+ * win32: 透传面更大（无这些系统键时 cmd/工具定位异常），仅语义编写、无环境验证。
+ */
+export function buildSpawnEnv(): Record<string, string> {
+  const env: Record<string, string> = {
+    OPENCODE_ROOT: OPENCODE_ROOT,
+    DATA_DIR: DATA_DIR,
+  };
+  const passthrough = process.platform === "win32"
+    ? [
+        "PATH", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "TEMP", "TMP",
+        "SystemRoot", "SystemDrive", "ProgramFiles", "ProgramFiles(x86)",
+      ]
+    : ["PATH", "HOME"];
+  for (const key of passthrough) {
+    const v = process.env[key];
+    if (v !== undefined && v !== "") env[key] = v;
+  }
+  return env;
+}
+
 export function startControl(): Promise<boolean> {
   if (!inFlightStart) {
     inFlightStart = doStartControl()
@@ -165,13 +197,7 @@ async function doStartControl(): Promise<boolean> {
     const proc = spawn(python, [CONTROL_SCRIPT], {
       stdio: ["ignore", stdoutFd, stderrFd],
       detached: true, // 关键：脱离父进程
-      env: {
-        ...process.env,
-        OPENCODE_ROOT: OPENCODE_ROOT, // 控制台读 .ai_env 用
-        DATA_DIR: DATA_DIR, // 控制台定位 IPC socket 用
-        HF_HUB_OFFLINE: "1", // 避免 SentenceTransformer 联网检查
-        TRANSFORMERS_OFFLINE: "1",
-      },
+      env: buildSpawnEnv(),
     });
     proc.unref(); // 让 opencode 事件循环不等待控制台
     const pid = proc.pid;
