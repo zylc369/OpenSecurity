@@ -21,11 +21,24 @@
 
 **jku 头注入**: 服务端从 jku URL 拉取 JWKS → JWKS 托管攻击者域（webhook.site），header `jku: https://attacker.com/.well-known/jwks.json`。SSRF+伪造组合。
 
-**kid 注入**（kid 用于选密钥时）:
-- 路径穿越 `../../../dev/null` → 空文件 → HMAC 空密钥（签名密钥用空串）
-- `/proc/sys/kernel/hostname` → 内容可预测
-- SQL 注入 `' UNION SELECT 'known-secret'--`（kid 查库时）
-- 命令注入: 后端用 Ruby `open()` 读密钥文件时 kid 传 `/path/to/key|whoami`（管道执行）; PHP `exec`/`system` 读文件同理。利用条件苛刻（要求特定后端读文件方式），审计时看 kid 的消费方式
+**kid 注入**（kid 用于选密钥时——先做防御指纹，再选变体）:
+
+**防御指纹**（改 kid 值观察报错差异，先定位服务端实现）:
+
+| 探测 | 响应特征 | 推断 |
+|------|---------|------|
+| kid=不存在的文件名 | 文件不存在报错（含密钥绝对路径） | kid 直接拼路径加载 → 穿越可行 |
+| kid=`../../../../dev/null` + 空串签名 | `HMAC key must not be empty` 类报错 | 实现拒绝空密钥（新版 PyJWT encode/decode 均抛 InvalidKeyError）→ 变体①不可行 |
+| 同一文件、换错误内容签名 | 报签名验证失败（而非文件读取失败） | 文件已读入并被用作 HMAC 密钥材料 → 变体②③④可行 |
+
+**变体链**（判据=密钥文件内容的"可知性"）:
+
+1. **空密钥**（内容=空）: kid=`../../../../dev/null`，用空串签名。部分实现放行；维护中的实现拒绝——指纹确认后再走。
+2. **已知内容文件**（内容=可下载/可读出）: kid 指向能精确获取内容的文件——可下载的静态资源（样式表/图片/robots.txt），或先经服务端读出面导出的文件；取该文件字节作 HMAC 密钥签名。
+3. **穿越读源码**（内容=可从源码推得）: kid 穿越 + 服务端文件读取面（verbose 报错页回显内容/调试端点/LFI）→ 读应用源码 → 提取硬编码密钥常量（或密钥生成逻辑）→ 用真实密钥、按正常 kid 声明签名。
+4. **可预测内容文件**（内容=确实可知）: `/proc/sys/kernel/hostname` 等——仅在内容确实已知时可用；容器主机名通常随机，须先获取内容再签，禁止盲签。
+
+其他管道: SQL 注入 `' UNION SELECT 'known-secret'--`（kid 查库时）；命令注入（后端把 kid 拼进 shell 读密钥时）kid 传 `/path/to/key|whoami`——利用条件苛刻（依赖特定读文件方式），审计 kid 的消费方式。
 
 ## §3 JWE 公钥伪造
 
