@@ -180,4 +180,5 @@ class BgeM3Embedder(EmbedderClient):
         只把 encode 调用交给 to_thread（串行由 LockedEmbedder 保证）。
         """
         from services.model_loader import ModelInferenceService
-        return await asyncio.to_thread(model_loader.embed_batch_sync, input_data)
+        return await asyncio.to_thread(
+            ModelInferenceService.get_instance().embed_batch_sync, input_data)

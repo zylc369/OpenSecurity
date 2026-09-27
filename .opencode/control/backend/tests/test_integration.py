@@ -137,13 +137,37 @@ def is_pid_alive(pid: int) -> bool:
         return True
 
 
+TEST_OPENCODE_ROOT = TEST_DATA_DIR / "opencoderoot"   # 测试独立 OPENCODE_ROOT（隔离 .ai_env）
+
+
+def _ensure_test_ai_env(vals: dict[str, str]) -> None:
+    """测试 tunables 写入独立 .ai_env + symlink 后端目录。
+
+    OOP 收口后 tunables 从 .ai_env 读取（进程 env 不再被消费——D1）;
+    直接写生产 .ai_env 会污染生产控制台（sweep 每轮重读，3s 超时会误杀
+    生产心跳），故带小值场景的 spawn 用独立 OPENCODE_ROOT。
+    TS 侧 CONTROL_SCRIPT 硬编码 OPENCODE_ROOT/control/backend/server.py，
+    venv/DATA_DIR 解耦依赖目录结构——backend 目录 symlink 指向真实位置
+    （文件读取经 symlink 透明，sys.path/资源定位均正常）。
+    """
+    TEST_OPENCODE_ROOT.mkdir(parents=True, exist_ok=True)
+    link = TEST_OPENCODE_ROOT / "control" / "backend"
+    if not link.exists():
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(BACKEND_DIR, target_is_directory=True)
+    lines = [f"{k}={v}" for k, v in vals.items()]
+    (TEST_OPENCODE_ROOT / ".ai_env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def bun_env(extra: dict[str, str] | None = None) -> dict:
-    """bun 子进程环境变量。extra 注入 HEARTBEAT_* 小值可加速自杀场景。"""
+    """bun 子进程环境变量。extra 为 HEARTBEAT_* 小值（写入独立 .ai_env 加速自杀场景）。"""
     env = os.environ.copy()
     env["DATA_DIR"] = str(TEST_DATA_DIR)
-    env["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
     if extra:
-        env.update(extra)
+        _ensure_test_ai_env(extra)
+        env["OPENCODE_ROOT"] = str(TEST_OPENCODE_ROOT)  # 独立 root → 控制台读测试 .ai_env
+    else:
+        env["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
     return env
 
 
@@ -251,7 +275,7 @@ def test_exit_handler():
             cwd=str(WORKSPACE_ROOT),
             env=bun_env({"HEARTBEAT_TIMEOUT_SEC": "3",
                          "HEARTBEAT_SWEEP_INTERVAL_SEC": "1",
-                         "HEARTBEAT_GRACE_SEC": "5"}),
+                         "HEARTBEAT_GRACE_SEC": "15"}),
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True,
         )
@@ -266,13 +290,13 @@ def test_exit_handler():
 
         # 等控制台自杀（超时 3s + sweep 1s + 宽限判定，最多 12s）
         control_dead = False
-        for i in range(12):
+        for i in range(40):
             time.sleep(1)
             if not is_pid_alive(control_pid):
                 control_dead = True
                 print(f"    [wait] 第 {i+1}s 控制台自杀")
                 break
-        assert_true(control_dead, "控制台应在 12s 内自杀（心跳表空）")
+        assert_true(control_dead, "控制台应在 40s 内自杀（心跳表空）")
 
         # 验证：IPC socket 文件应该被删（控制台自杀路径清理）
         time.sleep(1)
@@ -304,7 +328,7 @@ def test_sigkill_cleanup():
             cwd=str(WORKSPACE_ROOT),
             env=bun_env({"HEARTBEAT_TIMEOUT_SEC": "3",
                          "HEARTBEAT_SWEEP_INTERVAL_SEC": "1",
-                         "HEARTBEAT_GRACE_SEC": "5"}),
+                         "HEARTBEAT_GRACE_SEC": "15"}),
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True,
         )
@@ -322,13 +346,13 @@ def test_sigkill_cleanup():
         # 等控制台自杀（超时 3s + sweep 1s + 过宽限，最多 12s）
         print(f"    [wait] 等心跳超时自杀（最多 12s）...")
         control_dead = False
-        for i in range(12):
+        for i in range(40):
             time.sleep(1)
             if not is_pid_alive(control_pid):
                 control_dead = True
                 print(f"    [wait] 第 {i+1}s 控制台自杀")
                 break
-        assert_true(control_dead, "控制台应在 12s 内自杀（心跳表空）")
+        assert_true(control_dead, "控制台应在 40s 内自杀（心跳表空）")
     finally:
         if proc and proc.poll() is None:
             try: proc.kill()

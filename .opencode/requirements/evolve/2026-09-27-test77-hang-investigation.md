@@ -1,8 +1,7 @@
-# [77] 测试挂起调查档案（暂停态——等明确提示词继续）
+# [77] 测试挂起调查档案（已结案）
 
-> 状态: 调查暂停（用户指令）; 本文完整保留进度/证据/分析过程，供后续继续
+> 状态: **已结案**（2026-09-27 晚）——根因 = restart execv bug 的多线程冻结形态; 详见 §9
 > 关联: 2026-09-26-backend-oop-refactor.md / progress 同名文件
-> 暂停时点: 2026-09-27
 
 ---
 
@@ -105,6 +104,49 @@ MainThread（测试进程）: httpx 同步 _sock.recv  ← 等一个 HTTP 响应
 2. 若复现: 这是 Python 3.13 macOS 平台级 bug 候选（fork+threads），绕法=子进程 spawn 用 posix_spawn（subprocess 默认应已用）或 process 重构
 3. 若不复现: 二分测试线程组合定位碰撞源
 
-## 8. 当前处置
+## 8. 当前处置（结案前）
 
 [77] 已恢复为子进程隔离形态（断言原样）——但该形态也会触发挂起。全量回归时需**跳过 [77]**（标记 skip）——单独直跑该测试通过（干净环境）。根因调查按 §7 建议路径，等用户明确提示词。
+
+---
+
+## 9. 结案（2026-09-27 晚）
+
+### 9.1 根因：restart execv bug 的多线程冻结形态（统一理论）
+
+restart 测试经**模块级旧实例**（`services/restart.py` 残留的 `console_restarter = ConsoleRestarter()`，
+OOP 批次 D 遗漏项）武装了真 `Timer(1.5s)` → 触发真 `perform()` → `os.execv(sys.argv[0])`。
+测试进程此时持有 ~20 个线程（10× reaper + stores + ipc-accept + tqdm + …）。
+execv 在多线程进程中做镜像替换/fd 关闭，与任意线程的 malloc/GIL 状态碰撞，两种结局：
+
+1. **execv 成功** → 套件重跑（progress 档案记录的 ×2/×3/×4 重跑现象，最坏 387s）
+2. **execv 中途冻结** → 整进程 GIL 冻结——即本档案全部"玄学"观测
+
+### 9.2 该理论统一解释此前所有无法闭环的证据
+
+| 历史观测 | 统一解释 |
+|---|---|
+| 全量跑 3/3 挂在 [77] 附近 | restart 测试在 [77] 前几个位置，Timer 固定 +1.5s 触发; 全量跑到此线程最多 → 碰撞概率最大 |
+| 单独直跑 [77] 通过 | 不含 restart 测试 → 无 Timer → 无 execv |
+| 少量前置 + [77] 通过 | 前置未覆盖 restart 测试 |
+| 卡点"不固定"（73/76/77） | 冻结是否发生是概率性的; 冻结瞬间主线程的执行点决定卡在哪 |
+| 铁证 B: 主线程 httpx recv 永不返回 | Timer 触发时主线程恰在 [77] 的 HTTP 等待中，execv 冻结 → 响应永不到达 |
+| §7: 子进程隔离版也挂 | 同因; 冻结瞬间主线程在 subprocess.communicate |
+| SIGALRM/faulthandler 到期不触发、心跳线程 sleep 返回后无法写文件 | execv 冻结是 C 层/malloc 级，Python signal handler 无 GIL 可调度——与 §7 "GIL 冻结"结论吻合，仅归因修正（非 spawn 竞态，是 execv 竞态） |
+
+严谨度: 修复后行为一致（3/3 挂 → 3/3 过）+ 机制上无矛盾解释全部证据的强推断; 未做破坏性复现实验（故意还原 bug 跑到冻结——无必要，修复已验证）。
+
+### 9.3 挂起消失后立即抓到的真实 bug（曾被挂起掩盖）
+
+[77] 恢复执行后第一轮就暴露**两处生产接口漂移**（OOP 重构遗漏消费方更新，
+`POST /api/knowledge/memory/entry` 与 `POST /api/events/*` 写端点一直是 AttributeError/500）:
+- `routes/knowledge.py:70` `submit_entry` → `submit`
+- `routes/events.py:73,83` `submit_entry` → `submit`
+- 静态核对全部路由→服务方法调用（正则比对 41 文件），无其他漂移
+
+### 9.4 处置
+
+- restart bug 修复: 删模块级实例导出 + 路由改 `get_instance()` + restart 测试改类级 patch perform（progress 档案有完整记录）
+- [77] 恢复全量直跑（子进程隔离形态保留——防 TestClient 循环互锁，这是独立且真实的防御）; TC_FULL_RUN 守卫删除，环境变量零残留
+- 验证: 无守卫全量 3/3 通过（70.03/69.06/69.30s），80/80
+- §2.2 深挖点（httpx uds timeout 库缺陷嫌疑、Thread-1 泄漏）随结案关闭——其观测均产生于 execv 污染环境，如后续独立复现再立新档

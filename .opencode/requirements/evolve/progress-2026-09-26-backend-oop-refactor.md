@@ -56,3 +56,27 @@
 - 真模型 3 用例保留（lifecycle/窗口卸载/worker 稳定性）: 识别正确性 + stream 复用 + footprint——兼作 fake 接口漂移守卫
 - 实施中修两 bug: fake _infer_impl 返回值对齐 (text, stats) 二元组; 串行用例 slow_gen 递归调用自身挂死（改走类原始方法）
 - 结果: 9 用例 35.7s → 7.9s; 全量套件 99s → 69.6s（连续两轮 69.56/70.16 稳定）; 80/80
+
+## 追加（2026-09-27 晚三）：[77] 挂起结案 + 生产 bug 修复
+- 复测: restart bug 修复后挂起消失（档案 3/3 挂 → 3/3 过，70s 稳定）; 根因统一理论: 旧模块级实例武装真 Timer → perform → os.execv 与 ~20 线程碰撞——成功=套件重跑（×2/×4），冻结=进程级 GIL 冻结（即 [77] 挂起全部"玄学"观测）
+- [77] 恢复执行即抓到两处被挂起掩盖的生产 bug: routes/knowledge.py:70 + routes/events.py:73,83 的 submit_entry → submit（OOP 接口漂移，写端点一直 500）; 全路由静态核对无其他漂移
+- [77] TC_FULL_RUN 守卫删除（环境变量零残留），保留子进程隔离形态（防 TestClient 循环互锁——独立真实防御）
+- 验证: 无守卫全量 3/3 通过 80/80; 档案已结案（§9）
+
+## 追加（2026-09-27 晚四）：全量验收——4 个被掩盖的生产 bug + 测试盲区修复
+验收自查发现回归清单遗漏 4 个测试文件（test_e2e_real/test_integration/test_proxy_mcp/test_windows_ipc），补跑后揪出被掩盖的生产 bug 链：
+1. **event_store 三处日志 f-string 缺 f 前缀**——异常细节被吞（写入失败的真因不可见）
+2. **Keys.DEEPSEEK_SMALL_MODEL 键丢失**（config.py 合并遗漏）——events 提取链断裂; 补回 + 全量键核对（28 键 vs 全部引用，零漂移）
+3. **graphiti_config/reranker 裸模块函数调用**（model_loader.embed_batch_sync/rerank_sync 实为实例方法）——落库 embed 与 diverse 搜索 500; 全部改 ModelInferenceService.get_instance()
+4. **IpcListener.__init__ 重入抹状态**（单例 __new__ 未防 __init__ 重跑）——每次 get_instance() 复位 _running/_listener → 退出 cleanup 静默跳过 → IPC sock 文件泄漏（生产日志 11 次"死残留"即此因）; 修为 _init_once 模板 + AST 排查全项目无同款
+测试侧修复：
+- test_integration bun_env 适配 D1 收口（HEARTBEAT_* 小值从进程 env 改独立 OPENCODE_ROOT + .ai_env + backend 目录 symlink）; 宽限 5→15s（覆盖 TS 就绪确认链）; 自杀等待 12→40s
+- test_control IPC 测试改 object.__new__ 模拟第二实例（原依赖 __init__ 重入 bug 行为）
+- test_proxy_mcp 无 __main__ 入口（直跑=假绿）——确认为 pytest 收集形态，2/2 通过
+最终验收全绿：control 80 + integration 5 + e2e_real 6 + e2e_remote 全链路 + 7 快族 51 + proxy 58+2 + mcp 2 + 前端 build; 生产控制台重启吃全部修复（pid 60146）
+
+## 追加（2026-09-27 晚五）：graphiti 适配器真链测试（需求文档 2026-09-27-graphiti-adapter-real-test.md）
+- 背景: FakeGraphiti 把组装链（BgeM3Embedder/BgeRerankerClient/GraphitiFactory.create_graphiti）整体短路——纯项目胶水层曾零单测级动态覆盖（晚四 bug #2/#3 藏点）
+- 实施: test_control 新增 81 号用例（四段断言: create 1024 维 / create_batch 2×1024 / rank 真推理区分度+降序 / create_graphiti 组装类型——graphiti 未传参静默默认 OpenAIEmbedder 的唯一防线）; 置 E2E /rerank 后
+- 防作弊闭环: 注入旧 bug 形态（reranker.py 裸模块调用）→ 用例红（报错与生产当天一字不差）→ 还原 → 绿
+- 验收: 81/81（耗时 77.8s，增量 ~8s 含测试进程首次模型加载）; e2e_real 6/6; config_manager 5/5 + api_guard 4/4 抽测绿; 生产代码零改动

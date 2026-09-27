@@ -146,7 +146,7 @@ class EventStoreService:
                 return False
         else:
             if not (entry.name and entry.body and entry.group_id):
-                logger.info("跳过非法事件: name={entry.name!r} group_id={entry.group_id!r}")
+                logger.info(f"跳过非法事件: name={entry.name!r} group_id={entry.group_id!r}")
                 return False
         self._queue.put(entry)
         return True
@@ -249,7 +249,7 @@ class EventStoreService:
                 async with semaphore:
                     await EntityNode.delete_by_group_id(graphiti.driver, entry.group_id)
                     await EpisodicNode.delete_by_group_id(graphiti.driver, entry.group_id)
-                logger.info("group deleted: {entry.group_id}")
+                logger.info(f"group deleted: {entry.group_id}")
             else:
                 from graphiti_core.nodes import EpisodeType
                 async with semaphore:
@@ -262,9 +262,9 @@ class EventStoreService:
                         group_id=entry.group_id,
                         entity_types=CUSTOM_ENTITY_TYPES,
                     )
-                logger.info("episode added: {entry.name}")
+                logger.info(f"episode added: {entry.name}")
         except Exception as e:
-            logger.info("写入失败（{entry.name if isinstance(entry, EventEntry) else 'delete'}）: {type(e).__name__}: {e}")
+            logger.warning(f"写入失败（{entry.name if isinstance(entry, EventEntry) else 'delete'}）: {type(e).__name__}: {e}")
             await self._reset_graphiti()
 
     async def _main(self, loop: asyncio.AbstractEventLoop):

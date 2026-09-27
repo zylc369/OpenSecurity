@@ -63,12 +63,22 @@ class IpcListener:
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
-                    cls._instance = super().__new__(cls)
+                    inst = super().__new__(cls)
+                    inst._init_once()
+                    cls._instance = inst
         return cls._instance
 
-    @classmethod
-    def get_instance(cls) -> "IpcListener":
-        return cls()
+    def _init_once(self) -> None:
+        """一次性初始化（__new__ 内调用——防重复 __init__ 抹掉运行态）。
+
+        历史缺陷: 曾用 __init__ 初始化，而 Python 对 cls() 每次调用都会
+        重跑 __init__（__new__ 返回同一实例不阻止）——任何 get_instance()
+        都会把 _running 复位 False / _listener 置 None → 退出 cleanup
+        静默跳过 → IPC socket 文件泄漏（生产日志高频"死残留"即此因）。
+        """
+        self._lifecycle_lock = threading.Lock()
+        self._listener: object | None = None   # Unix: socket / Windows: 管道名 str
+        self._running = False
 
     @classmethod
     def _reset_for_tests(cls) -> None:
@@ -92,10 +102,13 @@ class IpcListener:
 
     """IPC 监听生命周期管理（线程安全单例语义由模块级实例保证）。"""
 
-    def __init__(self) -> None:
-        self._lifecycle_lock = threading.Lock()
-        self._listener: object | None = None   # Unix: socket / Windows: 管道名 str
-        self._running = False
+    # 注意: 不定义 __init__——Python 对每次 cls() 都会重跑 __init__（__new__
+    # 返回同一实例不阻止），曾因此抹掉 _running/_listener 导致 cleanup 静默
+    # 跳过、socket 文件泄漏。初始化一律走 _init_once（__new__ 内一次性调用）。
+
+    @classmethod
+    def get_instance(cls) -> "IpcListener":
+        return cls()
 
     # ── 生命周期 ──────────────────────────────────────────
 

@@ -67,7 +67,7 @@ def memory_search(req: MemorySearchIn) -> dict:
 
 @router.post("/memory/entry", status_code=202)
 def memory_entry(req: MemoryEntryIn) -> dict:
-    queued = KnowledgeStoreService.get_instance().submit_entry(
+    queued = KnowledgeStoreService.get_instance().submit(
         MemoryEntry(
             question=req.question, answer=req.answer,
             type=req.type, flow_id=req.flow_id))

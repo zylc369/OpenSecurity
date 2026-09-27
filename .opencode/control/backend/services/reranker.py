@@ -37,8 +37,9 @@ class BgeRerankerClient(CrossEncoderClient):
         if not passages:
             return []
 
-        from services import model_loader
-        scores = await asyncio.to_thread(model_loader.rerank_sync, query, passages)
+        from services.model_loader import ModelInferenceService
+        scores = await asyncio.to_thread(
+            ModelInferenceService.get_instance().rerank_sync, query, passages)
         scores_array = np.asarray(scores)
 
         results = list(zip(passages, scores_array.tolist()))

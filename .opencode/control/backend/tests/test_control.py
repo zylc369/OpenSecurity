@@ -157,8 +157,11 @@ def test_ipc_listener_unix():
     assert_true(lst.start() is IpcStartStatus.LISTENING, "首次 bind 应返回 LISTENING")
     try:
         assert_true(IpcListener.ipc_probe_alive(timeout=1.0), "bind 后 probe 应通")
-        # 已有活实例：新 IpcListener.start 应返回 EXISTING_INSTANCE（复用语义，不抛错）
-        second = IpcListener()
+        # 已有活实例：另一实例 start 应返回 EXISTING_INSTANCE（复用语义，不抛错）
+        # （object.__new__ 绕过单例模拟"另一进程的新实例"——单例修正后
+        # IpcListener() 返回同一实例，其 start 幂等返回 LISTENING 而非复用）
+        second = object.__new__(IpcListener)
+        second._init_once()
         assert_true(
             second.start() is IpcStartStatus.EXISTING_INSTANCE,
             "活实例在时第二个 start 应返回 EXISTING_INSTANCE",
@@ -1692,6 +1695,63 @@ def test_e2e_rerank():
     assert_eq(len(data), 2)
 
 
+@test("graphiti 适配器真链: BgeM3Embedder/BgeRerankerClient/build 组装（无 fake）")
+def test_graphiti_adapter_real_chain():
+    """graphiti 组装链三个组件的真实动态覆盖（无 fake、真推理）。
+
+    FakeGraphiti 把组装链整体短路——这层是纯项目胶水（项目引用项目的
+    适配层），裸模块调用/键丢失/组装漏传三类漂移只有真调用能抓
+    （2026-09-27 三个生产 bug 均藏于此链，仅 e2e_real 可见的窗口期存活）。
+    置于 E2E /embed、/rerank 之后: bge-m3/bge-reranker 已由共享控制台进程
+    加载——本用例进程内首次推理触发惰性加载后复用，增量秒级。
+    """
+    from services.graphiti_config import BgeM3Embedder
+
+    async def run():
+        # 1. 单文本 embed → 1024 维（create → embed_sync 引用真链）
+        vec = await BgeM3Embedder().create("如何扫描端口")
+        assert_true(isinstance(vec, list) and len(vec) == 1024,
+                    f"create 应返回 1024 维，实际 {type(vec).__name__} len={len(vec) if isinstance(vec, list) else 'N/A'}")
+
+        # 2. 批量 embed → 2×1024（create_batch → embed_batch_sync 引用——
+        #    裸调用 bug 藏点）
+        vecs = await BgeM3Embedder().create_batch(["nmap 扫描", "sql 注入"])
+        assert_true(isinstance(vecs, list) and len(vecs) == 2
+                    and all(isinstance(v, list) and len(v) == 1024 for v in vecs),
+                    f"create_batch 应返回 2×1024，实际 {[len(v) if isinstance(v, list) else type(v).__name__ for v in vecs] if isinstance(vecs, list) else type(vecs).__name__}")
+
+        # 3. rerank 真推理（rank → rerank_sync 引用——裸调用 bug 藏点）:
+        #    相关段得分必须高于无关段（区分度即模型可用性）
+        from services.reranker import BgeRerankerClient
+        ranked = await BgeRerankerClient().rank(
+            "如何扫描主机开放端口",
+            ["用 nmap -sS 扫描目标端口", "今天天气晴朗适合散步"],
+        )
+        assert_true(isinstance(ranked, list) and len(ranked) == 2,
+                    f"rank 应返回 2 项，实际 {len(ranked) if isinstance(ranked, list) else type(ranked).__name__}")
+        scores = [s for _, s in ranked]
+        assert_true(scores == sorted(scores, reverse=True), f"rank 结果应按分降序: {scores}")
+        by_text = dict(ranked)
+        assert_true(by_text["用 nmap -sS 扫描目标端口"] > by_text["今天天气晴朗适合散步"],
+                    f"相关段应得分更高: {scores}")
+
+        # 4. 组装链断言: build 产物组件类型必须是项目适配器——graphiti 未传参时
+        #    静默默认 OpenAIEmbedder()（实证），漏配不报错只会走错模型，
+        #    类型断言是唯一防线
+        from services.graphiti_config import GraphitiFactory
+        graphiti, err = GraphitiFactory.create_graphiti()
+        assert_true(graphiti is not None, f"create_graphiti 应成功: {err}")
+        try:
+            assert_true(isinstance(graphiti.embedder, BgeM3Embedder),
+                        f"embedder 应为 BgeM3Embedder，实际 {type(graphiti.embedder).__name__}")
+            assert_true(isinstance(graphiti.cross_encoder, BgeRerankerClient),
+                        f"cross_encoder 应为 BgeRerankerClient，实际 {type(graphiti.cross_encoder).__name__}")
+        finally:
+            await graphiti.close()   # 释放 driver（构造惰性不连库，close 兜底）
+
+    asyncio.run(run())
+
+
 @test("E2E: /api/config/{key} 不存在 → 404")
 def test_e2e_config_404():
     cp = get_shared_server()
@@ -2195,11 +2255,9 @@ def test_health_boot_token():
 
 @test("knowledge/events 路由: 写端点 202 + 搜索端点结构（fake 注入）")
 def test_knowledge_events_routes():
-    """子进程隔离执行（临时——根因调查暂停中, 档案: 2026-09-27-test77-hang-investigation.md; 断言原样零弱化）。"""
+    """子进程隔离执行（防进程内 TestClient 与前置线程的循环互锁——
+    见 2026-09-27-test77-hang-investigation.md; 断言原样零弱化）。"""
     import os as _os
-    if _os.environ.get("TC_FULL_RUN") == "1":
-        print("  ⏭ [77] 全量跑时跳过（GIL 冻结竞态——档案 2026-09-27-test77-hang-investigation.md §7/§8）")
-        return
     import subprocess as _sp
     code = (
         "import sys, os; sys.path.insert(0, '.'); sys.path.insert(0, 'tests'); "

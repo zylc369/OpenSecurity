@@ -70,7 +70,7 @@ class EntitySearchIn(BaseModel):
 
 @router.post("/entry", status_code=202)
 async def events_entry(req: EventEntryIn) -> dict:
-    queued = EventStoreService.get_instance().submit_entry(
+    queued = EventStoreService.get_instance().submit(
         EventEntry(
             name=req.name, body=req.body, source=req.source,
             group_id=req.group_id,
@@ -80,7 +80,7 @@ async def events_entry(req: EventEntryIn) -> dict:
 
 @router.post("/delete", status_code=202)
 async def events_delete(req: EventDeleteIn) -> dict:
-    queued = EventStoreService.get_instance().submit_entry(DeleteGroup(group_id=req.group_id))
+    queued = EventStoreService.get_instance().submit(DeleteGroup(group_id=req.group_id))
     return {"queued": queued}
 
 
