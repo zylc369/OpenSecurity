@@ -42,3 +42,17 @@
 4. 顶层大写常量仅嵌套类/异常注册/__all__（AST 扫描）
 5. .ai_env 直接 open 仅 config_manager.py
 6. routes 处理函数体 ≤3 行
+
+## 追加修复（2026-09-27 晚）：restart execv 自我重跑 bug
+- 现象: test_control 全量跑 387s（套件被 os.execv 重跑 2-4 遍，竞态决定次数）
+- 根因: services/restart.py L142 残留模块级实例导出 `console_restarter = ConsoleRestarter()`（批次 D 遗漏项）; routes/system.py import 该旧实例; restart 测试 _reset_for_tests 后 patch 的是新实例——路由在旧实例上 schedule 挂真 Timer(1.5s)，perform 里 `os.execv(sys.argv[0])` 在测试进程 = 重跑 test_control
+- 修复: 删模块级导出（OOP D 规则彻底达标）; 路由改 `ConsoleRestarter.get_instance().schedule()`; 测试注释同步
+- 验证: TC_FULL_RUN=1 全量 97.79s 单遍 80/80（修复前最坏 387s）; grep console_restarter 零残留
+
+## 追加改进（2026-09-27 晚二）：OCR 测试 fake 化提速
+- 背景: 套件基线 99s 中 OCR 段占 ~69s——12+1 用例全真模型，加载税 ~20 次 × 2-3s; 其中 9 个用例断言的是状态机行为（非识别正确性）
+- 改造: tests/test_control.py 新增 FakeMlxEngine（接口对齐 load/unload/loaded/preprocess/_infer_impl; load_delay 确定性窗口; infer gate; 计数器; fail_load_error 注入; 未加载防御对齐真引擎）; 9 用例切 fake（单飞/串行/在途×2/加载失败/并发失败/reaper/idle_sec/竞态）
+- 防覆盖退化三硬约束落地: ①单飞用例加"窗口存在"（starting 轮询）+ "单飞语义"（总耗时 < 3×load_delay）行为特征断言 ②在途用例用 fake infer gate ③fake 计数直接断言（load_count/infer_count）
+- 真模型 3 用例保留（lifecycle/窗口卸载/worker 稳定性）: 识别正确性 + stream 复用 + footprint——兼作 fake 接口漂移守卫
+- 实施中修两 bug: fake _infer_impl 返回值对齐 (text, stats) 二元组; 串行用例 slow_gen 递归调用自身挂死（改走类原始方法）
+- 结果: 9 用例 35.7s → 7.9s; 全量套件 99s → 69.6s（连续两轮 69.56/70.16 稳定）; 80/80

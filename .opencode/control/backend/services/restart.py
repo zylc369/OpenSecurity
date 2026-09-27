@@ -138,5 +138,3 @@ class ConsoleRestarter:
         logger.info("Windows 重启：helper 已 spawn，本进程退出")
         os._exit(ConfigManager.Protocol.EXIT_CODE_NORMAL)
 
-
-console_restarter = ConsoleRestarter()

@@ -1029,6 +1029,59 @@ def _png_b64() -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+class FakeMlxEngine:
+    """MlxEngine 测试替身（接口对齐: load/unload/loaded/preprocess/_infer_impl）。
+
+    状态机/竞态用例的引擎协作者——零 GPU 成本，但必须还原关键行为特征
+    （防覆盖退化的三条硬约束）:
+    - load_delay: 确定性加载窗口——等待者路径必被触发（真模型 2-3s 加载
+      耗时随磁盘缓存波动，窗口可能偶发过短导致单飞路径未被触发）
+    - infer gate: infer_entered/infer_release 构成"推理在途"挂起窗口
+    - 计数器: load/unload/infer 次数——调度断言的直接证据
+
+    接口漂移守卫: 真模型用例（lifecycle/窗口卸载/worker 稳定性）每轮全量
+    跑验证真实接口; fake 缺方法时本类用例立即 AttributeError，不静默。
+    """
+
+    def __init__(self, infer_text: str = "FAKE-OCR-OK", load_delay: float = 0.0):
+        self._loaded = False
+        self.infer_text = infer_text
+        self.load_delay = load_delay
+        self.fail_load_error: Exception | None = None   # 非空 → load 抛此错
+        self.load_count = 0
+        self.unload_count = 0
+        self.infer_count = 0
+        self.infer_entered = threading.Event()
+        self.infer_release = threading.Event()
+        self.infer_release.set()                        # 默认放行（不阻塞）
+
+    @property
+    def loaded(self) -> bool:
+        return self._loaded
+
+    def load(self, model_path: str) -> None:
+        time.sleep(self.load_delay)                     # 确定性窗口（等待者在此挂上）
+        self.load_count += 1
+        if self.fail_load_error is not None:
+            raise self.fail_load_error
+        self._loaded = True
+
+    def unload(self) -> None:
+        self.unload_count += 1
+        self._loaded = False
+
+    def preprocess(self, image_b64: str, prompt: str):
+        return (image_b64, prompt)                      # PreparedOcrInput 直通替身
+
+    def _infer_impl(self, prepared):
+        if not self._loaded:
+            raise RuntimeError("MLX 引擎未加载（推理窗口内被卸载，请重试）")
+        self.infer_count += 1
+        self.infer_entered.set()
+        self.infer_release.wait(timeout=10)
+        return self.infer_text, None              # (text, stats) 二元组对齐真引擎
+
+
 @test("ocr: 状态机——extract 懒加载/识图/force_release 卸载/再 extract 重载")
 def test_ocr_lifecycle():
     import base64
@@ -1074,56 +1127,53 @@ def test_ocr_lifecycle():
 
 @test("ocr: 并发 extract 懒加载单飞——6 路并发首图只加载一次")
 def test_ocr_lazy_singleflight():
-    import base64
-    import io
-
-    from PIL import Image
     from services.ocr_service import OcrService
 
     svc = OcrService._reset_for_tests() or OcrService()
-    loads = []
-    orig_load = svc._mlx.load
-
-    def counting_load(path):
-        loads.append(path)
-        orig_load(path)
-
-    img = Image.new("RGB", (64, 32), "white")
-    buf = io.BytesIO(); img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode()
+    fake = FakeMlxEngine(load_delay=0.3)   # 确定性窗口: 6 路必全落在加载中
+    svc._mlx = fake                        # ManagedModel 惰性构建前替换即全链路生效
 
     async def main():
-        svc._mlx.load = counting_load
-        results = await asyncio.gather(*[svc.extract(b64, "") for _ in range(6)],
-                                       return_exceptions=True)
+        t0 = time.monotonic()
+        tasks = [asyncio.create_task(svc.extract(_png_b64(), "")) for _ in range(6)]
+        # 行为特征断言①（防"测试绿但没测到"）: 轮询确认进入加载窗口——
+        # 若加载瞬时完成，等待者走 ready 快路径，单飞等待逻辑根本未被触发
+        # （create_task 仅注册不执行，需让出控制权等首任务真正开跑）
+        for _ in range(30):
+            if svc.status().state == "starting":
+                break
+            await asyncio.sleep(0.01)
+        assert_eq(svc.status().state, "starting", "并发首图期间状态应为 starting（加载窗口存在证明）")
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        elapsed = time.monotonic() - t0
         assert_true(all(not isinstance(r, Exception) for r in results),
                     f"6 路并发应全成功: {results}")
-        assert_eq(len(loads), 1, f"6 路并发应只 load 一次，实际 {len(loads)}")
+        assert_eq(fake.load_count, 1, f"6 路并发应只 load 一次，实际 {fake.load_count}")
+        # 行为特征断言②: 单飞语义——若各自独立加载，耗时 ≥ 6×load_delay
+        assert_true(elapsed < fake.load_delay * 3,
+                    f"6 路共享一次加载应约 1 个窗口时长，实际 {elapsed:.2f}s"
+                    f"（各自独立加载会 ≥{fake.load_delay * 6:.1f}s）")
+        assert_eq(fake.infer_count, 6, "6 路应各完成一次推理")
         await svc.force_release()
 
-    try:
-        asyncio.run(main())
-    finally:
-        svc._mlx.load = orig_load
+    asyncio.run(main())
 
 
 @test("ocr: 并发 extract——generate 串行（物理上限）+ 预处理并发重叠")
 def test_ocr_extract_serialized():
-    import base64
-    import io
     import threading
 
-    from PIL import Image
     from services.ocr_service import OcrService
 
     svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine()
+    svc._mlx = fake
     gen_active = []          # generate 区内计数
     gen_max = [0]
     pp_active = []           # 预处理区内计数
     pp_max = [0]
     guard = threading.Lock()
 
-    orig_prep = svc._mlx.preprocess
     def slow_prep(image_b64: str, prompt: str):
         with guard:
             pp_active.append(1)
@@ -1131,9 +1181,8 @@ def test_ocr_extract_serialized():
         time.sleep(0.3)  # 拉长预处理窗口放大并发
         with guard:
             pp_active.pop()
-        return orig_prep(image_b64, prompt)
+        return (image_b64, prompt)
 
-    orig_gen = svc._mlx._infer_impl
     def slow_gen(prepared):
         with guard:
             gen_active.append(1)
@@ -1141,64 +1190,46 @@ def test_ocr_extract_serialized():
         time.sleep(0.3)
         with guard:
             gen_active.pop()
-        return orig_gen(prepared)
-
-    img = Image.new("RGB", (64, 32), "white")
-    buf = io.BytesIO(); img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode()
+        # 走类原始方法（绕过实例 patch——fake._infer_impl 已被替换成
+        # slow_gen 自身，经实例属性调用会无限递归）
+        return FakeMlxEngine._infer_impl(fake, prepared)
 
     async def main():
-        svc._mlx.preprocess = slow_prep
+        fake.preprocess = slow_prep
         # ⚠ patch 层次铁律: 必须 patch _infer_impl（worker 内执行层）。
-        # 若 patch 公开方法 infer_serialized，真推理会绕过 worker 在池线程
-        # 执行 → MLX 跨线程 generate 必崩（"There is no Stream"，历史上
-        # 三版实现的假崩溃全部源于此）
-        svc._mlx._infer_impl = slow_gen
-        results = await asyncio.gather(*[svc.extract(b64, "") for _ in range(3)],
-                                       return_exceptions=True)
-        assert_true(all(not isinstance(r, Exception) for r in results),
-                    f"3 路并发 extract 应全成功: {results}")
-        # generate 必须串行（MLX thread-local stream 物理约束）
-        assert_eq(gen_max[0], 1, f"generate 并发峰值为 {gen_max[0]}，必须 1")
-        # 预处理应并发重叠（使用并发语义的直接证据）
-        assert_true(pp_max[0] >= 2,
-                    f"预处理应有并发重叠（峰值 {pp_max[0]}，应 ≥2——串行实现会恒为 1）")
+        # patch 公开方法会绕过 worker 在池线程执行 → 破坏 FIFO 串行不变量
+        # （真引擎历史上三版假崩溃均源于跨线程绕过）
+        orig_impl = fake._infer_impl
+        fake._infer_impl = slow_gen
+        try:
+            results = await asyncio.gather(*[svc.extract(_png_b64(), "") for _ in range(3)],
+                                           return_exceptions=True)
+            assert_true(all(not isinstance(r, Exception) for r in results),
+                        f"3 路并发 extract 应全成功: {results}")
+            # generate 必须串行（worker FIFO 物理约束）
+            assert_eq(gen_max[0], 1, f"generate 并发峰值为 {gen_max[0]}，必须 1")
+            # 预处理应并发重叠（使用并发语义的直接证据）
+            assert_true(pp_max[0] >= 2,
+                        f"预处理应有并发重叠（峰值 {pp_max[0]}，应 ≥2——串行实现会恒为 1）")
+        finally:
+            fake._infer_impl = orig_impl
         await svc.force_release()
 
-    try:
-        asyncio.run(main())
-    finally:
-        svc._mlx.preprocess = orig_prep
-        svc._mlx._infer_impl = orig_gen
+    asyncio.run(main())
 
 
 @test("ocr: 推理在途——另一 extract 复用不被阻塞（使用不挡生命周期读路径）")
 def test_ocr_infer_not_blocking_extract():
-    import base64
-    import io
-    import threading
-
-    from PIL import Image
     from services.ocr_service import OcrService
 
     svc = OcrService._reset_for_tests() or OcrService()
-    orig_gen = svc._mlx._infer_impl
-    entered = threading.Event()
-    release = threading.Event()
-
-    def blocking_gen(prepared):
-        entered.set()
-        release.wait(timeout=10)
-        return orig_gen(prepared)
-
-    img = Image.new("RGB", (64, 32), "white")
-    buf = io.BytesIO(); img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode()
+    fake = FakeMlxEngine()
+    fake.infer_release.clear()           # 推理挂起（在途窗口由替身 gate 制造）
+    svc._mlx = fake
 
     async def main():
-        svc._mlx._infer_impl = blocking_gen
-        infer_task = asyncio.create_task(svc.extract(b64, ""))  # 首图懒加载
-        await asyncio.get_running_loop().run_in_executor(None, entered.wait, 5)
+        infer_task = asyncio.create_task(svc.extract(_png_b64(), ""))  # 首图懒加载
+        await asyncio.get_running_loop().run_in_executor(None, fake.infer_entered.wait, 5)
         # 推理在途时生命周期读路径（status/idle_sec——模型页轮询）应立即返回:
         # 推理只在 worker FIFO 串行，不持 lifecycle 锁、不阻塞读
         t0 = time.monotonic()
@@ -1208,58 +1239,38 @@ def test_ocr_infer_not_blocking_extract():
         assert_true(dt < 0.1, f"推理在途时 status/idle_sec 应立即返回，实际 {dt:.2f}s")
         assert_eq(st.state, "ready", "推理在途状态应 ready")
         assert_true(idle is not None and idle < 10, "推理刷新活跃后 idle_sec 应近 0")
-        release.set()
-        await infer_task
+        fake.infer_release.set()
+        text = await infer_task
+        assert_eq(text, "FAKE-OCR-OK", "替身推理文本应原样返回")
         await svc.force_release()
 
-    try:
-        asyncio.run(main())
-    finally:
-        svc._mlx._infer_impl = orig_gen
+    asyncio.run(main())
 
 
 @test("ocr: 推理在途——force_release 等推理完成再卸载（生命周期互斥）")
 def test_ocr_release_waits_infer():
-    import base64
-    import io
-    import threading
-
-    from PIL import Image
     from services.ocr_service import OcrService
 
     svc = OcrService._reset_for_tests() or OcrService()
-    orig_gen = svc._mlx._infer_impl
-    entered = threading.Event()
-    release = threading.Event()
-
-    def blocking_gen(prepared):
-        entered.set()
-        release.wait(timeout=10)
-        return orig_gen(prepared)
-
-    img = Image.new("RGB", (64, 32), "white")
-    buf = io.BytesIO(); img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode()
+    fake = FakeMlxEngine()
+    fake.infer_release.clear()           # 推理挂起（在途窗口由替身 gate 制造）
+    svc._mlx = fake
 
     async def main():
-        svc._mlx._infer_impl = blocking_gen
-        infer_task = asyncio.create_task(svc.extract(b64, ""))
-        await asyncio.get_running_loop().run_in_executor(None, entered.wait, 5)
+        infer_task = asyncio.create_task(svc.extract(_png_b64(), ""))
+        await asyncio.get_running_loop().run_in_executor(None, fake.infer_entered.wait, 5)
         # 推理在途发起卸载——必须等推理完成（不能把模型从推理脚下抽走）
         rel_task = asyncio.create_task(svc.force_release())
         await asyncio.sleep(0.3)
         assert_false(rel_task.done(), "推理在途时卸载不得提前完成")
-        assert_true(svc._mlx.loaded, "推理在途时模型不得被卸载")
-        release.set()
-        text = await infer_task            # 推理完整完成
-        assert_true(len(text) >= 0, "推理结果应正常返回")
-        await rel_task                     # 卸载随后完成
-        assert_false(svc._mlx.loaded, "卸载最终应完成")
+        assert_true(fake.loaded, "推理在途时模型不得被卸载")
+        fake.infer_release.set()
+        text = await infer_task           # 推理完整完成
+        assert_eq(text, "FAKE-OCR-OK", "替身推理文本应原样返回")
+        await rel_task                    # 卸载随后完成
+        assert_false(fake.loaded, "卸载最终应完成")
 
-    try:
-        asyncio.run(main())
-    finally:
-        svc._mlx._infer_impl = orig_gen
+    asyncio.run(main())
 
 
 @test("ocr: 懒加载失败——引擎报错传播 + 状态回 idle")
@@ -1267,11 +1278,11 @@ def test_ocr_load_failure():
     from services.ocr_service import OcrService
 
     svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine()
+    svc._mlx = fake
 
     async def main():
-        def bad_load(path):
-            raise RuntimeError("boom: 模拟加载失败")
-        svc._mlx.load = bad_load
+        fake.fail_load_error = RuntimeError("boom: 模拟加载失败")
         try:
             await svc.extract(_png_b64(), "")
             raise AssertionError("加载失败应抛 RuntimeError")
@@ -1289,14 +1300,11 @@ def test_ocr_concurrent_load_failure():
     from services.ocr_service import OcrService
 
     svc = OcrService._reset_for_tests() or OcrService()
-    orig = svc._mlx.load
-
-    def bad_load(path):
-        time.sleep(0.3)  # 让等待者先挂上 event.wait 再失败
-        raise RuntimeError("boom: 并发失败场景")
+    fake = FakeMlxEngine(load_delay=0.3)   # 确定性窗口: 6 路必全挂上等待再失败
+    svc._mlx = fake
 
     async def main():
-        svc._mlx.load = bad_load  # patch 引擎加载层（ManagedModel load_fn 动态查找）
+        fake.fail_load_error = RuntimeError("boom: 并发失败场景")
         results = await asyncio.gather(
             *[svc.extract(_png_b64(), "") for _ in range(6)],
             return_exceptions=True,
@@ -1304,17 +1312,16 @@ def test_ocr_concurrent_load_failure():
         errs = [r for r in results if isinstance(r, RuntimeError) and "boom" in str(r)]
         assert_eq(len(errs), 6,
                   f"6 路应全收到失败错误，实际 {[type(r).__name__ + str(r)[:30] for r in results]}")
+        assert_eq(fake.load_count, 1, "失败也是单飞（只尝试加载一次）")
         assert_eq(svc.status().state, ManagedModel.STATE_IDLE, "失败后状态应回 idle")
         # 失败后可重试（回 idle 即可重载）
-        svc._mlx.load = orig
-        text = await svc.extract(_png_b64(), "")  # 真图（重载后可达 ready）
+        fake.fail_load_error = None
+        text = await svc.extract(_png_b64(), "")
         assert_eq(svc.status().state, "ready", "失败恢复后应可重新加载")
+        assert_eq(text, "FAKE-OCR-OK", "重试应走替身推理")
         await svc.force_release()
 
-    try:
-        asyncio.run(main())
-    finally:
-        svc._mlx.load = orig
+    asyncio.run(main())
 
 
 @test("ocr: reaper 纯空闲超时——ready 且空闲超窗 → 自动卸载")
@@ -1325,6 +1332,8 @@ def test_ocr_reaper_idle_release():
     orig_release = mod.IDLE_RELEASE_SEC
     mod.IDLE_RELEASE_SEC = 0  # 立即超窗（ManagedModel 构造时读取该值）
     svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine()
+    svc._mlx = fake
     async def main():
         # 真实路径加载（extract → ensure_loaded → reaper 随加载启动）
         await svc.extract(_png_b64(), "")
@@ -1335,7 +1344,7 @@ def test_ocr_reaper_idle_release():
             if svc.status().state == ManagedModel.STATE_IDLE:
                 break
         assert_eq(svc.status().state, ManagedModel.STATE_IDLE, "空闲超窗后应自动卸载")
-        assert_false(svc._mlx.loaded, "引擎应已卸载")
+        assert_false(fake.loaded, "引擎应已卸载")
     try:
         asyncio.run(main())
     finally:
@@ -1348,6 +1357,8 @@ def test_ocr_idle_sec_field():
     from services.ocr_service import OcrService
 
     svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine()
+    svc._mlx = fake
 
     async def main():
         assert_true(svc.idle_sec() is None, "未加载应为 None")
@@ -1377,18 +1388,20 @@ def test_ocr_force_release_race_with_load():
     from services.ocr_service import OcrService
 
     svc = OcrService._reset_for_tests() or OcrService()
-    orig_load = svc._mlx.load
+    fake = FakeMlxEngine()
+    svc._mlx = fake
+    orig_load = fake.load
     load_started = threading.Event()
     gate = threading.Event()
 
     def gated_load(path):
         load_started.set()
         gate.wait(timeout=10)     # 卡在"加载完成前"——force_release 会排队等待
-        return orig_load(path)
+        orig_load(path)
 
     async def main():
-        svc._mlx.load = gated_load  # patch 引擎加载层（ManagedModel load_fn 动态查找）
-        ext = asyncio.create_task(svc.extract(_png_b64(), ""))  # 懒加载发起者（真图）
+        fake.load = gated_load    # patch 替身加载层（ManagedModel load_fn 动态查找）
+        ext = asyncio.create_task(svc.extract(_png_b64(), ""))  # 懒加载发起者
         await asyncio.get_running_loop().run_in_executor(None, load_started.wait, 5)
         # 加载在途 → force_release 等加载完成后卸载（不中断加载）
         rel = asyncio.create_task(svc.force_release())
@@ -1403,9 +1416,9 @@ def test_ocr_force_release_race_with_load():
         # 无论 release 与等待者的顺序如何，终态必须是 IDLE + 引擎空
         assert_eq(svc.status().state, ManagedModel.STATE_IDLE,
                   f"竞态后不得出现假 READY（实际 {svc.status().state}）")
-        assert_false(svc._mlx.loaded, "引擎应已卸载")
+        assert_false(fake.loaded, "引擎应已卸载")
         # 自愈验证: 竞态后仍可重新懒加载（旧 bug 会永久卡 READY）
-        svc._mlx.load = orig_load
+        fake.load = orig_load
         await svc.extract(_png_b64(), "")
         assert_eq(svc.status().state, "ready", "竞态后应可重新加载（自愈）")
         await svc.force_release()
@@ -1413,7 +1426,7 @@ def test_ocr_force_release_race_with_load():
     try:
         asyncio.run(main())
     finally:
-        svc._mlx.load = orig_load
+        fake.load = orig_load
 
 
 @test("ocr: 坏输入防御——坏 b64 / 非图数据")
@@ -1844,24 +1857,32 @@ def test_restart_schedule_and_route():
     restart_mod._reset_for_tests()
     r = restart_mod.get_instance()
     calls = []
-    r.perform = lambda: calls.append(1)   # 拦截真实 exec
-    assert_true(r.schedule(), "首次调度应返回 True")
-    assert_false(r.schedule(), "重复调度应返回 False（幂等）")
-
-    app = create_app()
-    # 单例即 r——无需替换模块级实例
+    # 类级 patch：假 perform 挂在类上——任何实例（含路由将来可能持有的
+    # 旧引用）调 perform 都命中假的，真实 execv 在本套件内不可能发生。
+    # （实例级 patch 曾因路由持有旧模块级实例而拦错对象 → execv 重跑套件）
+    _orig_perform = restart_mod.perform  # restart_mod 即 ConsoleRestarter 类
+    restart_mod.perform = lambda self: calls.append(1)
     try:
-        with TestClient(app) as c:
-            resp = c.post("/api/system/restart")
-            assert resp.status_code == 200
-            data = resp.json()
-            assert_true(data["success"], "路由应返回 success")
-            assert_true("message" in data, "路由应带提示消息")
+        assert_true(r.schedule(), "首次调度应返回 True")
+        assert_false(r.schedule(), "重复调度应返回 False（幂等）")
+
+        app = create_app()
+        # 路由经 get_instance() 取单例即 r（模块级实例导出已删除——曾导致
+        # 路由持有旧实例、真 Timer 逃逸 execv 重跑整个套件）
+        try:
+            with TestClient(app) as c:
+                resp = c.post("/api/system/restart")
+                assert resp.status_code == 200
+                data = resp.json()
+                assert_true(data["success"], "路由应返回 success")
+                assert_true("message" in data, "路由应带提示消息")
+        finally:
+            pass
+        # schedule 已被 Timer 挂起 → 立即执行 perform 清掉（Timer 0.05s 后也会调，双调用无害）
+        r.perform()
+        assert_true(len(calls) >= 1, "perform 应被调用")
     finally:
-        pass
-    # schedule 已被 Timer 挂起 → 立即执行 perform 清掉（Timer 0.05s 后也会调，双调用无害）
-    r.perform()
-    assert_true(len(calls) >= 1, "perform 应被调用")
+        restart_mod.perform = _orig_perform
 
 
 @test("model_loader: LockedEmbedder/LockedReranker 并发互斥（串行不变量的构造保证）")

@@ -46,8 +46,8 @@ async def restart_console() -> dict:
     响应送达约 1.5s 后进程 execv 替换为新代码；前端轮询 /api/health 的
     boot_token 变化判定重启完成。重复点击返回 in_flight。
     """
-    from services.restart import console_restarter
-    scheduled = console_restarter.schedule()
+    from services.restart import ConsoleRestarter
+    scheduled = ConsoleRestarter.get_instance().schedule()
     return {
         "success": True,
         "scheduled": scheduled,
