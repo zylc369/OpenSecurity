@@ -10,9 +10,8 @@
  */
 import { HeartbeatSender, heartbeatSender } from "../lib/heartbeat";
 import {
-  getAllConfig,
+  fetchConfig,
   getCachedConfig,
-  refreshConfig,
 } from "../lib/control-config";
 import { controlFetch } from "../lib/control-http";
 import * as constants from "../lib/constants";
@@ -108,28 +107,63 @@ await test("heartbeat: HEARTBEAT_INTERVAL_MS 与控制台超时协议配对", ()
 // ─── control-config 测试 ───────────────────────────────────
 // 注意：control-config 通过 HTTP 调控制台，需要控制台运行
 
-await test("control-config: refreshConfig + getAllConfig", async () => {
-  // 2026/9/14 起 refreshConfig fail-fast：控制台不可达直接抛异常。
+await test("control-config: fetchConfig + getCachedConfig TTL/SWR", async () => {
+  // fetchConfig fail-fast：控制台不可达直接抛异常。
   // 控制台未启动 = 测试环境不具备 → 明确跳过（替代旧的"静默空配置"语义）。
+  let configs: Record<string, string>;
   try {
-    await refreshConfig();
+    configs = await fetchConfig();
   } catch (e) {
     console.log(
-      "跳过：控制台未运行（refreshConfig 已 fail-fast）:",
+      "跳过：控制台未运行（fetchConfig 已 fail-fast）:",
       (e as Error).message,
     );
     return;
   }
-  const configs = await getAllConfig(); // getAllConfig 是 async（此前缺 await，断言恒空转）
   if (Object.keys(configs).length > 0) {
     assert("DEEPSEEK_API_KEY" in configs, "应有 DEEPSEEK_API_KEY");
   }
+
+  // a) fetchConfig 直读后喂缓存：同步侧立即可见（无需等待）
+  const synced = getCachedConfig();
+  assert(
+    Object.keys(synced).length === Object.keys(configs).length,
+    "fetchConfig 应喂缓存（getCachedConfig 立即可见）",
+  );
+
+  // b) TTL 内同步调用不触发后台刷新（无 in-flight 竞态即可返回完整缓存）
+  const again = getCachedConfig();
+  assert(
+    Object.keys(again).length === Object.keys(configs).length,
+    "TTL 内二次同步调用应直接返缓存",
+  );
 });
 
 await test("control-config: getCachedConfig 同步返回", () => {
   const configs = getCachedConfig();
   // 应该返回对象（空对象也行）
   assert(typeof configs === "object", "应返回对象");
+});
+
+await test("control-config: SWR 过期分支（返旧值 + 后台刷新不破坏缓存）", async () => {
+  const before = getCachedConfig();
+  if (Object.keys(before).length === 0) {
+    console.log("跳过：控制台未运行（缓存为空，SWR 分支依赖已填充的缓存）");
+    return;
+  }
+  const { forceExpireCacheForTest } = await import("../lib/control-config");
+  forceExpireCacheForTest(); // 强制 TTL 过期
+  const stale = getCachedConfig(); // SWR: 立即返旧值（非空）+ fire-and-forget 后台刷
+  assert(
+    Object.keys(stale).length === Object.keys(before).length,
+    "SWR 过期时应立即返回完整旧值（不阻塞不空转）",
+  );
+  await new Promise((r) => setTimeout(r, 500)); // 等后台刷新落地
+  const fresh = getCachedConfig();
+  assert(
+    Object.keys(fresh).length === Object.keys(before).length,
+    "后台刷新完成后缓存应完整（失败场景才保留旧值——此处应成功刷新）",
+  );
 });
 
 // ─── control-http 测试 ─────────────────────────────────────

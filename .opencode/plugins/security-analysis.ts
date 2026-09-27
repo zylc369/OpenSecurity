@@ -42,7 +42,7 @@ import {
 import { getPythonCmd, getInstallHint, getCompilerName } from "./lib/venv";
 import { isControlHealthy, startControl } from "./lib/control-manager";
 import { controlFetch } from "./lib/control-http";
-import { refreshConfig, getCachedConfig } from "./lib/control-config";
+import { fetchConfig, getCachedConfig } from "./lib/control-config";
 
 /** 从缓存读配置值（同步，不触发 HTTP）。如果缓存为空返回 null。 */
 function getCachedConfigValue(key: string): string | null {
@@ -982,8 +982,8 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
 
         // 控制台启动成功后，预热配置缓存。关键：shell.env hook 每轮用同步版
         // getCachedConfig() 注入环境变量（不能 await），缓存未预热时它拿到空对象
-        // → IDA_PRO_HOME 等注入缺失。此处显式 refresh 填充缓存。
-        await refreshConfig();
+        // → IDA_PRO_HOME 等注入缺失。此处显式 fetch 预热缓存。
+        await fetchConfig();
 
         // 2. 环境检测
         let envCheck: EnvironmentCheckResult | null = null;
@@ -1276,14 +1276,10 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           }
         }
 
-        // DEEPSEEK_API_KEY 和其他配置：通过 shell.env 注入到 agent 子进程
-        const allConfigs = getCachedConfig();
-        for (const [key, value] of Object.entries(allConfigs)) {
-          // 不覆盖系统已有的环境变量（让用户 shell export 优先）
-          if (!(key in output.env) && !key.startsWith("CONTROL_")) {
-            output.env[key] = value;
-          }
-        }
+        // 业务配置键（DEEPSEEK_API_KEY 等）不注入 agent bash——实证零消费方
+        // （agent 脚本/知识库/prompt 无引用），注入纯增提示注入外带面。
+        // 后端消费方走 ConfigManager 直读 .ai_env; IDAT/IDA_PRO_HOME 上方
+        // 显式注入; agent 需要配置时经控制台 API。
 
         debugLog(
           `shell.env: 已注入` +

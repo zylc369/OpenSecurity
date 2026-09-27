@@ -11,7 +11,7 @@ import { ctx } from "./context";
 import { debugLog } from "./logging";
 import { SessionData } from "./session-manager";
 import StringUtils from "./string-utils";
-import { getAllConfig, refreshConfig } from "./control-config";
+import { fetchConfig } from "./control-config";
 
 // ─── 完成标记（动态生成 + 精确匹配）──────────────────────────────
 //
@@ -223,7 +223,7 @@ export async function maybeResumeAnalysis(
     // 放在最前面（requireSecurityAgent 之前）——禁用时零开销，不查 session。
     // 未找到 / "1" / "true" / 任何其他值 → 启用，保持向后兼容。
     // 配置读取收口到 control-config（HTTP /api/config + 缓存）
-    const allConfigs = await getAllConfig();
+    const allConfigs = await fetchConfig();
     const enabledRaw = allConfigs[ENV_KEY_RESUME_ANALYSIS];
     if (
       enabledRaw !== undefined &&
@@ -355,7 +355,7 @@ export async function maybeResumeAnalysis(
           // 改为刷新配置后重走完整校验：此时 sinceLastResume ≈ cooldown，
           // 不会再进入冷却分支（无重入死循环），校验通过即正常发送；
           // 校验不通过（中断/关开关/已完成/session 已删）则静默终止。
-          refreshConfig()
+          fetchConfig()
             .then(() => maybeResumeAnalysis(sessionID, true))
             .catch((e) => {
               debugLog(

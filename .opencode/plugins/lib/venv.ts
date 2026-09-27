@@ -70,7 +70,7 @@ export function getInstallHint(): string {
 
 // ─── 编译器名（惰性缓存） ─────────────────────────────────────
 // readAiEnv / getIdatPath 已删除——配置读取收口到 control-config.ts。
-// 调用方应改用 getConfig("IDA_PRO_HOME") / getAllConfig() 拿配置。
+// 调用方应改用 fetchConfig()（直读）或 getCachedConfig()（TTL 缓存）拿配置。
 
 let cachedCompilerName: string | null = null;
 
