@@ -56,3 +56,9 @@
 
 - **`refresh()` 定位**：不是"运行期动态刷新"，而是"**构造时按当前 env 求值一次快照**"——生产 env 启动后不变（等价每进程一次）；pytest 单进程多沙箱切换是其唯一有效场景——重建的是 **ConfigManager 单例对象**（`_reset_for_tests()` 置空 `_instance` → `__new__` 走构造分支；**无 fork/子进程**），refresh 直接改写类属性。全仓 `ConfigManager._reset_for_tests` 调用点 15 处**全在测试**（零生产调用）→ 生产恰好一次 / 测试 N 次。调用方唯一（`config_manager._init_once`）。代码注释（runtime_paths.refresh / cm 构造处）已按此改写；§2.1 重同步复核 IDENTICAL；py_compile OK。
 - **`_ipc_address()` 路径**：注入值即完整地址（`join(OPENSECURITY_HOME, "opensecurity-control.sock")` 拼接在插件侧完成），control_url 零拼接、零路径知识；实测注入值 = live socket 路径（`srwxr-xr-x`）、`resolve_control()` via=uds；Windows 注入完整管道名。
+
+### 评审修正（v6，求值单一化）
+
+- **`_resolve()` 模块级化**（评审改定）：类体与 `refresh()` 同源调用模块级私有函数；删除类尾 `staticmethod` 包装。中间态曾残留 `cls._resolve()` 旧引用（`refresh()` 内）——实测 `AttributeError: type object 'RuntimePaths' has no attribute '_resolve'`，本次统一时消除（无需恢复包装）。
+- **初始化与重算单一求值点**：`refresh()` 成为唯一写入点（类属性仅类型声明，8 个值只写一次）；模块尾部 `RuntimePaths.refresh()` 完成加载时快照；类体内不再重复一份求值代码（此前 8 行 ×2 处）。
+- 验证：py_compile；import 快照 + 沙箱切换链（reset + 重建）实测跟随；test_config_manager 5/5；test_control 87 / test_integration 6 / test/deps 22；§2.1 重同步 IDENTICAL。

@@ -343,11 +343,12 @@ def build_gopher_url(
       ``%XX`` 时在 body 中写 ``%25XX``。
 
     版本边界: libcurl ≥ 8.22.0 拒绝解码后含 CR/LF 的 gopher selector
-    （``CURLE_URL_MALFORMAT``，不发起连接）——目标 fetcher 为新版时本函数
-    产物无法发出，先确认 fetcher 的 libcurl 版本（webhook 回显 UA）; 本地
-    用新版 curl 验证产物会全部 rc=3 被拒，需 <8.22.0 的 curl 或裸 socket
-    客户端复现。libcurl 在 selector 后固定追加一个 CRLF（无 body 请求恰好
-    补成头块空行; 有 body 时 body 尾部多 2 字节，按 CL 读取无影响）。
+    （``CURLE_URL_MALFORMAT``; TCP 连接已建立但 0 字节发出即关闭）——目标
+    fetcher 为新版时本函数产物无法发出，先确认 fetcher 的 libcurl 版本
+    （webhook 回显 UA）; 本地用新版 curl 验证产物会全部 rc=3 被拒，需
+    <8.22.0 的 curl 或裸 socket 客户端复现。libcurl 在 selector 后固定
+    追加一个 CRLF（无 body 请求恰好补成头块空行; 有 body 时 body 尾部
+    多 2 字节，按 CL 读取无影响）。
 
     关键防护——Content-Length 自动修正（fix_content_length=True，默认）:
     body 中的字面 ``%XX``（如 urlencoded 表单 ``content=%3Ch1%3E``）经
@@ -355,7 +356,8 @@ def build_gopher_url(
     导致服务端按 CL 永久等待 body（表现为目标"挂起"）。本函数按
     **解码后字节数**（``len(unquote_to_bytes(...))``）重算并回写
     Content-Length（缺失则补写、重复则去重），杜绝该坑。
-    无 body 时不添加/不修改 Content-Length。
+    无 body 时移除遗留的 Content-Length（CL>0 配 0 字节 body 会导致服务端
+    挂起），不添加新的; `fix_content_length=False` 时请求头原样保留。
 
     Args:
         host: 目标主机（如 "127.0.0.1"）

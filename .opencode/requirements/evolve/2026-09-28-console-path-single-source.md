@@ -5,6 +5,7 @@
 > 修订 v3（评审修正）：文件更名 `runtime_paths.py`（"paths" 太通用）；常量收口静态类 `RuntimePaths`（OOP 写法）；消费方与文档引用同步
 > 修订 v4（评审修正二）：全部 sys.path 自举移除（启动方注入 PYTHONPATH；`clean_databases` 移至 backend 根）；恢复 `detect_tools` CLI（历史重构静默丢失）+ 修复 `detect_py_deps install` 裸调用；test/deps 陈旧测试重写（22 通过）
 > 修订 v5（评审修正三）：`RuntimePaths.resolve()` 移除——类属性为唯一取数接口，新增 `refresh()`（唯一调用方 = ConfigManager 初始化）；config_manager 直读类属性（删实例路径字段）；`ToolsEnv._opencode_root` 删除；MCP 与控制台解耦（插件注入 `OPENSECURITY_CONTROL_IPC`，control_url 零 console import）
+> 修订 v6（评审修正四）：`_resolve()` 模块级化（去类尾 staticmethod 包装；残留引用已消除）；类属性仅类型声明，`refresh()` 成为初始化与重算的唯一求值点（模块加载时首调）
 > 关联：`2026-09-28-opensecurity-home-full-rename.md`（命名统一）；本文件解决"解析逻辑收口与正名"
 > 实施进度与 as-built：`progress-2026-09-28-console-path-single-source.md`
 
@@ -28,7 +29,7 @@
 - 读取边界归一化（expanduser + abspath；不做 realpath——保留符号链接语义）。
 - 仅依赖标准库——可被各进程（控制台/薄壳/工具脚本）单独 import（导入路径由启动方注入 PYTHONPATH）。
 - 其他模块不得再重复"读 env + 归一化"的写法；子路径字面量也收口在本类。
-- 类属性 = 引导 env 的快照，消费方直接读取；`refresh()` 按当前 env 重算（见其 docstring）。
+- 类属性 = 引导 env 的快照，消费方直接读取；`refresh()` 是唯一求值点（模块加载时首调；重算见其 docstring）。
 """
 from __future__ import annotations
 
@@ -36,50 +37,54 @@ import os
 from pathlib import Path
 
 
+def _resolve() -> tuple[str, str]:
+    """按当前环境解析 (OPENSECURITY_HOME, OPENCODE_ROOT)（不缓存）。"""
+    home = os.environ.get("OPENSECURITY_HOME") or str(Path.home() / "bw-security-analysis")
+    # .opencode 根兜底：由本文件位置逐级回溯 services → backend → control → .opencode（不解析符号链接）
+    services_dir = Path(os.path.abspath(__file__)).parent
+    root = os.environ.get("OPENCODE_ROOT") or str(services_dir.parents[2])
+    # 归一化：expanduser + abspath（不做 realpath——保留符号链接语义）
+    return (
+        os.path.abspath(os.path.expanduser(home)),
+        os.path.abspath(os.path.expanduser(root)),
+    )
+
+
 class RuntimePaths:
     """路径唯一来源（静态类）。
 
     - 类属性（OPENSECURITY_HOME / OPENCODE_ROOT / 各标准子路径）= 引导 env 快照，消费方直接读取；
-    - `refresh()` 按当前 env 重算快照——唯一调用方是 ConfigManager 构造（_init_once）：
-      生产 env 启动后不变（等价于一次快照）；测试在同一 pytest 进程内切换沙箱后重建实例，
-      需要读到新值而非模块加载时的旧快照。
+    - `refresh()` 是**唯一求值点**（初始化与重算共用同一段代码）：模块加载时调用一次；
+      此后唯一调用方是 ConfigManager 构造（_init_once）——测试在同一 pytest 进程内切换
+      沙箱后重建实例时读到新值（生产 env 启动后不变，重算等价于快照）。
     """
 
-    def _resolve() -> tuple[str, str]:
-        """按当前环境解析 (OPENSECURITY_HOME, OPENCODE_ROOT)（不缓存）。"""
-        home = os.environ.get("OPENSECURITY_HOME") or str(Path.home() / "bw-security-analysis")
-        # .opencode 根兜底：由本文件位置逐级回溯 services → backend → control → .opencode（不解析符号链接）
-        services_dir = Path(os.path.abspath(__file__)).parent
-        root = os.environ.get("OPENCODE_ROOT") or str(services_dir.parents[2])
-        # 归一化：expanduser + abspath（不做 realpath——保留符号链接语义）
-        return (
-            os.path.abspath(os.path.expanduser(home)),
-            os.path.abspath(os.path.expanduser(root)),
-        )
-
-    # —— 引导 env 快照（消费方直接读取；重算入口见 refresh()）——
-    OPENSECURITY_HOME, OPENCODE_ROOT = _resolve()
-    LOGS_DIR = os.path.join(OPENSECURITY_HOME, "logs")
-    KNOWLEDGE_DB = os.path.join(OPENSECURITY_HOME, "db", "knowledge", "knowledge.db")
-    VENV_DIR = os.path.join(OPENSECURITY_HOME, ".venv")
-    BIN_DIR = os.path.join(OPENSECURITY_HOME, "bin")
-    TOOLS_DIR = os.path.join(OPENSECURITY_HOME, "tools")
-    WORDLISTS_DIR = os.path.join(OPENSECURITY_HOME, "wordlists")
+    # —— 引导 env 快照（值由模块加载时的 refresh() 写入；消费方直接读取）——
+    OPENSECURITY_HOME: str
+    OPENCODE_ROOT: str
+    LOGS_DIR: str
+    KNOWLEDGE_DB: str
+    VENV_DIR: str
+    BIN_DIR: str
+    TOOLS_DIR: str
+    WORDLISTS_DIR: str
 
     @classmethod
     def refresh(cls) -> None:
-        """按**当前** os.environ 重算类属性快照（与上文类体同式）。
+        """按**当前** os.environ 求值并写入类属性快照（初始化与重算的**唯一求值点**）。
 
         何时会真正"变化"：
-        - 生产：env 在进程启动前设定、之后不变——首次构造时重算一次，等价于快照；
+        - 生产：env 在进程启动前设定、之后不变——模块加载时求值一次，首次构造再算一次
+          （结果等价）；
         - 测试：pytest 在**同一进程**内逐用例切换沙箱——先改进程版 `os.environ`，再重建
           ConfigManager **单例对象**（`_reset_for_tests()` 置空 `_instance` → `__new__` 走
           构造分支；不是进程、无 fork），本方法把类属性重新赋值为当前 env 的求值结果，
           让新实例读到新值，而不是模块加载时的旧快照。
 
-        唯一调用方: ConfigManager 构造（_init_once）。运行中的其他模块不得调用。
+        调用方: ① 模块加载（初始快照） ② ConfigManager 构造（_init_once）。
+        运行中的其他模块不得调用。
         """
-        cls.OPENSECURITY_HOME, cls.OPENCODE_ROOT = cls._resolve()
+        cls.OPENSECURITY_HOME, cls.OPENCODE_ROOT = _resolve()
         cls.LOGS_DIR = os.path.join(cls.OPENSECURITY_HOME, "logs")
         cls.KNOWLEDGE_DB = os.path.join(cls.OPENSECURITY_HOME, "db", "knowledge", "knowledge.db")
         cls.VENV_DIR = os.path.join(cls.OPENSECURITY_HOME, ".venv")
@@ -87,19 +92,20 @@ class RuntimePaths:
         cls.TOOLS_DIR = os.path.join(cls.OPENSECURITY_HOME, "tools")
         cls.WORDLISTS_DIR = os.path.join(cls.OPENSECURITY_HOME, "wordlists")
 
-    # 类体内求值用的函数在类尾包装为静态方法（类体执行期间经普通函数名调用）
-    _resolve = staticmethod(_resolve)
+
+# 模块加载即快照（refresh() 是唯一求值点；ConfigManager 构造时按需重算）
+RuntimePaths.refresh()
 ```
 
 ### 2.2 迁移清单
 
 | 消费方 | 现状 | 改为 |
 |--------|------|------|
-| `config_manager.py` | 自读 env×2 + 归一化；Bootstrap 持 env 名/默认值 | `_init_once` 调 `RuntimePaths.resolve()`（保留 `_reset_for_tests` 重解析语义）存实例字段；删 `OPENSECURITY_HOME_ENV`/`OPENCODE_ROOT_ENV`/`DEFAULT_OPENSECURITY_HOME`；`ai_env_path`/`ipc_unix_socket_path` 走实例字段 |
-| `detect_tools.py` | `ToolsEnv.CACHE_DIR` 自读 env，派生 3 目录；`_opencode_root()` 自推导；venv 候选 2 处拼 `.venv` | `CMD_DIR=RuntimePaths.BIN_DIR`、`TOOLS_HOME_DIR=RuntimePaths.TOOLS_DIR`、`WORDLISTS_DIR=RuntimePaths.WORDLISTS_DIR`；`_opencode_root()`→`RuntimePaths.OPENCODE_ROOT`；候选 2 处→`RuntimePaths.VENV_DIR`（CACHE_DIR 删除） |
+| `config_manager.py` | 自读 env×2 + 归一化；Bootstrap 持 env 名/默认值 | `_init_once` 调 `RuntimePaths.refresh()`（生产等价一次快照；测试重建链重读）；路径属性直读 `RuntimePaths.*`（无实例路径字段）；删 Bootstrap 三个路径常量 |
+| `detect_tools.py` | `ToolsEnv.CACHE_DIR` 自读 env，派生 3 目录；`_opencode_root()` 自推导；venv 候选 2 处拼 `.venv` | `CMD_DIR=RuntimePaths.BIN_DIR`、`TOOLS_HOME_DIR=RuntimePaths.TOOLS_DIR`、`WORDLISTS_DIR=RuntimePaths.WORDLISTS_DIR`；`_opencode_root()` 删除（4 处调用点直读 `RuntimePaths.OPENCODE_ROOT`）；候选 2 处→`RuntimePaths.VENV_DIR`（CACHE_DIR 删除） |
 | `detect_py_deps.py` | `CACHE_DIR`/`VENV_DIR` 自读 env | `VENV_DIR = RuntimePaths.VENV_DIR`（CACHE_DIR 删除）；导入路径由启动方注入 PYTHONPATH=backend；docstring 约束更新 |
 | `launchd_setup.py` | env 或 cm 双读 ×2；日志目录拼接 | `str(cm.opencode_root)` / `str(cm.opensecurity_home)`（cm 由 paths 提供）；日志目录→`RuntimePaths.LOGS_DIR` |
-| `control_url.py` | `_unix_socket_path` 自读 env | `Path(RuntimePaths.OPENSECURITY_HOME) / IPC_UNIX_SOCKET_NAME`（socket 名保持本地协议常量；PYTHONPATH=backend:mcp-servers 由启动方注入） |
+| `control_url.py` | `_unix_socket_path` 自读 env | 读启动方注入的 `OPENSECURITY_CONTROL_IPC`（完整平台地址；零控制台代码依赖；PYTHONPATH 仅 mcp-servers） |
 | `clean_databases.py` | 自读 env + 拼 db 路径 | 移至 `control/backend/` 根（直跑天然可得导入路径）+ `KNOWLEDGE_DB = Path(RuntimePaths.KNOWLEDGE_DB)` |
 | `knowledge_store.py` | 拼 `db/knowledge/knowledge.db` | `Path(RuntimePaths.KNOWLEDGE_DB)` |
 | `logging_setup.py` | 拼 `logs/` ×2 | `Path(RuntimePaths.LOGS_DIR) / ...` ×2 |
