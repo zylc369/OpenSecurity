@@ -76,8 +76,8 @@ node --check .opencode/plugins/security-analysis.ts
 
 ```
 1. 控制台是否运行？
-   → 端口文件 ~/bw-security-analysis/.opencode-control.port 首行即端口
-   → curl http://127.0.0.1:<端口>/health 应返回 200
+   → IPC 通道: macOS/Linux 为 $OPENSECURITY_HOME/opensecurity-control.sock；Windows 为 \\.\pipe\opensecurity-control-482964
+   → 冒烟: curl --unix-socket "$OPENSECURITY_HOME/opensecurity-control.sock" http://localhost/health 应返回 200（status=ok）
 
 2. IDA_PRO_HOME 是否配置？
    → grep '^IDA_PRO_HOME=' $OPENCODE_ROOT/.ai_env

@@ -14,6 +14,7 @@
  * interpretScanExit / interpretDepsSummary: 纯函数，便于测试。
  */
 import { join } from "path";
+import { DEFAULT_LOG, LOGS_DIR } from "./constants";
 import { startControl } from "./control-manager";
 import { controlFetch } from "./control-http";
 import { runProcess } from "./spawn";
@@ -108,7 +109,7 @@ export function interpretScanExit(
       `[环境自举检查故障] ${reason}\n` +
       `这可能是环境安装不完整或插件配置问题。可先尝试：\n` +
       `  ${installShCommand()}\n` +
-      `仍失败请查看日志：~/bw-security-analysis/logs/plugin_debug.log`,
+      `仍失败请查看日志：${DEFAULT_LOG}`,
   };
 }
 
@@ -225,7 +226,7 @@ export async function checkDepsViaControl(
       ready: false,
       message:
         `[环境检测失败] 控制台依赖检测接口不可达（agent=${agent}）。\n` +
-        `控制台可能仍在启动或已异常退出，请查看日志：~/bw-security-analysis/logs/\n` +
+        `控制台可能仍在启动或已异常退出，请查看日志：${LOGS_DIR}\n` +
         `或重启 opencode 后重试。`,
     };
   }

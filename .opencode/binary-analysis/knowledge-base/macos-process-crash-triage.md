@@ -81,14 +81,14 @@ for ti, th in enumerate(c["threads"]):
 ## 7. OpenSecurity 控制台专属绑定
 
 - 死亡指纹：MCP（events/knowledge）`Connection refused` + plugin 报"控制台不可用"
-- 日志三角：`~/bw-security-analysis/logs/{control.log, control-stderr.log, control-stdout.log}`（stderr 含 Python traceback 与资源警告；control.log 为业务日志）
+- 日志三角：`$OPENSECURITY_HOME/logs/{control.log, control-stderr.log, control-stdout.log}`（stderr 含 Python traceback 与资源警告；control.log 为业务日志）
 - 同参重启（与 plugin spawn 参数一致）：
 
 ```bash
 cd <项目根> && nohup env OPENCODE_ROOT=<项目 .opencode 路径> \
-  DATA_DIR=$HOME/bw-security-analysis HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
-  <DATA_DIR>/.venv/bin/python <OPENCODE_ROOT>/control/backend/server.py \
-  >> <DATA_DIR>/logs/control-stdout.log 2>> <DATA_DIR>/logs/control-stderr.log & disown
+  OPENSECURITY_HOME="$OPENSECURITY_HOME" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+  "$OPENSECURITY_HOME/.venv/bin/python" "$OPENCODE_ROOT/control/backend/server.py" \
+  >> "$OPENSECURITY_HOME/logs/control-stdout.log" 2>> "$OPENSECURITY_HOME/logs/control-stderr.log" & disown
 ```
 
 - 控制台进程内三类模型的串行约束（违者即 §6 形态崩溃）：

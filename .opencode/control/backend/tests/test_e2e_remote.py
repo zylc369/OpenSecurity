@@ -66,16 +66,16 @@ def _setup(root: Path, ai_env: dict[str, str]) -> None:
     (root / ".ai_env").write_text("\n".join(lines) + "\n")
 
 
-def _spawn(root: Path, data_dir: Path, port: int) -> subprocess.Popen:
+def _spawn(root: Path, opensecurity_home: Path, port: int) -> subprocess.Popen:
     env = dict(os.environ)
     env.update({
         "OPENCODE_ROOT": str(root),
-        "DATA_DIR": str(data_dir),
+        "OPENSECURITY_HOME": str(opensecurity_home),
         "CONTROL_TCP_PORT": str(port),
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
     })
-    log = open(data_dir / "spawn.log", "w")
+    log = open(opensecurity_home / "spawn.log", "w")
     return subprocess.Popen(
         [sys.executable, str(BACKEND_DIR / "server.py")],
         env=env, stdout=log, stderr=log,

@@ -41,7 +41,7 @@ $ARGUMENTS
 
 ### 第 3 步：运行时健康（B 层）
 
-检查方向，自行构造命令。socket = `~/bw-security-analysis/opensecurity-control.sock`。
+检查方向，自行构造命令。socket = `$OPENSECURITY_HOME/opensecurity-control.sock`。
 
 | 方向 | 通过标准 |
 |---|---|
@@ -49,7 +49,7 @@ $ARGUMENTS
 | API 数据一致：scan 与 deps 接口 | 两者读同一份工具清单，工具数量相等 |
 | 环境注入：在 bash 工具里实测 | PATH 前两前缀 = venv/bin、工具 bin; `$WORDLISTS_DIR` 非空 |
 | MCP：全部 server 注册 | 对照实际清单（mcp-servers/ 目录），注册日志无失败 |
-| 错误日志：当前 agent 的分流日志（`~/bw-security-analysis/logs/<agent>.log`，非 plugin_debug.log） | 无新增 ERROR/WARN |
+| 错误日志：当前 agent 的分流日志（`$OPENSECURITY_HOME/logs/<agent>.log`，非 plugin_debug.log） | 无新增 ERROR/WARN |
 | 工具抽验：从工具 bin 目录抽 3 个直接运行——1 个本机二进制、1 个容器 wrapper、1 个近期新增的 | 都能执行（如输出版本号） |
 | 数据落点健康：近期记忆库沉淀可召回（无新沉淀则跳过）; db/logs 体积无异常（参考阈值: db > 2GB、logs > 500MB 记 🟡） | 按上述标准 |
 

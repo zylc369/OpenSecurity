@@ -47,7 +47,7 @@ Security Analysis 的架构地图（目录树、归属规则、依赖方向、Pl
 
 环境信息由 Plugin 每轮注入（见系统提示"环境信息"段）; `$AGENT_DIR` 对每个 agent 各指各的专属目录（evolve → security-analysis-evolve/）。变量语义详见 architecture-map.md 环境变量表。
 
-**工具策略（预期行为，非故障）**：`knowledge_*` / `events_*` MCP 工具对本 agent 有意排除（知识双轨：静态知识=知识库文档、动态知识=领域 agent 写入的向量库；复盘数据源=任务目录 + progress）。工具缺失无需排查；记忆库存储/索引状态的审计可直读 SQLite（默认 `~/bw-security-analysis/db/knowledge/knowledge.db`）；检索质量复测须走真实检索路径，不得用直读代答（见 retrospective-methodology §6.2）。
+**工具策略（预期行为，非故障）**：`knowledge_*` / `events_*` MCP 工具对本 agent 有意排除（知识双轨：静态知识=知识库文档、动态知识=领域 agent 写入的向量库；复盘数据源=任务目录 + progress）。工具缺失无需排查；记忆库存储/索引状态的审计可直读 SQLite（`$OPENSECURITY_HOME/db/knowledge/knowledge.db`）；检索质量复测须走真实检索路径，不得用直读代答（见 retrospective-methodology §6.2）。
 
 ## 进化流程
 

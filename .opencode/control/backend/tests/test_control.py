@@ -7,7 +7,7 @@
 
 运行方式：
   cd .opencode/control/backend
-  OPENCODE_ROOT=<path> DATA_DIR=<path> python tests/test_control.py
+  OPENCODE_ROOT=<path> OPENSECURITY_HOME=<path> python tests/test_control.py
 
 每个测试独立运行（自带 setup + teardown），失败一个不影响其他。
 """
@@ -31,21 +31,21 @@ from fastapi import FastAPI
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
-# 测试专用 DATA_DIR（避免污染实际 ~/bw-security-analysis）
-TEST_DATA_DIR = Path(os.environ.get("DATA_DIR", "/tmp/control_test_data"))
-TEST_DATA_DIR.mkdir(parents=True, exist_ok=True)
+# 测试专用 OPENSECURITY_HOME（避免污染实际 ~/bw-security-analysis）
+TEST_OPENSECURITY_HOME = Path(os.environ.get("OPENSECURITY_HOME", "/tmp/control_test_data"))
+TEST_OPENSECURITY_HOME.mkdir(parents=True, exist_ok=True)
 
 # OPENCODE_ROOT 用真实路径（读真实 .ai_env）
 OPENCODE_ROOT = Path(os.environ.get("OPENCODE_ROOT", ""))
 
 # 强制环境变量
-os.environ["DATA_DIR"] = str(TEST_DATA_DIR)
+os.environ["OPENSECURITY_HOME"] = str(TEST_OPENSECURITY_HOME)
 if OPENCODE_ROOT.exists():
     os.environ["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
 # CONTROL_TCP_PORT 随机高位：沙箱控制台与生产 9776 隔离（bind 冲突会直接退出）
 os.environ.setdefault("CONTROL_TCP_PORT", str(__import__("random").randint(41000, 49000)))
 
-# services 顶部 import 必须在 env 设置之后（model_assets→config 链会冻结 DATA_DIR）
+# services 顶部 import 必须在 env 设置之后（model_assets→config 链会冻结 OPENSECURITY_HOME）
 from services.model_lifecycle import ManagedModel  # noqa: E402
 from services.model_assets import ModelAssetRegistry  # noqa: E402
 # 重模块单线程预热: 后段测试在 patch/create_app 里延迟 import（多线程互锁死锁源），在此一次性完成
@@ -125,7 +125,7 @@ def test_get_process_start_time():
 @test("process_lock.atomic_write: 写入 + 读取一致")
 def test_atomic_write():
     from services.process_lock import ProcessLockUtil
-    test_file = TEST_DATA_DIR / "test_atomic.txt"
+    test_file = TEST_OPENSECURITY_HOME / "test_atomic.txt"
     ProcessLockUtil.atomic_write(test_file, "hello\nworld\n")
     content = test_file.read_text()
     assert_eq(content, "hello\nworld\n", "内容应该一致")
@@ -135,7 +135,7 @@ def test_atomic_write():
 @test("process_lock.atomic_write: 父目录不存在时自动创建")
 def test_atomic_write_mkdir():
     from services.process_lock import ProcessLockUtil
-    test_file = TEST_DATA_DIR / "subdir" / "test_atomic.txt"
+    test_file = TEST_OPENSECURITY_HOME / "subdir" / "test_atomic.txt"
     if test_file.exists():
         test_file.unlink()
     ProcessLockUtil.atomic_write(test_file, "test")
@@ -2006,7 +2006,7 @@ def main():
     print("=" * 60)
     print("opencode-control 测试套件")
     print(f"BACKEND_DIR: {BACKEND_DIR}")
-    print(f"TEST_DATA_DIR: {TEST_DATA_DIR}")
+    print(f"TEST_OPENSECURITY_HOME: {TEST_OPENSECURITY_HOME}")
     print(f"OPENCODE_ROOT: {OPENCODE_ROOT}")
     print("=" * 60)
     print()
@@ -2426,7 +2426,7 @@ def test_knowledge_store_paths():
             out = np.zeros((len(seq), 1024), dtype=np.float32)
             return out[0] if single else out
 
-    db_path = TEST_DATA_DIR / "ks_unit" / "knowledge.db"
+    db_path = TEST_OPENSECURITY_HOME / "ks_unit" / "knowledge.db"
     if db_path.exists():
         db_path.unlink()
     svc = KnowledgeStoreService._create_fresh(db_path=db_path, embedder_factory=FakeEmbedder)
@@ -2509,7 +2509,7 @@ def _knowledge_events_routes_inner():
         async def close(self):
             pass
 
-    db_path = TEST_DATA_DIR / "ingest_route" / "knowledge.db"
+    db_path = TEST_OPENSECURITY_HOME / "ingest_route" / "knowledge.db"
     if db_path.exists():
         db_path.unlink()
     ks._reset_for_tests()
@@ -2550,7 +2550,7 @@ def test_knowledge_events_routes():
     import subprocess as _sp
     code = (
         "import sys, os; sys.path.insert(0, '.'); sys.path.insert(0, 'tests'); "
-        f"os.environ['DATA_DIR'] = {str(TEST_DATA_DIR)!r}; "
+        f"os.environ['OPENSECURITY_HOME'] = {str(TEST_OPENSECURITY_HOME)!r}; "
         f"os.environ['OPENCODE_ROOT'] = {str(OPENCODE_ROOT)!r}; "
         "os.environ.setdefault('CONTROL_TCP_PORT', os.environ.get('CONTROL_TCP_PORT', '0')); "
         "from tests.test_control import _knowledge_events_routes_inner; "
@@ -2580,7 +2580,7 @@ def test_knowledge_store_sync_methods():
             out = np.stack([vec(t) for t in seq])
             return out[0] if single else out
 
-    db_path = TEST_DATA_DIR / "ks_sync" / "knowledge.db"
+    db_path = TEST_OPENSECURITY_HOME / "ks_sync" / "knowledge.db"
     if db_path.exists():
         db_path.unlink()
     svc = KnowledgeStoreService._create_fresh(db_path=db_path, embedder_factory=FakeEmbedder)

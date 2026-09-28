@@ -27,7 +27,7 @@ def control_server():
     """启动发布态沙箱控制台实例（E2E/API 共享）。
 
     隔离铁律：
-      • DATA_DIR → tmp 沙箱（IPC sock / TCP 候选段全隔离）
+      • OPENSECURITY_HOME → tmp 沙箱（IPC sock / TCP 候选段全隔离）
       • CONTROL_FRONTEND_DEV=0（env 优先级，不碰真实 .ai_env）
       • CONTROL_TCP_PORT 随机高位（bind 候选整体避开生产 9776）
       • 心跳上报测试进程引用（防心跳表空自杀）
@@ -39,14 +39,14 @@ def control_server():
 
     import httpx
 
-    # DATA_DIR 必须是短路径：macOS AF_UNIX sock 路径 ≤104 字节，
+    # OPENSECURITY_HOME 必须是短路径：macOS AF_UNIX sock 路径 ≤104 字节，
     # pytest tmp_path（/private/var/folders/...）+ sock 文件名会超长 → bind 必败
     rand_port = random.randint(41000, 49000)
-    data_dir = Path(f"/tmp/frontend_test_{rand_port}")
-    data_dir.mkdir(parents=True, exist_ok=True)
+    opensecurity_home = Path(f"/tmp/frontend_test_{rand_port}")
+    opensecurity_home.mkdir(parents=True, exist_ok=True)
     env = {
         **os.environ,
-        "DATA_DIR": str(data_dir),
+        "OPENSECURITY_HOME": str(opensecurity_home),
         "CONTROL_FRONTEND_DEV": "0",
         "CONTROL_TCP_PORT": str(rand_port),
     }
@@ -61,7 +61,7 @@ def control_server():
     port = None
     heartbeat_stop: threading.Event | None = None
     try:
-        sock_file = data_dir / "opensecurity-control.sock"
+        sock_file = opensecurity_home / "opensecurity-control.sock"
         for _ in range(20):
             if sock_file.exists():
                 try:
@@ -115,4 +115,4 @@ def control_server():
         except subprocess.TimeoutExpired:
             proc.kill()
         import shutil
-        shutil.rmtree(data_dir, ignore_errors=True)
+        shutil.rmtree(opensecurity_home, ignore_errors=True)

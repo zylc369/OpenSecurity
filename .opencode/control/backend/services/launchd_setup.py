@@ -4,7 +4,7 @@ plist 契约:
   • Label: com.opensecurity.control
   • ProgramArguments: 当前解释器（sys.executable，venv python）+ server.py 绝对路径
   • RunAtLoad: 登录后自动拉起（LaunchAgent 语义——需开启系统自动登录）
-  • StandardOut/ErrPath: DATA_DIR/logs/launchd.log（排查拉起失败）
+  • StandardOut/ErrPath: OPENSECURITY_HOME/logs/launchd.log（排查拉起失败）
 
 部署提示（写入前端）: macOS 用户级 LaunchAgent 只在登录后运行——
 Mac Mini 必须开启"自动登录"，否则重启后控制台不会起来。
@@ -65,7 +65,7 @@ class LaunchdManager:
     def _plist_content(cls) -> str:
         """生成 plist（解释器 + server.py 均绝对路径）。
 
-        EnvironmentVariables 必带 OPENCODE_ROOT/DATA_DIR: LaunchAgent 无
+        EnvironmentVariables 必带 OPENCODE_ROOT/OPENSECURITY_HOME: LaunchAgent 无
         shell 环境，缺这两键时 ConfigManager 的 .ai_env 定位回退到相对
         路径（launchd 工作目录通常为 /）→ 节点以全默认配置启动并因
         心跳自杀退出（CONTROL_RESIDENT 等在 .ai_env 内可正常读到）。
@@ -74,9 +74,9 @@ class LaunchdManager:
         from services.config_manager import ConfigManager
         cm = ConfigManager.get_instance()
         server_py = Path(__file__).resolve().parents[1] / "server.py"
-        log_dir = Path(cm.data_dir) / "logs"
+        log_dir = Path(cm.opensecurity_home) / "logs"
         oc_root = os.environ.get("OPENCODE_ROOT") or str(server_py.parents[2])
-        data_dir = os.environ.get("DATA_DIR") or str(cm.data_dir)
+        opensecurity_home = os.environ.get("OPENSECURITY_HOME") or str(cm.opensecurity_home)
         # 与 plugin spawn 白名单（buildSpawnEnv）语义对齐: launchd 默认 PATH 是
         # 系统安全路径（无 venv/node/brew），控制台子进程（vite/外部工具）需要
         # 完整 PATH; HOME 供 Path.home/expanduser 主路径。OFFLINE 不进 plist——
@@ -110,8 +110,8 @@ class LaunchdManager:
     <dict>
         <key>OPENCODE_ROOT</key>
         <string>{oc_root}</string>
-        <key>DATA_DIR</key>
-        <string>{data_dir}</string>
+        <key>OPENSECURITY_HOME</key>
+        <string>{opensecurity_home}</string>
         <key>PATH</key>
         <string>{env_path}</string>
         <key>HOME</key>

@@ -38,7 +38,7 @@ class KnownContainer:
     description: str
     ports: list[str]           # 端口映射（如 ["7474:7474"]）
     env: list[str]             # 环境变量（如 ["NEO4J_AUTH=neo4j/neo4j_password"]）
-    volumes: list[str]         # 卷映射（如 ["$ConfigManager.get_instance().data_dir/neo4j:/data"]）
+    volumes: list[str]         # 卷映射（如 ["$ConfigManager.get_instance().opensecurity_home/neo4j:/data"]）
     mem_limit: str = ""        # 容器内存上限（如 "2g"; 空=不限）
     auto_start: bool = True    # 是否允许控制台自动启动（False = 只能手动）
 
@@ -75,7 +75,7 @@ class DockerManager:
                 "NEO4J_server_memory_heap_max__size=1g",
                 "NEO4J_server_memory_pagecache_size=512m",
             ],
-            volumes=["$ConfigManager.get_instance().data_dir/db/events:/data"],  # $ConfigManager.get_instance().data_dir 由 create_container 展开
+            volumes=["$ConfigManager.get_instance().opensecurity_home/db/events:/data"],  # $ConfigManager.get_instance().opensecurity_home 由 create_container 展开
             mem_limit="2g",
         ),
     ]
@@ -210,7 +210,7 @@ class DockerManager:
 
     @staticmethod
     def create_container(spec: KnownContainer) -> tuple[bool, str]:
-        """根据 KnownContainer spec 创建并启动容器（$ConfigManager.get_instance().data_dir 占位符自动展开）。"""
+        """根据 KnownContainer spec 创建并启动容器（$ConfigManager.get_instance().opensecurity_home 占位符自动展开）。"""
         if not DockerManager.is_daemon_running():
             return False, "Docker daemon 未运行"
         args = ["run", "-d", f"--name={spec.name}"]
@@ -222,7 +222,7 @@ class DockerManager:
             args.append(e)
         for v in spec.volumes:
             args.append("-v")
-            args.append(v.replace("$ConfigManager.get_instance().data_dir", ConfigManager.get_instance().data_dir))
+            args.append(v.replace("$ConfigManager.get_instance().opensecurity_home", ConfigManager.get_instance().opensecurity_home))
         if spec.mem_limit:
             args.append(f"--memory={spec.mem_limit}")
         args.append("--restart=unless-stopped")  # 常驻服务: Docker Desktop 重启后自动恢复
@@ -406,8 +406,8 @@ class DockerManager:
             raise RuntimeError("Docker daemon 不可用，无法确认容器状态")
 
         # not_exists → 建数据目录 + 拉镜像 + 创建
-        data_dir = Path(ConfigManager.get_instance().data_dir) / "db" / "events"
-        data_dir.mkdir(parents=True, exist_ok=True)
+        opensecurity_home = Path(ConfigManager.get_instance().opensecurity_home) / "db" / "events"
+        opensecurity_home.mkdir(parents=True, exist_ok=True)
         if DockerManager.image_exists(spec.image) is not True:
             logger.info("拉取镜像 %s（首次需下载，可能较慢）...", spec.image)
             try:
@@ -429,7 +429,7 @@ class DockerManager:
             if not ok:
                 raise RuntimeError(f"容器 {spec.name} 创建失败: {msg}")
         _wait_bolt()
-        logger.info("容器 %s 已就绪（bolt 可连），数据目录: %s", spec.name, data_dir)
+        logger.info("容器 %s 已就绪（bolt 可连），数据目录: %s", spec.name, opensecurity_home)
 
 @dataclass
 class DockerRuntime:

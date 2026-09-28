@@ -25,7 +25,7 @@ from pathlib import Path
 from services.config_manager import ConfigManager
 from services.knowledge_db import MemoryDB
 
-DEFAULT_DB_PATH = Path(ConfigManager.get_instance().data_dir) / "db" / "knowledge" / "knowledge.db"
+DEFAULT_DB_PATH = Path(ConfigManager.get_instance().opensecurity_home) / "db" / "knowledge" / "knowledge.db"
 
 
 @dataclass(frozen=True)

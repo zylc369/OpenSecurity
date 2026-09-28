@@ -73,6 +73,7 @@ permission:
 - `mode: all`：允许在主 session 和子 session 中使用（详见 OpenCode 文档）
 - `buwai-extension-id`：**必须与文件名一致**，Plugin 据此判断是否做占位符展开
 - `permission`：固定模板，允许 Agent 读写任务目录和 Downloads
+  - 注：`permission` 模式由 opencode 静态匹配（仅展开 `~/`、`$HOME`，不支持自定义变量）——数据主目录被 `OPENSECURITY_HOME` 覆盖时需手动同步此模式
 
 **prompt 正文骨架**（参考 `binary-analysis.md` 的结构）：
 

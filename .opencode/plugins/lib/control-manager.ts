@@ -27,7 +27,7 @@ import {
   CONTROL_IPC_READY_WAIT_MS,
   CONTROL_STDERR_LOG,
   CONTROL_STDOUT_LOG,
-  DATA_DIR,
+  OPENSECURITY_HOME,
   OPENCODE_ROOT,
   VENV_DIR,
   VENV_PYTHON_CANDIDATES,
@@ -124,7 +124,7 @@ let inFlightStart: Promise<boolean> | null = null;
 export function buildSpawnEnv(): Record<string, string> {
   const env: Record<string, string> = {
     OPENCODE_ROOT: OPENCODE_ROOT,
-    DATA_DIR: DATA_DIR,
+    OPENSECURITY_HOME: OPENSECURITY_HOME,
   };
   const passthrough = process.platform === "win32"
     ? [

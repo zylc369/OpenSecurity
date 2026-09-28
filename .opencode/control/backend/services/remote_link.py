@@ -14,7 +14,7 @@
 请求级 fallback 反馈: 路由层远程调用失败时调 note_request_failure——
 与心跳失败同源计数（更快感知降级）。
 
-日志: 独立文件 DATA_DIR/logs/remote-link.log（setup_auxiliary_logger，
+日志: 独立文件 OPENSECURITY_HOME/logs/remote-link.log（setup_auxiliary_logger，
 propagate=False——不进 control.log，两类日志物理分离）。
 
 循环依赖防护: 对 model_loader / ocr_service 的预热/卸载调用全部函数内

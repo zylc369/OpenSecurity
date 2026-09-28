@@ -26,7 +26,7 @@ def _fresh() -> "object":
     shutil.rmtree(_DATA, ignore_errors=True)
     _SANDBOX.mkdir(parents=True)
     _DATA.mkdir(parents=True)
-    os.environ["DATA_DIR"] = str(_DATA)
+    os.environ["OPENSECURITY_HOME"] = str(_DATA)
     os.environ["OPENCODE_ROOT"] = str(_SANDBOX)
     return ConfigManager.get_instance()
 
@@ -92,7 +92,7 @@ def test_meta():
 def test_bootstrap_props():
     from services.config_manager import ConfigManager
     cm = _fresh()
-    assert_eq(cm.data_dir, str(_DATA))
+    assert_eq(cm.opensecurity_home, str(_DATA))
     assert_eq(cm.opencode_root, str(_SANDBOX))
     assert_true(isinstance(cm.is_windows, bool))
     assert_true(cm.ipc_addr().endswith(cm.Protocol.IPC_UNIX_SOCKET_NAME) or cm.is_windows)

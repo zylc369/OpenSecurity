@@ -61,7 +61,7 @@
 | 源 | 位置 | 取证内容 |
 |---|---|---|
 | 会话时间线 | 任务目录 `logs/timeline.log`、`logs/plugin.log` | `tool.before/after` 序列——还原每步工具调用、耗时、失败重试，统计各机制实际调用（知识库读取、记忆库检索/写入、子 agent 委派） |
-| 记忆库直读 | 记忆库 SQLite（默认 `~/bw-security-analysis/db/knowledge/knowledge.db`） | `answers` 表按时间/关键词查条目与写入记录；`answer_vectors_rowids` 判断条目是否已建向量索引 |
+| 记忆库直读 | 记忆库 SQLite（`$OPENSECURITY_HOME/db/knowledge/knowledge.db`） | `answers` 表按时间/关键词查条目与写入记录；`answer_vectors_rowids` 判断条目是否已建向量索引 |
 | 配置核对 | `agents/*.md` frontmatter、`agents-rules/` 片段挂载、插件片段展开 | 工具在/不在的原因（permission deny、片段是否挂载）、展开行数复算 |
 
 归因判据：机制"没起作用"先区分**没有**（库中无对应内容）与**错过**（有内容但未检索到 / 未消费）——两者的修复方向不同。

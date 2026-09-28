@@ -3,7 +3,7 @@
 CLI:  python build_toolbox.py [--arch arm64|amd64|both] [--no-smoke]
       docker build 输出实时透传终端。
 import: from services import build_toolbox → build_toolbox.build_all(arch="both")
-      构建输出写入 DATA_DIR/logs/control.log（控制台统一日志）。
+      构建输出写入 OPENSECURITY_HOME/logs/control.log（控制台统一日志）。
 
 构建顺序（full 依赖同架构 core 基座）:
   core:arm64 → core:amd64 → full:arm64 → full:amd64

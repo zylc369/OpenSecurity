@@ -5,7 +5,7 @@
 
 运行：
   cd .opencode/control/backend
-  OPENCODE_ROOT=<path> DATA_DIR=<path> python tests/test_integration.py
+  OPENCODE_ROOT=<path> OPENSECURITY_HOME=<path> python tests/test_integration.py
 
 注意：自杀场景经 HEARTBEAT_* 小值 env 加速（超时 3s + sweep 1s + 宽限 5s）。
 """
@@ -24,20 +24,20 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
 WORKSPACE_ROOT = BACKEND_DIR.parent.parent.parent  # OpenSecurity/
-# 集成测试用沙箱 DATA_DIR（/tmp）——不碰真实 ~/bw-security-analysis 的
-# 状态文件（曾因直接 cleanup 真实 DATA_DIR 把生产控制台搞死）。
+# 集成测试用沙箱 OPENSECURITY_HOME（/tmp）——不碰真实 ~/bw-security-analysis 的
+# 状态文件（曾因直接 cleanup 真实 OPENSECURITY_HOME 把生产控制台搞死）。
 # venv 仍用真实位置：constants.ts 的 VENV_DIR 支持 OPENSECURITY_VENV_DIR 覆盖，
 # bun（control-manager → venv.ts）经此变量找到真实 venv Python。
-TEST_DATA_DIR = Path(os.environ.get("DATA_DIR", "/tmp/control_integration_test"))
-TEST_DATA_DIR.mkdir(parents=True, exist_ok=True)
+TEST_OPENSECURITY_HOME = Path(os.environ.get("OPENSECURITY_HOME", "/tmp/control_integration_test"))
+TEST_OPENSECURITY_HOME.mkdir(parents=True, exist_ok=True)
 REAL_VENV_DIR = Path.home() / "bw-security-analysis" / ".venv"
 OPENCODE_ROOT = Path(os.environ.get("OPENCODE_ROOT", WORKSPACE_ROOT / ".opencode"))
 
-os.environ["DATA_DIR"] = str(TEST_DATA_DIR)
+os.environ["OPENSECURITY_HOME"] = str(TEST_OPENSECURITY_HOME)
 os.environ["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
 os.environ["OPENSECURITY_VENV_DIR"] = str(REAL_VENV_DIR)
 # CONTROL_TCP_PORT 随机高位（隔离铁律）：沙箱控制台的浏览器 TCP 通道避开生产 9776。
-# IPC（sock）由 DATA_DIR 沙箱隔离；此处只需避开 TCP bind 冲突。
+# IPC（sock）由 OPENSECURITY_HOME 沙箱隔离；此处只需避开 TCP bind 冲突。
 os.environ["CONTROL_TCP_PORT"] = str(random.randint(41000, 49000))
 
 
@@ -84,7 +84,7 @@ def assert_false(value, msg=""):
 def cleanup_state():
     """清理所有残留状态文件 + 杀残留控制台（经 IPC /health 拿 PID）。"""
     import httpx
-    sock = TEST_DATA_DIR / "opensecurity-control.sock"
+    sock = TEST_OPENSECURITY_HOME / "opensecurity-control.sock"
     if sock.exists():
         try:
             with httpx.Client(
@@ -101,7 +101,7 @@ def cleanup_state():
         except: pass
     # 删状态文件
     for fname in ["opensecurity-control.sock"]:
-        f = TEST_DATA_DIR / fname
+        f = TEST_OPENSECURITY_HOME / fname
         if f.exists():
             try: f.unlink()
             except: pass
@@ -137,7 +137,7 @@ def is_pid_alive(pid: int) -> bool:
         return True
 
 
-TEST_OPENCODE_ROOT = TEST_DATA_DIR / "opencoderoot"   # 测试独立 OPENCODE_ROOT（隔离 .ai_env）
+TEST_OPENCODE_ROOT = TEST_OPENSECURITY_HOME / "opencoderoot"   # 测试独立 OPENCODE_ROOT（隔离 .ai_env）
 
 
 def _ensure_test_ai_env(vals: dict[str, str]) -> None:
@@ -147,7 +147,7 @@ def _ensure_test_ai_env(vals: dict[str, str]) -> None:
     直接写生产 .ai_env 会污染生产控制台（sweep 每轮重读，3s 超时会误杀
     生产心跳），故带小值场景的 spawn 用独立 OPENCODE_ROOT。
     TS 侧 CONTROL_SCRIPT 硬编码 OPENCODE_ROOT/control/backend/server.py，
-    venv/DATA_DIR 解耦依赖目录结构——backend 目录 symlink 指向真实位置
+    venv/OPENSECURITY_HOME 解耦依赖目录结构——backend 目录 symlink 指向真实位置
     （文件读取经 symlink 透明，sys.path/资源定位均正常）。
     """
     TEST_OPENCODE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -162,7 +162,7 @@ def _ensure_test_ai_env(vals: dict[str, str]) -> None:
 def bun_env(extra: dict[str, str] | None = None) -> dict:
     """bun 子进程环境变量。extra 为 HEARTBEAT_* 小值（写入独立 .ai_env 加速自杀场景）。"""
     env = os.environ.copy()
-    env["DATA_DIR"] = str(TEST_DATA_DIR)
+    env["OPENSECURITY_HOME"] = str(TEST_OPENSECURITY_HOME)
     if extra:
         _ensure_test_ai_env(extra)
         env["OPENCODE_ROOT"] = str(TEST_OPENCODE_ROOT)  # 独立 root → 控制台读测试 .ai_env
@@ -300,7 +300,7 @@ def test_exit_handler():
 
         # 验证：IPC socket 文件应该被删（控制台自杀路径清理）
         time.sleep(1)
-        sock_file = TEST_DATA_DIR / "opensecurity-control.sock"
+        sock_file = TEST_OPENSECURITY_HOME / "opensecurity-control.sock"
         assert_false(sock_file.exists(), "IPC socket 文件应被删")
     finally:
         if proc and proc.poll() is None:
@@ -438,12 +438,12 @@ def test_stale_sock_self_healing():
         proc_a = subprocess.Popen(
             [sys.executable, str(BACKEND_DIR / "server.py")],
             env={**os.environ,
-                 "DATA_DIR": str(TEST_DATA_DIR),
+                 "OPENSECURITY_HOME": str(TEST_OPENSECURITY_HOME),
                  "OPENCODE_ROOT": str(OPENCODE_ROOT),
                  "OPENSECURITY_VENV_DIR": str(REAL_VENV_DIR)},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        sock = TEST_DATA_DIR / "opensecurity-control.sock"
+        sock = TEST_OPENSECURITY_HOME / "opensecurity-control.sock"
         deadline = time.time() + 15
         while time.time() < deadline:
             if sock.exists():
@@ -462,7 +462,7 @@ def test_stale_sock_self_healing():
         proc_b = subprocess.Popen(
             [sys.executable, str(BACKEND_DIR / "server.py")],
             env={**os.environ,
-                 "DATA_DIR": str(TEST_DATA_DIR),
+                 "OPENSECURITY_HOME": str(TEST_OPENSECURITY_HOME),
                  "OPENCODE_ROOT": str(OPENCODE_ROOT),
                  "OPENSECURITY_VENV_DIR": str(REAL_VENV_DIR)},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -522,7 +522,7 @@ def test_spawn_env_whitelist():
         # 断言: 子进程 environ（ps eww = execve 快照）
         out = subprocess.run(["ps", "eww", str(cpid)], capture_output=True, text=True).stdout
         keys = {tok.split("=", 1)[0] for tok in out.split() if "=" in tok and not tok.startswith("/")}
-        whitelist = {"OPENCODE_ROOT", "DATA_DIR", "PATH", "HOME"}
+        whitelist = {"OPENCODE_ROOT", "OPENSECURITY_HOME", "PATH", "HOME"}
         missing = whitelist - keys
         assert_true(not missing, f"白名单键缺失: {missing}")
         leaked = [k for k in ("DEEPSEEK_API_KEY", "JULIANG_API_KEY",
@@ -544,7 +544,7 @@ def main():
     print("=" * 60)
     print("opencode-control 集成测试")
     print(f"WORKSPACE_ROOT: {WORKSPACE_ROOT}")
-    print(f"TEST_DATA_DIR: {TEST_DATA_DIR}")
+    print(f"TEST_OPENSECURITY_HOME: {TEST_OPENSECURITY_HOME}")
     print(f"OPENCODE_ROOT: {OPENCODE_ROOT}")
     print("=" * 60)
     print()

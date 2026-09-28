@@ -22,7 +22,7 @@ start() 返回 IpcStartStatus 枚举（调用方按语义处理，不用裸 bool
     （socket 对 + Event），并发连接互不阻塞
   • probe 无共享可变状态，无锁
 
-日志：全路径经 logging 打到 DATA_DIR/logs/control.log（stdio=ignore 下
+日志：全路径经 logging 打到 OPENSECURITY_HOME/logs/control.log（stdio=ignore 下
 print 不可见——见 services/logging_setup.py）。
 
 单例经 IpcListener.get_instance() 获取（模块级委托已删）。
@@ -208,7 +208,7 @@ class IpcListener:
 
     def _start_unix(self) -> socket.socket | None:
         path = ConfigManager.get_instance().ipc_unix_socket_path()
-        # 父目录兜底创建（DATA_DIR 首次运行可能不存在；缺目录时 bind 报 OSError
+        # 父目录兜底创建（OPENSECURITY_HOME 首次运行可能不存在；缺目录时 bind 报 OSError
         # 会被误判为"地址被占"）
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

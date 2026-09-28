@@ -6,7 +6,7 @@
   python3 tests/test_e2e_real.py knowledge  # 按名过滤子串
 
 前置条件：
-  - 生产控制台在跑（IPC sock：$DATA_DIR/opensecurity-control.sock）
+  - 生产控制台在跑（IPC sock：$OPENSECURITY_HOME/opensecurity-control.sock）
   - Docker daemon 可用（neo4j-events 卷数据保留）
   - DEEPSEEK_API_KEY 已配置（.ai_env）
 
@@ -31,9 +31,10 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", str(Path.home() / "bw-security-analysis")))
-SOCK_FILE = DATA_DIR / "opensecurity-control.sock"
-KNOWLEDGE_DB = DATA_DIR / "db" / "knowledge" / "knowledge.db"
+OPENSECURITY_HOME = Path(os.environ.get("OPENSECURITY_HOME") or os.environ.get("OPENSECURITY_HOME")
+                or str(Path.home() / "bw-security-analysis"))
+SOCK_FILE = OPENSECURITY_HOME / "opensecurity-control.sock"
+KNOWLEDGE_DB = OPENSECURITY_HOME / "db" / "knowledge" / "knowledge.db"
 RUN_ID = f"e2er-{os.getpid()}"
 
 _results: list[tuple[str, bool, str]] = []

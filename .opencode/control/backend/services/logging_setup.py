@@ -61,7 +61,7 @@ class LogManager:
             return logging.getLogger("control")
 
         from services.config_manager import ConfigManager
-        log_file = Path(ConfigManager.get_instance().data_dir) / "logs" / "control.log"
+        log_file = Path(ConfigManager.get_instance().opensecurity_home) / "logs" / "control.log"
 
         root.setLevel(level)
         root.addHandler(self._rotating_handler(log_file))
@@ -88,7 +88,7 @@ class LogManager:
             return logger
 
         from services.config_manager import ConfigManager
-        aux_file = Path(ConfigManager.get_instance().data_dir) / "logs" / filename
+        aux_file = Path(ConfigManager.get_instance().opensecurity_home) / "logs" / filename
 
         logger.setLevel(level)
         logger.propagate = False

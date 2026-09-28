@@ -21,7 +21,7 @@ from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
-os.environ.setdefault("DATA_DIR", "/tmp/control_test_data")
+os.environ.setdefault("OPENSECURITY_HOME", "/tmp/control_test_data")
 
 from tests.test_control import test, assert_eq, assert_true, assert_false  # noqa: E402
 

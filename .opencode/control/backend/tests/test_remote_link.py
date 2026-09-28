@@ -23,8 +23,8 @@ from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
-os.environ["DATA_DIR"] = "/tmp/control_test_rl"
-Path(os.environ["DATA_DIR"], "logs").mkdir(parents=True, exist_ok=True)
+os.environ["OPENSECURITY_HOME"] = "/tmp/control_test_rl"
+Path(os.environ["OPENSECURITY_HOME"], "logs").mkdir(parents=True, exist_ok=True)
 # 参数沙箱: 小阈值写 .ai_env（可调参数唯一通道是 config_store——无 env 第二套）
 RL_TEST_ROOT = Path("/tmp/control_test_rl_root")
 RL_TEST_ROOT.mkdir(parents=True, exist_ok=True)

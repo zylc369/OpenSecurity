@@ -156,7 +156,7 @@ class ProxyPool:
     # ─── IP 池簿记（唯一状态实现; 路由与 relay 经 get_instance 直呼）───
 
     def _init_once(self, state_path: Path | None = None) -> None:
-        self._path = state_path or (Path(config_manager.ConfigManager.get_instance().data_dir) / "proxy_state.json")
+        self._path = state_path or (Path(config_manager.ConfigManager.get_instance().opensecurity_home) / "proxy_state.json")
         self._state = PoolState()
         self._lock = asyncio.Lock()
         self._load()

@@ -19,7 +19,7 @@ from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
-os.environ.setdefault("DATA_DIR", "/tmp/control_test_routes")
+os.environ.setdefault("OPENSECURITY_HOME", "/tmp/control_test_routes")
 # 根隔离: 本文件测试的路由直接写 .ai_env——OPENCODE_ROOT 重定向到临时目录，
 # 防止测试值污染生产配置（config_store 的读写路径跟随 OPENCODE_ROOT）
 _ROUTES_TEST_ROOT = Path("/tmp/control_test_routes_root")

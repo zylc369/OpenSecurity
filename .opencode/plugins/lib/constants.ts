@@ -24,24 +24,24 @@ export const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 export const OPENCODE_ROOT =
   process.env.OPENCODE_ROOT || findOpenCodeRoot(PLUGIN_DIR);
 
-// DATA_DIR 支持环境变量覆盖（与控制台 config.py 对等）。
+// OPENSECURITY_HOME 支持环境变量覆盖（与控制台 config.py 对等）。
 // 默认 ~/bw-security-analysis（生产环境用户路径）。
-// 测试可通过 DATA_DIR=/tmp/xxx 隔离。
-export const DATA_DIR =
-  process.env.DATA_DIR || join(homedir(), "bw-security-analysis");
-export const WORKSPACE_DIR = join(DATA_DIR, "workspace");
+// 测试可通过 OPENSECURITY_HOME=/tmp/xxx 隔离。
+export const OPENSECURITY_HOME =
+  process.env.OPENSECURITY_HOME || join(homedir(), "bw-security-analysis");
+export const WORKSPACE_DIR = join(OPENSECURITY_HOME, "workspace");
 export const TASK_SESSIONS_DIR = join(WORKSPACE_DIR, ".task_sessions");
 // 字典统一目录（WordlistRecipe 落点; shell.env 注入 $WORDLISTS_DIR; 容器 wrapper 挂载源）
-export const WORDLISTS_DIR = join(DATA_DIR, "wordlists");
+export const WORDLISTS_DIR = join(OPENSECURITY_HOME, "wordlists");
 // 外部工具目录（detect_tools.py 的 CMD_DIR/TOOLS_HOME_DIR 对等落点）。
-// 必须经 DATA_DIR 派生（勿硬编码 homedir 拼接）——保持 env 覆盖/测试沙箱一致性。
-// 两者是 DATA_DIR 下的平级兄弟目录（无包含关系）:
+// 必须经 OPENSECURITY_HOME 派生（勿硬编码 homedir 拼接）——保持 env 覆盖/测试沙箱一致性。
+// 两者是 OPENSECURITY_HOME 下的平级兄弟目录（无包含关系）:
 //   CMD  = 命令目录（可执行入口: wrapper + 单二进制，PATH 注入点，按名调用）
 //   HOME = 工具的家（本体文件: 运行时/克隆仓库/jar，如 node/、dotnet/、android-platform-tools/）
-export const TOOLS_CMD_DIR = join(DATA_DIR, "bin");
-export const TOOLS_HOME_DIR = join(DATA_DIR, "tools");
+export const TOOLS_CMD_DIR = join(OPENSECURITY_HOME, "bin");
+export const TOOLS_HOME_DIR = join(OPENSECURITY_HOME, "tools");
 
-export const LOGS_DIR = join(DATA_DIR, "logs");
+export const LOGS_DIR = join(OPENSECURITY_HOME, "logs");
 export const DEFAULT_LOG = join(LOGS_DIR, "plugin_debug.log");
 // 控制台子进程 stdout/stderr 落盘（spawn stdio 接管）。
 // 此前 stdio 三路 ignore 导致 crash traceback / kill 信号物理不可见——
@@ -155,9 +155,9 @@ export const ENV_KEY_COGNITION_CHECKPOINT = "COGNITION_CHECKPOINT_ENABLED";
 
 // ─── venv ──────────────────────────────────────────────────────
 
-// venv 与 DATA_DIR 解耦：测试用沙箱 DATA_DIR 时仍可指向真实 venv（省 1GB+ 依赖安装）。
+// venv 与 OPENSECURITY_HOME 解耦：测试用沙箱 OPENSECURITY_HOME 时仍可指向真实 venv（省 1GB+ 依赖安装）。
 export const VENV_DIR =
-  process.env.OPENSECURITY_VENV_DIR || join(DATA_DIR, ".venv");
+  process.env.OPENSECURITY_VENV_DIR || join(OPENSECURITY_HOME, ".venv");
 
 export const VENV_PYTHON_CANDIDATES = [
   join(VENV_DIR, "python.exe"), // conda env Windows 根目录
@@ -193,7 +193,7 @@ export const CONTROL_SCRIPT = join(
 );
 
 /** 控制台 IPC：Unix Domain Socket 路径（macOS/Linux；与控制台 config.py 一致） */
-export const CONTROL_UNIX_SOCKET = join(DATA_DIR, "opensecurity-control.sock");
+export const CONTROL_UNIX_SOCKET = join(OPENSECURITY_HOME, "opensecurity-control.sock");
 
 /** 控制台 IPC：Windows 命名管道名（与控制台 config.py 一致；随机后缀防撞名） */
 export const CONTROL_WIN_PIPE = "\\\\.\\pipe\\opensecurity-control-482964";

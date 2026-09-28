@@ -93,7 +93,7 @@ class FakeJuliang:
 
 @pytest.fixture
 def pool(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENSECURITY_HOME", str(tmp_path))
     import importlib, services.config_manager as config
     importlib.reload(config)
     importlib.reload(pp)

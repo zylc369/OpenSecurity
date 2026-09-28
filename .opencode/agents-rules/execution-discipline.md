@@ -13,7 +13,7 @@
 ### 文件放置规则
 
 1. **中间产物写入当前 agent 自己的目录（`$TASK_DIR`）**：Python 脚本、HTTP 响应保存、cookie 文件、调试输出、截图、解包目录、工具结果（根会话下它就是任务目录；子会话下它是自己的子任务目录）
-2. **禁止位置**：workspace 根目录（`~/bw-security-analysis/workspace/`）、项目根目录、系统临时目录
+2. **禁止位置**：workspace 根目录（`$OPENSECURITY_HOME/workspace/`）、项目根目录、系统临时目录
 3. **敏感信息**：Cookie/Token 等必须在 `$TASK_DIR` 中存储
 4. **下面这些约定文件写入 `$ROOT_TASK_DIR`（整个任务的目录；子会话的 `$TASK_DIR` 在其下）**——读取约定由各自 agent/命令规定，不在此重复：
    - 分析台账 → `$ROOT_TASK_DIR/ledger.md`

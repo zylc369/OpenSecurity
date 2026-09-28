@@ -1,7 +1,7 @@
 import { join } from "path";
 import { existsSync } from "fs";
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { OPENCODE_ROOT, DATA_DIR } from "./constants";
+import { OPENCODE_ROOT, OPENSECURITY_HOME } from "./constants";
 import { getPythonCmd } from "./venv";
 import { startControl } from "./control-manager";
 import { debugLog } from "./logging";
@@ -98,9 +98,9 @@ export class McpManager {
       return;
     }
 
-    // 2. 构造 env：只注入 DATA_DIR（control_url.py 用它定位 IPC socket）
+    // 2. 构造 env：只注入 OPENSECURITY_HOME（control_url.py 用它定位 IPC socket）
     const mcpEnv: Record<string, string> = {
-      DATA_DIR: DATA_DIR,
+      OPENSECURITY_HOME: OPENSECURITY_HOME,
     };
 
     // 3. 通过 SDK 官方 API 注册
@@ -112,8 +112,8 @@ export class McpManager {
             type: "local" as const,
             command,
             // 字段名必须是 environment（opencode 运行时读 mcp.environment）。
-            // 历史上误写 env 被静默丢弃 → DATA_DIR 从未注入 MCP 子进程，
-            // 生产靠默认值巧合可用，测试沙箱 DATA_DIR 则泄漏到生产端口文件
+            // 历史上误写 env 被静默丢弃 → OPENSECURITY_HOME 从未注入 MCP 子进程，
+            // 生产靠默认值巧合可用，测试沙箱 OPENSECURITY_HOME 则泄漏到生产端口文件
             environment: mcpEnv,
             enabled: true,
             timeout,

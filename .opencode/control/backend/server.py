@@ -190,7 +190,7 @@ def main() -> None:
     单实例检测 + TCP 顺延绑定 + IPC 监听 + B 方案启动 + 引用计数周期清洗。
 
     时序：
-      1. 日志初始化（文件轮转 DATA_DIR/logs/control.log——stdio=ignore 下 print 不可见）
+      1. 日志初始化（文件轮转 OPENSECURITY_HOME/logs/control.log——stdio=ignore 下 print 不可见）
       2. IPC 监听（内核排他互斥；按 IpcStartStatus 分支处理）
       3. bind 浏览器 TCP 候选段（9776 起顺延）+ 注册真实端口
       4. 启动引用计数后台清洗

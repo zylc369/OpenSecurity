@@ -3,7 +3,7 @@
 CLI:  python push_toolbox.py [--ver v1.0]
       docker 输出实时透传终端（不捕获，与手敲命令一致的观感）。
 import: from services import push_toolbox → push_toolbox.push_all(ver="v1.0")
-      docker 输出写入 DATA_DIR/logs/control.log（控制台统一日志，stdio=ignore 下 print 不可见）。
+      docker 输出写入 OPENSECURITY_HOME/logs/control.log（控制台统一日志，stdio=ignore 下 print 不可见）。
 
 tag 语义:
   :v1.0-arm64 / :v1.0-amd64  版本锚点——发新版后永不再动，用于复现/回退

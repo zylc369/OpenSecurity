@@ -6,7 +6,7 @@ import type { Event } from "@opencode-ai/sdk";
 import {
   PLUGIN_DIR,
   OPENCODE_ROOT,
-  DATA_DIR,
+  OPENSECURITY_HOME,
   WORDLISTS_DIR,
   TOOLS_CMD_DIR,
   TOOLS_HOME_DIR,
@@ -359,6 +359,9 @@ async function buildEnvSection(
     }
 
     envSection += `- 共享目录($SHARED_DIR)路径，它里面有共享的通用的知识、工具和脚本: ${SHARED_DIR}\n`;
+
+    // OpenSecurity 主目录（运行时数据与工具所在; 与 shell.env 注入保持一致）
+    envSection += `- OpenSecurity 主目录 ($OPENSECURITY_HOME): 完整路径是 \`${OPENSECURITY_HOME}\`。它是本体系全部运行时数据与工具的存放根：workspace/（所有任务目录，$TASK_DIR 在其中；找历史任务目录从这里找）、db/knowledge/knowledge.db（记忆库）、logs/（运行日志）、bin/ 与 wordlists/（外部工具与字典）。命令和文档引用这些资源时一律拼 \`$OPENSECURITY_HOME/...\`，不要写死路径\n`;
 
     // OPENSECURITY_FLOW_ID：事件库分区标识
     envSection += `- 事件库 Flow ID ($OPENSECURITY_FLOW_ID): ${session.flowId}。标识当前分析任务的事件库分区。主任务和它启动的所有子任务共享同一个 Flow ID——子 agent 写入的事件（工具执行记录、LLM 响应）和父 agent 写入的事件存在同一个分区里，互相可搜索。调用事件库 MCP 的搜索工具时，将此值作为 group_id 参数传入，限定搜索范围到当前任务的事件，避免搜到其他无关任务的数据。\n`;
@@ -841,7 +844,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   debugLog(`=== SecurityAnalysisPlugin loaded ===`);
   debugLog(`  PLUGIN_DIR: ${PLUGIN_DIR}`);
   debugLog(`  OPENCODE_ROOT: ${OPENCODE_ROOT}`);
-  debugLog(`  DATA_DIR: ${DATA_DIR}`);
+  debugLog(`  OPENSECURITY_HOME: ${OPENSECURITY_HOME}`);
   debugLog(`  WORKSPACE_DIR: ${WORKSPACE_DIR}`);
   debugLog(`  TASK_SESSIONS_DIR: ${TASK_SESSIONS_DIR}`);
   debugLog(`  LOGS_DIR: ${LOGS_DIR}`);
@@ -1221,7 +1224,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           output.env.PYTHON_CMD = pythonCmd;
           // 字典统一目录（路径约定恒定，无条件注入——不依赖安装状态; AI 用 $WORDLISTS_DIR/xxx 引用字典）
           output.env.WORDLISTS_DIR = WORDLISTS_DIR;
-          // PATH: 前置 venv/bin（venv CLI 工具 sage/sqlmap 等）+ ~/bw-security-analysis/bin
+          // PATH: 前置 venv/bin（venv CLI 工具 sage/sqlmap 等）+ $OPENSECURITY_HOME/bin
           // （detect_tools.py 自动安装的外部工具: nuclei/ffuf/bkcrack/wrapper 等）
           const venvBin = dirname(pythonCmd);
           const toolBin = TOOLS_CMD_DIR;
@@ -1242,6 +1245,8 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         }
         output.env.OPENCODE_ROOT = OPENCODE_ROOT;
         output.env.SHARED_DIR = SHARED_DIR;
+        // OpenSecurity 主目录（与 buildEnvSection 展示一致）
+        output.env.OPENSECURITY_HOME = OPENSECURITY_HOME;
 
         // AGENT_DIR（根据当前 agent 计算）
         const scriptDir = getScriptDir(agentName);
@@ -1289,6 +1294,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             ` OPENCODE_ROOT=${OPENCODE_ROOT}` +
             ` AGENT_DIR=${scriptDir ?? "无"}` +
             ` SHARED_DIR=${output.env.SHARED_DIR}` +
+            ` OPENSECURITY_HOME=${OPENSECURITY_HOME}` +
             ` TASK_DIR=${taskDir ?? "无"}` +
             ` ROOT_TASK_DIR=${output.env.ROOT_TASK_DIR ?? "无"}` +
             ` OPENSECURITY_FLOW_ID=${session.flowId}` +

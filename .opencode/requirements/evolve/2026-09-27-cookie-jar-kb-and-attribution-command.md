@@ -6,6 +6,8 @@
 > 实施进度与 as-built 记录：`progress-2026-09-27-cookie-jar-kb-and-attribution-command.md`
 > as-built：bot-patterns +45/−1（116→160）、xss-advanced +2、web-analysis 1 行替换、knowledge-management +2（29→31）、命令 54 行；5 agent 展开 428/449/407/416/320；实现与 §2.1/§2.3 全文稿 diff 为零
 > 修订 v2（功能测试）：§3.4 驱逐细化（批量清至低水位约 150 的 150↔180 锯齿——本地 Playwright T1-T4 验证）；命令端到端实测（对 `20260927_160838_e8ba_web-analysis` 产出完整归因报告）；命令增加外部目录权限提示行
+> 修订 v3（数据目录变量化）：命令草稿 3 处路径改 `$DATA_DIR`（承接 `2026-09-28-data-dir-var-injection-and-hardcoded-path-cleanup.md`）
+> 修订 v4（命名升级）：命令草稿 3 处路径改 `$OPENSECURITY_HOME`（承接 `2026-09-28-opensecurity-home-var-rename.md`）
 
 ## §1 背景与目标
 
@@ -122,7 +124,7 @@ description: 机制贡献归因 — 分析一次分析任务中「自身经验/�
 
 | $ARGUMENTS | 行为 |
 |------------|------|
-| 空 | 当前会话对应任务：`$TASK_DIR` 优先；为空（非 instrumented 会话）取 `~/bw-security-analysis/workspace/` 最新任务目录，报告首行标注来源；分析上下文在当前会话内时，第 4 步自述可用 |
+| 空 | 当前会话对应任务：`$TASK_DIR` 优先；为空（非 instrumented 会话）取 `$OPENSECURITY_HOME/workspace/` 最新任务目录，报告首行标注来源；分析上下文在当前会话内时，第 4 步自述可用 |
 | 任务目录路径 | 直接使用 |
 | 产出文档路径（writeup/报告） | 从文档回溯所属任务目录（按路径就近找 workspace 任务目录）；回溯失败 → 降级模式 |
 | `self` | 当前会话即分析会话，以会话上下文自述为主 |
@@ -138,7 +140,7 @@ $ARGUMENTS
    - 其他分析工具调用（环境相关，如 idat）；
    - 配置核对：相关 agent 的 frontmatter、片段挂载、工具权限（解释某机制"没有调用"的工具侧原因）。
 2. **落库状态核对（区分"没有/错过"）**：
-   - 直读 `~/bw-security-analysis/db/knowledge/knowledge.db`：`answers` 表按关键词/时间查条目、`answer_vectors_rowids` 查向量索引状态；
+   - 直读 `$OPENSECURITY_HOME/db/knowledge/knowledge.db`：`answers` 表按关键词/时间查条目、`answer_vectors_rowids` 查向量索引状态；
    - 直读仅用于存储/索引状态审计；**检索质量复测必须走真实检索路径**——派发 memorist 用技法词复测（要求逐字返回 id + question）；无权限/不可用时标注"未复测"并列入遗留。
 3. **消费质量归因**：读 `ledger.md`/`progress.md`/产出文档与日志时间线，判断各调用是否真正支撑关键步骤/突破；无法判断的条目标注"需自述"。
 4. **自述补充**：当前会话包含分析上下文时，基于会话自述突破归因；不含时标注"自述缺失"，仅给日志侧结论。
@@ -161,7 +163,7 @@ $ARGUMENTS
 - 只读审计：不修改任何文件、不写知识库/记忆库；
 - 不重做分析、不评价分析结论对错（只归因机制贡献）；
 - 路径引用保持 `$OPENCODE_ROOT`/`$TASK_DIR`/`~` 形式，禁止硬编码绝对路径；
-- 任务目录与知识库 DB 位于项目外（`~/bw-security-analysis/`）——交互会话遇外部目录权限询问时放行只读访问（非交互运行需预授权）；
+- 任务目录与知识库 DB 位于数据主目录（`$OPENSECURITY_HOME`）——该变量由 Plugin 注入（见环境信息段）；交互会话遇外部目录权限询问时放行只读访问（非交互运行需预授权）；
 - 日志缺失时降级：标注"降级模式（无任务目录日志）"，仅用产出物 + 自述归因并降低证据等级。
 ```
 

@@ -1,7 +1,7 @@
 """配置唯一权威（ConfigManager，Java 式全局单例）。
 
 职责收口（原 config.py + services/config_store.py 全部合并）:
-  • 引导参数: DATA_DIR / OPENCODE_ROOT / CONTROL_TCP_PORT / CONTROL_FRONTEND_DEV
+  • 引导参数: OPENSECURITY_HOME / OPENCODE_ROOT / CONTROL_TCP_PORT / CONTROL_FRONTEND_DEV
     （本模块是全项目唯一的 os.environ 读取点——.ai_env 路径本身由
      OPENCODE_ROOT 决定，配置文件的位置无法从配置文件读取）
   • .ai_env 唯一读写: get/get_all/set/delete/ensure_template
@@ -63,16 +63,16 @@ class ConfigManager:
     class Bootstrap:
         """进程引导参数（唯一 env 读取点）。
 
-        DATA_DIR/OPENCODE_ROOT/CONTROL_TCP_PORT 由 Plugin spawn 或测试进程注入;
+        OPENSECURITY_HOME/OPENCODE_ROOT/CONTROL_TCP_PORT 由 Plugin spawn 或测试进程注入;
         CONTROL_FRONTEND_DEV 仅在 .ai_env 未定义该键时读 env（CI/无文件环境
         注入通道——文件一旦定义即为权威，env 同名值不参与）。
         """
 
-        DATA_DIR_ENV = "DATA_DIR"
+        OPENSECURITY_HOME_ENV = "OPENSECURITY_HOME"
         OPENCODE_ROOT_ENV = "OPENCODE_ROOT"
         TCP_PORT_ENV = "CONTROL_TCP_PORT"
         FRONTEND_DEV_ENV = "CONTROL_FRONTEND_DEV"
-        DEFAULT_DATA_DIR = str(Path.home() / "bw-security-analysis")
+        DEFAULT_OPENSECURITY_HOME = str(Path.home() / "bw-security-analysis")
 
     class Keys:
         """全部 .ai_env 键名常量（ConfigField 与消费方统一引用）。"""
@@ -191,7 +191,9 @@ class ConfigManager:
 
     def _init_once(self) -> None:
         b = self.Bootstrap
-        self._data_dir = os.environ.get(b.DATA_DIR_ENV, b.DEFAULT_DATA_DIR)
+        self._opensecurity_home = (
+            os.environ.get(b.OPENSECURITY_HOME_ENV) or b.DEFAULT_OPENSECURITY_HOME
+        )
         self._opencode_root = os.environ.get(b.OPENCODE_ROOT_ENV, "")
         self._dev_mode = self._read_dev_mode_once()
 
@@ -212,8 +214,8 @@ class ConfigManager:
     # ═══════════════ 引导属性 ═══════════════
 
     @property
-    def data_dir(self) -> str:
-        return self._data_dir
+    def opensecurity_home(self) -> str:
+        return self._opensecurity_home
 
     @property
     def opencode_root(self) -> str:
@@ -239,7 +241,7 @@ class ConfigManager:
         return self.Protocol.CONTROL_TCP_PORT_START
 
     def ipc_unix_socket_path(self) -> Path:
-        return Path(self._data_dir) / self.Protocol.IPC_UNIX_SOCKET_NAME
+        return Path(self._opensecurity_home) / self.Protocol.IPC_UNIX_SOCKET_NAME
 
     def ipc_addr(self) -> str:
         """当前平台的 IPC 会合地址（Unix: 文件路径 / Windows: 管道名）。"""

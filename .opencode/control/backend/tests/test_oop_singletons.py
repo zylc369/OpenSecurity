@@ -23,7 +23,7 @@ shutil.rmtree(_SANDBOX, ignore_errors=True)
 shutil.rmtree(_DATA, ignore_errors=True)
 _SANDBOX.mkdir(parents=True)
 _DATA.mkdir(parents=True)
-os.environ["DATA_DIR"] = str(_DATA)
+os.environ["OPENSECURITY_HOME"] = str(_DATA)
 os.environ["OPENCODE_ROOT"] = str(_SANDBOX)
 (_SANDBOX / ".ai_env").write_text("# 单例测试沙箱\n")
 
