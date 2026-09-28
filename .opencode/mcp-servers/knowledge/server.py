@@ -8,16 +8,14 @@
 端口发现：control_url.py（读端口文件，事实来源）；控制台重启换端口自动自愈。
 """
 import json
-import sys
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Annotated
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-sys.path.insert(0, str(Path(__file__).parent.parent))  # control_url 同级
+# control_url 与后端模块的导入路径由启动方注入（插件 mcp-manager 设置 PYTHONPATH）
 from control_url import resolve_control, make_control_client
 
 _CONTROL: dict = {"base": None}

@@ -1,9 +1,9 @@
 """配置唯一权威（ConfigManager，Java 式全局单例）。
 
 职责收口（原 config.py + services/config_store.py 全部合并）:
-  • 引导参数: OPENSECURITY_HOME / OPENCODE_ROOT / CONTROL_TCP_PORT / CONTROL_FRONTEND_DEV
-    （本模块是全项目唯一的 os.environ 读取点——.ai_env 路径本身由
-     OPENCODE_ROOT 决定，配置文件的位置无法从配置文件读取）
+  • 引导参数: CONTROL_TCP_PORT / CONTROL_FRONTEND_DEV
+    （路径类引导参数 OPENSECURITY_HOME / OPENCODE_ROOT 收口于 services.runtime_paths——
+     .ai_env 路径本身由 OPENCODE_ROOT 决定，配置文件的位置无法从配置文件读取）
   • .ai_env 唯一读写: get/get_all/set/delete/ensure_template
   • 键名常量（Keys）/ 可调参数默认值（Defaults）/ 协议常量（Protocol）
   • 行为可调参数: remote/heartbeat/proxy 三组 tunables（.ai_env 优先，
@@ -13,7 +13,7 @@
 设计规则（后端 OOP 重构铁律）:
   • 单例模板: __new__ 双检锁 + _init_once（禁止 __init__）+ get_instance()
   • 常量只存在于嵌套静态类 / 服务类静态字段——模块级大写变量违规
-  • 测试隔离: _reset_for_tests() 后修改引导 env 再首访即得新实例
+  • 测试隔离: 修改引导 env 后 _reset_for_tests()/重建实例即得新快照（RuntimePaths.refresh 重读）
 """
 from __future__ import annotations
 
@@ -25,6 +25,8 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+from services.runtime_paths import RuntimePaths
 
 logger = logging.getLogger(__name__)
 
@@ -61,18 +63,15 @@ class ConfigManager:
     # ═══════════════ 嵌套静态类: 常量收口 ═══════════════
 
     class Bootstrap:
-        """进程引导参数（唯一 env 读取点）。
+        """进程引导参数（路径解析见 services.runtime_paths）。
 
-        OPENSECURITY_HOME/OPENCODE_ROOT/CONTROL_TCP_PORT 由 Plugin spawn 或测试进程注入;
+        CONTROL_TCP_PORT 由 Plugin spawn 或测试进程注入;
         CONTROL_FRONTEND_DEV 仅在 .ai_env 未定义该键时读 env（CI/无文件环境
         注入通道——文件一旦定义即为权威，env 同名值不参与）。
         """
 
-        OPENSECURITY_HOME_ENV = "OPENSECURITY_HOME"
-        OPENCODE_ROOT_ENV = "OPENCODE_ROOT"
         TCP_PORT_ENV = "CONTROL_TCP_PORT"
         FRONTEND_DEV_ENV = "CONTROL_FRONTEND_DEV"
-        DEFAULT_OPENSECURITY_HOME = str(Path.home() / "bw-security-analysis")
 
     class Keys:
         """全部 .ai_env 键名常量（ConfigField 与消费方统一引用）。"""
@@ -190,11 +189,11 @@ class ConfigManager:
     # ═══════════════ 实例状态与构造 ═══════════════
 
     def _init_once(self) -> None:
-        b = self.Bootstrap
-        self._opensecurity_home = (
-            os.environ.get(b.OPENSECURITY_HOME_ENV) or b.DEFAULT_OPENSECURITY_HOME
-        )
-        self._opencode_root = os.environ.get(b.OPENCODE_ROOT_ENV, "")
+        # 路径消费一律直读 RuntimePaths 类属性；构造时先重算快照：
+        # - 生产：env 启动后不变，此处等价于"进程级一次快照"；
+        # - 测试：pytest 同一进程内切换沙箱（改进程版 os.environ 后 _reset_for_tests()
+        #   置空 _instance、重建单例对象，无 fork/子进程）——refresh 重算类属性。
+        RuntimePaths.refresh()
         self._dev_mode = self._read_dev_mode_once()
 
     def _read_dev_mode_once(self) -> bool:
@@ -215,15 +214,15 @@ class ConfigManager:
 
     @property
     def opensecurity_home(self) -> str:
-        return self._opensecurity_home
+        return RuntimePaths.OPENSECURITY_HOME
 
     @property
     def opencode_root(self) -> str:
-        return self._opencode_root
+        return RuntimePaths.OPENCODE_ROOT
 
     @property
     def ai_env_path(self) -> Path:
-        return Path(self._opencode_root) / ".ai_env" if self._opencode_root else Path(".ai_env")
+        return Path(RuntimePaths.OPENCODE_ROOT) / ".ai_env"
 
     @property
     def is_dev_mode(self) -> bool:
@@ -241,7 +240,7 @@ class ConfigManager:
         return self.Protocol.CONTROL_TCP_PORT_START
 
     def ipc_unix_socket_path(self) -> Path:
-        return Path(self._opensecurity_home) / self.Protocol.IPC_UNIX_SOCKET_NAME
+        return Path(RuntimePaths.OPENSECURITY_HOME) / self.Protocol.IPC_UNIX_SOCKET_NAME
 
     def ipc_addr(self) -> str:
         """当前平台的 IPC 会合地址（Unix: 文件路径 / Windows: 管道名）。"""
@@ -258,7 +257,12 @@ class ConfigManager:
         path = self.ai_env_path
         if not path.exists():
             return {}
-        return self._parse(path.read_text(errors="ignore"))
+        configs = self._parse(path.read_text(errors="ignore"))
+        # 路径型配置读时归一化（expanduser + abspath；写侧保留原文）——消费者拿到的即绝对展开路径
+        for field in self.required_configs() + self.extra_configs():
+            if field.type == "path" and configs.get(field.key):
+                configs[field.key] = os.path.abspath(os.path.expanduser(configs[field.key]))
+        return configs
 
     def set(self, updates: dict[str, str]) -> dict[str, str]:
         """批量更新（保留注释 + 未改字段; 值统一 strip）。"""
@@ -583,7 +587,7 @@ DEEPSEEK_API_KEY=
 
     def validate_ida_pro_home(self, value: str) -> tuple[bool, str]:
         """校验 IDA_PRO_HOME: 目录存在 + idat 可执行文件存在。"""
-        path = Path(value)
+        path = Path(os.path.abspath(os.path.expanduser(value)))
         if not path.exists():
             return False, f"目录不存在：{value}"
         exe = "idat.exe" if self.is_windows else "idat"

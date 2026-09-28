@@ -686,7 +686,8 @@ def test_cli_deps_scan_consumer():
     venv_py = Path(sys.executable)
     r = subprocess.run(
         [str(venv_py), str(Path(__file__).resolve().parents[1] / "services" / "detect_py_deps.py"), "scan"],
-        capture_output=True, text=True, timeout=120)
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "PYTHONPATH": str(BACKEND_DIR)})  # CLI 消费链：启动方注入模块搜索路径
     assert_eq(r.returncode, 0,
               f"scan 应 exit 0（stderr 尾: {r.stderr[-200:] if r.stderr else '空'}）")
 

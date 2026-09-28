@@ -32,6 +32,10 @@ elif [[ $# -gt 0 ]]; then
     exit 1
 fi
 
+# 子脚本以 services.* 形式导入控制台后端 → 注入模块搜索路径（系统 python 阶段同样适用；
+# detect_py_deps 内部切 venv 重 exec 时继承本环境）
+export PYTHONPATH="${SCRIPT_DIR}/control/backend${PYTHONPATH:+:${PYTHONPATH}}"
+
 # 1. Python 依赖（必需层: 失败即中断）
 "$PYTHON" "${SCRIPT_DIR}/control/backend/services/detect_py_deps.py" install
 

@@ -88,6 +88,6 @@ $WORDLISTS_DIR/
 
 ## 4. 维护
 
-- 安装/重装: `python $OPENCODE_ROOT/control/backend/services/detect_tools.py install --tool seclists|rockyou|cn-dicts`
+- 安装/重装: `cd $OPENCODE_ROOT/control/backend && $PYTHON_CMD -m services.detect_tools install --tool seclists|rockyou|cn-dicts`
 - 检查完整: `ls $WORDLISTS_DIR/seclists/Discovery` 有输出即 seclists 就绪; `wc -l $WORDLISTS_DIR/rockyou.txt` ≈ 14344392
 - cn/ 源在 git 仓库 `$OPENCODE_ROOT/wordlists/cn/`（跨机器可重现; install 复制到 $WORDLISTS_DIR）

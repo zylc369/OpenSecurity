@@ -125,7 +125,11 @@ export async function checkPyDepsViaCli(
   const r = await runProcess(
     pythonCmd,
     [DETECT_PY_DEPS, "scan", "--agent", "all"],
-    { timeout: SCAN_TIMEOUT_MS, env: { OPENCODE_ROOT } },
+    {
+      timeout: SCAN_TIMEOUT_MS,
+      // 脚本以 services.* 导入后端 → 注入模块搜索路径（与 install.sh 同约定；脚本内无自举）
+      env: { OPENCODE_ROOT, PYTHONPATH: join(OPENCODE_ROOT, "control", "backend") },
+    },
   );
   // error 与 status 都进解析（fail-closed：链路故障绝不静默放行）
   debugLog(

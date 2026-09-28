@@ -1,6 +1,6 @@
 """工具箱镜像构建（双架构: arm64 原生 + amd64 QEMU 模拟）—— CLI + import 双模式。
 
-CLI:  python build_toolbox.py [--arch arm64|amd64|both] [--no-smoke]
+CLI（在 backend 目录）: python -m services.docker_build_toolbox [--arch arm64|amd64|both] [--no-smoke]
       docker build 输出实时透传终端。
 import: from services import build_toolbox → build_toolbox.build_all(arch="both")
       构建输出写入 OPENSECURITY_HOME/logs/control.log（控制台统一日志）。
@@ -24,10 +24,6 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
-
-# CLI 直跑自举（detect_tools.py 同模式）: 把 backend 目录加 sys.path 使 services 可见
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 

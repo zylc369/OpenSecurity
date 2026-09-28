@@ -9,7 +9,7 @@
 注意：
   • IDA_PRO_HOME 通过 ConfigManager 读（配置收口）
   • 其他工具（apktool/jadx 等）通过 shutil.which 检测 PATH，未命中回落 ToolsEnv.CMD_DIR
-  • 自动安装产物落 ~/bw-security-analysis/bin（插件注入 PATH）/ tools/（源码与 jar）
+  • 自动安装产物落 $OPENSECURITY_HOME/bin（插件注入 PATH）/ tools/（源码与 jar）
 """
 from __future__ import annotations
 
@@ -30,27 +30,15 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
-# CLI 直跑自举（detect_py_deps.py 同模式）: 把 backend 目录加 sys.path 使 services 可见
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from services.config_manager import ConfigManager  # noqa: E402 —— 自举后可见
+from services.config_manager import ConfigManager
+from services.runtime_paths import RuntimePaths
 
 class ToolsEnv:
-    """工具环境常量与平台推导（静态方法类; 目录刻意本地定义不跨模块 import）。"""
+    """工具环境常量与平台推导（静态方法类; 路径来自 services.runtime_paths——唯一来源）。"""
 
-    CACHE_DIR = os.path.expanduser("~/bw-security-analysis")
-    CMD_DIR = os.path.join(CACHE_DIR, "bin")           # 命令目录: 可执行入口（wrapper+单二进制，插件注入 PATH）
-    TOOLS_HOME_DIR = os.path.join(CACHE_DIR, "tools")  # 工具"家"目录: 克隆仓库/jar/运行时（node/dotnet/...）
-    WORDLISTS_DIR = os.path.join(CACHE_DIR, "wordlists")  # 字典统一落点（插件注入 $ToolsEnv.WORDLISTS_DIR）
-
-    @staticmethod
-    def _opencode_root() -> str:
-        """OPENCODE_ROOT 推导: 环境变量 → 从本文件路径回溯（backend/services → .opencode）。"""
-        env = os.environ.get("OPENCODE_ROOT")
-        if env:
-            return env
-        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    CMD_DIR = RuntimePaths.BIN_DIR            # 命令目录: 可执行入口（wrapper+单二进制，插件注入 PATH）
+    TOOLS_HOME_DIR = RuntimePaths.TOOLS_DIR   # 工具"家"目录: 克隆仓库/jar/运行时（node/dotnet/...）
+    WORDLISTS_DIR = RuntimePaths.WORDLISTS_DIR  # 字典统一落点（插件注入 $ToolsEnv.WORDLISTS_DIR）
 
     @staticmethod
     def _plat_key() -> str:
@@ -748,7 +736,7 @@ exec "$GDB" -q "$BIN" -ex "set architecture $ELF_N" -ex "target remote :$PORT" "
 
 
 # ─── 工具清单 ────────────────────────────────────────────
-_AUTO_HINT = "自动安装: bash .opencode/install.sh 或 python control/backend/services/detect_tools.py install --tool {name}"
+_AUTO_HINT = "自动安装: bash .opencode/install.sh 或 cd $OPENCODE_ROOT/control/backend && $PYTHON_CMD -m services.detect_tools install --tool {name}"
 _WEB = ["web-analysis"]
 _BIN = ["binary-analysis"]
 
@@ -917,7 +905,7 @@ EXTERNAL_TOOLS.extend([
     ToolField(name="git-bash", agents=["all"], required=False, version_cmd=[],
               description="Git Bash 运行时自举（仅 Windows: opencode shell 前提，系统版优先便携版兜底）",
               platforms=["win32"],
-              install_hint="自动安装（Windows）: python control/backend/services/detect_tools.py install --tool git-bash"),
+              install_hint="自动安装（Windows）: cd $OPENCODE_ROOT/control/backend && $PYTHON_CMD -m services.detect_tools install --tool git-bash"),
 ])
 
 
@@ -1203,10 +1191,10 @@ case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
 NAME="{NAME}-$$-$(date +%s)-$(od -An -N2 -tu2 /dev/urandom 2>/dev/null | tr -d " ")"
 # 参数中工作目录/字典目录前缀 → 容器视角路径
 # （AI 统一写 $ToolsEnv.WORDLISTS_DIR/xxx 一套心智，wrapper 自动重写——容器内无需该环境变量）
-# 多形式匹配: AI 传参可能是 $(pwd) 的 MSYS 形态、$ToolsEnv.WORDLISTS_DIR 的 Windows 形态、或 $HOME 形态
+# 多形式匹配: AI 传参可能是 $(pwd) 的 MSYS 形态、字典目录的宿主绝对路径形态、或（MSYS 下）Windows 形态
 # ⚠ 空模式防护: 变量为空（如 wrapper 在无 plugin 注入的手动终端跑）时 s|^|repl| 会给所有参数
 #   加前缀——必须动态构造 sed 表达式，空变量规则自动跳过
-WL_MSYS="$HOME/bw-security-analysis/wordlists"
+WL_MSYS="{WL_DIR}"
 WL_WIN="$WL_MSYS"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
   command -v cygpath >/dev/null 2>&1 && WL_WIN="$(cygpath -w "$WL_MSYS")"
@@ -1216,7 +1204,6 @@ RW_SED=""
 _rw_add w "$DIR" /work
 _rw_add wl "$WL_MSYS" /usr/share/wordlists-host
 _rw_add wlw "$WL_WIN" /usr/share/wordlists-host
-_rw_add envwl "$ToolsEnv.WORDLISTS_DIR" /usr/share/wordlists-host
 rw_path() { if [ -n "$RW_SED" ]; then printf %s "$1" | sed "$RW_SED"; else printf %s "$1"; fi; }
 ARGS=""; for a in "$@"; do ARGS="$ARGS $(rw_path "$a")"; done
 
@@ -1703,7 +1690,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             return InstallResult(r.name, "skipped", f"平台 {sys.platform} 不适用（{'/'.join(r.platforms)} 专用）")
         if not force and os.path.exists(self._bin_path(r.name)):
             return InstallResult(r.name, "skipped", "ToolsEnv.CMD_DIR 已存在")
-        src = os.path.join(ToolsEnv._opencode_root(), r.source)
+        src = os.path.join(RuntimePaths.OPENCODE_ROOT, r.source)
         if not os.path.isfile(src):
             return InstallResult(r.name, "failed", f"预编译产物缺失: {r.source}（需 macOS 环境执行 tools/build-class-dump.sh 重建）")
         if r.jar:  # 自包含 jar: 拷 tools/<name>/ + java -jar wrapper（跨平台）
@@ -1817,7 +1804,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             return InstallResult(r.name, "installed",
                                  f"下载 {len(data) // 1048576}MB → {dest}")
         if r.source:
-            src = os.path.join(ToolsEnv._opencode_root(), r.source)
+            src = os.path.join(RuntimePaths.OPENCODE_ROOT, r.source)
             if not os.path.isdir(src):
                 return InstallResult(r.name, "failed", f"仓库内源缺失: {r.source}")
             if os.path.isdir(dest):
@@ -1831,7 +1818,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     @staticmethod
     def _configure_opencode_shell(bash_exe: str) -> str:
         """写项目级 opencode.json 的 shell 键（JSON 合并保留其他键）。返回结果描述。"""
-        path = os.path.join(ToolsEnv._opencode_root(), "opencode.json")
+        path = os.path.join(RuntimePaths.OPENCODE_ROOT, "opencode.json")
         cfg: dict = {}
         if os.path.isfile(path):
             try:
@@ -2120,7 +2107,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     @staticmethod
     def _docker_build(r: DockerRecipe) -> InstallResult:
         """docker build（context = Dockerfile 所在目录）。"""
-        df = os.path.join(ToolsEnv._opencode_root(), r.dockerfile)
+        df = os.path.join(RuntimePaths.OPENCODE_ROOT, r.dockerfile)
         if not os.path.isfile(df):
             return InstallResult(r.name, "failed", f"Dockerfile 不存在: {r.dockerfile}")
         try:
@@ -2170,7 +2157,8 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             "{EXTRA}", (" ".join(r.extra_args) + " ") if r.extra_args else "").replace(
             "{LONGCHECK}", longcheck).replace(
             "{HASHCAT_ENV}", hashcat_env).replace(
-            "{W3CHECK}", w3check)
+            "{W3CHECK}", w3check).replace(
+            "{WL_DIR}", ToolsEnv.WORDLISTS_DIR)
         with open(path, "w", encoding="utf-8",
                   newline=None if os.name == "nt" else "\n") as f:
             f.write(body)
@@ -2344,9 +2332,9 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     def _venv_python() -> str:
         """venv 解释器路径（与 detect_py_deps.VENV_DIR 同值推导; 无 venv 时回落当前解释器）。"""
         if os.name == "nt":
-            cand = os.path.join(ToolsEnv.CACHE_DIR, ".venv", "Scripts", "python.exe")
+            cand = os.path.join(RuntimePaths.VENV_DIR, "Scripts", "python.exe")
         else:
-            cand = os.path.join(ToolsEnv.CACHE_DIR, ".venv", "bin", "python")
+            cand = os.path.join(RuntimePaths.VENV_DIR, "bin", "python")
         return cand if os.path.exists(cand) else sys.executable
 
     @staticmethod
@@ -2356,4 +2344,70 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             raise RuntimeError(f"命令失败: {' '.join(cmd[:4])}...: {r.stderr.strip()[:200]}")
 
 
-# 模块级单例 + 兼容委托（既有消费方零改动）
+# ── CLI 入口（install.sh 第 2 步 / 知识库提示命令 / 手动重装共用）──
+
+
+def _main() -> int:
+    parser = argparse.ArgumentParser(
+        description="外部工具检测 + 自动安装",
+        usage="detect_tools.py <command> [options]\n\n"
+              "子命令:\n"
+              "  scan                检测工具状态（按 agent）\n"
+              "  install             安装 INSTALLABLE_TOOLS 清单（幂等）\n"
+              "  list-installable    列出可自动安装的工具",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sc = sub.add_parser("scan", help="检测工具状态")
+    sc.add_argument("--agent", default="all", help="agent 名（all=全部）")
+
+    ic = sub.add_parser("install", help="安装全部可自动安装工具")
+    ic.add_argument("--tool", default=None, help="只装指定工具（默认全部）")
+    ic.add_argument("--force", action="store_true", help="忽略幂等跳过条件重装")
+
+    sub.add_parser("list-installable", help="列出可自动安装清单")
+
+    args = parser.parse_args()
+
+    if args.command == "list-installable":
+        for r in installable_tools():
+            print(r.name)
+        return 0
+
+    if args.command == "install":
+        installer = ToolsInstaller.get_instance()
+        if args.tool:
+            results = [installer.install_tool(args.tool, force=args.force)]
+        else:
+            print("[*] 开始安装 INSTALLABLE_TOOLS 清单（单工具失败不中断）...")
+            results = installer.install_all(force=args.force)
+        ok = sum(1 for r in results if r.status == "installed")
+        skip = sum(1 for r in results if r.status == "skipped")
+        fail = [r for r in results if r.status == "failed"]
+        for r in results:
+            mark = {"installed": "+", "skipped": "*", "failed": "-"}[r.status]
+            print(f"[{mark}] {r.name:20s} {r.status:10s} {r.detail}")
+        print(f"[*] 完成: 安装 {ok} / 跳过 {skip} / 失败 {len(fail)}")
+        if fail:
+            print("[!] 以下工具安装失败（知识库命令依赖它们，修复后单独重装）:")
+            for r in fail:
+                print(f"    cd $OPENCODE_ROOT/control/backend && $PYTHON_CMD -m services.detect_tools install --tool {r.name}")
+            return 1
+        return 0
+
+    # scan
+    if args.agent == "all":
+        for agent, statuses in ToolsScanner.get_instance().scan_all().items():
+            print(f"── {agent}")
+            for s in statuses:
+                mark = "+" if s.available else ("*" if s.skipped else "-")
+                print(f"  [{mark}] {s.name:20s} {s.version or '':16s} {s.description}")
+    else:
+        for s in ToolsScanner.get_instance().scan_agent(args.agent):
+            mark = "+" if s.available else ("*" if s.skipped else "-")
+            print(f"[{mark}] {s.name:20s} {s.version or '':16s} {s.description}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main())

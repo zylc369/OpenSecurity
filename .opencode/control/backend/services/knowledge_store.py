@@ -22,10 +22,10 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from services.config_manager import ConfigManager
+from services.runtime_paths import RuntimePaths
 from services.knowledge_db import MemoryDB
 
-DEFAULT_DB_PATH = Path(ConfigManager.get_instance().opensecurity_home) / "db" / "knowledge" / "knowledge.db"
+DEFAULT_DB_PATH = Path(RuntimePaths.KNOWLEDGE_DB)
 
 
 @dataclass(frozen=True)

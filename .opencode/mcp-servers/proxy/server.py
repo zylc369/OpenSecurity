@@ -8,16 +8,14 @@
 工具描述即 agent 判定的现场引导（每轮注入）：proxy_status 描述内嵌判定 SOP
 （三场景：预期挑战不换 / 真限流换 / 烂 IP 淘汰），铁律一=查 rotate_history 补全时间线。
 """
-import sys
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Annotated
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # control_url 同级
+# control_url 与后端模块的导入路径由启动方注入（插件 mcp-manager 设置 PYTHONPATH）
 from control_url import resolve_control, make_control_client
 
 _CONTROL: dict = {"base": None}

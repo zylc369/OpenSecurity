@@ -1,16 +1,11 @@
-"""控制台 IPC 地址发现与 HTTP 客户端工厂（Python 侧唯一入口）。
+"""控制台 IPC 地址读取与 HTTP 客户端工厂（Python 侧唯一入口）。
 
-所有需要访问 control/backend 的 Python 代码（knowledge/events/ocr 薄壳、
-测试脚本）都通过本模块获取控制台地址与 httpx 客户端。
-
-IPC 化设计（与 control/backend/config.py 常量保持一致——两处进程
-sys.path 不同，常量按约定复制，修改须同步）：
-  • macOS/Linux：Unix Domain Socket $DATA_DIR/opensecurity-control.sock
-    httpx 原生支持：AsyncHTTPTransport(uds=...)
-  • Windows：命名管道 \\\\.\\pipe\\opensecurity-control-482964
-    httpx 不支持管道 → ControlIpc 内置进程内本地代理线程
-    （127.0.0.1 随机端口 → 管道，双泵）。随机端口是进程内部实现
-    细节（无文件、无固定占用、无发现机制）。
+所有需要访问控制台的 MCP 薄壳（knowledge/events/ocr/proxy）通过本模块获取
+地址与 httpx 客户端。本模块**不依赖控制台代码**：IPC 地址由启动方
+（插件 mcp-manager）以环境变量 `OPENSECURITY_CONTROL_IPC` 注入——
+  • macOS/Linux：Unix Domain Socket 绝对路径（httpx 原生支持 uds=...）
+  • Windows：命名管道名（httpx 不支持管道 → ControlIpc 内置进程内本地代理
+    线程：127.0.0.1 随机端口 → 管道，双泵；随机端口是进程内部实现细节）。
 
 控制台重启后：调用方在请求失败时重新调用 resolve_control() 即可
 （Unix 地址不变，重连即自愈；Windows 代理线程常驻，同样重连）。
@@ -22,21 +17,21 @@ import socket
 import sys
 import threading
 from dataclasses import dataclass
-from pathlib import Path
 
 import httpx
 
 IS_WINDOWS = sys.platform == "win32"  # 与 control/backend/config.py 写法统一
-IPC_UNIX_SOCKET_NAME = "opensecurity-control.sock"
-IPC_WINDOWS_PIPE = r"\\.\pipe\opensecurity-control-482964"
-# 与 control/backend/config.py 的 IPC_WINDOWS_PIPE 常量同步修改
+IPC_ENV_NAME = "OPENSECURITY_CONTROL_IPC"  # 启动方（插件 mcp-manager）注入的平台最终地址
 
 _BUF = 65536
 
 
-def _unix_socket_path() -> Path:
-    data_dir = os.environ.get("DATA_DIR", str(Path.home() / "bw-security-analysis"))
-    return Path(data_dir) / IPC_UNIX_SOCKET_NAME
+def _ipc_address() -> str:
+    """控制台 IPC 会合地址（Unix socket 绝对路径 / Windows 管道名）。"""
+    addr = os.environ.get(IPC_ENV_NAME)
+    if not addr:
+        raise RuntimeError(f"{IPC_ENV_NAME} 未注入——MCP 薄壳须由插件 mcp-manager 启动")
+    return addr
 
 
 @dataclass(frozen=True)
@@ -72,7 +67,7 @@ class ControlIpc:
         if IS_WINDOWS:
             port = self._ensure_pipe_proxy()
             return ControlAddr(url=f"http://127.0.0.1:{port}", via="pipe-proxy")
-        if _unix_socket_path().exists():
+        if os.path.exists(_ipc_address()):
             return ControlAddr(url="http://localhost", via="uds")
         return None
 
@@ -88,7 +83,7 @@ class ControlIpc:
             return httpx.AsyncClient(**kwargs)
         kwargs.pop("base_url", None)
         return httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(uds=str(_unix_socket_path())),
+            transport=httpx.AsyncHTTPTransport(uds=_ipc_address()),
             **kwargs,
         )
 
@@ -119,7 +114,7 @@ class ControlIpc:
         import win32file
         try:
             pipe = win32file.CreateFile(
-                IPC_WINDOWS_PIPE,
+                _ipc_address(),
                 win32file.GENERIC_READ | win32file.GENERIC_WRITE,
                 0, None, win32file.OPEN_EXISTING, 0, None,
             )

@@ -2,6 +2,8 @@
 
 > 状态：已实施（2 轮检查 + 终态扫描通过）| 入口：用户指令（"DATA_DIR 统一改成 OPENSECURITY_HOME"）
 > 来源：`2026-09-28-opensecurity-home-var-rename.md` 的兼容设计修订（该文 §2.2/§2.4 被本文件取代；v2 注记已加）
+> 修订 v2（评审修正）：① 清理 6 处兼容链残留的重复读取（`OPENSECURITY_HOME` 两侧同名）；② 引入外部路径归一化策略（见 §2.5）
+> 修订 v3（评审修正）：插件侧移除自研 `~` 展开——env 原样透传（覆盖值须为绝对路径；shell 导出时由 shell 展开），`vite.config` 同步；Python 侧保留官方 `os.path.expanduser/abspath`（见 §2.5-3）
 > 实施进度与 as-built：`progress-2026-09-28-opensecurity-home-full-rename.md`
 
 ## §1 背景与目标
@@ -34,6 +36,23 @@
 ### 2.4 影响面
 
 无 prompt 行数变化；环境信息段与 16 处文档引用不变（已用新名）；5 agent 展开 428/449/407/416/320 不变。
+
+### 2.5 评审修正（v2）
+
+**1. 重复读取清理（6 处）**：全量替换把兼容链两侧替换成同名（`X or os.environ.get(X)`），收敛为单次读取——`clean_databases.py`、`control_url.py`、`vite.config.ts`、`test_e2e_real.py`、`detect_py_deps.py`、`detect_tools.py`。
+
+**2. 外部路径归一化策略**：凡**外部输入的路径**（环境变量 / `.ai_env` / plist）在**读取边界**统一做 `expanduser + abspath`；**不做 realpath**（保留符号链接语义——测试沙箱与 venv 隔离依赖符号链接）；系统内部由根拼出的子路径不重复处理。读取侧清单：
+
+| 路径来源 | 归一化站点 |
+|----------|-----------|
+| `OPENSECURITY_HOME` | `constants.ts`、`config_manager`、`detect_tools`、`detect_py_deps`、`control_url`、`clean_databases`、`test_e2e_real`、`vite.config` |
+| `OPENCODE_ROOT` | `constants.ts`、`config_manager`、`detect_tools`、`launchd_setup` |
+| `OPENSECURITY_VENV_DIR` | `constants.ts` |
+| `IDA_PRO_HOME`（.ai_env 配置） | `ConfigManager.get_all` 读归一（`type="path"` 字段通用）+ validator 同步归一；插件经 `/api/config` 拿到即已展开路径 |
+
+写侧保留用户原文（.ai_env 不重写）；消费方与校验器拿到的是绝对展开路径。
+
+**3. 插件侧去自研展开（v3 修正）**：评审判定"自研路径函数易出坑"（官方无 tilde API）。插件侧（`constants.ts` + `vite.config.ts`）**移除自研 `~` 展开**，env 值**原样透传**，仅默认值由代码构造为绝对；覆盖值契约为**绝对路径**（shell 导出时 `~` 由 shell 展开；控制台/launchd/测试注入方均为绝对路径）。Python 侧保留官方 `os.path.expanduser + abspath`（标准库，非自研）。
 
 ## §3 实施与验证（as-built）
 

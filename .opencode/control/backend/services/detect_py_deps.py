@@ -1,8 +1,9 @@
 """Python 依赖检测 + 安装（清单唯一副本，检测/安装双子命令）。
 
 设计约束：
-  • 纔 stdlib——install.sh 在 venv 建立前运行本文件（清单+安装器一体，
-    无跨文件动态加载），不得依赖任何第三方包/包内相对导入
+  • 仅 stdlib（含项目内 services.runtime_paths——同为纯 stdlib）——install.sh 在 venv 建立前
+    运行本文件（清单+安装器一体）；导入路径由启动方注入（PYTHONPATH=backend）；
+    不得依赖任何第三方包/包内相对导入
   • 检测函数 scan(agent, python_exe) 同一签名服务两种入口：
       - 控制台 import 调用（routes/deps.py、scan 页）
       - CLI 子命令 scan（python detect_py_deps.py scan --agent X --json）
@@ -32,8 +33,9 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 
-CACHE_DIR = os.path.expanduser("~/bw-security-analysis")
-VENV_DIR = os.path.join(CACHE_DIR, ".venv")
+from services.runtime_paths import RuntimePaths
+
+VENV_DIR = RuntimePaths.VENV_DIR
 
 
 @dataclass(frozen=True)
@@ -555,7 +557,7 @@ def _run_install(dry_run: bool):
     dry_run → 只打印将安装的清单，不执行（可在 venv 外跑，不进 venv）。
     """
     if dry_run:
-        pkgs = required_packages()
+        pkgs = PyDepsDetector.required_packages()
         _log(f"[*] dry-run: 将安装 {len(pkgs)} 个包（全部必需依赖）")
         for p in pkgs:
             _log(f"    {p.pip_name}")
@@ -570,7 +572,7 @@ def _run_install(dry_run: bool):
         print("安装中断。请修复上述错误后重新运行此脚本。", file=sys.stderr)
         sys.exit(1)
 
-    packages = required_packages()
+    packages = PyDepsDetector.required_packages()
     _log("[*] 模式: 全部必需依赖（与检测端 /api/deps 的 required 判定一致）")
 
     # 1. Python 包

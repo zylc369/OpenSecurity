@@ -25,6 +25,7 @@ export const OPENCODE_ROOT =
   process.env.OPENCODE_ROOT || findOpenCodeRoot(PLUGIN_DIR);
 
 // OPENSECURITY_HOME 支持环境变量覆盖（与控制台 config.py 对等）。
+// 覆盖值须为绝对路径（插件侧不做路径改写；shell 导出时 ~ 由 shell 展开）。
 // 默认 ~/bw-security-analysis（生产环境用户路径）。
 // 测试可通过 OPENSECURITY_HOME=/tmp/xxx 隔离。
 export const OPENSECURITY_HOME =

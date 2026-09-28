@@ -1,7 +1,7 @@
 import { join } from "path";
 import { existsSync } from "fs";
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { OPENCODE_ROOT, OPENSECURITY_HOME } from "./constants";
+import { OPENCODE_ROOT, CONTROL_UNIX_SOCKET, CONTROL_WIN_PIPE, IS_WINDOWS } from "./constants";
 import { getPythonCmd } from "./venv";
 import { startControl } from "./control-manager";
 import { debugLog } from "./logging";
@@ -98,9 +98,12 @@ export class McpManager {
       return;
     }
 
-    // 2. 构造 env：只注入 OPENSECURITY_HOME（control_url.py 用它定位 IPC socket）
+    // 2. 构造 env：
+    //    - OPENSECURITY_CONTROL_IPC：控制台 IPC 最终地址（薄壳直用；MCP 不依赖控制台代码）
+    //    - PYTHONPATH：mcp-servers（薄壳 → control_url 同级导入）
     const mcpEnv: Record<string, string> = {
-      OPENSECURITY_HOME: OPENSECURITY_HOME,
+      OPENSECURITY_CONTROL_IPC: IS_WINDOWS ? CONTROL_WIN_PIPE : CONTROL_UNIX_SOCKET,
+      PYTHONPATH: join(OPENCODE_ROOT, "mcp-servers"),
     };
 
     // 3. 通过 SDK 官方 API 注册
@@ -120,7 +123,7 @@ export class McpManager {
           },
         },
       });
-      debugLog(`[McpManager] ${name} 注册成功：command=${command.join(" ")}（IPC 地址自行发现）`);
+      debugLog(`[McpManager] ${name} 注册成功：command=${command.join(" ")}（IPC 地址经环境变量注入）`);
     } catch (e) {
       const errMsg = (e as Error)?.message ?? String(e);
       debugLog(`[McpManager] ${name} 注册失败：${errMsg}`);

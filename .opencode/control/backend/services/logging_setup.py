@@ -60,8 +60,8 @@ class LogManager:
         if getattr(root, "_opensecurity_configured", False):
             return logging.getLogger("control")
 
-        from services.config_manager import ConfigManager
-        log_file = Path(ConfigManager.get_instance().opensecurity_home) / "logs" / "control.log"
+        from services.runtime_paths import RuntimePaths
+        log_file = Path(RuntimePaths.LOGS_DIR) / "control.log"
 
         root.setLevel(level)
         root.addHandler(self._rotating_handler(log_file))
@@ -87,8 +87,8 @@ class LogManager:
         if getattr(logger, "_aux_configured", False):
             return logger
 
-        from services.config_manager import ConfigManager
-        aux_file = Path(ConfigManager.get_instance().opensecurity_home) / "logs" / filename
+        from services.runtime_paths import RuntimePaths
+        aux_file = Path(RuntimePaths.LOGS_DIR) / filename
 
         logger.setLevel(level)
         logger.propagate = False

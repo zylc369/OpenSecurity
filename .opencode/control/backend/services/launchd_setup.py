@@ -71,12 +71,13 @@ class LaunchdManager:
         心跳自杀退出（CONTROL_RESIDENT 等在 .ai_env 内可正常读到）。
         """
         import os
+        from services.runtime_paths import RuntimePaths
         from services.config_manager import ConfigManager
         cm = ConfigManager.get_instance()
         server_py = Path(__file__).resolve().parents[1] / "server.py"
-        log_dir = Path(cm.opensecurity_home) / "logs"
-        oc_root = os.environ.get("OPENCODE_ROOT") or str(server_py.parents[2])
-        opensecurity_home = os.environ.get("OPENSECURITY_HOME") or str(cm.opensecurity_home)
+        log_dir = Path(RuntimePaths.LOGS_DIR)
+        oc_root = cm.opencode_root
+        opensecurity_home = cm.opensecurity_home
         # 与 plugin spawn 白名单（buildSpawnEnv）语义对齐: launchd 默认 PATH 是
         # 系统安全路径（无 venv/node/brew），控制台子进程（vite/外部工具）需要
         # 完整 PATH; HOME 供 Path.home/expanduser 主路径。OFFLINE 不进 plist——

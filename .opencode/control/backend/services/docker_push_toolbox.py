@@ -1,6 +1,6 @@
 """工具箱镜像推送（Docker Hub: zylc369/opensecurity-toolbox-*）—— CLI + import 双模式。
 
-CLI:  python push_toolbox.py [--ver v1.0]
+CLI（在 backend 目录）: python -m services.docker_push_toolbox [--ver v1.0]
       docker 输出实时透传终端（不捕获，与手敲命令一致的观感）。
 import: from services import push_toolbox → push_toolbox.push_all(ver="v1.0")
       docker 输出写入 OPENSECURITY_HOME/logs/control.log（控制台统一日志，stdio=ignore 下 print 不可见）。
@@ -22,10 +22,6 @@ import time
 import subprocess
 import sys
 from dataclasses import dataclass, field
-
-# CLI 直跑自举（detect_tools.py 同模式）: 把 backend 目录加 sys.path 使 services 可见
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 

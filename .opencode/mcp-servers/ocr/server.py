@@ -9,9 +9,7 @@
   提取图像中的文字（文档扫描页/UI 截图/照片/PDF 渲染页）。
   不做图表语义分析、图像对比、视频理解。
 """
-import asyncio
 import base64
-import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -20,7 +18,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # control_url 同级
+# control_url 与后端模块的导入路径由启动方注入（插件 mcp-manager 设置 PYTHONPATH）
 from control_url import resolve_control, make_control_client
 
 _CONTROL = {"base": None}

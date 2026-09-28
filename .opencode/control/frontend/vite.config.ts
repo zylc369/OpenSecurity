@@ -10,10 +10,10 @@ import { homedir } from "os";
 
 /** IPC 地址（与控制台 config.py 常量一致，进程不同按约定复制）。 */
 function ipcSocketPath(): string {
-  const dataDir = process.env.DATA_DIR ?? join(homedir(), "bw-security-analysis");
+  const opensecurityHome = process.env.OPENSECURITY_HOME ?? join(homedir(), "bw-security-analysis");
   return process.platform === "win32"
     ? "\\\\.\\pipe\\opensecurity-control-482964"
-    : join(dataDir, "opensecurity-control.sock");
+    : join(opensecurityHome, "opensecurity-control.sock");
 }
 
 /** 经 IPC 查控制台真实 TCP 端口（顺延后动态值）；失败回退 9776。 */

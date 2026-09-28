@@ -32,6 +32,9 @@ if ($args.Count -gt 0) {
     exit 1
 }
 
+# 子脚本以 services.* 形式导入控制台后端 → 注入模块搜索路径
+$env:PYTHONPATH = (Join-Path $ScriptDir "control\backend") + $(if ($env:PYTHONPATH) { ";" + $env:PYTHONPATH } else { "" })
+
 $Script = Join-Path $ScriptDir "control\backend\services\detect_py_deps.py"
 & $Python $Script install
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

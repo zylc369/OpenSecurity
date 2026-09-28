@@ -31,8 +31,9 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
-OPENSECURITY_HOME = Path(os.environ.get("OPENSECURITY_HOME") or os.environ.get("OPENSECURITY_HOME")
-                or str(Path.home() / "bw-security-analysis"))
+from services.runtime_paths import RuntimePaths  # noqa: E402 —— BACKEND_DIR 已自举
+
+OPENSECURITY_HOME = Path(RuntimePaths.OPENSECURITY_HOME)
 SOCK_FILE = OPENSECURITY_HOME / "opensecurity-control.sock"
 KNOWLEDGE_DB = OPENSECURITY_HOME / "db" / "knowledge" / "knowledge.db"
 RUN_ID = f"e2er-{os.getpid()}"

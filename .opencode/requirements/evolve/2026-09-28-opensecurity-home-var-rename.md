@@ -5,6 +5,7 @@
 > 实施进度与 as-built：`progress-2026-09-28-opensecurity-home-var-rename.md`
 > as-built：注入面与 9 文件 16 处文档全部改名；读侧 7 文件兼容链就位（三态实测：新名优先/旧名回退/默认）；内部通道零改动；新进程端到端通过（注入/环境信息段/命令回归）
 > 修订 v2（同日，用户决策）：撤除兼容别名、全面统一（含内部标识符/进程间通道/测试/plist 键）——本文 §2.2/§2.4 的兼容设计被 `2026-09-28-opensecurity-home-full-rename.md` 取代
+> 修订 v3（后续）：`RuntimePaths.resolve()` 已移除——类属性为唯一取数接口 + `refresh()`（测试隔离）；MCP 经 `OPENSECURITY_CONTROL_IPC` 注入解耦，详见 `2026-09-28-console-path-single-source.md` 修订 v5
 
 ## §1 背景与目标
 

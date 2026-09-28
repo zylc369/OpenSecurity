@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """清理 events（Neo4j）和 knowledge（SQLite）数据库的全部数据。
 
-用法：
-    python clean_databases.py              # 清理两个数据库
-    python clean_databases.py --events     # 只清理 events
-    python clean_databases.py --knowledge  # 只清理 knowledge
-    python clean_databases.py --dry-run    # 只查看数据量不删除
+用法（本脚本位于控制台后端根目录，直接 python 该文件运行即可——导入路径天然可得）：
+    python .opencode/control/backend/clean_databases.py --dry-run    # 只查看数据量不删除
+    python .opencode/control/backend/clean_databases.py              # 清理两个数据库（需确认）
+    python .opencode/control/backend/clean_databases.py --events     # 只清理 events
+    python .opencode/control/backend/clean_databases.py --knowledge  # 只清理 knowledge
 """
 import argparse
-import os
 import subprocess as sp
-import sys
 from pathlib import Path
+
+from services.runtime_paths import RuntimePaths
 
 NEO4J_CONTAINER = "neo4j-events"
 NEO4J_USER = "neo4j"
 NEO4J_PASS = "neo4j_password"
-KNOWLEDGE_DB = Path.home() / "bw-security-analysis" / "db" / "knowledge" / "knowledge.db"
+KNOWLEDGE_DB = Path(RuntimePaths.KNOWLEDGE_DB)
 
 
 def check_events_stats():
