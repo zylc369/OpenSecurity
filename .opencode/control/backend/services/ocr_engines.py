@@ -20,6 +20,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+# 模块级 logger（原 MlxEngine/OllamaEngine 两处类体绑定合并——类命名空间
+# 不在方法名字查找链; 日志名统一 .ocr_engines）
+logger = logging.getLogger(__name__)
+
 import httpx
 
 
@@ -61,7 +65,6 @@ class MlxEngine:
 
     MAX_TOKENS = 4096
     DEFAULT_PROMPT = "Extract all text from this image. Output text only."
-    logger = logging.getLogger(__name__ + ".MlxEngine")
 
     def __init__(self) -> None:
         self._model = None
@@ -125,7 +128,7 @@ class MlxEngine:
             self._model = self._processor = None
             raise RuntimeError(f"MLX 模型加载失败: {e}") from e
         after = self.footprint_mb()
-        self.logger.info("MLX load: %.2fs, footprint %s→%s MB, model=%s",
+        logger.info("MLX load: %.2fs, footprint %s→%s MB, model=%s",
                          time.monotonic() - t0, before, after, Path(model_path).name)
 
     def preprocess(self, image_b64: str, prompt: str) -> PreparedOcrInput:
@@ -175,7 +178,7 @@ class MlxEngine:
             elapsed_sec=round(time.monotonic() - t0, 2),
             output_chars=len(result.text),
         )
-        self.logger.info("MLX infer: %ss, %d chars", stats.elapsed_sec, stats.output_chars)
+        logger.info("MLX infer: %ss, %d chars", stats.elapsed_sec, stats.output_chars)
         return result.text, stats
 
     def unload(self) -> None:
@@ -188,10 +191,10 @@ class MlxEngine:
             import mlx.core as mx
             mx.clear_cache()
         except Exception as e:  # clear_cache 失败不影响语义（仅缓存残留）
-            self.logger.warning("MLX clear_cache 异常（忽略，仅缓存残留）: %s", e)
+            logger.warning("MLX clear_cache 异常（忽略，仅缓存残留）: %s", e)
         gc.collect()
         after = self.footprint_mb()
-        self.logger.info("MLX unload: footprint %s→%s MB", before, after)
+        logger.info("MLX unload: footprint %s→%s MB", before, after)
 
 
 class OllamaEngine:
@@ -199,7 +202,6 @@ class OllamaEngine:
 
     OLLAMA_BASE = "http://127.0.0.1:11434"
     OLLAMA_MODEL = "glm-ocr"
-    logger = logging.getLogger(__name__ + ".OllamaEngine")
 
     def __init__(self) -> None:
         self._http = httpx.AsyncClient(timeout=180.0)
@@ -235,7 +237,7 @@ class OllamaEngine:
             elapsed_sec=round(time.monotonic() - t0, 2),
             output_chars=len(text),
         )
-        self.logger.info("Ollama infer: %ss, %d chars", stats.elapsed_sec, stats.output_chars)
+        logger.info("Ollama infer: %ss, %d chars", stats.elapsed_sec, stats.output_chars)
         return text, stats
 
     async def unload(self) -> None:
@@ -247,4 +249,4 @@ class OllamaEngine:
                 timeout=5.0,
             )
         except httpx.HTTPError as e:
-            self.logger.warning("Ollama unload 请求失败（忽略）: %s", e)
+            logger.warning("Ollama unload 请求失败（忽略）: %s", e)

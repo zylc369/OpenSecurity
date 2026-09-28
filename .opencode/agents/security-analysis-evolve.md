@@ -12,19 +12,32 @@ permission:
   read:
     "~/Downloads/**/*.env": allow
     "~/Downloads/**/*.env.*": allow
-  # MCP 工具禁用（设计：知识双轨分离）：
-  # - 静态知识 = MD 知识库（本 agent 维护，领域 agent 按需 Read 消费）
-  # - 动态知识 = 向量记忆库（领域 agent 分析实践中 store_knowledge 增量写入，
-  #   见 agents-rules/knowledge-management.md）
-  # 本 agent 两个环节都不参与：
-  # - events 工具强制 group_id 限定当前任务 Flow，查不到被复盘任务的数据
-  #   （复盘数据源 = 任务目录 + progress.md）
-  # - 不做 seeding（MD→向量库批量提炼已废弃：双写有一致性问题，静态 MD
-  #   由领域 agent prompt 内建索引直接 Read，不经向量化）
-  # deny + "*" 会把工具从 LLM 工具列表完全移除（省 schema token + 注意力）。
-  "events_*":
+  # MCP 只读授权（全枚举，不用通配——避免通配 deny 与具体 allow 的
+  # 优先级歧义; MCP 工具增删时须同步此清单）:
+  # - 读接口 allow: 复盘时检索记忆库——判断"洞察是否已沉淀"、检索质量
+  #   复测走真实检索路径（retrospective-methodology §6.2）
+  # - 写接口 deny: store_knowledge（向量库写入是领域 agent 分析实践的
+  #   职责）/ delete_session_events（删除破坏事件档案）
+  # 知识双轨不变: 静态知识 = MD 知识库（本 agent 维护，领域 agent Read 消费）;
+  # 动态知识 = 向量记忆库（领域 agent 写入，本 agent 只读检索）
+  # deny 会把工具从 LLM 工具列表移除（省 schema token + 注意力）。
+  "events_time_search":
+    "*": allow
+  "events_entity_relationships_search":
+    "*": allow
+  "events_diverse_results_search":
+    "*": allow
+  "events_episode_context_search":
+    "*": allow
+  "events_entity_search":
+    "*": allow
+  "knowledge_search_knowledge":
+    "*": allow
+  "knowledge_search_in_memory":
+    "*": allow
+  "knowledge_store_knowledge":
     "*": deny
-  "knowledge_*":
+  "events_delete_session_events":
     "*": deny
 ---
 
@@ -47,7 +60,7 @@ Security Analysis 的架构地图（目录树、归属规则、依赖方向、Pl
 
 环境信息由 Plugin 每轮注入（见系统提示"环境信息"段）; `$AGENT_DIR` 对每个 agent 各指各的专属目录（evolve → security-analysis-evolve/）。变量语义详见 architecture-map.md 环境变量表。
 
-**工具策略（预期行为，非故障）**：`knowledge_*` / `events_*` MCP 工具对本 agent 有意排除（知识双轨：静态知识=知识库文档、动态知识=领域 agent 写入的向量库；复盘数据源=任务目录 + progress）。工具缺失无需排查；记忆库存储/索引状态的审计可直读 SQLite（`$OPENSECURITY_HOME/db/knowledge/knowledge.db`）；检索质量复测须走真实检索路径，不得用直读代答（见 retrospective-methodology §6.2）。
+**工具策略（预期行为，非故障）**：`knowledge_*` / `events_*` MCP 工具对本 agent 为**只读授权**（frontmatter 全枚举: 7 个检索工具 allow、`store_knowledge`/`delete_session_events` 两个写接口 deny——工具不在列表即预期，无需排查）。用途: 复盘时判断"洞察是否已沉淀到记忆库"（search_knowledge 优先）、检索质量复测须走真实检索路径（见 retrospective-methodology §6.2）。写入动态知识是领域 agent 的职责，本 agent 的知识沉淀产物统一落 MD 知识库。记忆库存储/索引状态的审计可直读 SQLite（`$OPENSECURITY_HOME/db/knowledge/knowledge.db`）; events 检索强制 group_id 限定当前任务 Flow，历史任务数据以任务目录 + progress.md 为数据源。
 
 ## 进化流程
 
@@ -225,6 +238,9 @@ Security Analysis 的架构地图（目录树、归属规则、依赖方向、Pl
 - 允许升级现有接口（如布尔值改为枚举、字段重命名等），但必须同步更新所有消费方
 - 每次改动后立即语法检查（按文件类型）:
   - `.py`: `python -c "compile(open('<文件>').read(), '<文件>', 'exec')"`
+    + **pyright 全量**（backend / mcp-servers 有 pyrightconfig.json，cd 进目录
+    跑 `pyright` 即生效——UndefinedVariable 必须为 0，ArgumentType 类新增
+    告警须评估是否本次改动引入; 领域 agent 的临时脚本不强制）
   - `.ts`: `node --check <文件>`
   - `.json`: `python -c "import json; json.load(open('<文件>'))"`
   - `.md`: 人工读一遍确认自包含性 + 不可见字节扫描（编辑存量文件后必做——NUL/控制字节会让 grep 断言静默归零、git diff 变 Binary; 扫描模板与修复纪律见 `$AGENT_DIR/knowledge-base/testing-blind-spot-patterns.md` 模式 H）

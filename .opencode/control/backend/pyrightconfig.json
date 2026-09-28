@@ -1,0 +1,19 @@
+{
+  "$schema": "https://basedpyright.com/schemas/pyrightconfig.schema.json",
+  "include": ["services", "server.py", "routes"],
+  "exclude": ["**/__pycache__", "tests"],
+  "typeCheckingMode": "basic",
+  "reportUnknownMemberType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownParameterType": "none",
+  "reportAny": "none",
+  "reportUnannotatedClassAttribute": "none",
+  "reportMissingParameterType": "none",
+  "reportUnusedCallResult": "none",
+  "reportImplicitStringConcatenation": "none",
+  "reportMissingTypeArgument": "none",
+  "reportUninitializedInstanceVariable": "none",
+  "reportMissingModuleSource": "none",
+  "reportMissingImports": "warning"
+}

@@ -37,6 +37,15 @@ ida_kernwin.msg(f"[!] 警告或错误: {reason}\n")         # 警告/失败
 - 新脚本必须有 docstring 头部：`"""summary: ...\ndescription: ...\nlevel: ..."""`
 - headless 入口逻辑必须在模块级执行（不能放在 `if __name__ == "__main__"` 内）
   - 原因：IDA 通过 `exec(code, g)` 执行 `-S` 指定的脚本，`__name__` 被设为脚本文件名而非 `"__main__"`
+- **try 内 import 的名字不得出现在同一 try 的 except 元组**：
+  `try: import httpx ... except (httpx.HTTPError, ...)` —— import 失败时
+  except 求值即 NameError（降级路径自己炸）。防御形态：import 单独一层
+  `try/except ImportError`，使用处放第二层 try（结构上消除，不依赖
+  pyright——其流分析不建模 import 失败）
+- **类体内不绑定方法要用的名字**：类体 `logger = ...` / 嵌套 `def _helper()`
+  在同类方法内裸名引用必 NameError（Python 类命名空间不在方法名字查找链）。
+  logger 一律模块级定义（`logger = logging.getLogger(__name__)` 放 import 区后），
+  同类 staticmethod 调用必须 `ClassName._helper(...)` 限定
 
 
 ## 环境变量传参（脚本输入的标准通道）

@@ -509,7 +509,7 @@ DEEPSEEK_API_KEY=
         """行为可调参数（hidden; default_value 与 tunables 默认同源生成）。"""
         k = self.Keys
 
-        def f(key: str, label: str, default, hint: str) -> ConfigField:
+        def f(key: str, label: str, default, hint: str) -> "ConfigManager.ConfigField":
             return self.ConfigField(key=key, label=label, type="text", required=False,
                                     hidden=True, default_value=str(default), hint=hint)
 

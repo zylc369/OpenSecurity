@@ -42,7 +42,7 @@ def _relay_port() -> int:
     """relay 真实端口：优先 relay 注册值（步骤 3a 起生效），否则配置起点。"""
     try:
         from services.proxy_relay import ProxyRelay
-        return relay_port()
+        return ProxyRelay.relay_port()
     except Exception as e:
         logger.warning("relay_port 获取失败，回落默认段: %s", e)
         return ConfigManager.Protocol.PROXY_RELAY_PORT_START

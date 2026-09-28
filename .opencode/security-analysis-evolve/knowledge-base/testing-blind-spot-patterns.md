@@ -128,9 +128,56 @@ CancelledError 必须 re-raise（生命周期信号非错误，勿吞勿打日�
 "未验证"; 声称"修复 N 处"后逐一核对是否全部落盘（说了没做是执行遗漏，
 与做错同等危险）; 弱断言要么修强要么删掉，不留在绿色数字里充数。
 
+## 模式 J: Python 类体绑定 + 方法内裸名——类命名空间不在查找链
+
+**什么场景**: 类体内直接绑定 `logger = logging.getLogger(...)` 或嵌套
+`def _helper()`，然后同类方法内用裸名访问（`logger.warning(...)` 或
+`target=_worker`）。Python 的方法名字查找链是 local → enclosing →
+global → builtins，**类命名空间不在其中**——裸名运行时 NameError。
+**为什么测试抓不到**: 高发于异常处理器（`except: logger.warning(...)`）
+——正常路径不执行; Thread `target=_worker` 只在下载/后台路径触发;
+且异常处理器内的 NameError 会**覆盖原异常**（火上浇油）。
+**怎么检查**: `pyright`（`reportUndefinedVariable`）静态全抓; 人工 grep
+类体缩进的 `logger =` / `def _` 绑定与方法内裸名引用的位置关系。
+**怎么防**: 模块级统一定义 logger（`logger = logging.getLogger(__name__)`
+放 import 区后），类内一律裸名引用; 同类 staticmethod 调用必须
+`ClassName._helper(...)` 限定; 引入 pyrightconfig.json 并保持
+UndefinedVariable = 0 作为回归线。
+
+**变体: try 内 import + except 引用同模块属性**——`try: import httpx`
+失败时 except 元组 `(httpx.HTTPError, ...)` 求值即 NameError（import
+失败不绑定名字，except 匹配前先求值类型表达式），被吞的降级路径
+自己炸掉。**pyright/mypy 对此保守**（流分析把 import 当无条件绑定，
+抓不到）; PyCharm 的流分析建模了 import 失败场景，能报
+"可能在赋值前引用"。防御: import 单独一层 try/except ImportError
+降级返回，使用 import 的代码放第二层 try——except 引用时名字必已
+绑定，结构上消除 NameError。
+
+## 模式 K: E2E 测试与生产共享端口/sock——"生产恰好死"才通过
+
+**什么场景**: 测试用例起真实服务实例（E2E），但端口与 sock 路径写死
+与生产相同。生产存活时测试实例 bind 失败/请求打到生产 → ReadTimeout
+一片红; 生产恰好死亡时全绿——**绿是环境巧合不是质量证明**。
+**怎么识别**: 测试起服务后 `ps eww <pid>` 看 bind 路径是否含沙箱
+前缀; 或直接问"生产活着的机器上跑这个测试会怎样"。
+**怎么防**: E2E 用例必须显式设置沙箱 `OPENSECURITY_HOME`（/tmp 前缀）
+并确认服务读的是沙箱值（启动日志的 bind 路径断言）; 短期无法隔离时，
+在测试文件头注明"跑全量前须停生产"并文档化（不是修复，是止损）。
+
 ---
 
 ## 防御资产索引（本项目已落地）
+
+- pyright 静态检查（`control/backend/pyrightconfig.json`）:
+  UndefinedVariable=0 作为回归线（模式 J 机器化根治）
+- test_control 契约扫描规则 1-4（"架构守护"用例）:
+  规则 3 = CLI 入口裸调用可解析性（模式 C 变体）;
+  规则 4 = except 引用不得仅由同 try 内 import 绑定（模式 J 变体——
+  pyright 流分析盲区，AST 结构判定封死; 防御形态 = import 单独一层
+  try/except ImportError）
+- test_integration 场景 6: spawn env 白名单污染免疫（含 ps eww 键集合
+  断言——快照 = execve 传入值）
+- test_control CLI 真链路消费测试: venv python 直跑 scan 断言 exit 0
 
 | 模式 | 防御 | 位置 |
 |---|---|---|

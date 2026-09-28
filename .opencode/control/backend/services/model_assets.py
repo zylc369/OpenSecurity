@@ -19,6 +19,9 @@ import psutil
 
 from services.config_manager import ConfigManager
 
+# 模块级 logger（原类体绑定导致方法内裸名 NameError——类命名空间不在方法名字查找链）
+logger = logging.getLogger(__name__ + ".ModelAssetRegistry")
+
 @dataclass(frozen=True)
 class ModelCacheState:
     """模型缓存查询结果。"""
@@ -103,7 +106,6 @@ class ModelAssetRegistry:
 
     _instance: "ModelAssetRegistry | None" = None
     _instance_lock = threading.Lock()
-    logger = logging.getLogger(__name__ + ".ModelAssetRegistry")
 
     MODELS: list[ModelAsset] = [
         ModelAsset(
@@ -213,6 +215,9 @@ class ModelAssetRegistry:
         # win/linux/intel-mac → Ollama
         try:
             import httpx
+        except ImportError:
+            return ModelCacheState(False, "缺少 httpx（依赖页可安装）", 0.0)
+        try:
             r = httpx.get("http://127.0.0.1:11434/api/tags", timeout=3.0)
             names = [m.get("name", "") for m in r.json().get("models", [])]
             hit = next((m for m in names if m.split(":")[0] == model.ollama_model), None)
@@ -313,15 +318,15 @@ class ModelAssetRegistry:
 
         if model.type == "ocr":
             threading.Thread(
-                target=_ocr_download_worker, args=(model,), daemon=True, name=f"model-dl-{model.id}"
+                target=self._ocr_download_worker, args=(model,), daemon=True, name=f"model-dl-{model.id}"
             ).start()
             return True
 
         threading.Thread(
-            target=_download_worker, args=(model,), daemon=True, name=f"model-dl-{model.id}"
+            target=self._download_worker, args=(model,), daemon=True, name=f"model-dl-{model.id}"
         ).start()
         threading.Thread(
-            target=_progress_poller, args=(model,), daemon=True, name=f"model-dl-progress-{model.id}"
+            target=self._progress_poller, args=(model,), daemon=True, name=f"model-dl-progress-{model.id}"
         ).start()
         return True
 

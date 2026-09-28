@@ -27,9 +27,13 @@ import concurrent.futures
 import logging
 import queue
 import threading
+
 import time
 from dataclasses import dataclass
 from typing import Callable, TypeVar
+
+# 模块级 logger（原类体绑定——类命名空间不在方法名字查找链）
+logger = logging.getLogger(__name__ + ".ManagedModel")
 
 T = TypeVar("T")  # 泛型参数声明（typing 设施，Java 泛型对应物）
 
@@ -136,7 +140,6 @@ class ManagedModel:
     STATE_STARTING = "starting"
     STATE_READY = "ready"
     STATE_STOPPING = "stopping"
-    logger = logging.getLogger(__name__ + ".ManagedModel")
 
     # 加载等待上限（秒）: 真实模型加载（含 MLX/MPS 冷缓存）远小于此值;
     # 超时 = 底层运行时挂死（如 MLX Metal eval 死锁）——转可见异常优于永久挂起。
@@ -219,10 +222,10 @@ class ManagedModel:
                     event = self._start_locked()
                 else:  # starting: 搭车等同一事件
                     event = self._ready_event
-                    self.logger.info("[%s] 懒加载: 已有加载在途，并发等待", self._name)
+                    logger.info("[%s] 懒加载: 已有加载在途，并发等待", self._name)
             if event is not None:
                 if not event.wait(timeout=self.LOAD_WAIT_TIMEOUT_SEC):
-                    self.logger.error("[%s] 加载等待超时（%.0fs）——底层运行时疑似挂死"
+                    logger.error("[%s] 加载等待超时（%.0fs）——底层运行时疑似挂死"
                                       "（如 MLX Metal eval 死锁），转异常", self._name,
                                       self.LOAD_WAIT_TIMEOUT_SEC)
                     raise RuntimeError(
@@ -259,7 +262,7 @@ class ManagedModel:
         exc = fut.exception()
         with self._lock:
             if self._state != self.STATE_STARTING:
-                self.logger.warning("[%s] 加载完成回调发现状态非 starting（%s），跳过收尾",
+                logger.warning("[%s] 加载完成回调发现状态非 starting（%s），跳过收尾",
                                self._name, self._state)
                 if self._ready_event is not None:
                     self._ready_event.set()
@@ -270,7 +273,7 @@ class ManagedModel:
             else:
                 self._error = f"{type(exc).__name__}: {exc}"
                 self._state = self.STATE_IDLE
-                self.logger.error("[%s] 加载失败: %s", self._name, self._error)
+                logger.error("[%s] 加载失败: %s", self._name, self._error)
             if self._ready_event is not None:
                 self._ready_event.set()
 
@@ -301,7 +304,7 @@ class ManagedModel:
         if event is not None:
             # 加载收尾回调置位（成功 READY / 失败 IDLE）; 超时兜底同 ensure_loaded
             if not event.wait(timeout=self.LOAD_WAIT_TIMEOUT_SEC):
-                self.logger.error("[%s] release 等待加载收尾超时（%.0fs）", self._name,
+                logger.error("[%s] release 等待加载收尾超时（%.0fs）", self._name,
                                   self.LOAD_WAIT_TIMEOUT_SEC)
                 raise RuntimeError(
                     f"[{self._name}] release 等待加载收尾超时"
@@ -327,7 +330,7 @@ class ManagedModel:
             self._error = ""
             self._state = self.STATE_IDLE
             self._ready_event = None
-        self.logger.info("[%s] 卸载完成（%.0fms）", self._name, (time.monotonic() - t0) * 1000)
+        logger.info("[%s] 卸载完成（%.0fms）", self._name, (time.monotonic() - t0) * 1000)
 
     # ── 空闲 reaper ─────────────────────────────────────
 
@@ -354,9 +357,9 @@ class ManagedModel:
                             and self._last_activity_at > 0
                             and self._idle_timeout_sec is not None
                             and time.monotonic() - self._last_activity_at > self._idle_timeout_sec):
-                        self.logger.info("[%s] reaper: 空闲>%.0fs，卸载",
+                        logger.info("[%s] reaper: 空闲>%.0fs，卸载",
                                     self._name, self._idle_timeout_sec)
                         self._release_locked()
                         return
             except Exception:  # noqa: BLE001
-                self.logger.exception("[%s] reaper 异常（忽略继续）", self._name)
+                logger.exception("[%s] reaper 异常（忽略继续）", self._name)

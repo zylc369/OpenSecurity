@@ -4,7 +4,7 @@ import {
   RESUME_COOLDOWN_STEP_MS,
   RESUME_COOLDOWN_MAX_MS,
   ABORTED_ERROR_NAME,
-  AGENT_SECURITY_ANALYSIS_EVOLVE,
+  SECURITY_ANALYSIS_AGENTS,
   ENV_KEY_RESUME_ANALYSIS,
 } from "./constants";
 import { ctx } from "./context";
@@ -250,9 +250,9 @@ export async function maybeResumeAnalysis(
       return;
     }
 
-    if (session.agentName === AGENT_SECURITY_ANALYSIS_EVOLVE) {
+    if (!SECURITY_ANALYSIS_AGENTS.includes(session.agentName)) {
       debugLog(
-        `session.idle: 跳过恢复 — evolve agent 不做分析工作, sessionID=${sessionID}`,
+        `session.idle: 跳过恢复 — 非分析 agent：${session.agentName}`,
         sessionID,
       );
       return;

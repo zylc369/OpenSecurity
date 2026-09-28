@@ -80,7 +80,7 @@ class ToolboxBuilder:
         ) + "; dpkg-query -W 2>/dev/null | wc -l"
         cmd = ["docker", "run", "--rm", "--platform", f"linux/{arch}",
                "--entrypoint", "sh", f"{ToolboxBuilder.PREFIX}-core:{arch}", "-c", script]
-        ok, detail = _run_logged(cmd, interactive, timeout=600)
+        ok, detail = ToolboxBuilder._run_logged(cmd, interactive, timeout=600)
         if not ok:
             return False, f"冒烟容器启动失败: {detail}"
         out = detail.strip().splitlines()[-1] if detail else ""
@@ -106,7 +106,7 @@ class ToolboxBuilder:
         archs = ["arm64", "amd64"] if arch == "both" else [arch]
 
         if "amd64" in archs:
-            ok, detail = _binfmt_ok(interactive)
+            ok, detail = ToolboxBuilder._binfmt_ok(interactive)
             report.steps.append(BuildStep("QEMU binfmt 检查", ["docker", "buildx", "ls"], ok, detail))
             if not ok:
                 report.ok = False
@@ -117,7 +117,7 @@ class ToolboxBuilder:
             cmd = ["docker", "build", "--platform", f"linux/{a}",
                    "-f", os.path.join(ToolboxBuilder.DOCKER_DIR, "toolbox-core.Dockerfile"),
                    "-t", f"{ToolboxBuilder.PREFIX}-core:{a}", ToolboxBuilder.DOCKER_DIR]
-            ok, detail = _run_logged(cmd, interactive)
+            ok, detail = ToolboxBuilder._run_logged(cmd, interactive)
             report.steps.append(BuildStep(f"build core:{a}", cmd, ok, detail))
             if not ok:
                 report.ok = False
@@ -127,14 +127,14 @@ class ToolboxBuilder:
                    "--build-arg", f"CORE_REF={ToolboxBuilder.PREFIX}-core:{a}",
                    "-f", os.path.join(ToolboxBuilder.DOCKER_DIR, "toolbox-full.Dockerfile"),
                    "-t", f"{ToolboxBuilder.PREFIX}-full:{a}", ToolboxBuilder.DOCKER_DIR]
-            ok, detail = _run_logged(cmd, interactive)
+            ok, detail = ToolboxBuilder._run_logged(cmd, interactive)
             report.steps.append(BuildStep(f"build full:{a}", cmd, ok, detail))
             if not ok:
                 report.ok = False
                 return report
             # ── 轻量冒烟 ──
             if smoke:
-                ok, detail = _smoke(a, interactive)
+                ok, detail = ToolboxBuilder._smoke(a, interactive)
                 report.steps.append(BuildStep(f"smoke core:{a}", ["<容器内组合检查>"], ok, detail))
                 if not ok:
                     report.ok = False

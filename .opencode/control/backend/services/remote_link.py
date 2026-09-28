@@ -37,7 +37,7 @@ logger = LogManager.get_instance().setup_auxiliary("remote_link", "remote-link.l
 
 
 
-def _tunables() -> RemoteTunables:
+def _tunables() -> "ConfigManager.RemoteTunables":
     """远程链接可调参数（ConfigManager 委托）。
 
     独立成模块级函数的原因: 单测注入点（monkeypatch 本函数替换小阈值，

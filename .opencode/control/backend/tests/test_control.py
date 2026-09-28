@@ -2342,6 +2342,58 @@ def test_contract_scan_name_references():
                         if n not in bound and n not in _BUILTINS:
                             problems.append(f"{p.name}:{sub.lineno} CLI 入口裸调用 {n}() 未定义")
 
+    # 规则 4: except 引用的名字不得仅由同 try 内 import 绑定
+    # （try: import httpx ... except (httpx.HTTPError, ...): —— import 失败时
+    #   except 元组求值即 NameError，降级路径自己炸。pyright/mypy 流分析
+    #   把 import 当无条件绑定抓不到此类; AST 结构判定可精确封死。
+    #   防御形态: import 单独一层 try/except ImportError，使用处放第二层
+    #   try——except 引用时名字必已绑定）
+    def _import_binds(s) -> set:
+        if isinstance(s, (ast.Import, ast.ImportFrom)):
+            return {a.asname or a.name.split(".")[0] for a in s.names}
+        return set()
+
+    scan_targets = sorted((backend / "services").glob("*.py")) \
+        + sorted((backend / "routes").glob("*.py")) \
+        + [backend / "server.py"] \
+        + sorted((backend.parent / "mcp-servers").glob("*.py")) \
+        + sorted((backend.parent / "mcp-servers").glob("*/server.py"))
+
+    def _module_import_binds(tree) -> set:
+        binds = set()
+        for node in tree.body:
+            binds |= _import_binds(node)
+        return binds
+
+    def _scan_except_import(node, prior_bound, fname):
+        """单个作用域节点（模块）内全量扫描。
+
+        ast.walk 递归覆盖全部嵌套形态（if/for/while/with 内的 try、
+        TryStar 即 except*、函数体内的 try）——lazy import 最常见的
+        就是条件分支内。prior_bound = 模块顶层 import 绑定（函数内
+        重复 import 同名模块不可能失败，walk 单遍天然抑制该误报）。
+        """
+        for sub in ast.walk(node):
+            if not isinstance(sub, (ast.Try, ast.TryStar)):
+                continue
+            try_binds: set = set()
+            for s in sub.body:
+                try_binds |= _import_binds(s)
+                if isinstance(s, ast.Assign):
+                    try_binds |= {t.id for t in s.targets if isinstance(t, ast.Name)}
+            for handler in sub.handlers:
+                if handler.type is None:
+                    continue
+                for hn in ast.walk(handler.type):
+                    if isinstance(hn, ast.Name) and hn.id in try_binds and hn.id not in prior_bound:
+                        problems.append(
+                            f"{fname}:{sub.lineno} except 引用 '{hn.id}' 仅由同 try 内 import 绑定"
+                            "（import 失败 → except 求值 NameError; 防御: import 单独一层 try）")
+
+    for p in scan_targets:
+        tree = ast.parse(p.read_text())
+        _scan_except_import(tree, _module_import_binds(tree), p.name)
+
     assert_true(not problems, f"名称引用契约违规 {len(problems)} 处:\n" + "\n".join(problems[:10]))
 
 

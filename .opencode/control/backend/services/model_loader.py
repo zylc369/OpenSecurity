@@ -35,6 +35,9 @@ import numpy as np
 
 from services.model_lifecycle import ManagedModel
 
+# 模块级 logger（原类体绑定导致方法内裸名 NameError——类命名空间不在方法名字查找链）
+logger = logging.getLogger(__name__ + ".ModelInferenceService")
+
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer, CrossEncoder
 
@@ -44,7 +47,6 @@ class ModelInferenceService:
 
     _instance: "ModelInferenceService | None" = None
     _instance_lock = threading.Lock()
-    logger = logging.getLogger(__name__ + ".ModelInferenceService")
 
     # ─── 单例模板 ─────────────────────────────────────────
 
@@ -154,30 +156,30 @@ class ModelInferenceService:
     def _load_embedder_impl(self) -> None:
         """加载 BGE-M3（ManagedModel worker 内执行）。"""
         from sentence_transformers import SentenceTransformer
-        self.logger.info("loading %s...", self.embed_model)
+        logger.info("loading %s...", self.embed_model)
         self._embedder = SentenceTransformer(self.embed_model)
-        self.logger.info("%s ready", self.embed_model)
+        logger.info("%s ready", self.embed_model)
 
     def _unload_embedder_impl(self) -> None:
         """卸载 BGE-M3。持 _infer_lock: 等在途推理完成（卸载排队语义）。"""
         with self._infer_lock:
             self._embedder = None
             gc.collect()
-        self.logger.info("%s unloaded", self.embed_model)
+        logger.info("%s unloaded", self.embed_model)
 
     def _load_reranker_impl(self) -> None:
         """加载 BGE-Reranker（ManagedModel worker 内执行）。"""
         from sentence_transformers import CrossEncoder
-        self.logger.info("loading %s...", self.reranker_model)
+        logger.info("loading %s...", self.reranker_model)
         self._reranker = CrossEncoder(self.reranker_model, max_length=512)
-        self.logger.info("%s ready", self.reranker_model)
+        logger.info("%s ready", self.reranker_model)
 
     def _unload_reranker_impl(self) -> None:
         """卸载 BGE-Reranker（语义同 _unload_embedder_impl）。"""
         with self._infer_lock:
             self._reranker = None
             gc.collect()
-        self.logger.info("%s unloaded", self.reranker_model)
+        logger.info("%s unloaded", self.reranker_model)
 
     # ─── 远程路由 + 请求级 fallback ────────────────────────
     # 对 remote_link 的引用全部函数内延迟 import（循环依赖防护: remote_link
@@ -222,7 +224,7 @@ class ModelInferenceService:
                 return arr[0] if isinstance(sentences, str) else arr
             except RemoteUnavailable as e:
                 self._note_remote_failure(f"embed: {e}")
-                self.logger.warning("远程 embed 失败，fallback 本地: %s", e)
+                logger.warning("远程 embed 失败，fallback 本地: %s", e)
         # 本地路径（含 fallback）: 锁内读引用——ensure_loaded 返回与拿锁之间模型
         # 可能被卸载线程清空（稳定期 Timer），锁外读会 AttributeError。锁内 None
         # → 有界重试。
@@ -245,7 +247,7 @@ class ModelInferenceService:
                 return np.asarray(scores, dtype=np.float32)
             except RemoteUnavailable as e:
                 self._note_remote_failure(f"rerank: {e}")
-                self.logger.warning("远程 rerank 失败，fallback 本地: %s", e)
+                logger.warning("远程 rerank 失败，fallback 本地: %s", e)
         for _attempt in range(3):
             self._reranker_managed.ensure_loaded()
             with self._infer_lock:
@@ -314,7 +316,7 @@ class ModelInferenceService:
                 from services.ocr_service import OcrService
                 OcrService.get_instance().warm_up_sync()
             except Exception:  # noqa: BLE001 —— 预热失败不致命（懒加载路径兜底）
-                self.logger.exception("模型预热失败（懒加载路径兜底）")
+                logger.exception("模型预热失败（懒加载路径兜底）")
 
         threading.Thread(target=_warm, name="model-preloader", daemon=True).start()
 
@@ -353,6 +355,6 @@ class ModelInferenceService:
                 self.get_embedder()
             except Exception as e:  # noqa: BLE001
                 # 加载失败不抛出（避免线程死掉）; /health 永远 503，Plugin 60s 超时后报错
-                self.logger.error("embedder 加载失败: %s", e)
+                logger.error("embedder 加载失败: %s", e)
 
         threading.Thread(target=_load, name="embedder-loader", daemon=True).start()

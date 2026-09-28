@@ -35,6 +35,7 @@ from services import detect_py_deps, detect_tools
 from services.frontend_port import FrontendPortRegistry
 from services.detect_py_deps import PyPkgStatus
 from services.detect_tools import CompilerInfo, ToolStatus
+from services.model_assets import ModelAssetStatus
 from services.docker_manager import DockerGlobal
 from services.model_assets import ModelAssetRegistry
 
@@ -162,7 +163,7 @@ class DepsService:
             return docker_manager.DockerManager.scan_global()
 
         def _models() -> list[ModelAssetStatus]:
-                        return ModelAssetRegistry.get_instance().get_model_assets()
+            return ModelAssetRegistry.get_instance().get_model_assets()
 
         with ThreadPoolExecutor(max_workers=5) as ex:
             f_py = ex.submit(self._safe, lambda: detect_py_deps.PyDepsDetector.get_instance().scan("all"), [])
