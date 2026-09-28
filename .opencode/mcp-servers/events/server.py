@@ -6,7 +6,7 @@
 
 业务实现在控制台 services/event_store.py（单 Graphiti 实例，
 Docker/容器/模型生命周期由控制台 docker_manager + model_loader 管理）。
-端口发现：control_url.py（读端口文件，事实来源）；控制台重启换端口自动自愈。
+IPC 发现：control_url.py（读注入的 IPC 地址，事实来源）；控制台重启后下次调用自愈重连。
 """
 import json
 from contextlib import asynccontextmanager

@@ -28,7 +28,10 @@ def control_server():
 
     隔离铁律：
       • OPENSECURITY_HOME → tmp 沙箱（IPC sock / TCP 候选段全隔离）
-      • CONTROL_FRONTEND_DEV=0（env 优先级，不碰真实 .ai_env）
+      • OPENCODE_ROOT → 沙箱 + stub .ai_env（不读真实配置；
+        CONTROL_FRONTEND_DEV=0 写文件——发布态，不起 vite）
+      • PATH 剥离宿主 OpenSecurity bin（工具可用性由沙箱决定：
+        宿主已装工具不泄漏为"可用"，未安装→安装提示列状态确定化）
       • CONTROL_TCP_PORT 随机高位（bind 候选整体避开生产 9776）
       • 心跳上报测试进程引用（防心跳表空自杀）
     """
@@ -44,11 +47,28 @@ def control_server():
     rand_port = random.randint(41000, 49000)
     opensecurity_home = Path(f"/tmp/frontend_test_{rand_port}")
     opensecurity_home.mkdir(parents=True, exist_ok=True)
+    # 沙箱 OPENCODE_ROOT + stub .ai_env：配置隔离（不读真实 .ai_env）；
+    # 文件显式 CONTROL_FRONTEND_DEV=0 → 发布态断言有效；stub 密钥供配置页断言
+    opencode_root = opensecurity_home / "opencode_root"
+    opencode_root.mkdir(parents=True, exist_ok=True)
+    (opencode_root / ".ai_env").write_text(
+        "CONTROL_FRONTEND_DEV=0\nDEEPSEEK_API_KEY=test-stub-key\n",
+        encoding="utf-8",
+    )
+    # PATH 隔离：剥离宿主 OpenSecurity bin——工具可用性由沙箱决定（shutil.which
+    # 不再命中宿主已装工具），"未安装→安装提示列"状态确定化（E2E 截断用例依赖）
+    parent_home = os.environ.get("OPENSECURITY_HOME") or str(Path.home() / "bw-security-analysis")
+    host_bin = str(Path(parent_home) / "bin")
+    path_kept = ":".join(
+        p for p in os.environ.get("PATH", "").split(":") if p and p != host_bin
+    )
     env = {
         **os.environ,
         "OPENSECURITY_HOME": str(opensecurity_home),
+        "OPENCODE_ROOT": str(opencode_root),
         "CONTROL_FRONTEND_DEV": "0",
         "CONTROL_TCP_PORT": str(rand_port),
+        "PATH": path_kept,
     }
 
     proc = subprocess.Popen(

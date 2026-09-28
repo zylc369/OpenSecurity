@@ -62,3 +62,4 @@
 - **`_resolve()` 模块级化**（评审改定）：类体与 `refresh()` 同源调用模块级私有函数；删除类尾 `staticmethod` 包装。中间态曾残留 `cls._resolve()` 旧引用（`refresh()` 内）——实测 `AttributeError: type object 'RuntimePaths' has no attribute '_resolve'`，本次统一时消除（无需恢复包装）。
 - **初始化与重算单一求值点**：`refresh()` 成为唯一写入点（类属性仅类型声明，8 个值只写一次）；模块尾部 `RuntimePaths.refresh()` 完成加载时快照；类体内不再重复一份求值代码（此前 8 行 ×2 处）。
 - 验证：py_compile；import 快照 + 沙箱切换链（reset + 重建）实测跟随；test_config_manager 5/5；test_control 87 / test_integration 6 / test/deps 22；§2.1 重同步 IDENTICAL。
+- 实机验证：控制台热重启（execv，pid/start_time 不变属预期）boot_token `cf83479c→c37839f6`、code_stale true→false、/api/system 与 /api/config 200、/health 预热瞬态 503 → 稳定 200；日志实锤启动链（execv → IPC 监听 → bge-m3 ready → 心跳注册 pid=77514）。

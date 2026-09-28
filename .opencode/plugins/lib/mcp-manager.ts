@@ -51,8 +51,8 @@ export class McpManager {
    * 不预检测依赖——直接 spawn server.py，依赖错误从握手失败的 stderr 捕获。
    * 节省每个 server 启动时 ~1-2s 同步子进程开销（原 checkPackages）。
    *
-   * 端口发现：不注入任何地址——Python 侧统一走 control_url.py 连 IPC
-   * （sock/管道，编译期常量地址），控制台重启后 MCP 重连自愈。
+   * 地址注入：mcpEnv 注入 OPENSECURITY_CONTROL_IPC（平台最终地址，源自
+   * constants.ts）——Python 侧 control_url.py 直用注入地址，控制台重启后重连自愈。
    * 此处调 startControl() 确保控制台已启动（必要时触发启动）。
    */
   async registerAll(): Promise<void> {
@@ -62,12 +62,12 @@ export class McpManager {
       return;
     }
 
-    // 确保控制台已启动（幂等：活则复用、死则拉起）。MCP 经 IPC 地址自行连接。
+    // 确保控制台已启动（幂等：活则复用、死则拉起）。MCP 经注入的 IPC 地址连接。
     const ready = await startControl();
     debugLog(
       ready
-        ? `[McpManager] 控制台就绪（MCP 经 IPC 自行发现）`
-        : `[McpManager] 控制台未启动——MCP 首次请求时经 IPC 地址自行重试`,
+        ? `[McpManager] 控制台就绪（IPC 地址已注入 MCP）`
+        : `[McpManager] 控制台未启动——MCP 首次请求时按注入地址重试`,
     );
 
     for (const server of MCP_SERVERS) {

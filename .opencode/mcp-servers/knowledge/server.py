@@ -5,7 +5,7 @@
   - search_in_memory：执行记忆库（doc_type=memory）
 
 业务实现在控制台 services/knowledge_store.py（单 MemoryDB 实例）。
-端口发现：control_url.py（读端口文件，事实来源）；控制台重启换端口自动自愈。
+IPC 发现：control_url.py（读注入的 IPC 地址，事实来源）；控制台重启后下次调用自愈重连。
 """
 import json
 from contextlib import asynccontextmanager

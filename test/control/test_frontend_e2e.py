@@ -359,12 +359,16 @@ def test_tools_hint_truncated_with_tooltip(rendered):
     truncated = hint_cell.evaluate(
         "el => { const t = el.querySelector('.ant-typography') || el; return t.scrollWidth > t.clientWidth + 1; }"
     )
-    assert truncated, "GoReSym 安装提示应被截断（超长 URL）"
-    hint_cell.hover()
+    assert truncated, "GoReSym 安装提示应被截断（超长命令）"
+    # tooltip 挂在 .ant-typography 文本元素上；表格超宽（hint 列中心在视口右缘外）——
+    # 先横向滚入视口再悬浮（否则 hover 取元素中心点落在视口外，事件不命中文本）
+    typo = hint_cell.locator(".ant-typography").first
+    typo.scroll_into_view_if_needed()
+    typo.hover()
     page.wait_for_timeout(150)
     tip = page.locator(".ant-tooltip:visible")
     assert tip.count() >= 1, "悬浮 150ms 内应显示完整提示"
-    assert "mandiant" in tip.first.inner_text()
+    assert "GoReSym" in tip.first.inner_text(), "浮层应含完整提示（含工具名）"
 
 
 def test_config_deepseek_grouped_half_width(rendered):
@@ -382,11 +386,16 @@ def test_config_deepseek_grouped_half_width(rendered):
     assert "可选" in label_text, "模型名应标'可选'"
 
     # 可选标记悬浮 → 显示默认值（后端收口数据）
-    ds_item.first.locator(".ant-tag:has-text('可选')").hover()
+    # 先显式滚入视口再悬浮：前序用例横向滚动后有残留位移，hover 的内部滚动会把
+    # 目标停在视口边缘（事件不命中）；显式滚动 + 稳定等待后悬浮可靠
+    tag = ds_item.first.locator(".ant-tag:has-text('可选')")
+    tag.scroll_into_view_if_needed()
+    page.wait_for_timeout(150)
+    tag.hover()
     page.wait_for_timeout(400)
     tip = page.locator(".ant-tooltip:not(.ant-tooltip-hidden):has-text('此项可不配置')")
     assert tip.count() >= 1, "悬浮可选标记应显示说明"
-    assert "deepseek-v4-flash" in tip.first.inner_text(), "说明应含默认值"
+    assert "deepseek-flash" in tip.first.inner_text(), "说明应含默认值"
 
     container = cfg.locator(".ant-row").first.bounding_box()
     box = ds_item.first.bounding_box()

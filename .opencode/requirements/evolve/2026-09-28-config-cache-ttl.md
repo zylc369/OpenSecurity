@@ -189,6 +189,10 @@
    测试自举沙箱控制台（/tmp/control_test_ts*），fetchConfig 真连沙箱非碰生产。
 5. **审计轮发现并修复**: SWR 后台刷新触发路径补 debugLog（原只有失败路径
    有日志，排查时看不到 SWR 是否工作）。
+6. **评审补充（恢复路径 fail-closed 语义）**: 恢复校验直读后，控制台不可达时
+   `fetchConfig` throw → `maybeResumeAnalysis` 外层 catch 记录 `session.idle: 恢复异常`
+   并跳过本轮恢复——不基于可能陈旧的缓存发恢复消息（与冷却分支"先刷新再校验"
+   同一设计方向：2026/9/14 事故教训，禁止 stale 配置驱动决策）。
 
 **待重启后验证**（用户下次重启 opencode 时自动闭环）:
 - bash 工具 `env | grep -cE "DEEPSEEK|JULIANG"` = 0（业务键归零）

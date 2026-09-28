@@ -3,7 +3,7 @@
 薄壳设计：不持有任何状态——IP 池/relay/判定依据全部在控制台：
   工具调用 → POST /api/proxy/*（控制台 proxy_pool/proxy_relay 唯一实现）
 
-端口发现：control_url.py（读 IPC，事实来源）；控制台重启后下次调用自愈重连。
+IPC 发现：control_url.py（读注入的 IPC 地址，事实来源）；控制台重启后下次调用自愈重连。
 
 工具描述即 agent 判定的现场引导（每轮注入）：proxy_status 描述内嵌判定 SOP
 （三场景：预期挑战不换 / 真限流换 / 烂 IP 淘汰），铁律一=查 rotate_history 补全时间线。

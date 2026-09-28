@@ -35,5 +35,6 @@ jobs:
         run: pip install fastapi uvicorn pywin32 httpx
       - name: 管道 IPC 验证
         env:
-          DATA_DIR: ${{ runner.temp }}
+          OPENSECURITY_CONTROL_IPC: '\\.\pipe\opensecurity-control-482964'
+          PYTHONUTF8: "1"
         run: python .opencode/control/backend/tests/test_windows_ipc.py

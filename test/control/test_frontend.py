@@ -167,7 +167,7 @@ def test_api_config_meta(control_server):
     assert d["DEEPSEEK_API_KEY"]["required"] is True
     # 可选项默认值收口回传（消费方 graphiti_config.py 的默认值）
     assert d["DEEPSEEK_MODEL"]["required"] is False
-    assert d["DEEPSEEK_MODEL"]["default_value"] == "deepseek-v4-flash"
+    assert d["DEEPSEEK_MODEL"]["default_value"] == "deepseek-flash"
 
 
 def test_api_install_get_removed_and_post_guard(control_server):

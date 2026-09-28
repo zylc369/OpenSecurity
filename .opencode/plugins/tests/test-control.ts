@@ -145,7 +145,7 @@ await test("control-config: getCachedConfig 同步返回", () => {
   assert(typeof configs === "object", "应返回对象");
 });
 
-await test("control-config: SWR 过期分支（返旧值 + 后台刷新不破坏缓存）", async () => {
+await test("control-config: SWR 过期分支（返旧值 + 后台刷新落地）", async () => {
   const before = getCachedConfig();
   if (Object.keys(before).length === 0) {
     console.log("跳过：控制台未运行（缓存为空，SWR 分支依赖已填充的缓存）");
@@ -164,6 +164,9 @@ await test("control-config: SWR 过期分支（返旧值 + 后台刷新不破坏
     Object.keys(fresh).length === Object.keys(before).length,
     "后台刷新完成后缓存应完整（失败场景才保留旧值——此处应成功刷新）",
   );
+  // 判据：fetchConfig 成功会替换缓存对象引用；失败路径只 debugLog、保留旧对象。
+  // "内容长度相同"不足以证明刷新落地（失败时旧值同样完整），引用变化才是硬证据。
+  assert(fresh !== before, "刷新成功应替换缓存对象（引用未变 = 后台刷新未落地）");
 });
 
 // ─── control-http 测试 ─────────────────────────────────────

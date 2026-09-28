@@ -222,7 +222,9 @@ export async function maybeResumeAnalysis(
     // 全局开关：默认启用；仅当值严格为 "0" 或 tolower 后 "false" 才禁用。
     // 放在最前面（requireSecurityAgent 之前）——禁用时零开销，不查 session。
     // 未找到 / "1" / "true" / 任何其他值 → 启用，保持向后兼容。
-    // 配置读取收口到 control-config（HTTP /api/config + 缓存）
+    // 配置读取收口到 control-config（HTTP /api/config 直读）：
+    // fail-closed 语义——控制台不可达时 fetchConfig throw，由本函数外层 catch
+    // 记录（session.idle: 恢复异常）并跳过本轮恢复，不基于陈旧缓存发恢复消息。
     const allConfigs = await fetchConfig();
     const enabledRaw = allConfigs[ENV_KEY_RESUME_ANALYSIS];
     if (

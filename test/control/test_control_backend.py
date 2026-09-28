@@ -19,14 +19,15 @@ sys.path.insert(0, str(BACKEND))
 class TestHealthLogic:
     """/health 状态由模型加载状态决定（503 loading → 200 ok）。
 
-    不起 HTTP——直接验证 model_loader 的就绪标志 is_models_ready（routes/health.py 消费同一状态）。
+    不起 HTTP——直接验证 ModelInferenceService 的就绪标志 is_models_ready（routes/health.py 消费同一状态）。
     """
 
     def test_preload_flag_starts_false_then_true(self):
-        from services import model_loader
+        from services.model_loader import ModelInferenceService
 
-        model_loader.get_embedder()  # 同步加载（模型在 HF cache，秒级）
-        assert model_loader.is_models_ready() is True
+        svc = ModelInferenceService.get_instance()
+        svc.get_embedder()  # 同步加载（模型在 HF cache，秒级）
+        assert svc.is_models_ready() is True
 
 
 class TestHardwareCpuInfo:
