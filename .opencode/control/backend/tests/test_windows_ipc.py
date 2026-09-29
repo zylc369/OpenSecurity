@@ -62,11 +62,13 @@ def main() -> int:
     from services.frontend_port import FrontendPortRegistry
     assert FrontendPortRegistry.get_instance().register_tcp(9776), "上游端口注册（9776 应有监听）"
 
-    # 2. 管道监听
-    from services.ipc_listener import IpcListener
+    # 2. 管道监听（start 返回 IpcStartStatus 枚举——必须恰为 LISTENING，
+    #    否则 BIND_TIMEOUT 等 truthy 枚举会假阳性通过）
+    from services.ipc_listener import IpcListener, IpcStartStatus
     listener = IpcListener()
-    name = listener.start() and "pipe-ok"
-    check("管道监听启动", lambda: (_ for _ in ()).throw(AssertionError("None")) if name is None else None)
+    status = listener.start()
+    check("管道监听启动", lambda: (_ for _ in ()).throw(
+        AssertionError(f"期望 LISTENING，实际 {status}")) if status is not IpcStartStatus.LISTENING else None)
 
     # 3. Python 客户端（control_url 本地代理 + httpx）
     def py_client():
@@ -82,12 +84,21 @@ def main() -> int:
         assert r.json().get("ok") is True
     check("Python httpx 经管道往返", py_client)
 
-    # 4. 互斥（并发等待语义：活实例在 → 第二个 start 返回 False 复用，不报错）
+    # 4. 互斥（真多进程竞争：IpcListener 同进程单例，第二个实例须起子进程
+    #    模拟——生产场景就是两个控制台进程抢管道）
     def mutex():
-        from services.ipc_listener import IpcListener
-        second = IpcListener().start()
-        assert second is False, f"活实例在时第二 start 应返回 False（复用），实际 {second}"
-    check("管道互斥（第二实例复用退出）", mutex)
+        code = (
+            "import sys; sys.path.insert(0, r'%s'); "
+            "from services.ipc_listener import IpcListener, IpcStartStatus; "
+            "st = IpcListener().start(); "
+            "sys.exit(0 if st is IpcStartStatus.EXISTING_INSTANCE else 1)"
+        ) % BACKEND_DIR
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                           text=True, timeout=60)
+        assert r.returncode == 0, (
+            f"子进程应 EXISTING_INSTANCE 复用退出，实际退出码 {r.returncode}: "
+            f"{r.stdout[-200:]} {r.stderr[-300:]}")
+    check("管道互斥（第二进程复用退出）", mutex)
 
     # 5. Bun 客户端（node:http socketPath）
     def bun_client():

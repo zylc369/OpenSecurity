@@ -8,7 +8,8 @@ on:
   push:
     paths:
       - ".opencode/control/backend/services/ipc_listener.py"
-      - ".opencode/control/backend/config.py"
+      - ".opencode/control/backend/services/config_manager.py"
+      - ".opencode/control/backend/services/frontend_port.py"
       - ".opencode/mcp-servers/control_url.py"
       - ".opencode/plugins/lib/control-http.ts"
       - ".opencode/plugins/tests/win-pipe-probe.ts"
@@ -17,7 +18,8 @@ on:
   pull_request:
     paths:
       - ".opencode/control/backend/services/ipc_listener.py"
-      - ".opencode/control/backend/config.py"
+      - ".opencode/control/backend/services/config_manager.py"
+      - ".opencode/control/backend/services/frontend_port.py"
       - ".opencode/mcp-servers/control_url.py"
       - ".opencode/plugins/lib/control-http.ts"
   workflow_dispatch:

@@ -31,6 +31,7 @@ import logging
 import threading
 import os
 import platform
+import time
 from dataclasses import dataclass
 
 from services.model_lifecycle import ManagedModel
@@ -78,8 +79,31 @@ class OcrService:
 
     @classmethod
     def _reset_for_tests(cls) -> None:
+        """测试隔离用: **同步释放旧实例模型资源后**清空单例。
+
+        历史 bug 形态: 直接置 None 丢弃——loaded 实例的 MLX 权重靠 GC
+        慢释放，Metal buffer 堆积，全量套件 ~10 轮 reset 后 mx.eval
+        概率性永久挂死（档案 2026-09-27-mlx-hang-investigation 假说 2，
+        实验 A 已排除库级泄漏）。返回 None 保持
+        `_reset_for_tests() or OcrService()` 每次新建干净实例的语义。
+        """
         with cls._instance_lock:
-            cls._instance = None
+            inst, cls._instance = cls._instance, None
+        if inst is not None:
+            inst.release_sync()
+            # 仅 MLX 后端需要等待卸载屏障（ollama 无进程内权重，
+            # 且其 status() 恒 ready——轮询对它无意义会误报超时）
+            if inst._backend() == "mlx" and inst._managed is not None:
+                deadline = time.monotonic() + 30.0
+                while time.monotonic() < deadline:
+                    if inst.status().state == "idle":
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise RuntimeError(
+                        "OcrService._reset_for_tests: 模型卸载等待超时（30s）——"
+                        "底层运行可能挂死（Metal/MPS 疑似死锁，见 model_lifecycle 120s 兜底）"
+                    )
 
     def _init_once(self) -> None:
         self._mlx = MlxEngine()

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import httpx
 
-IS_WINDOWS = sys.platform == "win32"  # 与 control/backend/config.py 写法统一
+IS_WINDOWS = sys.platform == "win32"  # 与后端 services/config_manager.py 的平台判定写法一致
 IPC_ENV_NAME = "OPENSECURITY_CONTROL_IPC"  # 启动方（插件 mcp-manager）注入的平台最终地址
 
 _BUF = 65536
@@ -110,15 +110,27 @@ class ControlIpc:
             threading.Thread(target=self._proxy_serve, args=(conn,), daemon=True).start()
 
     def _proxy_serve(self, conn: socket.socket) -> None:
-        """一条 TCP 连接 ↔ 一条管道连接的双向泵。"""
+        """一条 TCP 连接 ↔ 一条管道连接的双向泵。
+
+        win32file/pywintypes 为**函数内惰性 import**：_proxy_serve 仅由
+        _ensure_pipe_proxy 经 resolve() 的 IS_WINDOWS 分支调用——macOS/Linux
+        上此函数永不执行，import 永不触发，模块加载不受影响（对比
+        ipc_listener.py 的模块级 try-import：那里 _PLATFORM_OS_ERRORS 被
+        跨平台代码共用，必须模块级定义 + 平台退化）。
+        """
         import win32file
+        import pywintypes
+
+        # pywintypes.error 不继承 OSError（pywin32 源码 "class error(Exception)"）
+        # ——管道路径的捕获必须含它，否则代理线程以未捕获异常终止
+        win_errs = (OSError, pywintypes.error)
         try:
             pipe = win32file.CreateFile(
                 _ipc_address(),
                 win32file.GENERIC_READ | win32file.GENERIC_WRITE,
                 0, None, win32file.OPEN_EXISTING, 0, None,
             )
-        except OSError:
+        except win_errs:
             conn.close()
             return
 
@@ -129,7 +141,7 @@ class ControlIpc:
         def finish():
             try:
                 win32file.CloseHandle(pipe)
-            except OSError:
+            except win_errs:
                 pass
             conn.close()
 
@@ -140,7 +152,7 @@ class ControlIpc:
                     if not data:
                         break
                     write_fn(data)
-            except OSError:
+            except win_errs:
                 pass
             finally:
                 finish()

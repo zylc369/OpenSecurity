@@ -30,6 +30,7 @@ print 不可见——见 services/logging_setup.py）。
 from __future__ import annotations
 
 import enum
+import logging
 import socket
 import threading
 import time
@@ -37,8 +38,17 @@ import time
 from services.config_manager import ConfigManager
 from services.frontend_port import FrontendPortRegistry
 
+# pywin32 API 错误（pywintypes.error）**不继承 OSError**（源码实证:
+# PyWinTypesmodule.cpp "class error(Exception)"——issue #486 提了 14 年
+# 未改的向后兼容顾虑）——Windows 管道路径的异常捕获必须显式含它，
+# 否则泵/探测线程以未捕获异常终止（traceback 噪声）或探测函数向上抛。
+# 非 Windows 平台无 pywintypes → 等价于只捕 OSError（行为同现状）。
+try:
+    import pywintypes as _pywintypes
 
-import logging
+    _PLATFORM_OS_ERRORS: tuple[type[Exception], ...] = (OSError, _pywintypes.error)
+except ImportError:
+    _PLATFORM_OS_ERRORS = (OSError,)
 
 logger = logging.getLogger(__name__)
 
@@ -235,13 +245,12 @@ class IpcListener:
     def _start_windows(self) -> str | None:
         """FILE_FLAG_FIRST_PIPE_INSTANCE：管道名被占（已有实例）→ None。"""
         import win32pipe
-        import win32file
         import pywintypes
 
         try:
             handle = win32pipe.CreateNamedPipe(
                 ConfigManager.get_instance().ipc_addr(),
-                win32pipe.PIPE_ACCESS_DUPLEX | win32file.FILE_FLAG_FIRST_PIPE_INSTANCE,
+                win32pipe.PIPE_ACCESS_DUPLEX | win32pipe.FILE_FLAG_FIRST_PIPE_INSTANCE,
                 win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE | win32pipe.PIPE_WAIT,
                 win32pipe.PIPE_UNLIMITED_INSTANCES,
                 self._BUF, self._BUF,
@@ -295,7 +304,7 @@ class IpcListener:
         while True:
             try:
                 win32pipe.ConnectNamedPipe(handle, None)
-            except OSError as e:
+            except _PLATFORM_OS_ERRORS as e:
                 logger.info("IPC accept loop: 退出（%s）", e)
                 return
             logger.info("IPC accept: 管道客户端连入")
@@ -308,7 +317,7 @@ class IpcListener:
                     self._BUF, self._BUF,
                     0, None,
                 )
-            except OSError as e:
+            except _PLATFORM_OS_ERRORS as e:
                 logger.error("IPC accept: 创建下一管道实例失败: %s（本监听器停止接新连接）", e)
                 nxt = None
             threading.Thread(target=self._serve_pipe, args=(handle,), daemon=True).start()
@@ -334,7 +343,7 @@ class IpcListener:
         def pipe_close():
             try:
                 win32file.CloseHandle(handle)
-            except OSError:
+            except _PLATFORM_OS_ERRORS:
                 pass
 
         self._bridge(
@@ -362,7 +371,7 @@ class IpcListener:
             )
             win32file.CloseHandle(handle)
             return True
-        except OSError:
+        except _PLATFORM_OS_ERRORS:
             return False
 
     # ── 通用泵 ────────────────────────────────────────────
@@ -419,7 +428,7 @@ class IpcListener:
                 if not data:
                     break
                 write_fn(data)
-        except OSError:
+        except _PLATFORM_OS_ERRORS:
             pass
         finally:
             on_finish()
