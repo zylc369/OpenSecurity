@@ -155,6 +155,7 @@ permission:
 | `$AGENT_DIR/scripts/markdown_fuzz.py` | 无（纯标准库） | Markdown 解析器 XSS 注入系统化测试（8 种分类，30+ payload） | `MarkdownFuzzer`（类）、`generate_payloads`、`PayloadCategory` |
 | `$AGENT_DIR/scripts/sandbox_escape.py` | 无（纯标准库） | iframe sandbox 逃逸 payload 生成：sandbox 测试 JS、控制器页面、notebook 注入、SSO blob URL 绕过 | `generate_sandbox_test_payload`、`generate_controller_page`、`generate_notebook_payload`、`generate_sso_bypass_url` |
 | `$AGENT_DIR/scripts/bot_analyze.py` | 无（纯标准库） | Bot server.js 自动分析：提取关键参数、分类模式（单页/双页）、生成攻击时间线 | `analyze_bot_file`、`analyze_bot_code`、`BotAnalysis` |
+| `$AGENT_DIR/scripts/blind_extract.py` | requests | 盲注提取通用工具（布尔/时间 oracle）：长度探测 + 并行 ascii 二分 + 重试；库 + CLI | `BlindOracle`（类：`check`/`length`/`char_at`/`extract`）、`OracleConfig`；CLI 入口 `python blind_extract.py --help` |
 
 **使用方式**：临时脚本头部 `import sys; sys.path.insert(0, "$AGENT_DIR/scripts")`，再按上表 import 对应模块/函数（bot_analyze 亦可命令行: `python bot_analyze.py <server.js>`）。
 
@@ -185,7 +186,7 @@ permission:
 | `navigation-and-fetch-metadata.md` | 分析依赖 `Sec-Fetch-*` 判定、历史回退/重发、BFCache 条件、导航类型时 |
 | `css-attacks.md` | 能注 CSS 不能注 JS 时（webmail 渲染/CSP 留 style-src）。CSS hotwiring、label 劫持、select 键盘记录、净化器绕过、CSSOM mutation、CSP 全封外带 |
 | `race-conditions.md` | 竞态条件（单包攻击/HTTP/2 并发；`e.source === iframe.contentWindow` 类身份比较 × 文档切换的消息竞态）；原型链污染（sources/sinks/gadgets/RCE 链） |
-| `sqli-advanced.md` | SQL 注入实战（WAF 绕过全族/无列名/堆叠预处理/DNS OOB/写 shell/sqlmap 进阶） |
+| `sqli-advanced.md` | SQL 注入实战（WAF 绕过全族/无列名/堆叠预处理/DNS OOB/写 shell/PG 命令执行与只读库外带/sqlmap 进阶） |
 | `xss-advanced.md` | XSS 进阶（DOM Clobbering/Shadow DOM/Unicode 折叠/Referer 泄漏/XS-Leak 组合） |
 | `html-parse-differentials.md` | 存在"同一份输入被两种环境读取"类现象（DOM 检查 vs 渲染；JS 开/关），或需要构造"检查态无害、渲染态执行"的 payload 时 |
 | `command-injection.md` | 命令注入（无字母数字 RCE/无参数 RCE/临时文件 glob/分段写/各语言绕过表） |

