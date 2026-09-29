@@ -14,8 +14,7 @@ permission:
     "~/Downloads/**/*.env.*": allow
   # MCP 只读授权（全枚举，不用通配——避免通配 deny 与具体 allow 的
   # 优先级歧义; MCP 工具增删时须同步此清单）:
-  # - 读接口 allow: 复盘时检索记忆库——判断"洞察是否已沉淀"、检索质量
-  #   复测走真实检索路径（retrospective-methodology §6.2）
+  # - 读接口 allow: 复盘时检索记忆库——判断"洞察是否已沉淀"
   # - 写接口 deny: store_knowledge（向量库写入是领域 agent 分析实践的
   #   职责）/ delete_session_events（删除破坏事件档案）
   # 知识双轨不变: 静态知识 = MD 知识库（本 agent 维护，领域 agent Read 消费）;
@@ -60,7 +59,7 @@ Security Analysis 的架构地图（目录树、归属规则、依赖方向、Pl
 
 环境信息由 Plugin 每轮注入（见系统提示"环境信息"段）; `$AGENT_DIR` 对每个 agent 各指各的专属目录（evolve → security-analysis-evolve/）。变量语义详见 architecture-map.md 环境变量表。
 
-**工具策略（预期行为，非故障）**：`knowledge_*` / `events_*` MCP 工具对本 agent 为**只读授权**（frontmatter 全枚举: 7 个检索工具 allow、`store_knowledge`/`delete_session_events` 两个写接口 deny——工具不在列表即预期，无需排查）。用途: 复盘时判断"洞察是否已沉淀到记忆库"（search_knowledge 优先）、检索质量复测须走真实检索路径（见 retrospective-methodology §6.2）。写入动态知识是领域 agent 的职责，本 agent 的知识沉淀产物统一落 MD 知识库。记忆库存储/索引状态的审计可直读 SQLite（`$OPENSECURITY_HOME/db/knowledge/knowledge.db`）; events 检索强制 group_id 限定当前任务 Flow，历史任务数据以任务目录 + progress.md 为数据源。
+**工具策略（预期行为，非故障）**：`knowledge_*` / `events_*` MCP 工具对本 agent 为**只读授权**（frontmatter 全枚举: 7 个检索工具 allow、`store_knowledge`/`delete_session_events` 两个写接口 deny——工具不在列表即预期，无需排查）。用途: 复盘时判断"洞察是否已沉淀到记忆库"（search_knowledge 优先）。写入动态知识是领域 agent 的职责，本 agent 的知识沉淀产物统一落 MD 知识库。记忆库存储/索引状态的审计可直读 SQLite（`$OPENSECURITY_HOME/db/knowledge/knowledge.db`）; events 检索强制 group_id 限定当前任务 Flow，历史任务数据以任务目录 + progress.md 为数据源。
 
 ## 进化流程
 
@@ -203,6 +202,8 @@ Security Analysis 的架构地图（目录树、归属规则、依赖方向、Pl
 ```
 
 **禁止跳过任何 Phase。Phase 0-1 是分析讨论阶段，Phase 2-6 是严格实施阶段。**
+
+**Phase 关闭证据（强制）**：每个 Phase 关闭前必须先核对并落盘证据（改动文件 diff / grep 断言 / 行数或读数 / 验证点输出），再声明"通过/完成"；禁止仅有口头声明。证据随步骤进度摘要一并写入 progress 文件。
 
 入口 C（素材进化）操作指引——三条路径:
   1. **直接蒸馏**: 用户给出仓库 URL 或本地路径（"蒸馏 <对象>"）。输入形态速查（详解唯一权威: `$AGENT_DIR/knowledge-base/distillation-methodology.md` 输入解析节）:
@@ -434,6 +435,8 @@ Security Analysis 的架构地图（目录树、归属规则、依赖方向、Pl
 - 文件路径: 说明
 
 **发现问题数**: X（已全部修复）
+
+**落盘证据**: 文件 diff 摘要 / grep 断言 / 行数或读数（对应本 Phase 的验证点）
 
 **决策记录**:
 - 为什么选 A 而非 B

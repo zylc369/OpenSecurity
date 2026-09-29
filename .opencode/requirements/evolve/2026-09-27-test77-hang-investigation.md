@@ -164,7 +164,7 @@ execv 在多线程进程中做镜像替换/fd 关闭，与任意线程的 malloc
 变体（见 2026-09-27-mlx-hang-investigation.md）。本档确认无独立复发迹象，
 维持结案。
 
-### 10.2 拆除诊断注入（覆盖 §8 的临时措施）
+### 10.2 拆除诊断注入（[77] 调查期的临时措施）
 
 [77] 调查期装入"子进程心跳注入"并随 commit 266489f 固化进
 `tests/test_control.py` 的 `ControlProcess.start()`：每个 E2E 控制台子进程
@@ -206,7 +206,9 @@ threading.Thread(target=_heartbeat, daemon=True, name="stack-heartbeat").start()
 
 用法（将上文件存为 hb.py；输出路径 /tmp/hb_stacks.txt 可按需改）:
 - 主进程注入: `python -c "exec(open('hb.py').read())\n<目标启动代码>"`
+  ——`\n` 须是**真实换行**（shell 双引号不解析反斜杠转义；在 Python
+  字符串里构建同样命令时写 `\n`，Python 会转义为真实换行；写成 `\\n` 则是字面反斜杠+n，内层 python 报 SyntaxError）
 - 子进程注入: 启动命令前段拼 `exec(open('hb.py').read())\n` 再接目标
-  （即本次拆除的 `ControlProcess` 两段式形态）
-- 读取: `/tmp/hb_stacks.txt` 按 `===== HH:MM:SS pid=N =====` 分块，逐线程
-  栈（每帧截尾 1500 字符）
+  （即本次拆除的 `ControlProcess` 两段式形态；换行同注意事项）
+- 读取: `/tmp/hb_stacks.txt` 按 `===== HH:MM:SS pid=N =====` 分块；每线程
+  整段栈保留末尾 1500 字符（最内层帧优先）

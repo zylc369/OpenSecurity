@@ -221,4 +221,4 @@ tests/test_control.py（回归线）←→ 上述 services 两文件
 
 **验证边界（如实）**: 本轮的实机验证全部在 **macOS(arm64)** 完成（工具链/接口/90 用例/pyright 均此一平台）。**Linux（apt 路径）与 Windows（docker 路径）未在任何实机执行**——Linux 侧已核仓库包存在性（Debian/Ubuntu/Kali 均有；Kali=2.4.3+dfsg1）并做两层补充验证：① Kali 容器内 apt 版 binwalk（v2 线）实测 `-e -C` 提取可用（产物 `_<file>.extracted/`；v2 不支持 `--version`，版本显示为空、不影响可用性判定）；② 安装器 linux 分支进程内模拟通过（`需手动安装: sudo apt install -y binwalk`）。整机安装流未实机。Windows 侧 docker 目标核验（分支模拟 → `opensecurity/toolbox-core` 容器）通过，但 wrapper 实机执行未验证，wrapper 状态解析疑点已补录 `pending-items` #5。macOS Intel 同渠道（brew）未实机。
 
-**待后续**: 无新增挂起项。全量回归所需的"停生产"纪律源自 `pending-items` 模式 K（E2E 端口隔离未根治），本轮遵守未扩面。
+**待后续**: 无新增挂起项。全量回归所需的"停生产"纪律源自 `pending-items` 模式 K（E2E 端口隔离未根治），本轮遵守未扩面。（**注**: 该纪律已随 #7 于 2026-09-29 晚根治解除——此后全量可在生产运行时执行。）

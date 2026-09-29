@@ -157,7 +157,7 @@ plist 是控制台另一条 spawn 路径（launchd 启动），其 env 集应与
    - 依赖: 1-6
 
 8. 归档
-   - 文件: progress 档案条目, pending-items.md（#1 勾选移入已完成）,
+   - 文件: progress 档案条目, pending-items.md（#1 勾选 + 证据）,
      knowledge-base 如有新模式
    - 预估行数: ~30
    - 验证点: pending-items #1 状态 ☑ 含日期与证据
@@ -232,5 +232,5 @@ plist 是控制台另一条 spawn 路径（launchd 启动），其 env 集应与
    场景 6 移至横幅前（结构归位）。代理键不透传决策记入 §2.1 排除列表
    （当前环境无代理，实测 0 键）。
 
-生效时点: 控制台白名单即时生效（生产 60468）; MCP 白名单 command 在
-opencode 下次重启后生效（注册发生在 opencode 启动时）。
+生效时点: 控制台白名单即时生效（生产 60468）; MCP 按修订 6 回退为合并
+语义直跑（无 command 包装）。
