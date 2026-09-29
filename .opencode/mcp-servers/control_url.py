@@ -17,6 +17,7 @@ import socket
 import sys
 import threading
 from dataclasses import dataclass
+from typing import cast
 
 import httpx
 
@@ -130,7 +131,10 @@ class ControlIpc:
 
         win_errs = (OSError, pywintypes.error)
         try:
-            pipe = int(win32file.CreateFile(   # PyHANDLE → int（int 子类恒等；win32file stub 期望 int）
+            # pywin32 API 实际接受 PyHANDLE；stub 窄。cast 仅类型层——
+            # 必须保留 PyHANDLE 对象引用（其句柄生命周期由对象管理；int() 化会丢
+            # 引用致 GC 提前关闭句柄 → 句柄号复用后对"非 socket"操作报 WinError 10038）
+            pipe = cast(int, win32file.CreateFile(
                 _ipc_address(),
                 win32file.GENERIC_READ | win32file.GENERIC_WRITE,
                 0, None, win32file.OPEN_EXISTING, 0, None,

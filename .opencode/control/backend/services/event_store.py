@@ -223,8 +223,9 @@ class EventStoreService:
             entry = self._queue.get()
             if entry is None:
                 self._queue.task_done()
-                if self._stop_event is not None:  # 启动顺序保证非 None；防御收窄
-                    loop.call_soon_threadsafe(self._stop_event.set)
+                if self._stop_event is None:  # 启动顺序保证非 None；违反=内部顺序破坏→fail-loud（跳过则停止信号永不到达，专用循环挂死）
+                    raise RuntimeError("事件存储停止信号未就绪（内部顺序错误）")
+                loop.call_soon_threadsafe(self._stop_event.set)
                 return
             loop.call_soon_threadsafe(self._dispatch, entry)
 

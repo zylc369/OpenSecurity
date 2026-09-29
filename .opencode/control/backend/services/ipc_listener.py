@@ -403,7 +403,7 @@ class IpcListener:
                 0,
                 None,
             )
-            win32file.CloseHandle(int(handle))
+            win32file.CloseHandle(handle)  # pyright: ignore[reportArgumentType]  pywin32 stub 窄；勿 int()（须保留 PyHANDLE 对象引用——GC 关句柄的时序由对象管理）
             return True
         except _PLATFORM_OS_ERRORS:
             return False
