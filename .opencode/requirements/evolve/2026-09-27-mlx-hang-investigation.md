@@ -1,6 +1,7 @@
 # MLX 挂死成因调查档案（已结案）
 
 > 状态: **已结案（2026-09-29）**——假说 2 成立并修复，实验 A/B 完整裁决
+> RSS 慢泄漏深挖（实验 C/D，2026-09-29）见 §9
 > 关联: 2026-09-27-test77-hang-investigation.md（[77] 挂起档案——MLX 挂死是
 > [77] 前置堆积的变体之一，本结案对其有缓解意义）
 > 调查期: 2026-09-27 立案 → 暂停 → 2026-09-29 恢复并结案
@@ -112,3 +113,49 @@ reset → Metal buffer GB 级堆积 → `mx.eval` 概率性永久挂死。
 （成因修复 + 结果层防御）。
 
 ## 8. 历史章节（立案期原文，供追溯）
+
+---
+
+## 9. RSS 慢泄漏深挖（实验 C/D，2026-09-29）
+
+背景: 实验 A 附带观测"每轮 unload 后 RSS +~2MB"，本次专项复现与归因。
+
+### 9.1 实验 C（复现 + 量化，50 轮）
+
+方法: 最小脚本 50 轮 `warm_up_sync()` → `release_sync()` → `gc.collect()`，
+每轮采样进程 RSS 与 Metal 三指标（active/cache/peak），终态
+`gc.collect() + mx.clear_cache()` 后再测。
+
+实测（RSS）: 首轮卸载后 718.9MB → 第 50 轮 1125.0MB，**斜率 8.29MB/轮**
+（早期 ~20-40MB/轮更快，中后期 ~5MB/轮）。终态 clear_cache 后 1125.0MB
+**不回落**——真泄漏（非可清缓存）。GPU 侧 active/cache 恒 0（干净）；
+**peak 单调上升 1247 → 2494MB**（分配峰值逐轮变大）。50 轮不挂。
+
+### 9.2 实验 D（归因，tracemalloc + 对象计数）
+
+方法: 20 轮循环，第 3 轮与第 13 轮间对比 tracemalloc 快照（traceback 聚合）
++ `gc.get_objects()` 类型计数。
+
+结果: Python 层增长仅 KB 级（top 项 ~52KB；对象计数 tuple +453 等）——
+远无法解释 8MB/轮。**增长在 C 扩展 / 非 Python heap 侧**（MLX/Metal
+C++ 层内部分配——tracemalloc 盲区），与 peak 单调上升吻合。
+
+### 9.3 结论与生产影响
+
+- 该慢泄漏为**库级**（MLX/Metal C++ 侧），应用层无修复手段（卸载路径已含
+  release + gc + clear_cache 全量释放）。
+- 生产影响评估: 加载/卸载频率天级（空闲卸载/远程切换），量级 ~8MB/轮
+  → 月级累计 ~百 MB 级; 有 120s 挂死兜底（§6）与进程重启兜底——
+  **维持"留档关注"**，不新增代码防御。
+- 若继续深挖: 用 Instruments / malloc_history 对 C 侧分配追踪（未做）。
+
+### 9.4 观测脚本结构（可重建）
+
+- **实验 C**: 心跳/看门狗线程（同 §10 工具形态，防挂死）；主循环
+  `warm_up_sync()` → `release_sync()` → `gc.collect()` → 采样
+  `psutil.RSS` + `mx.metal.get_active_memory / get_cache_memory /
+  get_peak_memory`；终态 gc + clear_cache 复测；输出 CSV
+  `(轮次,RSS,active,cache,peak,load_s,release_s)` 与末行斜率。
+- **实验 D**: 同循环；`tracemalloc.start(15)`，第 3/13 轮 `take_snapshot()`
+  对比 `compare_to(..., "traceback")[:15]`；`Counter(type(o).__name__ for o
+  in gc.get_objects())` 差值取 top。

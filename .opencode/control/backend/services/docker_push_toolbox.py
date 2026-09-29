@@ -138,7 +138,8 @@ class ToolboxPusher:
         ver: 必填版本号（'1.0' 自动归一化 'v1.0'）; 省略返回错误报告。
         interactive: None=自动判断（终端 CLI → True 透传; 后端 import → False 写日志文件）
         """
-        interactive = sys.stdout.isatty() if interactive is None else interactive
+        # bool() 显式包裹: sys.stdout 类型含 Any（TextIO | Any），条件收窄需显式 bool 构造
+        interactive = bool(sys.stdout.isatty()) if interactive is None else interactive
         report = PushReport(ok=True)
         ver, err = ToolboxPusher._normalize_ver(ver)
         if err:

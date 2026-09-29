@@ -15,11 +15,13 @@ from __future__ import annotations
 import dataclasses
 import platform
 from dataclasses import asdict
+from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from services.config_manager import ConfigManager
+from services.remote_client import RemoteConsoleClient
 from services.remote_link import RemoteLinkService
 
 router = APIRouter(prefix="/api/remote", tags=["remote"])
@@ -121,7 +123,7 @@ async def node_health(node: str = Query(default="local")) -> dict:
     return _fingerprint_payload()
 
 
-async def _forward_get(client, path: str) -> dict:
+async def _forward_get(client: RemoteConsoleClient, path: str) -> dict:
     """经 remote_client 的底层 GET 转发（to_thread——同步 httpx 禁跑事件循环，
     节点网络黑洞时冻结整个控制台是 B2 级故障）。"""
     import asyncio
@@ -131,7 +133,7 @@ async def _forward_get(client, path: str) -> dict:
         raise HTTPException(status_code=502, detail=f"远程节点不可达: {e}")
 
 
-async def _forward_call(fn, *args):
+async def _forward_call(fn: Callable[..., Any], *args: Any):
     """转发写操作（to_thread，同 _forward_get 的线程域约束）。"""
     import asyncio
     try:

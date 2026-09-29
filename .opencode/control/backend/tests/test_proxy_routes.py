@@ -1,4 +1,5 @@
 """proxy_routes + pool 响应边界 测试（需求 REVIEW 补齐项 5/6/7）。"""
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import asyncio
@@ -67,7 +68,7 @@ def pool_boundary(monkeypatch, tmp_path):
     return pp.ProxyPool._create_fresh(state_path=tmp_path / "s.json")
 
 
-def _ok_payload(ip="1.2.3.4:5678", remain="300", surplus=100, plist=None):
+def _ok_payload(ip="1.2.3.4:5678", remain: str | None = "300", surplus=100, plist=None):
     entry = ip + ("," + remain if remain is not None else "")
     return {"code": 200, "msg": "成功",
             "data": {"count": 1, "surplus_quantity": surplus,
@@ -169,7 +170,7 @@ def routes_env(monkeypatch, tmp_path):
         info = pp.ProxyInfo(ip="9.9.9.9:9", fetched_at=now, expire_at=now + 270)
         pool._state.current = info; pool._state.total_fetched += 1; pool._state.surplus = 50
         return info, 300
-    type(pool)._fetch_from_julang = fake_fetch
+    type(pool)._fetch_from_julang = fake_fetch  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     pp.ProxyPool._force_instance(pool)  # 单例注入（替代旧 get_pool patch）
     return TestClient(app), pool
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from types import FrameType
 
 # 避免 SentenceTransformer 加载时向 HuggingFace 发 HEAD 请求（网络不通会卡 120s+）
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -139,7 +140,7 @@ def create_app() -> FastAPI:
                 while True:
                     await asyncio.sleep(2)
                     srv = ProxyRelay.current_server()
-                    if srv is None or not srv.sockets or srv.is_serving() is False:
+                    if srv is None or not getattr(srv, "sockets", None) or srv.is_serving() is False:
                         log.warning("[proxy_relay] 服务失活，自动重拉监听")
                         await ProxyRelay.stop_relay()
                         break
@@ -244,7 +245,7 @@ def main() -> None:
     # SIGTERM/SIGINT 也走 shutdown（清理 IPC socket + 退出）
     import signal
 
-    def _on_signal(signum, _frame):
+    def _on_signal(signum: int, _frame: "FrameType | None"):
         log.info("收到信号 %s，退出", signum)
         shutdown()
 

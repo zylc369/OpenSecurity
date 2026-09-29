@@ -11,6 +11,7 @@
 用 starlette TestClient 的 app 直接构建 + ASGI 手动调用太重——此处用
 monkeypatch _is_local 间接控制（单元级验证 dispatch 逻辑分支）。
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import os
@@ -71,7 +72,7 @@ def test_lan_whitelist_token():
     _cmi = cs.ConfigManager.get_instance()
     orig_read, orig_local = _cmi.get, guard.ApiGuardMiddleware.__dict__['_is_local']
     _cmi.get = lambda key: "right-key-123" if key == "CONTROL_API_KEY" else None
-    guard.ApiGuardMiddleware._is_local = classmethod(lambda cls, host: False)  # 伪造非本机
+    guard.ApiGuardMiddleware._is_local = classmethod(lambda cls, host: False)  # 伪造非本机  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     try:
         assert_eq(c_ok.post("/embed").status_code, 200, "正确 token 白名单放行")
         assert_eq(c_ok.get("/api/remote/health").status_code, 200, "health 放行")
@@ -91,7 +92,7 @@ def test_lan_admin_forbidden():
     _cmi = cs.ConfigManager.get_instance()
     orig_read, orig_local = _cmi.get, guard.ApiGuardMiddleware.__dict__['_is_local']
     _cmi.get = lambda key: "right-key-123" if key == "CONTROL_API_KEY" else None
-    guard.ApiGuardMiddleware._is_local = classmethod(lambda cls, host: False)
+    guard.ApiGuardMiddleware._is_local = classmethod(lambda cls, host: False)  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     try:
         assert_eq(c.get("/api/config").status_code, 403, "管理面 403")
         assert_eq(c.get("/api/docs").status_code, 403, "docs 403")
@@ -112,7 +113,7 @@ def test_lan_no_key_all_forbidden():
     _cmi = cs.ConfigManager.get_instance()
     orig_read, orig_local = _cmi.get, guard.ApiGuardMiddleware.__dict__['_is_local']
     _cmi.get = lambda key: None
-    guard.ApiGuardMiddleware._is_local = classmethod(lambda cls, host: False)
+    guard.ApiGuardMiddleware._is_local = classmethod(lambda cls, host: False)  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     try:
         assert_eq(c.post("/embed").status_code, 403, "无 key 白名单也 403")
         assert_eq(c.get("/api/config").status_code, 403, "无 key 管理面 403")

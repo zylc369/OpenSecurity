@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import secrets
 
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -53,7 +53,7 @@ class ApiGuardMiddleware(BaseHTTPMiddleware):
         normalized = path.rstrip("/") or "/"
         return normalized in cls.LAN_ALLOWED_PATHS
 
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
         host = request.client.host if request.client else None
         if self._is_local(host):
             return await call_next(request)

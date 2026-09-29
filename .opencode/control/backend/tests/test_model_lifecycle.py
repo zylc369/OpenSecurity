@@ -11,6 +11,7 @@
   cd .opencode/control/backend
   python tests/test_model_lifecycle.py
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import os
@@ -233,7 +234,7 @@ def test_model_loader_lifecycle():
     orig_load, orig_unload = managed._load_fn, managed._unload_fn  # noqa: SLF001
 
     def fake_load():
-        ModelInferenceService.get_instance()._embedder = FakeST()  # noqa: SLF001
+        ModelInferenceService.get_instance()._embedder = FakeST()  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
 
     def fake_unload():
         ModelInferenceService.get_instance()._embedder = None  # noqa: SLF001
@@ -351,7 +352,7 @@ def test_remote_routing_and_fallback():
             calls["note"] += 1
         def get_client(self):
             return _FailingClient() if stub_state["fail"] else FakeRemoteClient()
-    stub.RemoteLinkService = _FakeRL
+    setattr(stub, "RemoteLinkService", _FakeRL)  # 动态替换模块类（模块属性直赋值 pyright 不支持）
 
     def _install(use_remote: bool, fail: bool):
         stub_state["use_remote"] = use_remote
@@ -405,7 +406,7 @@ def test_remote_routing_and_fallback():
             sys.modules.pop("services.remote_link", None)
             import services
             if hasattr(services, "remote_link"):
-                del services.remote_link
+                del services.remote_link  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
         managed._load_fn, managed._unload_fn = orig_load, orig_unload  # noqa: SLF001
         managed.release()
 
@@ -448,7 +449,7 @@ def test_remote_routing_rerank():
             calls["note"] += 1
         def get_client(self):
             return FailClient() if rl_state["fail"] else OkClient()
-    stub.RemoteLinkService = _FakeRL
+    setattr(stub, "RemoteLinkService", _FakeRL)  # 动态替换模块类（模块属性直赋值 pyright 不支持）
 
     real_mod = sys.modules.get("services.remote_link")
     try:
@@ -473,7 +474,7 @@ def test_remote_routing_rerank():
             sys.modules.pop("services.remote_link", None)
             import services
             if hasattr(services, "remote_link"):
-                del services.remote_link
+                del services.remote_link  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
         managed._load_fn, managed._unload_fn = orig_load, orig_unload  # noqa: SLF001
         managed.release()
 

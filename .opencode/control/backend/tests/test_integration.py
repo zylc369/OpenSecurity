@@ -9,6 +9,7 @@
 
 注意：自杀场景经 HEARTBEAT_* 小值 env 加速（超时 3s + sweep 1s + 宽限 5s）。
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import json
@@ -109,6 +110,7 @@ def cleanup_state():
 
 def wait_control_pid(proc: subprocess.Popen, timeout: int = 30) -> int | None:
     """等子进程输出 CONTROL_PID 行（startControl 成功 + 身份 pid），失败返回 None。"""
+    assert proc.stdout is not None, "stdout 应为 PIPE"
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc.poll() is not None:

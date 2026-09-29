@@ -10,6 +10,7 @@
   cd .opencode/control/backend
   python tests/test_remote_routes.py
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import asyncio
@@ -104,7 +105,7 @@ def test_switch_paths():
     written = {}
     _cmi = cs.ConfigManager.get_instance()
     orig_write = _cmi.set_one
-    _cmi.set_one = lambda k, v: written.update({k: v}) or {}
+    _cmi.set_one = lambda k, v: written.update({k: v}) or {}  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     try:
         # 失败路径
         _fake_remote_link(ok_probe=False)

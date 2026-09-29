@@ -3,6 +3,7 @@
 覆盖：归一化全表逐行（§5.1 十形态含拒绝分支）、签名官方自测、
 mock 代理IP供应商 API 的缓存/过期/黑名单/冷却/history/持久化往返、凭证缺失行为。
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import asyncio
@@ -104,7 +105,7 @@ def pool(tmp_path, monkeypatch):
 def test_pool_lifecycle(pool):
     fake = FakeJuliang(pool, ["1.1.1.1:1", "2.2.2.2:2", "3.3.3.3:3"])
     original = pp.ProxyPool._fetch_from_julang
-    pp.ProxyPool._fetch_from_julang = fake.fn  # 替身：async def（绑定 self 形态）
+    pp.ProxyPool._fetch_from_julang = fake.fn  # 替身：async def（绑定 self 形态）  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     try:
         # 缓存：两次 get 只提取一次
         a = asyncio.run(pool.get())
@@ -128,7 +129,9 @@ def test_pool_lifecycle(pool):
         # 持久化往返：重建实例读同一状态文件
         pp.ProxyPool._fetch_from_julang = original
         pool2 = pp.ProxyPool._create_fresh(state_path=pool._path)
-        assert pool2._state.current.ip == "3.3.3.3:3"
+        cur2 = pool2._state.current
+        assert cur2 is not None
+        assert cur2.ip == "3.3.3.3:3"
         assert pool2._state.bad_ips == ["1.1.1.1:1"]
         assert pool2._state.total_fetched == 3
     finally:

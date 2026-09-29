@@ -101,7 +101,8 @@ class ToolboxBuilder:
     def build_all(arch: str = "both", smoke: bool = True,
                   interactive: bool | None = None) -> BuildReport:
         """构建双架构工具箱镜像。arch: arm64 / amd64 / both。"""
-        interactive = sys.stdout.isatty() if interactive is None else interactive
+        # bool() 显式包裹: sys.stdout 类型含 Any（TextIO | Any），条件收窄需显式 bool 构造
+        interactive = bool(sys.stdout.isatty()) if interactive is None else interactive
         report = BuildReport(ok=True)
         archs = ["arm64", "amd64"] if arch == "both" else [arch]
 

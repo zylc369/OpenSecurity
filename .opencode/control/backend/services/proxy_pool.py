@@ -245,7 +245,9 @@ class ProxyPool:
         """缓存命中直接复用（省花销核心）；过期/黑名单/force_new 才提取。"""
         async with self._lock:
             if not force_new and self._usable():
-                return self._state.current
+                cur = self._state.current
+                if cur is not None:  # _usable 已核；防御状态不一致
+                    return cur
             info, _ = await self._fetch_from_julang()
             self._persist()
             return info

@@ -44,7 +44,7 @@ class EmbedderLike(Protocol):
     测试用 fake 只需实现 encode（单线程下无锁无害）。
     """
 
-    def encode(self, texts: Any, **kwargs: Any) -> "np.ndarray": ...
+    def encode(self, texts: Any, /, **kwargs: Any) -> "np.ndarray": ...
 
 class MemoryDB:
     """向量存储（schema/阈值常量为类静态字段）。"""
@@ -159,12 +159,14 @@ class MemoryDB:
                 (question, content, doc_type, doc_type, "", lang, flow_id, time.time()),
             )
             row_id = cur.lastrowid
+            if row_id is None:
+                raise RuntimeError("INSERT 后 lastrowid 缺失（sqlite 异常）")
             self._conn.execute(
                 "INSERT INTO answer_vectors(rowid, embedding) VALUES (?, ?)",
-                (int(row_id), embedding),
+                (row_id, embedding),
             )
             self._conn.commit()
-            return int(row_id)
+            return row_id
 
     def search(
         self,

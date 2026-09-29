@@ -13,6 +13,7 @@
   冷门实体类型会被标为 Entity（兜底），语义搜索仍可找到。
 """
 import asyncio
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -147,7 +148,7 @@ class BgeM3Embedder(EmbedderClient):
         from services.model_loader import ModelInferenceService
         return ModelInferenceService.get_instance().embed_sync(text)
 
-    async def create(self, input_data) -> list[float]:
+    async def create(self, input_data: str | list[str] | Iterable[int | float]) -> list[float]:
         """生成 embedding 向量（async）。
 
         graphiti 的 EntityNode/EntityEdge 调 await embedder.create(input_data=[text])，
@@ -171,7 +172,7 @@ class BgeM3Embedder(EmbedderClient):
             return await asyncio.to_thread(self._encode, input_data)
 
         # 预计算向量（Iterable[int]）→ 原样返回
-        return [float(x) for x in input_data]
+        return [float(x) for x in input_data]  # pyright: ignore[reportArgumentType]  前面分支已排除 str；此处按数字向量契约（pyright 无法表达"首元素非 str 则全非 str"）
 
     async def create_batch(self, input_data: list[str]) -> list[list[float]]:
         """批量生成 embedding 向量（async）。

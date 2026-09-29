@@ -2,15 +2,20 @@
 
 运行: cd .opencode/control/backend && python3 tests/test_config_manager.py
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import os
 import shutil
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
+
+if TYPE_CHECKING:
+    from services.config_manager import ConfigManager
 
 from tests.test_control import test, assert_eq, assert_true  # noqa: E402
 
@@ -18,7 +23,7 @@ _SANDBOX = Path("/tmp/cm_unit_root")
 _DATA = Path("/tmp/cm_unit_data")
 
 
-def _fresh() -> "object":
+def _fresh() -> ConfigManager:
     """隔离沙箱 + 重置单例，返回新实例。"""
     from services.config_manager import ConfigManager
     ConfigManager._reset_for_tests()
@@ -27,6 +32,7 @@ def _fresh() -> "object":
     _SANDBOX.mkdir(parents=True)
     _DATA.mkdir(parents=True)
     os.environ["OPENSECURITY_HOME"] = str(_DATA)
+    os.environ["OPENSECURITY_AI_ENV"] = str(_DATA / ".ai_env")  # 同步重定向（import test_control 设的指向它的沙箱）
     os.environ["OPENCODE_ROOT"] = str(_SANDBOX)
     return ConfigManager.get_instance()
 

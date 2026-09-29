@@ -16,6 +16,7 @@
   - 每个测试独立 group_id（e2er-<pid>-<tag>），结束清理，不污染生产库
   - 与 test_control.py（fake 单测层）分离：本套件全真依赖，失败即真问题
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import concurrent.futures

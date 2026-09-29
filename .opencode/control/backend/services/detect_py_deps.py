@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
+from typing import Never
 
 from services.runtime_paths import RuntimePaths
 
@@ -430,7 +431,7 @@ def _fix_macos_libomp():
 # ═══ 安装 ═════════════════════════════════════════════════
 
 
-def _warn(msg, exc=None):
+def _warn(msg: str, exc: "BaseException | None" = None):
     """统一的 stderr 诊断日志。"""
     parts = [f"[!] {msg}"]
     if exc is not None:
@@ -438,7 +439,7 @@ def _warn(msg, exc=None):
     print(": ".join(parts), file=sys.stderr)
 
 
-def _log(msg):
+def _log(msg: str):
     """正常进度日志，打到 stderr。"""
     print(msg, file=sys.stderr)
 
@@ -566,7 +567,7 @@ def _run_install(dry_run: bool):
     # 确保在目标 venv 内运行
     _bootstrap_venv()
 
-    def _install_fail(msg):
+    def _install_fail(msg: str) -> Never:
         """安装失败 → 打印错误 → 立即中断。"""
         print(f"\n[ERROR] {msg}", file=sys.stderr)
         print("安装中断。请修复上述错误后重新运行此脚本。", file=sys.stderr)

@@ -98,9 +98,10 @@ class ControlIpc:
             srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             srv.bind(("127.0.0.1", 0))          # 随机端口：进程内实现细节
             srv.listen(8)
-            self._proxy_port = srv.getsockname()[1]
+            port = srv.getsockname()[1]
+            self._proxy_port = port
             threading.Thread(target=self._proxy_accept_loop, args=(srv,), daemon=True).start()
-            return self._proxy_port
+            return port
 
     def _proxy_accept_loop(self, srv: socket.socket) -> None:
         while True:
@@ -129,11 +130,11 @@ class ControlIpc:
 
         win_errs = (OSError, pywintypes.error)
         try:
-            pipe = win32file.CreateFile(
+            pipe = int(win32file.CreateFile(   # PyHANDLE → int（int 子类恒等；win32file stub 期望 int）
                 _ipc_address(),
                 win32file.GENERIC_READ | win32file.GENERIC_WRITE,
                 0, None, win32file.OPEN_EXISTING, 0, None,
-            )
+            ))
         except win_errs as e:
             print(f"[control_url] 管道连接失败（控制台未起或管道未就绪）: {e}",
                   file=sys.stderr)
@@ -144,8 +145,7 @@ class ControlIpc:
                 # 管道 → TCP
                 try:
                     # size=1 而非 0：C 层 malloc(0) 可能返回 NULL 误报 NoMemory
-                    # pywin32 无类型 stub（PyHANDLE/int 推断不精确）
-                    _, avail, _ = win32pipe.PeekNamedPipe(pipe, 1)  # pyright: ignore[reportArgumentType]
+                    _, avail, _ = win32pipe.PeekNamedPipe(pipe, 1)
                 except win_errs:
                     break
                 if avail:

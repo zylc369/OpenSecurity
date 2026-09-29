@@ -21,7 +21,7 @@ import queue
 import threading
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable, Coroutine
 
 MAX_CONCURRENT = 10
 BRIDGE_TIMEOUT = 600.0  # 桥接调用上限（覆盖 daemon 冷启动 180s + bolt 90s + 初始化）
@@ -54,7 +54,7 @@ class EventStoreService:
     _instance: "EventStoreService | None" = None
     _instance_lock = threading.Lock()
 
-    def __new__(cls, graphiti_factory=None) -> "EventStoreService":
+    def __new__(cls, graphiti_factory: Callable[[], Any] | None = None) -> "EventStoreService":
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
@@ -68,7 +68,7 @@ class EventStoreService:
         return cls()
 
     @classmethod
-    def _create_fresh(cls, *args, **kwargs):
+    def _create_fresh(cls, *args: Any, **kwargs: Any):
         """构造独立实例（绕过单例——测试 fake 注入用; 生产代码禁用）。"""
         inst = object.__new__(cls)
         inst._init_once(*args, **kwargs)
@@ -96,7 +96,7 @@ class EventStoreService:
             payload["error"] = error
         return payload
 
-    def _init_once(self, graphiti_factory=None) -> None:
+    def _init_once(self, graphiti_factory: Callable[[], Any] | None = None) -> None:
         self._graphiti_factory = graphiti_factory
 
         self._queue: queue.Queue[EventEntry | DeleteGroup | None] = queue.Queue()
@@ -157,7 +157,7 @@ class EventStoreService:
 
     # ── 跨循环桥（任意线程/循环 → 专用循环）───────────────
 
-    async def _on_loop(self, coro):
+    async def _on_loop(self, coro: Coroutine[Any, Any, Any]):
         """在专用事件循环上执行 coro（FastAPI 协程/worker 线程均可调用）。"""
         if self._loop is None or self._thread is None or not self._thread.is_alive():
             self.start()
@@ -223,13 +223,17 @@ class EventStoreService:
             entry = self._queue.get()
             if entry is None:
                 self._queue.task_done()
-                loop.call_soon_threadsafe(self._stop_event.set)
+                if self._stop_event is not None:  # 启动顺序保证非 None；防御收窄
+                    loop.call_soon_threadsafe(self._stop_event.set)
                 return
             loop.call_soon_threadsafe(self._dispatch, entry)
 
-    def _dispatch(self, entry) -> None:
+    def _dispatch(self, entry: "EventEntry | DeleteGroup") -> None:
         """专用循环内：为一条写消息建任务（task_done 在任务完成回调里）。"""
         semaphore = self._semaphore
+        if semaphore is None:  # 启动顺序保证非 None；防御收窄
+            self._queue.task_done()
+            raise RuntimeError("事件写入调度器未就绪（内部顺序错误）")
 
         async def _run() -> None:
             try:
@@ -239,7 +243,7 @@ class EventStoreService:
 
         self._tasks.append(asyncio.ensure_future(_run()))
 
-    async def _handle_write(self, entry, semaphore: asyncio.Semaphore):
+    async def _handle_write(self, entry: "EventEntry | DeleteGroup", semaphore: asyncio.Semaphore):
         """处理单条写消息（add_episode / delete_by_group_id）。"""
         from services.graphiti_config import CUSTOM_ENTITY_TYPES
         try:
@@ -284,7 +288,7 @@ class EventStoreService:
 
     # ── 读路径（5 种搜索；FastAPI 协程调用，经桥进专用循环）──
 
-    async def _search(self, **kwargs) -> Any:
+    async def _search(self, **kwargs: Any) -> Any:
         """graphiti.search_ 的桥接执行（kwargs 原样透传）。
 
         连接类失败（容器停/daemon 死）→ 重置实例重试一次：

@@ -12,6 +12,7 @@ import logging
 import typing
 
 from anthropic import AsyncAnthropic
+from anthropic.types import MessageParam
 from graphiti_core.llm_client.anthropic_client import AnthropicClient
 from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
 from graphiti_core.llm_client.errors import RateLimitError, RefusalError
@@ -38,8 +39,6 @@ class DeepSeekLLMClient(AnthropicClient):
             config = LLMConfig()
 
         # 创建指向 DeepSeek Anthropic 端点的 AsyncAnthropic 客户端
-        from anthropic import AsyncAnthropic
-
         client = AsyncAnthropic(
             api_key=config.api_key,
             base_url=config.base_url,
@@ -67,9 +66,10 @@ class DeepSeekLLMClient(AnthropicClient):
         import anthropic
 
         system_message = messages[0]
-        user_messages: list[dict[str, str]] = [
+        # MessageParam.role 为 Literal 联合（graphiti Message.role 为 str，运行值受控）→ cast 收口
+        user_messages = typing.cast("list[MessageParam]", [
             {"role": m.role, "content": m.content} for m in messages[1:]
-        ]
+        ])
 
         tools, tool_choice = self._create_tool(response_model)
 

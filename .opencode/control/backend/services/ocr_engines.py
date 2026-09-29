@@ -122,7 +122,7 @@ class MlxEngine:
         before = self.footprint_mb()
         t0 = time.monotonic()
         try:
-            from mlx_vlm import load as _load
+            from mlx_vlm import load as _load  # pyright: ignore[reportPrivateImportUsage]  mlx_vlm 未声明 __all__
             self._model, self._processor = _load(model_path)
         except Exception as e:
             self._model = self._processor = None
@@ -156,18 +156,20 @@ class MlxEngine:
         防御: 未加载 → RuntimeError（worker 内检查，覆盖竞争窗口）；
         generate 异常 → RuntimeError。
         """
-        if not self.loaded:
+        model = self._model
+        processor = self._processor
+        if model is None or processor is None:
             raise RuntimeError("MLX 引擎未加载（推理窗口内被卸载，请重试）")
         t0 = time.monotonic()
         try:
             from mlx_vlm.prompt_utils import apply_chat_template
-            from mlx_vlm import generate as _generate
+            from mlx_vlm import generate as _generate  # pyright: ignore[reportPrivateImportUsage]  mlx_vlm 未声明 __all__
             text_prompt = apply_chat_template(
-                self._processor, self._model.config,
+                processor, model.config,
                 prepared.text_prompt, num_images=1,
             )
             result = _generate(
-                self._model, self._processor, text_prompt, prepared.image,
+                model, processor, text_prompt, prepared.image,  # pyright: ignore[reportArgumentType]  mlx_vlm stub 与运行时签名不符
                 max_tokens=self.MAX_TOKENS, verbose=False,
             )
         except RuntimeError:

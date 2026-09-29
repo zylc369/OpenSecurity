@@ -107,7 +107,7 @@ HOME/OPENCODE_ROOT/OPENSECURITY_HOME/PATH）
 - 意外收获: `routes/proxy.py` 被吞 NameError（端口顺延错配 bug）、
   `model_assets` 下载 worker 三处必炸裸名——均为此前所有人工排查未发现
 
-**二期候选**（未排期）: ArgumentType 30 / AttributeAccessIssue 16 等
+**二期候选**（未排期）: ArgumentType 30 / AttributeAccessIssue 16 等——**已实施并清零（2026-09-29，见文末"二期实施结果"）**
 58 error 清零; mcp-servers 5 error 清零; 注解完备性规则逐档打开。
 
 **增补 1（同日）**: PyCharm 真阳性暴露 pyright 流分析盲区——
@@ -157,3 +157,42 @@ Ollama 分支，win/linux + httpx 缺失 → /api/models 500）。已修
 ——**后续修正（2026-09-29，#7 完成）**: 端口本就随机隔离（此前"共用
 9776"判断有误）; sock/.ai_env/测试数据已全部沙箱化; 全量 93/93 全程
 生产不停机——本段"停生产"处置已废弃。
+
+---
+
+## 二期实施结果（2026-09-29 完成）
+
+### 范围收敛（三线全清）
+
+- **backend 收尾 57 → 0**: 逐文件类型流修复（Optional/联合收窄、overload
+  化、库 stub 适配）。期间发现并修复三处真实隐患:
+  ① `model_assets._is_cached` 返回 frozen dataclass 但两处调用按 tuple 解包
+  （TypeError 隐患）; ② `detect_tools._install_tree` 的 UrlRecipe 分支错误
+  路径引用 `r.entry`（AttributeError 隐患）; ③ `_place_from_archive` 形参经
+  联合收窄暴露各 Recipe 类字段差异（`bins` 仅部分类拥有 → 收窄为
+  `ReleaseRecipe | UrlRecipe`）。
+- **mcp-servers 纳入 5 → 0**: PyHANDLE → int 归一（CreateFile 入口一处收口）、
+  返回类型收窄、`_CONTROL` dict 注解。
+- **tests 纳入 51 → 0**: `_fresh` 返回注解（`-> object` 病灶）、
+  `ControlProcess.client` property 收口（`_client` + getter 断言）、42 处
+  动态 patch/fake 场景行级豁免、Optional 收窄断言化。
+
+### 注解第一档打开
+
+- `reportMissingParameterType: error`（产品范围硬线）; 48 个参数注解补全
+  （含 `InstallRecipe` 联合类型别名抽取）。
+- tests 目录文件级豁免（测试 helper 无注解属合理实践）: 17 个测试文件头部
+  `# pyright: reportMissingParameterType=false`。
+
+### 稳态与回归
+
+- 全量 test_control **93/93**; 其他族全绿（oop_singletons 6 / remote_link 9 /
+  config_manager 5 / model_lifecycle 14 / integration 6 / pytest 47 等）;
+  生产全程无损。
+- 现行硬线: `basedpyright`（backend 含 tests，71 文件）**0 error / 0 warning**。
+
+### 后续候选（未排期）
+
+- unknown/Any 类规则逐档（reportUnknownParameterType / reportUnknownMemberType
+  / reportAny——当前 none）;
+- 注解档位继续收紧后的类型流精确性复审。

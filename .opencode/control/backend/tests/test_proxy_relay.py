@@ -4,6 +4,7 @@
 全部运行在**同一个事件循环**内（跨 run 的 server 对象会随旧循环失活，连接挂死）。
 全部 127.0.0.1 回环，零外网、零真实配额消耗。
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import asyncio
@@ -189,7 +190,7 @@ def test_connect_tunnel_end_to_end():
     async def scenario(relay_port):
         origin = await start_mock_origin()
         proxy_port, seen = await start_mock_proxy()
-        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))
+        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         r, w = await client(relay_port)
         w.write(f"CONNECT 127.0.0.1:{origin} HTTP/1.1\r\n\r\n".encode()); await w.drain()
         resp = await r.readline()
@@ -207,7 +208,7 @@ def test_connect_upstream_rejected_502():
     async def scenario(relay_port):
         origin = await start_mock_origin()
         rej_port, _ = await start_mock_proxy(connect_ok=False)
-        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{rej_port}"))
+        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{rej_port}"))  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         r, w = await client(relay_port)
         w.write(f"CONNECT 127.0.0.1:{origin} HTTP/1.1\r\n\r\n".encode()); await w.drain()
         line = await r.readline()
@@ -221,7 +222,7 @@ def test_threshold_rotate_uses_new_ip():
         origin = await start_mock_origin()
         proxy_port, _ = await start_mock_proxy()
         fake = FakePool(f"127.0.0.1:{proxy_port}")
-        pr.ProxyPool._force_instance(fake)
+        pr.ProxyPool._force_instance(fake)  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         _patch_threshold(2)
         async def one():
             r, w = await client(relay_port)
@@ -251,7 +252,7 @@ def test_plaintext_rewrite_and_method_preserved():
         srv = await asyncio.start_server(echo_origin, "127.0.0.1", 0)
         origin = srv.sockets[0].getsockname()[1]
         proxy_port, _ = await start_mock_proxy()
-        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))
+        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         r, w = await client(relay_port)
         w.write(f"POST http://127.0.0.1:{origin}/submit?a=1 HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n".encode())
         await w.drain()
@@ -266,7 +267,7 @@ def test_garbage_input_relay_survives():
     async def scenario(relay_port):
         origin = await start_mock_origin()
         proxy_port, _ = await start_mock_proxy()
-        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))
+        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         r, w = await client(relay_port)
         w.write(b"\x00\x01garbage no protocol\r\n\r\n"); await w.drain()
         try:
@@ -286,7 +287,7 @@ def test_graceful_close_inflight_delivered():
     async def scenario(relay_port):
         slow_port = await start_mock_origin(slow=True)
         proxy_port, _ = await start_mock_proxy()
-        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))
+        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         r, w = await client(relay_port)
         w.write(f"CONNECT 127.0.0.1:{slow_port} HTTP/1.1\r\n\r\n".encode()); await w.drain()
         await r.readline(); await r.readline()  # 状态行 + 空行
@@ -310,7 +311,7 @@ def test_concurrent_tunnels():
     async def scenario(relay_port):
         origin = await start_mock_origin()
         proxy_port, _ = await start_mock_proxy()
-        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))
+        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         async def one():
             r, w = await client(relay_port)
             w.write(f"CONNECT 127.0.0.1:{origin} HTTP/1.1\r\n\r\n".encode()); await w.drain()
@@ -330,7 +331,7 @@ def test_concurrent_threshold_single_rotate():
         origin = await start_mock_origin()
         proxy_port, _ = await start_mock_proxy()
         fake = FakePool(f"127.0.0.1:{proxy_port}")
-        pr.ProxyPool._force_instance(fake)
+        pr.ProxyPool._force_instance(fake)  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         _patch_threshold(3)
         async def one():
             r, w = await client(relay_port)
@@ -355,7 +356,7 @@ def test_graceful_close_survives_client_sends_during_drain():
     async def scenario(relay_port):
         slow_port = await start_mock_origin(slow=True)
         proxy_port, _ = await start_mock_proxy()
-        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))
+        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         r, w = await client(relay_port)
         w.write(f"CONNECT 127.0.0.1:{slow_port} HTTP/1.1\r\n\r\n".encode()); await w.drain()
         await r.readline(); await r.readline()
@@ -392,7 +393,7 @@ def test_direct_mode_ipv6_literal_target():
             writer.close()
         srv = await asyncio.start_server(v6_origin, "::1", 0)
         v6port = srv.sockets[0].getsockname()[1]
-        pr.ProxyPool._force_instance(FakePool("127.0.0.1:1", force_proxy=False))  # direct
+        pr.ProxyPool._force_instance(FakePool("127.0.0.1:1", force_proxy=False))  # direct  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         r, w = await client(relay_port)
         w.write(f"CONNECT [::1]:{v6port} HTTP/1.1\r\n\r\n".encode()); await w.drain()
         line = await r.readline()
@@ -414,7 +415,7 @@ def test_plaintext_path_without_slash():
         srv = await asyncio.start_server(echo_origin, "127.0.0.1", 0)
         origin = srv.sockets[0].getsockname()[1]
         proxy_port, _ = await start_mock_proxy()
-        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))
+        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         r, w = await client(relay_port)
         w.write(f"GET http://127.0.0.1:{origin}?a=1 HTTP/1.1\r\nHost: x\r\n\r\n".encode()); await w.drain()
         body = await read_all(r)
@@ -444,7 +445,7 @@ def test_connect_status_line_without_reason_phrase():
             await asyncio.gather(pump(reader, u_w), pump(u_r, writer))
         srv = await asyncio.start_server(terse_proxy, "127.0.0.1", 0)
         pp = srv.sockets[0].getsockname()[1]
-        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{pp}"))
+        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{pp}"))  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         r, w = await client(relay_port)
         w.write(f"CONNECT 127.0.0.1:{origin} HTTP/1.1\r\n\r\n".encode()); await w.drain()
         line = await r.readline()
@@ -463,7 +464,7 @@ def test_graceful_close_grace_timeout_force_close():
         srv = await asyncio.start_server(very_slow_origin, "127.0.0.1", 0)
         slow = srv.sockets[0].getsockname()[1]
         proxy_port, _ = await start_mock_proxy()
-        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))
+        pr.ProxyPool._force_instance(FakePool(f"127.0.0.1:{proxy_port}"))  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
         old_grace = pr.ProxyRelay._drain_grace_sec
         pr.ProxyRelay._drain_grace_sec = 0.3                  # 缩短宽限加速测试
         try:

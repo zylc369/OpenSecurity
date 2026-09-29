@@ -13,6 +13,7 @@
   cd .opencode/control/backend
   python tests/test_remote_link.py
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import asyncio
@@ -23,8 +24,8 @@ from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
-os.environ["OPENSECURITY_HOME"] = "/tmp/control_test_rl"
-Path(os.environ["OPENSECURITY_HOME"], "logs").mkdir(parents=True, exist_ok=True)
+os.environ["TEST_OPENSECURITY_HOME"] = "/tmp/control_test_rl"  # #7 约定: 沙箱根经 TEST_ 变量表达（import test_control 后由它落 OPENSECURITY_HOME）
+Path("/tmp/control_test_rl", "logs").mkdir(parents=True, exist_ok=True)
 # 参数沙箱: 小阈值写 .ai_env（可调参数唯一通道是 config_store——无 env 第二套）
 RL_TEST_ROOT = Path("/tmp/control_test_rl_root")
 RL_TEST_ROOT.mkdir(parents=True, exist_ok=True)
@@ -101,7 +102,7 @@ def test_degrade_on_failures():
         stub = type("StubMI", (), {"preload_all_models_background": staticmethod(
             lambda: warm_calls.append(1))})()
         orig_mi = rl_module.RemoteLinkService.__dict__["_model_inference"]
-        rl_module.RemoteLinkService._model_inference = staticmethod(lambda: stub)  # noqa: SLF001
+        rl_module.RemoteLinkService._model_inference = staticmethod(lambda: stub)  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
         svc = _mk_service()
         _set_probe(svc, [_ok_info()])
         await _pump(svc, 1)
@@ -203,7 +204,7 @@ def test_switch_to_remote():
     written = {}
     _cmi = cs.ConfigManager.get_instance()
     orig_write = _cmi.set_one
-    _cmi.set_one = lambda k, v: written.update({k: v}) or {}
+    _cmi.set_one = lambda k, v: written.update({k: v}) or {}  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     try:
         async def run():
             svc = _mk_service()
@@ -231,7 +232,7 @@ def test_switch_to_local():
     written = {}
     _cmi = cs.ConfigManager.get_instance()
     orig_write = _cmi.set_one
-    _cmi.set_one = lambda k, v: written.update({k: v}) or {}
+    _cmi.set_one = lambda k, v: written.update({k: v}) or {}  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     try:
         svc = _mk_service()
         svc._state = rl_module.RemoteLinkService.STATE_REMOTE  # noqa: SLF001

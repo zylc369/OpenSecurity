@@ -19,11 +19,13 @@ logger = logging.getLogger(__name__)
 
 import queue
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from services.runtime_paths import RuntimePaths
-from services.knowledge_db import MemoryDB
+from services.knowledge_db import EmbedderLike, MemoryDB
 
 DEFAULT_DB_PATH = Path(RuntimePaths.KNOWLEDGE_DB)
 
@@ -43,7 +45,8 @@ class KnowledgeStoreService:
     _instance: "KnowledgeStoreService | None" = None
     _instance_lock = threading.Lock()
 
-    def __new__(cls, db_path=None, embedder_factory=None) -> "KnowledgeStoreService":
+    def __new__(cls, db_path: str | None = None,
+                embedder_factory: Callable[[], EmbedderLike] | None = None) -> "KnowledgeStoreService":
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
@@ -57,7 +60,7 @@ class KnowledgeStoreService:
         return cls()
 
     @classmethod
-    def _create_fresh(cls, *args, **kwargs):
+    def _create_fresh(cls, *args: Any, **kwargs: Any):
         """构造独立实例（绕过单例——测试 fake 注入用; 生产代码禁用）。"""
         inst = object.__new__(cls)
         inst._init_once(*args, **kwargs)
@@ -83,8 +86,9 @@ class KnowledgeStoreService:
     注入点：db_path / embedder_factory（测试用 fake）。
     """
 
-    def _init_once(self, db_path=None, embedder_factory=None) -> None:
-        self._db_path = db_path or DEFAULT_DB_PATH
+    def _init_once(self, db_path: str | None = None,
+                   embedder_factory: Callable[[], EmbedderLike] | None = None) -> None:
+        self._db_path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
         self._embedder_factory = embedder_factory  # () -> EmbedderLike；None = model_loader
         self._queue: queue.Queue[MemoryEntry | None] = queue.Queue()
         self._thread: threading.Thread | None = None

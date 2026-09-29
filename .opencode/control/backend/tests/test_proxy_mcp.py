@@ -1,4 +1,5 @@
 """proxy MCP 协议级测试：工具清单/描述含判定 SOP/真实调用形态（REVIEW 补齐项 8）。"""
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import json
@@ -14,8 +15,18 @@ SOP_KEYWORDS = ["判定SOP", "预期挑战", "bad_ip"]
 
 
 def _spawn():
+    import os
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(SERVER.parent.parent) + os.pathsep + env.get("PYTHONPATH", "")  # control_url 等薄壳共享模块（自持，不依赖外部注入）
+    # v2 薄壳须由启动方注入 IPC 地址（生产=插件 mcp-manager）；测试语义=直连本机生产控制台。
+    # 不用进程 env 推导（pool/routes 测试会 monkeypatch OPENSECURITY_HOME 致其漂移）
+    env.setdefault(
+        "OPENSECURITY_CONTROL_IPC",
+        str(Path.home() / "bw-security-analysis" / "opensecurity-control.sock"),
+    )
     return subprocess.Popen(
         [sys.executable, str(SERVER)],
+        env=env,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, text=True)  # cwd 无关：脚本经绝对路径+内部 sys.path 自理
 
@@ -38,6 +49,7 @@ def test_mcp_tools_and_sop_description():
         assert init and "result" in init
         _rpc(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"}, read=False)
         tools = _rpc(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        assert tools is not None
         names = [t["name"] for t in tools["result"]["tools"]]
         assert names == EXPECTED_TOOLS, names
         desc = next(t for t in tools["result"]["tools"]
@@ -63,6 +75,7 @@ def test_mcp_status_call_shape():
         _rpc(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"}, read=False)
         r = _rpc(proc, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                         "params": {"name": "proxy_status", "arguments": {}}})
+        assert r is not None
         text = r["result"]["content"][0]["text"]
         if "错误" in text:
             return  # 控制台未运行/不可发现：错误路径明确 ✓（错误文本非 JSON，先判分支再 parse）

@@ -29,7 +29,7 @@ import asyncio
 import gc
 import logging
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 
@@ -114,7 +114,7 @@ class ModelInferenceService:
         def __init__(self, inner: "SentenceTransformer | None" = None) -> None:
             self._inner = inner
 
-        def encode(self, sentences, **kwargs):
+        def encode(self, sentences: str | list[str], **kwargs: Any):
             svc = ModelInferenceService.get_instance()
             if self._inner is not None:  # 测试注入直通（fake 直连，不经路由）
                 with svc._infer_lock:
@@ -132,7 +132,7 @@ class ModelInferenceService:
         def __init__(self, inner: "CrossEncoder | None" = None) -> None:
             self._inner = inner
 
-        def predict(self, pairs, **kwargs):
+        def predict(self, pairs: list[tuple[str, str]], **kwargs: Any):
             svc = ModelInferenceService.get_instance()
             if self._inner is not None:  # 测试注入直通
                 with svc._infer_lock:
@@ -207,13 +207,13 @@ class ModelInferenceService:
         return RemoteLinkService.get_instance().get_client()
 
     @staticmethod
-    def _texts_to_list(sentences) -> list[str]:
+    def _texts_to_list(sentences: str | list[str]) -> list[str]:
         """输入归一为文本列表（str → 单元素）。"""
         if isinstance(sentences, str):
             return [sentences]
         return list(sentences)
 
-    def _route_encode(self, sentences, kwargs):
+    def _route_encode(self, sentences: str | list[str], kwargs: dict[str, Any]):
         """embed 路由: 远程优先（失败 fallback 本地，HOLD 语义=懒加载阻塞）。"""
         if self._use_remote():
             from services.remote_client import RemoteUnavailable
@@ -236,7 +236,7 @@ class ModelInferenceService:
                     return target.encode(sentences, **kwargs)
         raise RuntimeError("embedder 竞态重试耗尽（连续卸载窗口内被清空）")
 
-    def _route_predict(self, pairs, kwargs):
+    def _route_predict(self, pairs: list[tuple[str, str]], kwargs: dict[str, Any]):
         """rerank 路由（语义同 _route_encode）。"""
         if self._use_remote():
             from services.remote_client import RemoteUnavailable
@@ -325,7 +325,7 @@ class ModelInferenceService:
     def embed_sync(self, text: str) -> list[float]:
         """同步单文本 embed（graphiti embedder 的 to_thread 路径用）。"""
         vec = self.get_embedder().encode(text, convert_to_numpy=True)
-        return np.asarray(vec).tolist()
+        return [float(x) for x in np.asarray(vec).ravel()]  # 1D 契约；numpy stub 的 tolist 保守为嵌套
 
     def embed_batch_sync(self, texts: list[str]) -> list[list[float]]:
         """同步批量 embed（/embed 路由）：一次前向，返回向量列表（每个 1024 维）。"""

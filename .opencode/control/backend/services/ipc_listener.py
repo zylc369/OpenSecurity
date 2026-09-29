@@ -34,6 +34,7 @@ import logging
 import socket
 import threading
 import time
+from typing import Any, Callable
 
 from services.config_manager import ConfigManager
 from services.frontend_port import FrontendPortRegistry
@@ -156,8 +157,9 @@ class IpcListener:
         if obj is None or ConfigManager.get_instance().is_windows:
             return
         try:
-            if hasattr(obj, "close"):
-                obj.close()
+            close = getattr(obj, "close", None)
+            if close is not None:
+                close()
         except OSError as e:
             logger.warning("IPC cleanup: 关闭监听 socket 异常: %s", e)
         try:
@@ -254,7 +256,7 @@ class IpcListener:
                 win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE | win32pipe.PIPE_WAIT,
                 win32pipe.PIPE_UNLIMITED_INSTANCES,
                 self._BUF, self._BUF,
-                0, None,
+                0, None,  # pyright: ignore[reportArgumentType]  sa=None 合法（stub 过严）
             )
         except pywintypes.error as e:
             logger.info("IPC bind: 管道 %s 创建失败: %s（被占，走等待/复用流程）",
@@ -296,7 +298,7 @@ class IpcListener:
 
     # ── Windows accept / 泵 ───────────────────────────────
 
-    def _pipe_accept_loop(self, first_handle) -> None:
+    def _pipe_accept_loop(self, first_handle: int) -> None:
         """阻塞等首个客户端，同时创建下一实例（否则后续客户端连不上）。"""
         import win32pipe
         handle = first_handle
@@ -318,7 +320,7 @@ class IpcListener:
                     win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE | win32pipe.PIPE_WAIT,
                     win32pipe.PIPE_UNLIMITED_INSTANCES,
                     self._BUF, self._BUF,
-                    0, None,
+                    0, None,  # pyright: ignore[reportArgumentType]  sa=None 合法（stub 过严）
                 )
             except _PLATFORM_OS_ERRORS as e:
                 logger.error("IPC accept: 创建下一管道实例失败: %s（本监听器停止接新连接）", e)
@@ -328,7 +330,7 @@ class IpcListener:
                 return
             handle = nxt
 
-    def _serve_pipe(self, handle) -> None:
+    def _serve_pipe(self, handle: int) -> None:
         """管道 ↔ 上游 TCP（**单线程轮询桥**）。
 
         为什么不用双泵（一读线程一写线程）：Windows 同步管道句柄的 I/O 在
@@ -401,7 +403,7 @@ class IpcListener:
                 0,
                 None,
             )
-            win32file.CloseHandle(handle)
+            win32file.CloseHandle(int(handle))
             return True
         except _PLATFORM_OS_ERRORS:
             return False
@@ -429,7 +431,8 @@ class IpcListener:
             return None
 
     @staticmethod
-    def _bridge(read_a, write_a, close_a, read_b, write_b, close_b) -> None:
+    def _bridge(read_a: Callable[[], bytes], write_a: Callable[[bytes], Any], close_a: Callable[[], Any],
+                read_b: Callable[[], bytes], write_b: Callable[[bytes], Any], close_b: Callable[[], Any]) -> None:
         """双向桥接 A<->B。
 
         方向 1（线程）：A 读 → B 写；方向 2（当前线程）：B 读 → A 写。
@@ -452,7 +455,8 @@ class IpcListener:
         IpcListener._run_pump(read_b, write_a, finish)
 
     @staticmethod
-    def _run_pump(read_fn, write_fn, on_finish) -> None:
+    def _run_pump(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Any],
+                  on_finish: Callable[[], Any]) -> None:
         """单方向泵：read_fn() 返回空即 EOF；异常/EOF 后调 on_finish() 收尾。"""
         try:
             while True:

@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+from collections.abc import Collection
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -58,7 +60,7 @@ async def get_config(key: str) -> dict[str, str]:
     return {"key": key, "value": value}
 
 
-def _guard_protected_keys(keys) -> None:
+def _guard_protected_keys(keys: Collection[str]) -> None:
     """拒绝直接写远程开关（D10: ENABLED 只能经「切换远程」按钮先校验后置位）。
 
     通用配置写接口不得绕过 remote_link.switch_to_remote 的校验路径

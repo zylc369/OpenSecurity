@@ -34,7 +34,7 @@ from fastapi import APIRouter
 from services import detect_py_deps, detect_tools
 from services.frontend_port import FrontendPortRegistry
 from services.detect_py_deps import PyPkgStatus
-from services.detect_tools import CompilerInfo, ToolStatus
+from services.detect_tools import CompilerInfo, ToolField, ToolStatus
 from services.model_assets import ModelAssetStatus
 from services.docker_manager import DockerGlobal
 from services.model_assets import ModelAssetRegistry
@@ -302,7 +302,7 @@ class DepsService:
         return agent == "all" or "all" in p.agents or agent in p.agents
 
     @staticmethod
-    def _tool_belongs(t, agent: str) -> bool:
+    def _tool_belongs(t: ToolField, agent: str) -> bool:
         return (agent == "all" or agent in t.agents) and detect_tools.ToolsScanner.get_instance()._platform_matches(t)
 
 

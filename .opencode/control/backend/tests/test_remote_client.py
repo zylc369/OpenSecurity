@@ -9,6 +9,7 @@
   cd .opencode/control/backend
   python tests/test_remote_client.py
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import os
@@ -24,7 +25,7 @@ os.environ.setdefault("OPENSECURITY_HOME", "/tmp/control_test_data")
 from tests.test_control import test, assert_eq, assert_true  # noqa: E402
 
 
-def _client_with(handler, token="secret-token-123") -> "object":
+def _client_with(handler, token="secret-token-123"):
     """构造使用 MockTransport 的 RemoteConsoleClient。"""
     from services.remote_client import RemoteConsoleClient
     c = RemoteConsoleClient("http://remote.test:9999", token=token,

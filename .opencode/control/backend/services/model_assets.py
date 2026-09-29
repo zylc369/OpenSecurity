@@ -13,6 +13,7 @@ import os
 import platform
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import psutil
@@ -164,7 +165,7 @@ class ModelAssetRegistry:
         self._change_callbacks: list = []
 
 
-    def add_change_callback(self, fn) -> None:
+    def add_change_callback(self, fn: "Callable[[str], None]") -> None:
         """注册变更回调（下载完成时调用，参数 model_id）。幂等注册。"""
         if fn not in self._change_callbacks:
             self._change_callbacks.append(fn)
@@ -301,8 +302,8 @@ class ModelAssetRegistry:
         if model is None:
             return False
 
-        cached, _, _ = self._is_cached(model.repo_id)
-        if cached:
+        cache_state = self._is_cached(model.repo_id)
+        if cache_state.cached:
             with self._lock:
                 self._states[model.id].status = "done"
                 self._states[model.id].progress = 1.0
@@ -447,7 +448,7 @@ class ModelAssetRegistry:
             with self._lock:
                 if self._states[model.id].status != "downloading":
                     return
-            _, _, size_gb = self._is_cached(model.repo_id)
+            size_gb = self._is_cached(model.repo_id).size_gb
             with self._lock:
                 self._states[model.id].progress = min(round(size_gb / model.disk_gb, 2), 0.99)
             time.sleep(2)

@@ -27,6 +27,7 @@ import tarfile
 import tempfile
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
@@ -471,7 +472,11 @@ class ScriptRecipe:
     prereq_cmds: list[str] = field(default_factory=list)
 
 
-_INSTALLABLE_TOOLS: list[ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | PrebuiltRecipe | NodeRecipe | DirRecipe | DotnetRecipe | WordlistRecipe | JdkRecipe | PkgToolRecipe] | None = None
+InstallRecipe = (ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | PrebuiltRecipe
+                 | NodeRecipe | DirRecipe | DotnetRecipe | WordlistRecipe | JdkRecipe
+                 | PkgToolRecipe | GitBashRecipe | SrcRecipe | GemRecipe | ScriptRecipe)
+
+_INSTALLABLE_TOOLS: list[InstallRecipe] | None = None
 
 
 def installable_tools() -> "list":
@@ -741,6 +746,7 @@ exec "$GDB" -q "$BIN" -ex "set architecture $ELF_N" -ex "target remote :$PORT" "
     PkgToolRecipe(name="cmake"),  # SrcRecipe(cmake 类) 的构建前置; brew/apt 均有
     SrcRecipe(name="pycdc", repo="zrax/pycdc", build_sys="cmake", bins=["pycdc", "pycdas"]),
 ]
+    assert _INSTALLABLE_TOOLS is not None  # 上方刚赋值；列表内构造调用使收窄失效
     return _INSTALLABLE_TOOLS
 
 
@@ -1298,7 +1304,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     # ── 对外入口 ──
 
-    def install_all(self, force: bool = False, progress=None) -> list[InstallResult]:
+    def install_all(self, force: bool = False, progress: Callable[[str], None] | None = None) -> list[InstallResult]:
         """按清单顺序安装全部; progress(name) 回调用于 UI 进度。
 
         Phase 0（逐工具循环前）: ①包管理器强制检查 ②linux 手动清单批量 which 检测
@@ -1341,7 +1347,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                 return self.install_recipe(recipe, force=force)
         return InstallResult(name=name, status="failed", detail="不在 INSTALLABLE_TOOLS 清单")
 
-    def install_recipe(self, recipe, force: bool) -> InstallResult:
+    def install_recipe(self, recipe: InstallRecipe, force: bool) -> InstallResult:
         """分发到各配方类型。"""
         try:
             if isinstance(recipe, ReleaseRecipe):
@@ -1459,10 +1465,10 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         self._wrapper(r.name, java_argv)
         return InstallResult(r.name, "installed", f"{asset} + wrapper")
 
-    def _install_tree(self, r: ReleaseRecipe, url: str, asset: str, data: bytes | None = None,
+    def _install_tree(self, r: "ReleaseRecipe | UrlRecipe", url: str, asset: str, data: bytes | None = None,
                       entry: str = "") -> InstallResult:
         """整归档解压到 ToolsEnv.TOOLS_HOME_DIR/<name>/，wrapper 指向 entry（默认取 r.entry）。"""
-        entry = entry or r.entry
+        entry = entry or getattr(r, "entry", "")
         dst = os.path.join(ToolsEnv.TOOLS_HOME_DIR, r.name)
         if os.path.isdir(dst) and os.path.exists(os.path.join(dst, entry)):
             return InstallResult(r.name, "skipped", "源码树已存在")
@@ -1478,7 +1484,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                     src_root = os.path.join(extract_dir, d)
                     break
         if not os.path.exists(os.path.join(src_root, entry)):
-            return InstallResult(r.name, "failed", f"归档内未找到入口 {r.entry}")
+            return InstallResult(r.name, "failed", f"归档内未找到入口 {entry}")
         shutil.copytree(src_root, dst, dirs_exist_ok=True)
         entry_abs = os.path.join(dst, entry)
         self._chmodx(entry_abs)
@@ -2198,7 +2204,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     # ── 底层操作 ──
 
-    def _place_from_archive(self, r, data: bytes, asset: str) -> None:
+    def _place_from_archive(self, r: "ReleaseRecipe | UrlRecipe", data: bytes, asset: str) -> None:
         """归档/裸二进制 → 提取 r.bins 到 ToolsEnv.CMD_DIR（归档内递归按名查找）。"""
         os.makedirs(ToolsEnv.CMD_DIR, exist_ok=True)
         lower = asset.lower()

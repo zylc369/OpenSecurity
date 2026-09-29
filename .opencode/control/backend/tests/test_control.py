@@ -14,6 +14,7 @@
 
 每个测试独立运行（自带 setup + teardown），失败一个不影响其他。
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import os
@@ -146,7 +147,7 @@ def assert_false(value, msg=""):
 def test_get_process_start_time():
     from services.process_lock import ProcessLockUtil
     st = ProcessLockUtil.get_process_start_time(os.getpid())
-    assert_true(st is not None, "应该返回启动时间戳")
+    assert st is not None, "应该返回启动时间戳"
     assert_true(st > 1_000_000_000, f"时间戳应该 > 2001 年，实际 {st}")
 
 
@@ -670,7 +671,13 @@ class ControlProcess:
 
     def __init__(self):
         self.proc: subprocess.Popen | None = None
-        self.client: httpx.Client | None = None
+        self._client: httpx.Client | None = None
+
+    @property
+    def client(self) -> httpx.Client:
+        """就绪的 HTTP 客户端（读取方保证生命周期：start 后 / stop 前）。"""
+        assert self._client is not None, "控制台未连接（CP.start 前或 stop 后）"
+        return self._client
 
     def start(self):
         """启动控制台（首跳心跳防自杀）。"""
@@ -700,7 +707,7 @@ class ControlProcess:
                         probe.get("http://localhost/health")
                         # 200/503 都算活着（503=模型加载中）；
                         # disconnected（uvicorn 未起）等异常继续轮询
-                        self.client = httpx.Client(
+                        self._client = httpx.Client(
                             transport=httpx.HTTPTransport(uds=str(sock_path)),
                             timeout=15,
                         )
@@ -721,9 +728,9 @@ class ControlProcess:
             self.proc.terminate()
             self.proc.wait(timeout=5)
             self.proc = None
-        if self.client:
-            self.client.close()
-            self.client = None
+        if self._client:
+            self._client.close()
+            self._client = None
         # 清理沙箱 IPC socket（控制台信号处理已删 sock，这里兜底）
         from services.config_manager import ConfigManager
         try:
@@ -884,7 +891,7 @@ def test_e2e_all_endpoints_smoke():
         all_routes = []
         for r in app.routes:
             if type(r).__name__ == "_IncludedRouter":
-                all_routes.extend(r.original_router.routes)
+                all_routes.extend(r.original_router.routes)  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
             else:
                 all_routes.append(r)
         checked = 0
@@ -1000,9 +1007,9 @@ def test_ipc_listener_bind_timeout():
         il.IpcListener._do_start_platform, il.IpcListener.__dict__['ipc_probe_alive']
     )
     import services.config_manager as _cm
-    _cm.ConfigManager.Protocol.IPC_BIND_WAIT_SEC = 0.2
+    _cm.ConfigManager.Protocol.IPC_BIND_WAIT_SEC = 0.2  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     il.IpcListener._do_start_platform = lambda self: None
-    il.IpcListener.ipc_probe_alive = staticmethod(lambda **kw: False)
+    il.IpcListener.ipc_probe_alive = staticmethod(lambda **kw: False)  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     try:
         from services.config_manager import ConfigManager
         ConfigManager.get_instance().ipc_unix_socket_path().unlink(missing_ok=True)  # 确保不触发"文件消失提前重试"
@@ -1088,7 +1095,7 @@ def test_frontend_port_vite_and_url():
     # monkeypatch is_dev_mode：防 .ai_env 的 CONTROL_FRONTEND_DEV=1 + 生产 vite(5173) 干扰
     import services.config_manager as _cm
     _orig_dev = _cm.ConfigManager.is_dev_mode
-    _cm.ConfigManager.is_dev_mode = property(lambda self: False)
+    _cm.ConfigManager.is_dev_mode = property(lambda self: False)  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     import socket as _s
     srv = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
     srv.bind(("127.0.0.1", 0))
@@ -1108,7 +1115,7 @@ def test_frontend_port_vite_and_url():
     finally:
         srv.close()
         reg.unregister_tcp()
-        _cm.ConfigManager.is_dev_mode = _orig_dev
+        _cm.ConfigManager.is_dev_mode = _orig_dev  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     # register_tcp 死端口 + verify → False
     assert_false(reg.register_tcp(1), "注册死端口（verify_alive）应失败")
 
@@ -1362,7 +1369,7 @@ def test_ocr_lazy_singleflight():
 
     svc = OcrService._reset_for_tests() or OcrService()
     fake = FakeMlxEngine(load_delay=0.3)   # 确定性窗口: 6 路必全落在加载中
-    svc._mlx = fake                        # ManagedModel 惰性构建前替换即全链路生效
+    svc._mlx = fake                        # ManagedModel 惰性构建前替换即全链路生效  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
 
     async def main():
         t0 = time.monotonic()
@@ -1398,7 +1405,7 @@ def test_ocr_extract_serialized():
 
     svc = OcrService._reset_for_tests() or OcrService()
     fake = FakeMlxEngine()
-    svc._mlx = fake
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     gen_active = []          # generate 区内计数
     gen_max = [0]
     pp_active = []           # 预处理区内计数
@@ -1456,7 +1463,7 @@ def test_ocr_infer_not_blocking_extract():
     svc = OcrService._reset_for_tests() or OcrService()
     fake = FakeMlxEngine()
     fake.infer_release.clear()           # 推理挂起（在途窗口由替身 gate 制造）
-    svc._mlx = fake
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
 
     async def main():
         infer_task = asyncio.create_task(svc.extract(_png_b64(), ""))  # 首图懒加载
@@ -1485,7 +1492,7 @@ def test_ocr_release_waits_infer():
     svc = OcrService._reset_for_tests() or OcrService()
     fake = FakeMlxEngine()
     fake.infer_release.clear()           # 推理挂起（在途窗口由替身 gate 制造）
-    svc._mlx = fake
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
 
     async def main():
         infer_task = asyncio.create_task(svc.extract(_png_b64(), ""))
@@ -1510,7 +1517,7 @@ def test_ocr_load_failure():
 
     svc = OcrService._reset_for_tests() or OcrService()
     fake = FakeMlxEngine()
-    svc._mlx = fake
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
 
     async def main():
         fake.fail_load_error = RuntimeError("boom: 模拟加载失败")
@@ -1532,7 +1539,7 @@ def test_ocr_concurrent_load_failure():
 
     svc = OcrService._reset_for_tests() or OcrService()
     fake = FakeMlxEngine(load_delay=0.3)   # 确定性窗口: 6 路必全挂上等待再失败
-    svc._mlx = fake
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
 
     async def main():
         fake.fail_load_error = RuntimeError("boom: 并发失败场景")
@@ -1564,7 +1571,7 @@ def test_ocr_reaper_idle_release():
     mod.IDLE_RELEASE_SEC = 0  # 立即超窗（ManagedModel 构造时读取该值）
     svc = OcrService._reset_for_tests() or OcrService()
     fake = FakeMlxEngine()
-    svc._mlx = fake
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     async def main():
         # 真实路径加载（extract → ensure_loaded → reaper 随加载启动）
         await svc.extract(_png_b64(), "")
@@ -1589,7 +1596,7 @@ def test_ocr_idle_sec_field():
 
     svc = OcrService._reset_for_tests() or OcrService()
     fake = FakeMlxEngine()
-    svc._mlx = fake
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
 
     async def main():
         assert_true(svc.idle_sec() is None, "未加载应为 None")
@@ -1598,9 +1605,13 @@ def test_ocr_idle_sec_field():
         assert_eq(svc.status().state, ManagedModel.STATE_READY, "加载后 ready")
         # 直接注入活动时刻（monotonic 口径）验证 idle_sec 计算
         managed._last_activity_at = time.monotonic() - 5  # noqa: SLF001
-        assert_true(abs(svc.idle_sec() - 5) < 1, f"应约 5s，实际 {svc.idle_sec()}")
+        idle = svc.idle_sec()
+        assert idle is not None
+        assert_true(abs(idle - 5) < 1, f"应约 5s，实际 {idle}")
         managed._last_activity_at = time.monotonic()  # noqa: SLF001
-        assert_true(svc.idle_sec() is not None and svc.idle_sec() < 1, "刷新后应接近 0")
+        idle2 = svc.idle_sec()
+        assert idle2 is not None
+        assert_true(idle2 < 1, "刷新后应接近 0")
         await svc.force_release()
         assert_true(svc.idle_sec() is None, "卸载后应 None")
 
@@ -1620,7 +1631,7 @@ def test_ocr_force_release_race_with_load():
 
     svc = OcrService._reset_for_tests() or OcrService()
     fake = FakeMlxEngine()
-    svc._mlx = fake
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
     orig_load = fake.load
     load_started = threading.Event()
     gate = threading.Event()
@@ -1631,7 +1642,7 @@ def test_ocr_force_release_race_with_load():
         orig_load(path)
 
     async def main():
-        fake.load = gated_load    # patch 替身加载层（ManagedModel load_fn 动态查找）
+        fake.load = gated_load  # pyright: ignore[reportAttributeAccessIssue]  # patch 替身加载层（ManagedModel load_fn 动态查找）
         ext = asyncio.create_task(svc.extract(_png_b64(), ""))  # 懒加载发起者
         await asyncio.get_running_loop().run_in_executor(None, load_started.wait, 5)
         # 加载在途 → force_release 等加载完成后卸载（不中断加载）
@@ -1754,9 +1765,10 @@ def test_ocr_two_cycles():
             assert_false(svc._mlx.loaded, f"第 {rnd} 轮卸载应完成")
             fps.append(MlxEngine.footprint_mb())
         # 两轮卸载后 footprint 一致（无跨循环累积；容忍小幅抖动）
-        assert_true(fps[0] is not None and fps[1] is not None, "footprint 应可测")
-        delta = abs(fps[1] - fps[0])
-        assert_true(delta < 150, f"两轮卸载后 footprint 应一致（{fps[0]} vs {fps[1]}）")
+        v0, v1 = fps[0], fps[1]
+        assert v0 is not None and v1 is not None, "footprint 应可测"
+        delta = abs(v1 - v0)
+        assert_true(delta < 150, f"两轮卸载后 footprint 应一致（{v0} vs {v1}）")
 
     asyncio.run(main())
 
@@ -1853,7 +1865,7 @@ def test_e2e_tcp_fallback():
                 except Exception:
                     pass
             time.sleep(0.5)
-        assert_true(isinstance(ok_port, int), "IPC 应答 /api/console-url")
+        assert isinstance(ok_port, int), "IPC 应答 /api/console-url"
         candidates = FrontendPortRegistry.get_instance().tcp_candidates()
         assert_true(
             ok_port in candidates and ok_port != start_port,
@@ -1970,7 +1982,7 @@ def test_graphiti_adapter_real_chain():
         #    类型断言是唯一防线
         from services.graphiti_config import GraphitiFactory
         graphiti, err = GraphitiFactory.create_graphiti()
-        assert_true(graphiti is not None, f"create_graphiti 应成功: {err}")
+        assert graphiti is not None, f"create_graphiti 应成功: {err}"
         try:
             assert_true(isinstance(graphiti.embedder, BgeM3Embedder),
                         f"embedder 应为 BgeM3Embedder，实际 {type(graphiti.embedder).__name__}")
@@ -2328,11 +2340,11 @@ def test_locked_wrapper_mutex():
         assert_true(probe.peak == 1, f"推理并发峰值应恒为 1（串行保证），实测 {probe.peak}")
 
     probe = ConcurrencyProbe()
-    embedder = ModelInferenceService.LockedEmbedder(probe)
+    embedder = ModelInferenceService.LockedEmbedder(probe)  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
     run_concurrent(embedder, "encode", lambda i: (f"t{i}",))
 
     probe2 = ConcurrencyProbe()
-    reranker = ModelInferenceService.LockedReranker(probe2)
+    reranker = ModelInferenceService.LockedReranker(probe2)  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
     run_concurrent(reranker, "predict", lambda i: ([("q", f"p{i}")],))
 
 

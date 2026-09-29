@@ -12,6 +12,7 @@
   cd .opencode/control/backend
   OPENSECURITY_E2E_REMOTE=1 python3 tests/test_e2e_remote.py
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import os

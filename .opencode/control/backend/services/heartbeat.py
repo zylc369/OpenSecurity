@@ -49,6 +49,8 @@ class HeartbeatRegistry:
 
     _instance: "HeartbeatRegistry | None" = None
     _instance_lock = __import__("threading").Lock()
+    _entries: "dict[int, HeartbeatEntry]"
+    _lock: "threading.Lock"
 
     def __new__(cls) -> "HeartbeatRegistry":
         if cls._instance is None:
@@ -61,7 +63,8 @@ class HeartbeatRegistry:
 
     @staticmethod
     def _init_instance(inst: "HeartbeatRegistry") -> None:
-        inst._entries: dict[int, HeartbeatEntry] = {}
+        # 属性注解声明在类体（PEP 526 属性注解对任意对象不支持，pyright 会拒绝）
+        inst._entries = {}
         inst._lock = threading.Lock()
 
     @classmethod

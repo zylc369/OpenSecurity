@@ -21,7 +21,7 @@ from pydantic import Field
 # control_url 与后端模块的导入路径由启动方注入（插件 mcp-manager 设置 PYTHONPATH）
 from control_url import resolve_control, make_control_client
 
-_CONTROL = {"base": None}
+_CONTROL: dict[str, str | None] = {"base": None}
 _client: httpx.AsyncClient | None = None
 
 

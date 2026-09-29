@@ -7,6 +7,7 @@
 
 运行: cd .opencode/control/backend && python3 tests/test_oop_singletons.py
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import logging
@@ -23,7 +24,7 @@ shutil.rmtree(_SANDBOX, ignore_errors=True)
 shutil.rmtree(_DATA, ignore_errors=True)
 _SANDBOX.mkdir(parents=True)
 _DATA.mkdir(parents=True)
-os.environ["OPENSECURITY_HOME"] = str(_DATA)
+os.environ["TEST_OPENSECURITY_HOME"] = str(_DATA)  # #7 约定: 沙箱根经 TEST_ 变量表达（import test_control 后由它落 OPENSECURITY_HOME）
 os.environ["OPENCODE_ROOT"] = str(_SANDBOX)
 (_SANDBOX / ".ai_env").write_text("# 单例测试沙箱\n")
 

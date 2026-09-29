@@ -9,6 +9,7 @@
 
 非 Windows 平台直接跳过（exit 0）。
 """
+# pyright: reportMissingParameterType=false
 from __future__ import annotations
 
 import os
@@ -72,7 +73,7 @@ def main() -> int:
 
     # 3. Python 客户端（control_url 本地代理 + httpx）
     def py_client():
-        from control_url import make_control_client, resolve_control
+        from control_url import make_control_client, resolve_control  # pyright: ignore[reportMissingImports]  (运行时 sys.path 注入 mcp-servers)
         addr = resolve_control()
         assert addr is not None, "resolve_control 返回 None"
         import asyncio

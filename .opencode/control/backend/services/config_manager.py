@@ -24,7 +24,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal, overload
 
 from services.runtime_paths import RuntimePaths
 
@@ -370,7 +370,11 @@ DEEPSEEK_API_KEY=
 
     # ═══════════════ tunables 读取器（.ai_env 优先，非法回退默认）═══════════════
 
-    def _read_num(self, vals: dict[str, str], key: str, default: float | int, as_int: bool):
+    @overload
+    def _read_num(self, vals: dict[str, str], key: str, default: float | int, as_int: Literal[True]) -> int: ...
+    @overload
+    def _read_num(self, vals: dict[str, str], key: str, default: float | int, as_int: Literal[False]) -> float: ...
+    def _read_num(self, vals: dict[str, str], key: str, default: float | int, as_int: bool) -> float | int:
         raw = (vals.get(key) or "").strip()
         if not raw:
             return default
@@ -515,7 +519,7 @@ DEEPSEEK_API_KEY=
         """行为可调参数（hidden; default_value 与 tunables 默认同源生成）。"""
         k = self.Keys
 
-        def f(key: str, label: str, default, hint: str) -> "ConfigManager.ConfigField":
+        def f(key: str, label: str, default: "float | int", hint: str) -> "ConfigManager.ConfigField":
             return self.ConfigField(key=key, label=label, type="text", required=False,
                                     hidden=True, default_value=str(default), hint=hint)
 
