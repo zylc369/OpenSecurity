@@ -511,6 +511,65 @@ def test_detect_py_deps_list_invariants():
     assert_true("oletools" in names, "oletools 不在清单")
 
 
+@test("detect_tools: CMD_DIR 回落 nt 双形态（.exe 单二进制 + 无扩展名 wrapper）")
+def test_resolve_tool_path_nt_wrapper():
+    """nt 分支只拼 <name>.exe 会让 docker wrapper（无扩展名 sh，经 Git Bash
+    执行）误报缺失——回落需依次认 .exe 与无扩展名两种落盘形态。"""
+    import os as _os
+    import tempfile
+    from unittest.mock import patch
+    from services.detect_tools import ToolsScanner, ToolField, ToolsEnv
+    sc = ToolsScanner.get_instance()
+    tool = ToolField(name="fake-tool-xyz", agents=["binary-analysis"],
+                     required=False, description="t", version_cmd=[])
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(ToolsEnv, "CMD_DIR", tmp), \
+                patch("services.detect_tools.shutil.which", return_value=None), \
+                patch("os.name", "nt"):
+            # 形态 A: 无扩展名 wrapper（docker 工具落盘形态）
+            open(_os.path.join(tmp, "fake-tool-xyz"), "w").close()
+            path, found = sc.resolve_tool_path(tool)
+            assert_true(found, "无扩展名 wrapper 应命中（nt 回落缺陷回归线）")
+            assert_true(path.endswith("fake-tool-xyz"), f"path={path}")
+            # 形态 B: .exe 单二进制
+            _os.remove(_os.path.join(tmp, "fake-tool-xyz"))
+            open(_os.path.join(tmp, "fake-tool-xyz.exe"), "w").close()
+            path, found = sc.resolve_tool_path(tool)
+            assert_true(found, ".exe 单二进制应命中")
+            assert_true(path.endswith("fake-tool-xyz.exe"), f"path={path}")
+            # 两者皆无 → 未安装
+            _os.remove(_os.path.join(tmp, "fake-tool-xyz.exe"))
+            _, found = sc.resolve_tool_path(tool)
+            assert_false(found, "无文件应报未安装")
+
+
+@test("detect_tools: 陈旧 wrapper 清理认无扩展名形态（nt 回归线）")
+def test_remove_stale_wrapper_nt():
+    """nt 下用 _bin_path（<name>.exe）定位 wrapper 会永远 miss——系统真身
+    存在时陈旧 wrapper 清不掉（PATH 首段遮蔽原生版）。同名 .exe 是单二进制
+    机制产物，非 wrapper，不得误删。"""
+    import os as _os
+    import tempfile
+    from unittest.mock import patch
+    from services.detect_tools import ToolsInstaller, ToolsEnv
+    sc = ToolsInstaller.get_instance()
+    with tempfile.TemporaryDirectory() as cmd_dir, \
+            tempfile.TemporaryDirectory() as real_dir:
+        wrapper = _os.path.join(cmd_dir, "fake-tool-xyz")      # 本项目 wrapper（无扩展名）
+        open(wrapper, "w").close()
+        exe_bin = _os.path.join(cmd_dir, "fake-tool-xyz.exe")  # 单二进制机制产物
+        open(exe_bin, "w").close()
+        real = _os.path.join(real_dir, "fake-tool-xyz.exe")    # 系统真身（nt 形态）
+        open(real, "w").close()
+        _os.chmod(real, 0o755)
+        with patch.object(ToolsEnv, "CMD_DIR", cmd_dir), \
+                patch("os.name", "nt"), \
+                patch.dict("os.environ", {"PATH": real_dir}):
+            sc._remove_stale_wrapper("fake-tool-xyz")
+        assert_false(_os.path.exists(wrapper), "nt 下陈旧 wrapper 应被清理（回归线）")
+        assert_true(_os.path.exists(exe_bin), "同名 .exe 非 wrapper，不应误删")
+
+
 # ============ docker_manager 测试 ============
 
 @test("docker_manager.DockerManager.check_status: Docker 安装 + daemon 状态")

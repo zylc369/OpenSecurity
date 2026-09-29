@@ -1106,9 +1106,13 @@ class ToolsScanner:
         if resolved:
             return resolved, True
         # 回落: ToolsEnv.CMD_DIR 安装的二进制/wrapper（后端进程无插件注入的 PATH，需显式查）
-        bin_cand = os.path.join(ToolsEnv.CMD_DIR, tool.name + (".exe" if os.name == "nt" else ""))
-        if os.path.isfile(bin_cand):
-            return bin_cand, True
+        # Windows 两种落盘形态: 单二进制 → <name>.exe; docker/脚本 wrapper → <name>
+        # （无扩展名 sh，经 Git Bash 执行——只拼 .exe 会让 wrapper 类工具误报缺失）
+        candidates = (tool.name + ".exe", tool.name) if os.name == "nt" else (tool.name,)
+        for cand_name in candidates:
+            bin_cand = os.path.join(ToolsEnv.CMD_DIR, cand_name)
+            if os.path.isfile(bin_cand):
+                return bin_cand, True
         return (tool.name, False)
 
     @staticmethod
@@ -1393,6 +1397,15 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             bin_name += ".exe"
         return os.path.join(ToolsEnv.CMD_DIR, bin_name)
 
+    @staticmethod
+    def _wrapper_path(name: str) -> str:
+        """CMD_DIR wrapper 路径（sh 脚本，无扩展名——Windows 经 Git Bash 执行）。
+
+        与 _bin_path（单二进制，nt 补 .exe）区分: wrapper 类产物的落盘/查找/
+        清理一律用本方法——nt 下误用 _bin_path 会拼成 <name>.exe 而永远 miss。
+        """
+        return os.path.join(ToolsEnv.CMD_DIR, name)
+
     # ── GitHub Releases ──
 
     def _install_release(self, r: ReleaseRecipe, force: bool) -> InstallResult:
@@ -1433,7 +1446,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         dst_dir = os.path.join(ToolsEnv.TOOLS_HOME_DIR, r.name)
         os.makedirs(dst_dir, exist_ok=True)
         jar_path = os.path.join(dst_dir, asset)
-        wrapper = os.path.join(ToolsEnv.CMD_DIR, r.name)
+        wrapper = self._wrapper_path(r.name)
         # java 解析: 便携 tools/jdk 优先（绝对路径硬编码进 wrapper，无系统 java 的机器也能跑）
         javabin, _ = self._resolve_java()
         java_argv = [javabin, "-jar", jar_path] if javabin else ["java", "-jar", jar_path]
@@ -1504,7 +1517,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                            f"https://github.com/{r.repo}", dst])
             self._run([self._venv_python(), "-m", "pip", "install", "-q", dst])
             return InstallResult(r.name, "installed", f"clone {r.repo} + pip install")
-        wrapper = os.path.join(ToolsEnv.CMD_DIR, r.name)
+        wrapper = self._wrapper_path(r.name)
         if os.path.exists(entry_abs) and not force:
             if not os.path.exists(wrapper):  # 克隆在而 wrapper 缺（历史失败残留）→ 只补 wrapper
                 self._install_git_wrapper(r, dst, entry_abs)
@@ -1583,7 +1596,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                 if os.path.isdir(stale):
                     shutil.rmtree(stale)
                 for b in ("node", "npm", "npx"):
-                    p = self._bin_path(b)
+                    p = self._wrapper_path(b)
                     if os.path.exists(p):
                         os.remove(p)
                 return InstallResult("node", "skipped", skip + "; 已清理历史残留")
@@ -1725,7 +1738,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     def _install_dotnet(self, r: DotnetRecipe, force: bool) -> InstallResult:
         """runtime（共享目录）+ nupkg 工具 + wrapper。"""
-        wrapper = self._bin_path(r.name)
+        wrapper = self._wrapper_path(r.name)
         dll = os.path.join(ToolsEnv.TOOLS_HOME_DIR, r.name, f"{r.name}.dll")
         if not force and os.path.exists(wrapper) and os.path.exists(dll):
             return InstallResult(r.name, "skipped", "wrapper + dll 已存在")
@@ -1779,7 +1792,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         #     DOTNET_ROLL_FORWARD=LatestMajor: net6.0 目标 dll 在 runtime 8 上跨两个大版本
         #     前滚的必要条件（默认 Minor 只允许 6→7; 微软官方支持场景）
         os.makedirs(ToolsEnv.CMD_DIR, exist_ok=True)
-        wpath = os.path.join(ToolsEnv.CMD_DIR, r.name)
+        wpath = self._wrapper_path(r.name)
         body = ("#!/bin/sh\n"
                 "export DOTNET_ROLL_FORWARD=LatestMajor\n"
                 f'exec "{dotnet_exe}" "{dll}" "$@"\n')
@@ -2030,7 +2043,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
                     "linux": f"{PM_PREFIX or 'sudo <PM> install -y'} {' '.join(missing)}"}.get(
                         ToolsEnv._plat_key().split('-')[0], "请安装: " + ' '.join(missing))
             return InstallResult(r.name, "failed", f"缺 {'/'.join(missing)} → {hint}")
-        path = os.path.join(ToolsEnv.CMD_DIR, r.name)
+        path = self._wrapper_path(r.name)
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(r.body)
         self._chmodx(path)
@@ -2072,7 +2085,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         （性能陷阱实例: brew Metal hashcat 被容器 CPU 版遮蔽 17 倍差距）。
         仅当"排除 ToolsEnv.CMD_DIR 后 PATH 仍能解析到真身"才清理。
         """
-        w = self._bin_path(name)
+        w = self._wrapper_path(name)
         if not os.path.exists(w):
             return
         exe = name + (".exe" if os.name == "nt" else "")
@@ -2086,7 +2099,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     def _install_docker(self, r: DockerRecipe, force: bool) -> InstallResult:
         """容器工具: docker 缺失→skip 提示; 镜像缺→build（同镜像幂等一次）; 生成 wrapper。"""
-        wrapper = os.path.join(ToolsEnv.CMD_DIR, r.name)
+        wrapper = self._wrapper_path(r.name)
         if not force and os.path.exists(wrapper):
             return InstallResult(r.name, "skipped", "wrapper 已存在")
         if not shutil.which("docker"):
@@ -2138,7 +2151,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         extra = (" ".join(r.extra_args) + " ") if r.extra_args else ""
         # 统一 sh wrapper（Windows 走 Git Bash/WSL 执行——与 install.sh 同前提;
         # 历史 .cmd 分支已删: 双语言维护腐化快且无法实测，见 docker-toolbox.md）
-        path = os.path.join(ToolsEnv.CMD_DIR, r.name)
+        path = self._wrapper_path(r.name)
         if r.long_running:
             longcheck = (
                 'if [ -z "$EXPLICIT_WT" ]; then\n'
@@ -2177,7 +2190,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
 
     def _qemu_gdb_wrapper(self, r: DockerRecipe) -> None:
         """qemu gdbstub 调试 wrapper（docker-toolbox.md §4: binfmt ptrace 失效的唯一可行模式）。"""
-        path = os.path.join(ToolsEnv.CMD_DIR, r.name)
+        path = self._wrapper_path(r.name)
         body = self._QEMU_TMPL.replace("{IMAGE}", r.image)
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(body)
@@ -2324,7 +2337,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         统一 sh（Windows 走 Git Bash/WSL 执行——与 docker wrapper/install.sh 同前提，单语言维护）。
         """
         os.makedirs(ToolsEnv.CMD_DIR, exist_ok=True)
-        path = os.path.join(ToolsEnv.CMD_DIR, name)
+        path = self._wrapper_path(name)
         body = "#!/bin/sh\n"
         if cwd:
             body += f'cd "{cwd}"\n'

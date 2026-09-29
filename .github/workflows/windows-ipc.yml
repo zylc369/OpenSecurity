@@ -2,7 +2,8 @@ name: windows-ipc
 
 # Windows 命名管道 IPC 验证（真机裁决，非纸面结论）。
 # 覆盖：ipc_listener 管道监听、control_url 本地代理 + httpx 往返、
-#       管道互斥、Bun node:http socketPath 兼容性（controlFetch 的 Windows 主路径）。
+#       管道互斥、Bun node:http socketPath 兼容性（controlFetch 的 Windows 主路径）、
+#       ToolsScanner CMD_DIR 回落 nt 双形态（.exe 单二进制 + 无扩展名 wrapper）。
 
 on:
   push:
@@ -10,6 +11,7 @@ on:
       - ".opencode/control/backend/services/ipc_listener.py"
       - ".opencode/control/backend/services/config_manager.py"
       - ".opencode/control/backend/services/frontend_port.py"
+      - ".opencode/control/backend/services/detect_tools.py"
       - ".opencode/mcp-servers/control_url.py"
       - ".opencode/plugins/lib/control-http.ts"
       - ".opencode/plugins/tests/win-pipe-probe.ts"
@@ -20,6 +22,7 @@ on:
       - ".opencode/control/backend/services/ipc_listener.py"
       - ".opencode/control/backend/services/config_manager.py"
       - ".opencode/control/backend/services/frontend_port.py"
+      - ".opencode/control/backend/services/detect_tools.py"
       - ".opencode/mcp-servers/control_url.py"
       - ".opencode/plugins/lib/control-http.ts"
   workflow_dispatch:
@@ -40,3 +43,50 @@ jobs:
           OPENSECURITY_CONTROL_IPC: '\\.\pipe\opensecurity-control-482964'
           PYTHONUTF8: "1"
         run: python .opencode/control/backend/tests/test_windows_ipc.py
+      - name: 工具检测 nt 回落（CMD_DIR 双形态）
+        # 与 test_control.py::test_resolve_tool_path_nt_wrapper 为同一断言的
+        # 两份拷贝（CI 无法直跑 test_control.py——依赖 graphiti_core 且 main()
+        # 用 signal.SIGALRM）——修改任一份时必须同步另一份。
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          python - <<'PY'
+          import os, sys, tempfile
+          from unittest.mock import patch
+          sys.path.insert(0, ".opencode/control/backend")
+          from services.detect_tools import ToolsScanner, ToolField, ToolsEnv
+
+          sc = ToolsScanner.get_instance()
+          tool = ToolField(name="fake-tool-xyz", agents=["binary-analysis"],
+                           required=False, description="t", version_cmd=[])
+          with tempfile.TemporaryDirectory() as tmp, \
+               patch.object(ToolsEnv, "CMD_DIR", tmp), \
+               patch("services.detect_tools.shutil.which", return_value=None):
+              # 无扩展名 wrapper（docker 工具落盘形态）→ 必须命中
+              open(os.path.join(tmp, "fake-tool-xyz"), "w").close()
+              path, found = sc.resolve_tool_path(tool)
+              assert found, "无扩展名 wrapper 未命中（nt 回落缺陷回归）"
+              assert path.endswith("fake-tool-xyz"), path
+              # .exe 单二进制形态 → 命中
+              os.remove(os.path.join(tmp, "fake-tool-xyz"))
+              open(os.path.join(tmp, "fake-tool-xyz.exe"), "w").close()
+              path, found = sc.resolve_tool_path(tool)
+              assert found and path.endswith(".exe"), path
+              print("nt CMD_DIR 双形态回落 OK（Windows 真机）")
+
+          # 陈旧 wrapper 清理（nt 无扩展名形态；与单测配对同步）
+          from services.detect_tools import ToolsInstaller
+          inst = ToolsInstaller.get_instance()
+          with tempfile.TemporaryDirectory() as cd2, \
+               tempfile.TemporaryDirectory() as rd2:
+              wrapper = os.path.join(cd2, "fake-tool-xyz2")
+              open(wrapper, "w").close()
+              real = os.path.join(rd2, "fake-tool-xyz2.exe")  # 系统真身（nt 形态）
+              open(real, "w").close()
+              with patch.object(ToolsEnv, "CMD_DIR", cd2), \
+                   patch.dict("os.environ", {"PATH": rd2}):
+                  inst._remove_stale_wrapper("fake-tool-xyz2")
+              assert not os.path.exists(wrapper), "陈旧 wrapper 未清理（nt 回归）"
+              print("陈旧 wrapper 清理 OK（Windows 真机）")
+          PY
