@@ -92,8 +92,9 @@ class ControlIpc:
     def _ensure_pipe_proxy(self) -> int:
         """启动（一次性）本地代理线程，返回其监听端口。"""
         with self._proxy_lock:
-            if self._proxy_port:
-                return self._proxy_port
+            port = self._proxy_port
+            if port:
+                return port
             srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             srv.bind(("127.0.0.1", 0))          # 随机端口：进程内实现细节
             srv.listen(8)
@@ -110,19 +111,22 @@ class ControlIpc:
             threading.Thread(target=self._proxy_serve, args=(conn,), daemon=True).start()
 
     def _proxy_serve(self, conn: socket.socket) -> None:
-        """一条 TCP 连接 ↔ 一条管道连接的双向泵。
+        """TCP ↔ 管道（**单线程轮询桥**）。
 
-        win32file/pywintypes 为**函数内惰性 import**：_proxy_serve 仅由
-        _ensure_pipe_proxy 经 resolve() 的 IS_WINDOWS 分支调用——macOS/Linux
-        上此函数永不执行，import 永不触发，模块加载不受影响（对比
-        ipc_listener.py 的模块级 try-import：那里 _PLATFORM_OS_ERRORS 被
-        跨平台代码共用，必须模块级定义 + 平台退化）。
+        win32file/pywintypes 为函数内惰性 import：仅由 _ensure_pipe_proxy 经
+        resolve() 的 IS_WINDOWS 分支调用——macOS/Linux 上此函数永不执行。
+        为什么不用双泵：Windows 同步管道句柄 I/O 句柄级序列化——pending
+        ReadFile 阻塞同句柄 WriteFile（跨线程亦然）——双泵必然死锁
+        （CI 实证）。改为 PeekNamedPipe + select 单线程交替转发（与
+        control/backend/services/ipc_listener._serve_pipe 同构，两边
+        修改须同步）。约束：单次转发量 ≤ 管道缓冲（64KB）。
         """
-        import win32file
-        import pywintypes
+        import select as _select
 
-        # pywintypes.error 不继承 OSError（pywin32 源码 "class error(Exception)"）
-        # ——管道路径的捕获必须含它，否则代理线程以未捕获异常终止
+        import pywintypes
+        import win32file
+        import win32pipe
+
         win_errs = (OSError, pywintypes.error)
         try:
             pipe = win32file.CreateFile(
@@ -133,36 +137,39 @@ class ControlIpc:
         except win_errs:
             conn.close()
             return
-
-        def pipe_read():
-            _, data = win32file.ReadFile(pipe, _BUF)
-            return data
-
-        def finish():
+        try:
+            while True:
+                # 管道 → TCP
+                try:
+                    # size=1 而非 0：C 层 malloc(0) 可能返回 NULL 误报 NoMemory
+                    # pywin32 无类型 stub（PyHANDLE/int 推断不精确）
+                    _, avail, _ = win32pipe.PeekNamedPipe(pipe, 1)  # pyright: ignore[reportArgumentType]
+                except win_errs:
+                    break
+                if avail:
+                    try:
+                        _, data = win32file.ReadFile(pipe, min(avail, _BUF))
+                    except win_errs:
+                        break
+                    if not data:
+                        break
+                    conn.sendall(data)  # pyright: ignore[reportArgumentType]
+                # TCP → 管道
+                r, _, _ = _select.select([conn], [], [], 0.001)
+                if r:
+                    data = conn.recv(_BUF)
+                    if not data:
+                        break
+                    try:
+                        win32file.WriteFile(pipe, data)
+                    except win_errs:
+                        break
+        finally:
             try:
                 win32file.CloseHandle(pipe)
             except win_errs:
                 pass
             conn.close()
-
-        def run(read_fn, write_fn):
-            try:
-                while True:
-                    data = read_fn()
-                    if not data:
-                        break
-                    write_fn(data)
-            except win_errs:
-                pass
-            finally:
-                finish()
-
-        t = threading.Thread(
-            target=run, args=(pipe_read, lambda d: win32file.WriteFile(pipe, d)),
-            daemon=True,
-        )
-        t.start()
-        run(lambda: conn.recv(_BUF), conn.sendall)
 
 
 # 模块级单例 + 同名委托（消费方 knowledge/events/ocr 零改动）

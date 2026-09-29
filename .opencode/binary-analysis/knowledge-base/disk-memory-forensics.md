@@ -39,7 +39,7 @@
 - **ZIP 修复族**: ①filename length 双处修复（LFH@26+CDE@28 必须一致）②中央目录缺失→local header `PK\x03\x04` 迭代独立解（zlib raw -15）③字节反转双向归档（正反都是合法 zip）④IEND 后 overlay 魔术复原
 - **XZ 头重建**: 尾部 `YZ` footer 反推——footer 的 stream_flags（EOF-6）拷来+本地重算 CRC32 拼 12B 头; 通用: 头坏先查尾字节找真签名
 - **bkcrack**（ZipCrypto 已知明文）: ≥12B 已知明文（参照文件/可猜文件头）; `-C zip -c target -P known.zip -p k.txt`→`-k k0 k1 k2 -d out`; pkcrack 失败就换。坑点: ①构造明文包必须用与目标**相同的压缩软件**（WinRAR 压的目标用 7z 构造参照包直接报错——比对两 zip 同文件压缩后体积是否一致可预检）②"口令未找到"≠失败——`加密密钥已成功恢复`即可停（key 足以解密，无需密码）
-- **伪加密**（无真实密码、只改了加密标志位）: ZIP 通用位标记（general purpose bit flag）bit0=1 即"加密"——伪加密通常只改**目录区**（CDE）加密位、数据区（LFH）仍为 0（真加密两处都置 1）——对比两处判真假。修复: python 定位 CDE 加密位翻转回 0（`d=bytearray(open("x.zip","rb").read()); off=定位的CDE头; d[off+8]&=~1; open("x_fixed.zip","wb").write(d)`）/ `$(dirname $PYTHON_CMD)/binwalk -e` 无视伪加密直接解 / macOS·Kali 部分解压器直接可开 / ZipCenOp.jar 批量改（副作用: 对真加密包会改成"CRC 校验错误"损坏态）。RAR 同理: 文件头块（0x74）HEAD_FLAGS 位标记改伪加密——具体偏移: 文件头第 24 字节 `PASSWORD_ENCRYPTED` 或第 11 字节 `BLOCK_HEADERS_ENCRYPTED`（010 Editor RAR 模板字段）置 1 即伪加密、置 0 解除。压缩包注释也藏密码（明文/反色/空格-tab 摩斯）
+- **伪加密**（无真实密码、只改了加密标志位）: ZIP 通用位标记（general purpose bit flag）bit0=1 即"加密"——伪加密通常只改**目录区**（CDE）加密位、数据区（LFH）仍为 0（真加密两处都置 1）——对比两处判真假。修复: python 定位 CDE 加密位翻转回 0（`d=bytearray(open("x.zip","rb").read()); off=定位的CDE头; d[off+8]&=~1; open("x_fixed.zip","wb").write(d)`）/ `binwalk -e` 无视伪加密直接解 / macOS·Kali 部分解压器直接可开 / ZipCenOp.jar 批量改（副作用: 对真加密包会改成"CRC 校验错误"损坏态）。RAR 同理: 文件头块（0x74）HEAD_FLAGS 位标记改伪加密——具体偏移: 文件头第 24 字节 `PASSWORD_ENCRYPTED` 或第 11 字节 `BLOCK_HEADERS_ENCRYPTED`（010 Editor RAR 模板字段）置 1 即伪加密、置 0 解除。压缩包注释也藏密码（明文/反色/空格-tab 摩斯）
 - **exrex 正则密码链**: `list(exrex.generate(regex))` 物化匹配串（每层个位数候选）→extract-hint-repeat 千层秒级
 - **冷门**: FemtoZip（.model 共享字典+同构 corpus）/Brotli 无魔术试解法（逐库 decompress 不抛错即命中）
 

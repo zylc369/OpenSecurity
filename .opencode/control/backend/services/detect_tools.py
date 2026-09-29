@@ -600,7 +600,7 @@ def installable_tools() -> "list":
     PkgToolRecipe(name="hydra", long_running=True, net_host=True),
     PkgToolRecipe(name="medusa", long_running=True, net_host=True),
     PkgToolRecipe(name="ncrack", long_running=True, net_host=True),
-    PkgToolRecipe(name="binwalk"),  # 原 binwalk-full; PM 包名 binwalk
+    PkgToolRecipe(name="binwalk", pkg_brew="binwalk", pkg_linux="binwalk"),  # brew v3 原生（-e/-M 提取）/ apt v2; brew 失败回落 docker
     GitRecipe(name="nxc", repo="Pennyw0rth/NetExec", entry="netexec", pip_pkg=True,
               platforms=("linux",)),  # mac 无 rust wheel(aardwolf) 无 brew formula → 下方 docker
     DockerRecipe(name="nxc", image="zylc369/opensecurity-toolbox-core", long_running=True,
@@ -622,6 +622,15 @@ def installable_tools() -> "list":
     }, bins=["exiftool"], entries={p: "exiftool" for p in
         ("darwin-arm64", "darwin-amd64", "linux-amd64", "linux-arm64")},
        src_names={"exiftool": "exiftool(-k).exe"}),  # win 走单文件提取分支
+    # ── ripgrep（多文件文本检索; 官方静态构建; 需排除 .sha256/.deb/.rpm 资产防误当二进制） ──
+    ReleaseRecipe(name="rg", repo="BurntSushi/ripgrep", plats={
+        "darwin-arm64": "apple-darwin,aarch64",
+        "darwin-amd64": "apple-darwin,x86_64",
+        "linux-amd64": "unknown-linux,x86_64",
+        "linux-arm64": "unknown-linux,aarch64",
+        "win-amd64": "pc-windows-msvc,x86_64",
+        "win-arm64": "pc-windows-msvc,aarch64",
+    }, bins=["rg"], excl="sha256,.deb,.rpm"),
     PkgToolRecipe(name="x86_64-w64-mingw32-gcc", pkg_brew="mingw-w64", pkg_linux="gcc-mingw-w64-x86-64"),
     PkgToolRecipe(name="nasm"),
     PkgToolRecipe(name="r2", pkg_brew="radare2", pkg_linux="radare2"),
@@ -856,12 +865,14 @@ EXTERNAL_TOOLS.extend([
     _auto("hydra", _WEB + _BIN, "多协议爆破（brew/apt 原生）"),
     _auto("medusa", _WEB + _BIN, "多协议爆破第二实现（brew/apt 原生）"),
     _auto("ncrack", _WEB + _BIN, "网络服务爆破（brew/apt 原生）"),
-    _auto("binwalk-full", _BIN, "binwalk（brew/apt 原生; magic 提取全功能）"),
+    _auto("binwalk", _BIN, "固件/嵌入文件签名扫描与提取", ["--version"]),
     _auto("nxc", _BIN, "NetExec 内网批量执行（linux pip / mac 容器）", ["--version"]),
     _auto("searchsploit", _WEB, "exploit-db 离线检索（brew/apt 原生）"),
     _auto("wpscan", _WEB, "WordPress 扫描（brew 原生，DB 预热）"),
     _auto("tshark", _BIN, "pcap 深度解析（brew wireshark / apt tshark 原生）"),
     _auto("exiftool", _BIN, "元数据读写（便携官方构建）"),
+    _auto("rg", ["binary-analysis", "web-analysis", "mobile-analysis", "crypto-analysis", "ai-security-analysis"],
+          "多文件文本检索（Bash 工具指引的 rg）", ["--version"]),
     _auto("one_gadget", _BIN, "libc execve gadget 搜索（brew one_gadget / linux 容器）"),
     _auto("seccomp-tools", _BIN, "seccomp BPF 反汇编（容器; gem 需 ruby>=3）"),
     _auto("phpggc", _WEB, "PHP 反序列化链生成（容器）"),

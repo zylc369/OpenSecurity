@@ -31,6 +31,33 @@
 
 ## opencode 平台行为实证记录
 
+### Windows 命名管道 IPC 实现要点（pywin32 / Python 端）
+
+**同步句柄 I/O 在句柄级序列化**——`FO_SYNCHRONOUS_IO` 文件对象上，pending 的
+`ReadFile` 会阻塞同句柄的 `WriteFile`（跨线程同样; NT 内核语义，MSDN
+"Synchronous and Overlapped Pipe I/O" 明示多线程读/写"does not help"）。
+**"一读线程 + 一写线程"双泵在同步管道上必然死锁**（正确性对端到端数据流
+为条件）。三种正解:
+- **单线程轮询桥**（工程最简）: `PeekNamedPipe` 非阻塞探测管道可读性
+  （单线程独占该句柄时"always returns immediately"——MSDN）+ `select`
+  探测 socket 可读性，同一线程交替转发——无并发 I/O 即无序列化问题;
+  代价: 1ms 级轮询粒度。`PeekNamedPipe(handle, size=1)` 返回
+  `(data, totalAvail, bytesLeft)`，**size 传 1 而非 0**（C 层 `malloc(0)`
+  可能返回 NULL 误报 NoMemory）
+- OVERLAPPED 异步 I/O（每操作独立 OVERLAPPED + event; 工程面大）
+- 双单工管道（协议需改，客户端要连两次）
+
+**pywin32 相关坑（代码级）**:
+- `FILE_FLAG_FIRST_PIPE_INSTANCE` 在 **win32pipe** 模块（win32file 无此常量）
+- `pywintypes.error` **不继承 OSError**（`class error(Exception)`）——捕获
+  win32 API 错误必须显式含它
+- `ConnectNamedPipe` 的 `ERROR_PIPE_CONNECTED`(535) 是**返回值**不是异常
+  （win32pipe.i @comm: "this value is returned"）——返回值 0/535 均"连接就绪"
+- pywin32 无类型 stub——basedpyright 把句柄误推 `int`、`ReadFile` 返回
+  误推 `str`，相关行需 `# pyright: ignore[reportArgumentType]`
+- 客户端侧（Bun/node:net）用 libuv 异步 I/O——**无序列化问题**；仅
+  Python/pywin32 端需要轮询桥或 OVERLAPPED
+
 ### MCP 子进程 env 是合并语义（无白名单选项）
 
 opencode spawn MCP server 时（`packages/opencode/src/mcp/index.ts`）:

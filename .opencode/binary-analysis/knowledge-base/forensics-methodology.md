@@ -15,6 +15,7 @@
 | 磁盘镜像（`.dd`/`.E01`/`.img`） | 磁盘取证 | §4 |
 | `.evtx`/`/var/log/*`/access.log | 日志分析 | §5 |
 | 图像/音频/视频/文档疑似藏数据 | 隐写分析 | `steganography-forensics.md`（专项文件） |
+| Office 宏文档（`.docm`/`.pptm`/`.xlsm`，含 VBA 宏） | Office 宏取证 | `malware-analysis.md` §8a（olevba/pcodedmp 提取宏） |
 | pcap 加密流量/隐蔽信道/隧道/文件层修复 | 网络取证进阶 | `network-forensics.md`（专项文件，本文件 §2 是基础侦察） |
 | 磁盘恢复/加密卷/内存 key/容器云/文件系统修复 | 磁盘内存进阶 | `disk-memory-forensics.md`（专项文件，本文件 §3-§4 是基础） |
 | Windows 事件ID/USN/ADS/反取证/MPLog | Windows 专项 | `windows-forensics.md` |
@@ -97,8 +98,8 @@ AI 用命令行（autopsy 是 GUI，不便自动化）。
 
 **文件 carving（按 magic 提取，含已删文件）**：
 ```bash
-$(dirname $PYTHON_CMD)/binwalk -e firmware.bin   # 固件/嵌入文件系统提取（签名库扫描+递归解包，覆盖通用 carving）
-$(dirname $PYTHON_CMD)/binwalk --dd=".*" image.dd  # 按签名提取全部嵌入文件（含已删文件的 magic 级恢复）
+binwalk -e firmware.bin            # 固件/嵌入文件提取（-e 提取可解类型; 递归解包加 -M）
+binwalk -e -C out image.dd         # 按签名提取嵌入文件到 out/（v3.1 无 v2 的 --dd; 需要全量 magic 雕刻时用 foremost）
 ```
 
 **挂载只读分析**：
@@ -226,7 +227,7 @@ for fp, content in files.items():
 |------|------|--------------|
 | tshark | pcap 分析 | `-r`/`-Y <filter>`/`--export-objects <proto,dir>` |
 | vol (Volatility 3) | 内存取证 | `vol -f <dump> windows.<plugin>`；Linux 用 `linux.*` |
-| binwalk | 文件 carving/固件提取 | `$(dirname $PYTHON_CMD)/binwalk -e <file>` |
+| binwalk | 文件 carving/固件提取 | `binwalk -e [-C <dir>] <file>`（递归加 `-M`） |
 | binwalk | 固件/嵌入文件 | `binwalk -e <file>` |
 | strings | 字符串提取 | `strings -n 8 <file>` |
 | Evtx→XML | Windows 事件日志 | 上节 python-evtx 命令 |

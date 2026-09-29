@@ -95,7 +95,7 @@ macOS Docker Desktop 的容器经 VPNKit NAT 出网，实测行为：
 | PHPGGC **[实测]** | git clone + php-cli | Laravel/RCE1 生成 ✓ | |
 | pcapfix **[包确认]** | kali apt | apt 有 1.1.7 | |
 | ImageMagick / sox **[包确认]** | kali apt | 同 apt 机制 | PIL/ffmpeg 主路径的补充 |
-| binwalk（完整版含 magic 提取）**[包确认]** | kali apt | | $PYTHON_CMD 环境已有 pip 版，容器版功能更全 |
+| binwalk **[包确认]** | kali apt（v2 完整 magic 提取） | | 宿主 mac=brew v3 原生（-e/-M/-C）; brew 失败回落容器 |
 
 ### 3.2 △ 条件可用（5 项）
 

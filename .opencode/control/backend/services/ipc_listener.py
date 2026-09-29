@@ -303,6 +303,9 @@ class IpcListener:
         logger.info("IPC accept loop: 启动（windows pipe）")
         while True:
             try:
+                # 返回 0=正常连接; 535=ERROR_PIPE_CONNECTED（客户端先行连入的
+                # 时序竞争，pywin32 以返回值而非异常暴露——win32pipe.i @comm）
+                # ——两者均"连接就绪"继续服务; 其余错误抛异常退出。
                 win32pipe.ConnectNamedPipe(handle, None)
             except _PLATFORM_OS_ERRORS as e:
                 logger.info("IPC accept loop: 退出（%s）", e)
@@ -326,34 +329,60 @@ class IpcListener:
             handle = nxt
 
     def _serve_pipe(self, handle) -> None:
+        """管道 ↔ 上游 TCP（**单线程轮询桥**）。
+
+        为什么不用双泵（一读线程一写线程）：Windows 同步管道句柄的 I/O 在
+        句柄级序列化——pending 的 ReadFile 会阻塞同句柄的 WriteFile，跨线程
+        同样（NT 内核 FO_SYNCHRONOUS_IO 语义）——双泵必然死锁。正解是
+        OVERLAPPED 异步 I/O（工程面大）或单线程轮询（本实现）：
+        PeekNamedPipe 非阻塞探测管道可读 + select 非阻塞探测上游可读，
+        同一线程交替转发——无并发 I/O，序列化问题不存在。
+        约束：单次转发量 ≤ 管道缓冲（64KB）——IPC 请求/响应体远小于此。
+        """
+        import select as _select
+
         import win32file
+        import win32pipe
+
         upstream = self._connect_upstream()
         if upstream is None:
             logger.error("IPC serve: 上游 TCP 不可达，关闭管道连接")
             win32file.CloseHandle(handle)
             return
-
-        def pipe_read():
-            _, data = win32file.ReadFile(handle, self._BUF)
-            return data
-
-        def pipe_write(data):
-            win32file.WriteFile(handle, data)
-
-        def pipe_close():
+        try:
+            while True:
+                # 管道 → 上游
+                try:
+                    # size=1 而非 0：C 层 malloc(0) 可能返回 NULL 误报 NoMemory
+                    _, avail, _ = win32pipe.PeekNamedPipe(handle, 1)
+                except _PLATFORM_OS_ERRORS:
+                    break  # 管道断开
+                if avail:
+                    try:
+                        _, data = win32file.ReadFile(handle, min(avail, self._BUF))
+                    except _PLATFORM_OS_ERRORS:
+                        break
+                    if not data:
+                        break
+                    # pywin32 无类型 stub，basedpyright 将 ReadFile 返回推断为
+                    # str——运行时为 bytes（win32file 返回字节串）
+                    upstream.sendall(data)  # pyright: ignore[reportArgumentType]
+                # 上游 → 管道
+                r, _, _ = _select.select([upstream], [], [], 0.001)
+                if r:
+                    data = upstream.recv(self._BUF)
+                    if not data:
+                        break  # 上游 EOF（如 Connection: close 响应后关闭）
+                    try:
+                        win32file.WriteFile(handle, data)
+                    except _PLATFORM_OS_ERRORS:
+                        break
+        finally:
             try:
                 win32file.CloseHandle(handle)
             except _PLATFORM_OS_ERRORS:
                 pass
-
-        self._bridge(
-            pipe_read,
-            pipe_write,
-            pipe_close,
-            lambda: upstream.recv(self._BUF),
-            upstream.sendall,
-            upstream.close,
-        )
+            upstream.close()
 
     @staticmethod
     def _pipe_connect_ok() -> bool:

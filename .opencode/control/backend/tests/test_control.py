@@ -471,6 +471,46 @@ def test_scan_all_tools():
     assert_true("mobile-analysis" in all_tools, "应有 mobile-analysis")
 
 
+@test("detect_tools: binwalk 检测项与配方一致（回归线）")
+def test_detect_tools_binwalk_consistency():
+    """检测项名与配方名不一致（binwalk-full ← binwalk 改名残留）会使状态
+    永远报缺失、依赖安装被误跳过。"""
+    from services.detect_tools import EXTERNAL_TOOLS, installable_tools, PkgToolRecipe
+    ext = {t.name: t for t in EXTERNAL_TOOLS}
+    assert_true("binwalk" in ext, "binwalk 检测项缺失")
+    assert_true("binwalk-full" not in ext, "binwalk-full 旧名残留")
+    rs = [r for r in installable_tools() if r.name == "binwalk"]
+    assert_eq(len(rs), 1, "binwalk 配方应恰一条")
+    assert_true(isinstance(rs[0], PkgToolRecipe), f"配方类型 {type(rs[0])}")
+    assert_eq(rs[0].pkg_brew, "binwalk", "mac 包名")
+    assert_eq(rs[0].pkg_linux, "binwalk", "linux 包名")
+    assert_eq(ext["binwalk"].version_cmd, ["--version"], "version_cmd")
+
+
+@test("detect_tools: rg 配方存在且排除 sha256（防 raw 分支误写）")
+def test_detect_tools_rg_recipe():
+    """上游 release 每产物附 .sha256——不排除会被 raw 分支当二进制写入 rg。"""
+    from services.detect_tools import EXTERNAL_TOOLS, installable_tools, ReleaseRecipe
+    assert_true(any(t.name == "rg" for t in EXTERNAL_TOOLS), "rg 检测项缺失")
+    rs = [r for r in installable_tools() if r.name == "rg"]
+    assert_eq(len(rs), 1, "rg 配方应恰一条")
+    r = rs[0]
+    assert_true(isinstance(r, ReleaseRecipe), f"配方类型 {type(r)}")
+    assert_eq(r.bins, ["rg"], "bins")
+    assert_true("sha256" in r.excl, f"excl 缺 sha256: {r.excl}")
+    assert_eq(len(r.plats), 6, f"应六平台: {sorted(r.plats)}")
+
+
+@test("detect_py_deps: binwalk 死包已移除 + oletools 在清单")
+def test_detect_py_deps_list_invariants():
+    """PyPI binwalk 2.1.0 缺 core 模块（import 即崩）且遮蔽 PM 版本;
+    oletools 是 Office 宏文档分析（olevba/pcodedmp）依赖来源。"""
+    from services.detect_py_deps import PyDepsDetector
+    names = {p.name for p in PyDepsDetector.PYTHON_PACKAGES}
+    assert_true("binwalk" not in names, "binwalk 死包不应在清单")
+    assert_true("oletools" in names, "oletools 不在清单")
+
+
 # ============ docker_manager 测试 ============
 
 @test("docker_manager.DockerManager.check_status: Docker 安装 + daemon 状态")

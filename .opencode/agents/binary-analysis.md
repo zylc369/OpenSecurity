@@ -50,7 +50,7 @@ permission:
 
 ### 阶段 A：信息收集（自动、强制）
 
-**触发条件**：分析型需求、混合型需求。查询型需求跳过。
+**触发条件**：分析型需求、混合型需求。查询型需求跳过。**非 PE/ELF 载体**（Office 文档/PDF/pcap/镜像/流量）跳过 idat 流水线，直接按对应知识库文档处理（Office 宏 → `malware-analysis.md` §8a），从阶段 B 继续。
 
 执行初始分析流水线（单次 idat 调用完成所有基础信息收集）：
 
@@ -232,7 +232,7 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 | `windows-shellcode-loader.md` | Windows shellcode 加载与 evasion（回调执行族/编码存储/SEH+CFG 三件套/loader 组件） |
 | `angr-symbolic-execution.md` | 符号执行求解（angr pipeline/Z3 模式/Qiling 模拟/Triton 对比/路径爆炸管理） |
 | `sandbox-escape.md` | 沙箱逃逸（pyjail/bashjail/chroot/Docker/K8s/Lua/Ruby/模拟器注入面） |
-| `malware-analysis.md` | 恶意软件分析（C2 协议族/RAT 家族取证/YARA 规则/内存注入检测/VBA·.NET 配置提取） |
+| `malware-analysis.md` | 恶意软件分析（C2 协议族/RAT 家族取证/YARA 规则/内存注入检测/Office 宏文档 docm·pptm·xlsm 与 VBA·.NET 配置提取） |
 | `osint-techniques.md` | OSINT 情报收集（社交媒体追踪/地理定位/用户名枚举/WHOIS·Shodan·GitHub 挖掘） |
 | `steganography-forensics.md` | 隐写分析（图片/音频/文档载体/PNG·GIF 结构/QR/工具分诊表） |
 | `wordlists-guide.md` | 任何爆破/fuzz 需要字典时（$WORDLISTS_DIR 场景选型速查: 目录/密码/子域/payload） |

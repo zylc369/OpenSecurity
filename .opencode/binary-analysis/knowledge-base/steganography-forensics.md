@@ -42,7 +42,7 @@ while pos < len(data):
 | 高度/CRC 篡改 | 图"被裁过"/IHDR CRC 校验失败 | 爆破 h∈1..4096 对 CRC32; CRC 也改过则直接放大 height+重算 CRC |
 | 宽高反算（无 CRC 可用时） | JPG/PNG 显示尺寸与文件大小对不上 | 文件字节−头尾开销 ≈ 像素数×3（RGB）: `(size-56)/3/已知宽=真实高`; JPG 也可 010 模板 SOF0 的 `word y_image` 直接改大（不毁图，秒杀法） |
 | GIF 多帧宽高 | 分帧数>1 且图被裁 | 每帧 Logical Screen Descriptor 各有宽高字段——逐个全改，只改第一帧无效 |
-| 多 IDAT 疑似藏数据 | §1 python chunk 解析器列异常块（长度/顺序） | python 重写 chunk 流: 逐个剔除末尾小 IDAT 重算 CRC 拼新文件试显示; 或合并全部 IDAT 后 $(dirname $PYTHON_CMD)/binwalk 再扫 |
+| 多 IDAT 疑似藏数据 | §1 python chunk 解析器列异常块（长度/顺序） | python 重写 chunk 流: 逐个剔除末尾小 IDAT 重算 CRC 拼新文件试显示; 或合并全部 IDAT 后 binwalk 再扫 |
 | chunk 乱序 | 头合法但解码报错 | 重排 签名+IHDR+辅助+IDAT(原序)+IEND |
 | CRC 字段藏数据 | 各 chunk CRC 是可读 ASCII | 拼接 CRC 字节 |
 | 自定义 chunk | 类型非标准集（如 scRT） | 提取 data（可能 XOR 分层加密，见 §8） |
