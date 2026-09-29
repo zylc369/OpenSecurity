@@ -67,11 +67,14 @@ class ConfigManager:
 
         CONTROL_TCP_PORT 由 Plugin spawn 或测试进程注入;
         CONTROL_FRONTEND_DEV 仅在 .ai_env 未定义该键时读 env（CI/无文件环境
-        注入通道——文件一旦定义即为权威，env 同名值不参与）。
+        注入通道——文件一旦定义即为权威，env 同名值不参与）;
+        OPENSECURITY_AI_ENV 重定向 .ai_env 路径（测试沙箱隔离用——生产
+        env 白名单不含它，天然到不了生产进程）。
         """
 
         TCP_PORT_ENV = "CONTROL_TCP_PORT"
         FRONTEND_DEV_ENV = "CONTROL_FRONTEND_DEV"
+        AI_ENV_OVERRIDE_ENV = "OPENSECURITY_AI_ENV"
 
     class Keys:
         """全部 .ai_env 键名常量（ConfigField 与消费方统一引用）。"""
@@ -222,6 +225,9 @@ class ConfigManager:
 
     @property
     def ai_env_path(self) -> Path:
+        override = os.environ.get(self.Bootstrap.AI_ENV_OVERRIDE_ENV)
+        if override:
+            return Path(os.path.abspath(os.path.expanduser(override)))
         return Path(RuntimePaths.OPENCODE_ROOT) / ".ai_env"
 
     @property

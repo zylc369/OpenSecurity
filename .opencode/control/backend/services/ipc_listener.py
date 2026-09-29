@@ -461,9 +461,9 @@ class IpcListener:
                     break
                 write_fn(data)
         except _PLATFORM_OS_ERRORS as e:
-            # 对端关闭/重置等（ECONNRESET 等）——连接生命周期结束形态，
-            # 记 info 留痕（曾静默 pass——排查时看不到连接为何结束）
-            logger.info("IPC pump: 异常收尾: %s", e)
+            # 对端关闭竞态（反向泵 EOF 后 finish 关 fd，本方向 read 得 EBADF）
+            # 是双泵关闭常态、每连接必现——debug 级留痕（曾 info 致 1671 条噪音）
+            logger.debug("IPC pump: 收尾: %s", e)
         finally:
             on_finish()
 

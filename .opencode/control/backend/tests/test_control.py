@@ -7,7 +7,10 @@
 
 运行方式：
   cd .opencode/control/backend
-  OPENCODE_ROOT=<path> OPENSECURITY_HOME=<path> python tests/test_control.py
+  python tests/test_control.py
+  （自隔离沙箱 /tmp/control_test_data + 随机高位端口 + .ai_env 副本——
+   可在生产控制台运行期间直接跑，生产数据/sock/端口/配置零接触；
+   TEST_OPENSECURITY_HOME 可显式覆盖沙箱根）
 
 每个测试独立运行（自带 setup + teardown），失败一个不影响其他。
 """
@@ -15,6 +18,7 @@ from __future__ import annotations
 
 import os
 import sys
+import shutil
 import time
 import asyncio
 import socket
@@ -31,19 +35,43 @@ from fastapi import FastAPI
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
-# 测试专用 OPENSECURITY_HOME（避免污染实际 ~/bw-security-analysis）
-TEST_OPENSECURITY_HOME = Path(os.environ.get("OPENSECURITY_HOME", "/tmp/control_test_data"))
+# 测试专用 OPENSECURITY_HOME 沙箱（TEST_OPENSECURITY_HOME 可显式覆盖;
+# 不读变量 OPENSECURITY_HOME——沿用生产值会把测试数据写进生产目录）
+TEST_OPENSECURITY_HOME = Path(os.path.abspath(os.path.expanduser(
+    os.environ.get("TEST_OPENSECURITY_HOME", "/tmp/control_test_data"))))
+# 防假隔离：沙箱解析结果等于系统默认生产路径即拒绝运行（模式 K"设了但没
+# 生效"的一票否决; 不比对环境变量 OPENSECURITY_HOME——子进程隔离执行时
+# 该值本就是沙箱，比对会误伤）
+_default_prod = os.path.abspath(os.path.expanduser(str(Path.home() / "bw-security-analysis")))
+if str(TEST_OPENSECURITY_HOME) == _default_prod:
+    raise SystemExit(f"测试沙箱指向生产目录，拒绝运行: {TEST_OPENSECURITY_HOME}")
 TEST_OPENSECURITY_HOME.mkdir(parents=True, exist_ok=True)
 
-# OPENCODE_ROOT 用真实路径（读真实 .ai_env）
-OPENCODE_ROOT = Path(os.environ.get("OPENCODE_ROOT", ""))
+# OPENCODE_ROOT 用真实路径（代码本体在真实 .opencode; .ai_env 走沙箱副本见下）。
+# 未导出/无效时回落本文件位置推导的 .opencode（普通 Terminal 手动跑可自持，
+# 不依赖 OPENCODE_ROOT 环境变量）
+_root_raw = os.environ.get("OPENCODE_ROOT", "").strip()
+OPENCODE_ROOT = (Path(os.path.abspath(os.path.expanduser(_root_raw)))
+                 if _root_raw else BACKEND_DIR.parents[1])
+if not OPENCODE_ROOT.is_dir():
+    OPENCODE_ROOT = BACKEND_DIR.parents[1]
 
 # 强制环境变量
 os.environ["OPENSECURITY_HOME"] = str(TEST_OPENSECURITY_HOME)
-if OPENCODE_ROOT.exists():
-    os.environ["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
+os.environ["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
 # CONTROL_TCP_PORT 随机高位：沙箱控制台与生产 9776 隔离（bind 冲突会直接退出）
 os.environ.setdefault("CONTROL_TCP_PORT", str(__import__("random").randint(41000, 49000)))
+
+# .ai_env 沙箱副本：配置读写用例（含 E2E PUT /api/config）全落副本，生产文件
+# 零接触; OPENSECURITY_AI_ENV 由 ConfigManager.Bootstrap 消费（测试进程与
+# E2E 子进程同走副本）
+SOURCE_AI_ENV = OPENCODE_ROOT / ".ai_env"
+TEST_AI_ENV = TEST_OPENSECURITY_HOME / ".ai_env"
+if not SOURCE_AI_ENV.is_file():
+    raise SystemExit(f"源 .ai_env 不存在（测试依赖真实配置结构）: {SOURCE_AI_ENV}")
+shutil.copy2(SOURCE_AI_ENV, TEST_AI_ENV)  # 覆盖复制：清掉上次可能残留的测试键
+os.chmod(TEST_AI_ENV, 0o600)  # 副本含凭证——/tmp 沙箱下收紧权限（防多用户机器可读）
+os.environ["OPENSECURITY_AI_ENV"] = str(TEST_AI_ENV)
 
 # services 顶部 import 必须在 env 设置之后（model_assets→config 链会冻结 OPENSECURITY_HOME）
 from services.model_lifecycle import ManagedModel  # noqa: E402
@@ -616,6 +644,25 @@ def test_scanner_cache():
     assert_true(duration < 0.1, f"缓存命中应该 < 0.1s，实际 {duration:.3f}s")
 
 
+@test("E2E 沙箱: home/sock/端口/ai_env 四要素均落沙箱（防假隔离回归线）")
+def test_sandbox_isolation():
+    """模式 K 标准防御：沙箱"设了但没生效"会静默读写生产——四要素锁死。"""
+    from services.runtime_paths import RuntimePaths
+    from services.config_manager import ConfigManager
+    cm = ConfigManager.get_instance()
+    home = str(RuntimePaths.OPENSECURITY_HOME)
+    assert_true(home.startswith(str(TEST_OPENSECURITY_HOME)),
+                f"OPENSECURITY_HOME 应在沙箱内: {home}")
+    sock = str(cm.ipc_unix_socket_path())
+    assert_true(sock.startswith(str(TEST_OPENSECURITY_HOME)),
+                f"IPC sock 应在沙箱内: {sock}")
+    port = cm.tcp_port_start()
+    assert_true(not (9776 <= port <= 9785), f"TCP 起点不得落在生产候选段: {port}")
+    ai_env = str(cm.ai_env_path)
+    assert_true(ai_env.startswith(str(TEST_OPENSECURITY_HOME)),
+                f"ai_env 应在沙箱副本: {ai_env}")
+
+
 # ============ 端到端：控制台启动 + HTTP API ============
 
 class ControlProcess:
@@ -628,6 +675,11 @@ class ControlProcess:
     def start(self):
         """启动控制台（首跳心跳防自杀）。"""
         env = os.environ.copy()
+        # 沙箱三键显式注入（不依赖继承——防环境改动导致隔离失效；
+        # 值的存在性由本文件头部强制：沙箱根 / .ai_env 副本 / 随机高位端口）
+        env["OPENSECURITY_HOME"] = str(TEST_OPENSECURITY_HOME)
+        env["OPENSECURITY_AI_ENV"] = str(TEST_AI_ENV)
+        env["CONTROL_TCP_PORT"] = os.environ["CONTROL_TCP_PORT"]
         cmd = [
             sys.executable, "-c",
             "exec(open('/tmp/heartbeat_inject.py').read())\n"
@@ -1716,31 +1768,31 @@ def test_ocr_two_cycles():
 
 @test("ConfigManager.write: 覆盖已存在 key")
 def test_config_overwrite():
-    if not OPENCODE_ROOT.exists(): return
     from services.config_manager import ConfigManager
-    original = (OPENCODE_ROOT / ".ai_env").read_text()
+    cm = ConfigManager.get_instance()
+    original = cm.ai_env_path.read_text()
     try:
-        ConfigManager.get_instance().set({"TEST_OV": "v1"})
-        assert_eq(ConfigManager.get_instance().get_all().get("TEST_OV"), "v1")
-        ConfigManager.get_instance().set({"TEST_OV": "v2"})
-        assert_eq(ConfigManager.get_instance().get_all().get("TEST_OV"), "v2", "覆盖后应新值")
+        cm.set({"TEST_OV": "v1"})
+        assert_eq(cm.get_all().get("TEST_OV"), "v1")
+        cm.set({"TEST_OV": "v2"})
+        assert_eq(cm.get_all().get("TEST_OV"), "v2", "覆盖后应新值")
     finally:
-        (OPENCODE_ROOT / ".ai_env").write_text(original)
+        cm.ai_env_path.write_text(original)
 
 
 @test("ConfigManager.write: 批量多个 key")
 def test_config_multi_keys():
-    if not OPENCODE_ROOT.exists(): return
     from services.config_manager import ConfigManager
-    original = (OPENCODE_ROOT / ".ai_env").read_text()
+    cm = ConfigManager.get_instance()
+    original = cm.ai_env_path.read_text()
     try:
-        ConfigManager.get_instance().set({"TEST_M1": "v1", "TEST_M2": "v2", "TEST_M3": "v3"})
-        cfg = ConfigManager.get_instance().get_all()
+        cm.set({"TEST_M1": "v1", "TEST_M2": "v2", "TEST_M3": "v3"})
+        cfg = cm.get_all()
         assert_eq(cfg.get("TEST_M1"), "v1")
         assert_eq(cfg.get("TEST_M2"), "v2")
         assert_eq(cfg.get("TEST_M3"), "v3")
     finally:
-        (OPENCODE_ROOT / ".ai_env").write_text(original)
+        cm.ai_env_path.write_text(original)
 
 
 @test("detect_tools: otool 平台过滤（非 macOS skipped）")
@@ -1780,6 +1832,8 @@ def test_e2e_tcp_fallback():
     blocker.listen(1)
     env = os.environ.copy()
     env["CONTROL_TCP_PORT"] = str(start_port)  # 子进程与沙箱同起点
+    env["OPENSECURITY_HOME"] = str(TEST_OPENSECURITY_HOME)  # 显式沙箱（不依赖继承）
+    env["OPENSECURITY_AI_ENV"] = str(TEST_AI_ENV)
     proc = subprocess.Popen(
         [sys.executable, str(BACKEND_DIR / "server.py")],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1981,17 +2035,18 @@ def test_e2e_scan_cache():
 @test("GITHUB_TOKEN: .ai_env 配置通道（无 env 通道）+ detect_tools 消费")
 def test_github_token_config_path():
     """GITHUB_TOKEN 走 .ai_env 配置通道（spawn env 白名单化的前置迁移:
-    env 直读通道已删, detect_tools 从 ConfigManager 读）。沙箱同 dev_mode 用例。"""
+    env 直读通道已删, detect_tools 从 ConfigManager 读）。沙箱: 临时
+    OPENSECURITY_AI_ENV 指向自写 .ai_env（不碰生产文件）。"""
     import os as _os
     import tempfile
     from services.config_manager import ConfigManager
 
-    saved_root = _os.environ.get("OPENCODE_ROOT")
+    saved_override = _os.environ.get("OPENSECURITY_AI_ENV")
     try:
         with tempfile.TemporaryDirectory() as td:
             fake_env = Path(td) / ".ai_env"
             fake_env.write_text("GITHUB_TOKEN=ghp_sandbox_test_123\n", encoding="utf-8")
-            _os.environ["OPENCODE_ROOT"] = td
+            _os.environ["OPENSECURITY_AI_ENV"] = str(fake_env)
             ConfigManager._reset_for_tests()
             assert_eq(ConfigManager.get_instance().get("GITHUB_TOKEN"),
                       "ghp_sandbox_test_123", ".ai_env 配置应可读")
@@ -2005,10 +2060,10 @@ def test_github_token_config_path():
             assert_eq(ToolsInstaller._github_token(), "ghp_sandbox_test_123",
                       "detect_tools 应从 ConfigManager 拿到 .ai_env 的 GITHUB_TOKEN")
     finally:
-        if saved_root is None:
-            _os.environ.pop("OPENCODE_ROOT", None)
+        if saved_override is None:
+            _os.environ.pop("OPENSECURITY_AI_ENV", None)
         else:
-            _os.environ["OPENCODE_ROOT"] = saved_root
+            _os.environ["OPENSECURITY_AI_ENV"] = saved_override
         ConfigManager._reset_for_tests()
 
 
@@ -2016,17 +2071,17 @@ def test_github_token_config_path():
 def test_dev_mode_default():
     # source=ai_env 语义: .ai_env 定义了 CONTROL_FRONTEND_DEV → 文件是权威
     # （env 同名值不参与）; 文件未定义 → env 兜底（CI 注入通道）。
-    # 沙箱: 临时 OPENCODE_ROOT + 自写 .ai_env（不碰生产文件）。
+    # 沙箱: 临时 OPENSECURITY_AI_ENV 指向自写 .ai_env（不碰生产文件）。
     import os as _os
     import tempfile
     from services.config_manager import ConfigManager
 
     saved_env = _os.environ.get("CONTROL_FRONTEND_DEV")
-    saved_root = _os.environ.get("OPENCODE_ROOT")
+    saved_override = _os.environ.get("OPENSECURITY_AI_ENV")
     try:
         with tempfile.TemporaryDirectory() as td:
             fake_env = Path(td) / ".ai_env"
-            _os.environ["OPENCODE_ROOT"] = td
+            _os.environ["OPENSECURITY_AI_ENV"] = str(fake_env)
             # 场景 1: 文件定义 1，env 同名 0 → 文件权威（env 不参与）
             fake_env.write_text("CONTROL_FRONTEND_DEV=1\n", encoding="utf-8")
             _os.environ["CONTROL_FRONTEND_DEV"] = "0"
@@ -2053,10 +2108,10 @@ def test_dev_mode_default():
             _os.environ.pop("CONTROL_FRONTEND_DEV", None)
         else:
             _os.environ["CONTROL_FRONTEND_DEV"] = saved_env
-        if saved_root is None:
-            _os.environ.pop("OPENCODE_ROOT", None)
+        if saved_override is None:
+            _os.environ.pop("OPENSECURITY_AI_ENV", None)
         else:
-            _os.environ["OPENCODE_ROOT"] = saved_root
+            _os.environ["OPENSECURITY_AI_ENV"] = saved_override
         ConfigManager._reset_for_tests()
 
 
@@ -2073,13 +2128,13 @@ def test_dev_mode_consumer_vite():
     called = []
     orig = _fp.FrontendPortRegistry.ensure_vite_dev
     _fp.FrontendPortRegistry.ensure_vite_dev = lambda self: called.append(1)  # type: ignore[method-assign]
-    saved_root = _os.environ.get("OPENCODE_ROOT")
+    saved_override = _os.environ.get("OPENSECURITY_AI_ENV")
     saved_dev = _os.environ.pop("CONTROL_FRONTEND_DEV", None)
     try:
         from server import create_app
         with tempfile.TemporaryDirectory() as td:
             env_file = Path(td) / ".ai_env"
-            _os.environ["OPENCODE_ROOT"] = td
+            _os.environ["OPENSECURITY_AI_ENV"] = str(env_file)
             # dev=0 → 不拉 vite
             env_file.write_text("CONTROL_FRONTEND_DEV=0\n", encoding="utf-8")
             _cm.ConfigManager._reset_for_tests()
@@ -2093,10 +2148,10 @@ def test_dev_mode_consumer_vite():
             assert_true(len(called) == 1, f"dev=1 时 create_app 应拉 vite（实际调用 {len(called)} 次）")
     finally:
         _fp.FrontendPortRegistry.ensure_vite_dev = orig  # type: ignore[method-assign]
-        if saved_root is None:
-            _os.environ.pop("OPENCODE_ROOT", None)
+        if saved_override is None:
+            _os.environ.pop("OPENSECURITY_AI_ENV", None)
         else:
-            _os.environ["OPENCODE_ROOT"] = saved_root
+            _os.environ["OPENSECURITY_AI_ENV"] = saved_override
         if saved_dev is not None:
             _os.environ["CONTROL_FRONTEND_DEV"] = saved_dev
         _cm.ConfigManager._reset_for_tests()
@@ -2166,8 +2221,8 @@ def test_config_ensure_template():
 
     with tempfile.TemporaryDirectory() as td:
         fake = Path(td) / ".ai_env"
-        saved_root = _os.environ.get("OPENCODE_ROOT")
-        _os.environ["OPENCODE_ROOT"] = td
+        saved_override = _os.environ.get("OPENSECURITY_AI_ENV")
+        _os.environ["OPENSECURITY_AI_ENV"] = str(fake)
         ConfigManager._reset_for_tests()
         try:
             assert_true(ConfigManager.get_instance().ensure_template(), "首次应创建并返回 True")
@@ -2178,8 +2233,10 @@ def test_config_ensure_template():
             assert_false(ConfigManager.get_instance().ensure_template(), "已存在应返回 False")
             assert fake.read_text(encoding="utf-8") == "USER_CUSTOM=value\n", "用户内容不得被覆盖"
         finally:
-            if saved_root is not None:
-                _os.environ["OPENCODE_ROOT"] = saved_root
+            if saved_override is None:
+                _os.environ.pop("OPENSECURITY_AI_ENV", None)
+            else:
+                _os.environ["OPENSECURITY_AI_ENV"] = saved_override
             ConfigManager._reset_for_tests()
 
 
@@ -2703,6 +2760,7 @@ def test_knowledge_events_routes():
     code = (
         "import sys, os; sys.path.insert(0, '.'); sys.path.insert(0, 'tests'); "
         f"os.environ['OPENSECURITY_HOME'] = {str(TEST_OPENSECURITY_HOME)!r}; "
+        f"os.environ['OPENSECURITY_AI_ENV'] = {str(TEST_AI_ENV)!r}; "
         f"os.environ['OPENCODE_ROOT'] = {str(OPENCODE_ROOT)!r}; "
         "os.environ.setdefault('CONTROL_TCP_PORT', os.environ.get('CONTROL_TCP_PORT', '0')); "
         "from tests.test_control import _knowledge_events_routes_inner; "
