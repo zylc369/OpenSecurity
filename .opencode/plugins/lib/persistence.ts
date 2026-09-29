@@ -12,6 +12,11 @@ import { debugLog } from "./logging";
 import { SessionData } from "./session-manager";
 import StringUtils from "./string-utils";
 import { fetchConfig } from "./control-config";
+import {
+  sendReflection,
+  isReflectEnabled,
+  isReflectionDue,
+} from "./reflection";
 
 // ─── 完成标记（动态生成 + 精确匹配）──────────────────────────────
 //
@@ -174,6 +179,10 @@ async function getLastAssistantText(sessionID: string): Promise<string | null> {
   }
 }
 
+// ─── 反思心跳（空闲通道）──────────────────────────────────────────
+// 实现收口在 lib/reflection.ts（与忙时纸条共用开关/到期/守卫/状态更新）；
+// 本文件仅在 maybeResumeAnalysis 的统一注入器判定中调用 sendReflection。
+
 /** 发送 resume prompt 并记录状态。仅从 maybeResumeAnalysis 调用（冷却 setTimeout 回调
  *  也改为重入 maybeResumeAnalysis 全量校验，不再直接调用此处）。
  *  内部通过 get 获取最新 session——setTimeout 回调可能延迟很久，闭包捕获的 session 可能已失效。 */
@@ -314,6 +323,19 @@ export async function maybeResumeAnalysis(
       `session.idle: 未检测到完成标记 ${session.resumeMarker}, sessionID=${sessionID}, lastText=${lastText}`,
       sessionID,
     );
+
+    // ── 统一注入器：反思到期 → 发心跳（优先于 resume；心跳自带续接指令，本次不再发 resume） ──
+    if (isReflectEnabled() && isReflectionDue(session)) {
+      debugLog(
+        `session.idle: 反思到期（距上次 ${Math.round((Date.now() - session.lastReflectionAt) / 60000)}min ≥ 间隔），优先发心跳 sessionID=${sessionID}`,
+        sessionID,
+      );
+      await sendReflection(session);
+      return;
+    }
+    if (!isReflectEnabled()) {
+      debugLog(`session.idle: 反思开关禁用，走 resume 路径 sessionID=${sessionID}`, sessionID);
+    }
 
     const resumeCount = session.resumeCount;
     if (resumeCount >= MAX_RESUMES) {

@@ -82,8 +82,8 @@ export const AGENT_KNOWLEDGE_SCOUT = "knowledge-scout";
 // | security-analysis-evolve |             |                   | ✓         | 有意排除    |
 
 // 领域分析 agent（5 个）。消费点：根会话任务目录 + ledger.md 模板创建
-//（task-session-persistence.ts）；认知检查点计数/注入、压缩时台账注入
-//（security-analysis.ts）；启动时的环境检测预热。
+//（task-session-persistence.ts）；压缩时台账注入（security-analysis.ts）；
+// 反思纸条守卫（lib/reflection.ts）；启动时的环境检测预热。
 export const SECURITY_ANALYSIS_AGENTS = [
   AGENT_BINARY_ANALYSIS,
   AGENT_MOBILE_ANALYSIS,
@@ -149,10 +149,12 @@ export const ABORTED_ERROR_NAME = "MessageAbortedError";
 // 取值规则：未找到/非 0 非 false 的任意值 → 启用；值为 "0" 或 tolower 后 "false" → 禁用。
 export const ENV_KEY_RESUME_ANALYSIS = "RESUME_ANALYSIS_ENABLED";
 
-// 控制台配置中控制"认知检查点"开关的变量名（读写方：控制台 config_store；插件经配置缓存读取）。
-// 取值规则：未找到/非 0 非 false 的任意值 → 启用（默认开启）；"0" 或 tolower 后 "false" → 禁用。
-// 改配置后重启 opencode 生效。
-export const ENV_KEY_COGNITION_CHECKPOINT = "COGNITION_CHECKPOINT_ENABLED";
+// 控制台配置中控制"反思"功能的总开关（反思纸条 + 反思心跳两通道共用，见 lib/reflection.ts）。
+// 取值规则与上述开关一致（未找到 → 启用；"0"/"false" → 禁用）。
+export const ENV_KEY_REFLECT_NUDGE = "REFLECT_NUDGE_ENABLED";
+
+// 反思到期间隔（分钟）。纸条与心跳共用：距上次反思超过该间隔即到期。验证时可经控制台配置调小。
+export const REFLECT_NUDGE_DEFAULT_INTERVAL_MIN = 30;
 
 // ─── venv ──────────────────────────────────────────────────────
 
@@ -172,12 +174,8 @@ export const VENV_PYTHON_CANDIDATES = [
 
 export const MAX_TIMELINE_BUFFER = 50;
 
-// ─── 认知检查点（反公理固化）────────────────────────────────────
+// ─── 认知（台账注入预算；检查点机制已由反思系统取代并删除）────────
 
-/** 检查点触发：每 N 次工具调用一次 */
-export const CHECKPOINT_TOOL_INTERVAL = 20;
-/** 检查点触发：时间间隔（毫秒；与工具调用数先到者触发） */
-export const CHECKPOINT_TIME_INTERVAL_MS = 40 * 60 * 1000;
 /** 台账原样注入压缩上下文的 token 预算（估算；超预算按行截断并附全文路径） */
 export const LEDGER_INJECT_MAX_TOKENS = 4000;
 

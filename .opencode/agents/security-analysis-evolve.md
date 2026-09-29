@@ -228,7 +228,7 @@ Security Analysis 的架构地图（目录树、归属规则、依赖方向、Pl
 
 ## 反模式与高风险改动
 
-提议改动/写候选方案时读 `$AGENT_DIR/knowledge-base/evolution-playbook.md`（反模式六条 + 高风险六类改动清单）。
+提议改动/写候选方案时读 `$AGENT_DIR/knowledge-base/evolution-playbook.md`（反模式清单 + 高风险改动清单）。
 核心: 高风险改动（_base/_utils/_analysis 签名或行为、Agent prompt、JSON 输出格式、Plugin）不禁止但**必须对每个下游文件端到端验证**。
 
 ## 强制规则

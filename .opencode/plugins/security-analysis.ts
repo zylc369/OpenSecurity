@@ -35,10 +35,7 @@ import { debugLog } from "./lib/logging";
 import TaskSessionPersistence, {
   LEDGER_TEMPLATE,
 } from "./lib/task-session-persistence";
-import {
-  shouldTriggerCheckpoint,
-  renderCheckpointText,
-} from "./lib/checkpoint";
+import { maybeAttachReflectNudge } from "./lib/reflection";
 import { getPythonCmd, getInstallHint, getCompilerName } from "./lib/venv";
 import { isControlHealthy, startControl } from "./lib/control-manager";
 import { controlFetch } from "./lib/control-http";
@@ -189,7 +186,7 @@ function getCompactionContext(): string {
 
 ### 4. ${cognition.sections.conclusions}与${cognition.fields.untestedList}
 - 每条结论必须保留【${cognition.evidenceLevelSpec} + ${cognition.fields.verifiedScope} + ${cognition.fields.untestedList}】，禁止把未验证结论表述为已确认
-- "${cognition.sections.untested}"清单与"${cognition.sections.changelog}"必须原样保留
+- "${cognition.sections.untested}"清单与"${cognition.sections.changelog}"必须原样保留；"${cognition.sections.directions}"（含每方向的依赖前提/证伪探针/投入/产出列）同样原样保留
 - 禁止保留无条件的"${cognition.universalDenyMarkers.join("/")}"类结论；如需保留，必须同时保留其${cognition.fields.untestedList}（分析台账 $ROOT_TASK_DIR/${cognition.ledgerFilename} 的内容已随本提示一并提供——超约 ${LEDGER_INJECT_MAX_TOKENS} token 时截断并附全文路径；结论与未测清单照其原文保留，不要改写或精简）`;
 
   return context;
@@ -290,16 +287,10 @@ async function verifyCognitionSelfCheck(): Promise<void> {
         problems.push("压缩注入渲染缺否定词表");
       if (!compaction.includes(cognition.evidenceLevelSpec))
         problems.push("压缩注入渲染缺证据等级口径");
-      const checkpoint = renderCheckpointText({
-        checkpointCount: 0,
-        elapsedMinutes: 0,
-        toolCallCount: 0,
-        commandCallCount: 0,
-      });
-      if (!checkpoint.includes(cognition.ledgerFilename))
-        problems.push("检查点渲染缺台账文件名");
       if (!LEDGER_TEMPLATE.includes(cognition.fields.untestedList))
         problems.push("台账模板缺未测清单字段");
+      if (!LEDGER_TEMPLATE.includes(cognition.sections.directions))
+        problems.push("台账模板缺方向表节");
     } catch (e) {
       problems.push(`渲染冒烟异常: ${(e as Error)?.message}`);
     }
@@ -800,39 +791,9 @@ function fireAndForgetMemory(
 }
 
 /**
- * 认知检查点：满足（根会话 + 五分析 agent + 有任务目录 + 触发判定）时返回注入文本并记账；
- * 否则返回 null（调用方不 push）。触发判定含特性开关（COGNITION_CHECKPOINT_ENABLED）。
+ * 认知检查点机制已删除（实测零行动合规，由反思系统取代：忙时纸条 + 空闲心跳，
+ * 实现收口 lib/reflection.ts）。system.transform 保留环境注入与片段展开职责。
  */
-function cognitionCheckpoint(session: SessionData): string | null {
-  if (!session.isRootAgent) {
-    return null;
-  }
-  const agentName = session.agentName;
-  if (!SECURITY_ANALYSIS_AGENTS.includes(agentName)) {
-    return null;
-  }
-
-  if (!session.getTaskDir()) {
-    return null;
-  }
-
-  const now = Date.now();
-  if (!shouldTriggerCheckpoint(session, now)) {
-    return null;
-  }
-
-  session.checkpointCount++;
-  session.lastCheckpointToolCount = session.toolCallCount;
-  session.lastCheckpointAt = now;
-
-  const result = renderCheckpointText(session);
-  const sessionID = session.sessionID;
-  debugLog(
-    `[INFO] system.transform: 注入认知检查点 #${session.checkpointCount} (tools=${session.toolCallCount}, cmds=${session.commandCallCount}, minutes=${session.elapsedMinutes}) sessionID=${sessionID}`,
-    sessionID,
-  );
-  return result;
-}
 
 export const SecurityAnalysisPlugin: Plugin = async (input) => {
   const { client, directory } = input;
@@ -1142,12 +1103,6 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           }
         }
 
-        // ── 认知检查点（独立于环境注入频率；仅根会话 + 五分析 agent + 有任务目录）──
-        const cognitionCheckpointResult = cognitionCheckpoint(session);
-        if (cognitionCheckpointResult) {
-          output.system.push(cognitionCheckpointResult);
-        }
-
         // ── buildEnvSection（所有识别的 agent 都执行）──
         session.systemTransformCount++;
         const shouldInject =
@@ -1421,6 +1376,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
             session.flowId,
           );
         }
+
+        // ── 反思纸条：必须在事件库/记忆库存储之后调用（顺序约束：放存储之前会污染两库） ──
+        maybeAttachReflectNudge(input, output, session);
 
         debugLog(`tool.execute.after: tool=${toolName}`, sid);
       } catch (e) {

@@ -7,7 +7,7 @@
  * 使用场景：
  *   • shell.env hook 注入 IDA_PRO_HOME 到 agent 子进程（同步走缓存）
  *   • persistence.ts 恢复校验读 RESUME_ANALYSIS_ENABLED（异步直读）
- *   • checkpoint.ts 认知检查点开关判定（同步走缓存）
+ *   • reflection.ts 反思开关/间隔判定（同步走缓存）
  *
  * API 语义（正交两分）：
  *   • fetchConfig()  —— 无缓存直读：每次拉最新，成功顺带喂缓存，失败 throw

@@ -56,6 +56,7 @@ $OPENCODE_ROOT/                              # 由插件注入，项目级 .open
 │       ├── long-document-editing.md      # >300 行文档编辑策略
 │       └── opencode-references.md        # OpenCode 开发文档索引 + 源码查阅
 ├── commands/                              # opencode 命令目录（opencode 只把 *.md 当命令；非命令 .md 勿放，会被误识别。可含命令配套的 .py 脚本）
+├── skills/                                # opencode skill 目录（SKILL.md 程序容器，按需加载；description 驱动触发）
 └── requirements/
     └── evolve/                            # 进化需求文档（不放 commands/，避免被 opencode 当命令加载）
 ```
@@ -84,7 +85,9 @@ _base.py ← _utils.py ← _analysis.py ← query.py / update.py / scripts/*.py
 | shell.env | 注入环境变量（$SESSION_ID/$PYTHON_CMD/$IDAT/$AGENT_DIR 等）到 bash 命令 |
 | experimental.session.compacting | 压缩时注入分析状态保留提示 + TASK_DIR; 置 justCompacted 标识 |
 | experimental.chat.system.transform | 每轮注入环境信息 + 占位符展开; 检测 justCompacted 强制重注入 |
+| session.idle | 会话空闲时统一注入器判定（反思心跳 / resume 续推，见 lib/persistence.ts） |
 | tool.execute.before | 记录工具执行时间线 |
+| tool.execute.after | 工具结果时间线/事件库/记忆库记录 + 反思纸条附加（存储之后追加，实现收口 lib/reflection.ts） |
 | event | 管理 session 生命周期 + 子 session 继承 |
 
 ## 环境变量表
