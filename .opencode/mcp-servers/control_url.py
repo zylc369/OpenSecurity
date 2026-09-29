@@ -134,7 +134,9 @@ class ControlIpc:
                 win32file.GENERIC_READ | win32file.GENERIC_WRITE,
                 0, None, win32file.OPEN_EXISTING, 0, None,
             )
-        except win_errs:
+        except win_errs as e:
+            print(f"[control_url] 管道连接失败（控制台未起或管道未就绪）: {e}",
+                  file=sys.stderr)
             conn.close()
             return
         try:
@@ -164,6 +166,11 @@ class ControlIpc:
                         win32file.WriteFile(pipe, data)
                     except win_errs:
                         break
+        except win_errs as e:
+            # TCP 侧异常（conn sendall/recv/select——httpx 关闭连接/RST）收尾。
+            # 薄壳无 logging 基建：stderr 是 MCP 的日志流（stdout 为协议流，
+            # 写入即污染 JSON-RPC——禁止）。
+            print(f"[control_url] 管道桥 TCP 侧异常收尾: {e}", file=sys.stderr)
         finally:
             try:
                 win32file.CloseHandle(pipe)

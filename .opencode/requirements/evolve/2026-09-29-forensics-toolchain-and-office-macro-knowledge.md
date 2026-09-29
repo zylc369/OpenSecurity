@@ -208,7 +208,7 @@ tests/test_control.py（回归线）←→ 上述 services 两文件
 - 调研期先装 brew binwalk 作为 v3 真值来源；步骤 4 以 `uninstall → install_tool` 重装复现配方路径（未走"第一次安装"路径的原始形态，属等价复现）。
 - pyright 错误总量 58 → 57（存量计数演进，与本轮无因果）。
 
-**修订记录**: **修订 1（用户 review 反馈，同日）**: 移除 `_LEGACY_REMOVALS` 常驻自动拆除块——一次性历史清理不值当常驻代码，且覆盖不完整（单工具安装路径 `install --tool` 不经过该块）；现实环境仅本机（已一次性卸载完成）。测试同步去掉该断言（`test_detect_py_deps_list_invariants` 保留"死包不在清单 / oletools 在清单"两条不变量）；旧环境迁移说明由本节"一次性清理"承载。复验：targeted 6/6（含 CLI 消费链）、`scan` 无 binwalk/oletools available、pyright UndefinedVariable=0、`_LEGACY_REMOVALS` 代码引用清零。
+**修订记录**: **修订 1（用户 review 反馈，同日）**: 移除 `_LEGACY_REMOVALS` 常驻自动拆除块——一次性历史清理不值当常驻代码，且覆盖不完整（单工具安装路径 `install --tool` 不经过该块）；现实环境仅本机（已一次性卸载完成）。测试同步去掉该断言（`test_detect_py_deps_list_invariants` 保留"死包不在清单 / oletools 在清单"两条不变量）；旧环境迁移说明由本节"一次性清理"承载。**复验（修订后终态）**: test_control 全量 **90/90**（停生产窗口执行；恢复 pid 56273 / boot_token be9fd598 / health ok）、`scan` 无 binwalk / oletools available、basedpyright UndefinedVariable=0、`_LEGACY_REMOVALS` 代码引用清零。
 
 **决策附注（pip 渠道为何移除——防未来重复评估）**:
 

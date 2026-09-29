@@ -228,7 +228,6 @@ for fp, content in files.items():
 | tshark | pcap 分析 | `-r`/`-Y <filter>`/`--export-objects <proto,dir>` |
 | vol (Volatility 3) | 内存取证 | `vol -f <dump> windows.<plugin>`；Linux 用 `linux.*` |
 | binwalk | 文件 carving/固件提取 | `binwalk -e [-C <dir>] <file>`（递归加 `-M`） |
-| binwalk | 固件/嵌入文件 | `binwalk -e <file>` |
 | strings | 字符串提取 | `strings -n 8 <file>` |
 | Evtx→XML | Windows 事件日志 | 上节 python-evtx 命令 |
 | python-registry | 注册表 hive | `import Registry; Registry.Registry("NTUSER.DAT")` |

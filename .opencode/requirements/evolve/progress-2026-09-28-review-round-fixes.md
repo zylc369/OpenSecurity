@@ -43,6 +43,9 @@
 
 ## 遗留
 
-- untracked: `pending-items.md`（被 config-cache-ttl §5 引用）、`docs/分析/Forensics/`、`docs/分析/web/分析-Planetary-Probe.md`、`docs/分析/web/分析-SiteCheck.md`；staged: 控制台路径 progress 一行（未提交）。
+- 工作区收尾（2026-09-29 更新）: 本轮修改已随 `8b24dd0` 入库；当前 untracked: `pending-items.md`（被 config-cache-ttl §5 引用，建议入库）、`docs/分析/web/分析-Planetary-Probe.md`。
 - Windows CI 需 push 后验证（本地无 Windows 环境）；`pending-items.md` #5 已加进展注记。
+  → **已闭环（2026-09-29）**: 后续提交（f6d29e8/0e66607）接力修复 Windows 实现层问题后，
+  run `36510505269` **success**——管道监听 / Python httpx 管道往返 / 管道互斥 / Bun
+  node:http socketPath 往返四项全过；详细迭代见 pending-items §5。
 - 观察（非本轮回归）: 1440 视口下页面存在 ≈209px 横向滚动（布局宽度 ≥1649px）——E2E 已适配；如介意布局可另立需求。

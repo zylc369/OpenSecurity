@@ -377,6 +377,9 @@ class IpcListener:
                         win32file.WriteFile(handle, data)
                     except _PLATFORM_OS_ERRORS:
                         break
+        except _PLATFORM_OS_ERRORS as e:
+            # TCP 侧异常（upstream sendall/recv/select——对端 RST/关闭）收尾
+            logger.warning("IPC serve: TCP 侧异常收尾: %s", e)
         finally:
             try:
                 win32file.CloseHandle(handle)
@@ -457,8 +460,10 @@ class IpcListener:
                 if not data:
                     break
                 write_fn(data)
-        except _PLATFORM_OS_ERRORS:
-            pass
+        except _PLATFORM_OS_ERRORS as e:
+            # 对端关闭/重置等（ECONNRESET 等）——连接生命周期结束形态，
+            # 记 info 留痕（曾静默 pass——排查时看不到连接为何结束）
+            logger.info("IPC pump: 异常收尾: %s", e)
         finally:
             on_finish()
 
