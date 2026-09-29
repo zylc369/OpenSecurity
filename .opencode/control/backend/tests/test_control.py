@@ -681,10 +681,8 @@ class ControlProcess:
         env["OPENSECURITY_AI_ENV"] = str(TEST_AI_ENV)
         env["CONTROL_TCP_PORT"] = os.environ["CONTROL_TCP_PORT"]
         cmd = [
-            sys.executable, "-c",
-            "exec(open('/tmp/heartbeat_inject.py').read())\n"
-            "import runpy, sys\n"
-            f"runpy.run_path({str(BACKEND_DIR / 'server.py')!r}, run_name='__main__')",
+            sys.executable,
+            str(BACKEND_DIR / "server.py"),
         ]
         self.proc = subprocess.Popen(
             cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

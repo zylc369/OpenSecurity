@@ -1,6 +1,7 @@
 # [77] 测试挂起调查档案（已结案）
 
 > 状态: **已结案**（2026-09-27 晚）——根因 = restart execv bug 的多线程冻结形态; 详见 §9
+> 复验与诊断注入拆除（2026-09-29）见 §10
 > 关联: 2026-09-26-backend-oop-refactor.md / progress 同名文件
 
 ---
@@ -21,7 +22,7 @@
 
 ### 2.2 第二阶段：`sys._current_frames()` 心跳线程（决定性工具）
 
-**工具**（`/tmp/heartbeat_inject.py`，仍在）：daemon 线程每 5s 把全线程 Python 栈写入 `/tmp/hb_stacks.txt`。不持锁、不受 C 层阻塞影响、无需特权。
+**工具**（代码与用法归档于 §10）：daemon 线程每 5s 把全线程 Python 栈写入 `/tmp/hb_stacks.txt`。不持锁、不受 C 层阻塞影响、无需特权。
 
 **铁证 A（第一轮心跳，卡点在 OCR 测试）**：
 ```
@@ -73,7 +74,7 @@ MainThread（测试进程）: httpx 同步 _sock.recv  ← 等一个 HTTP 响应
 1. **验证 httpx uds timeout 缺陷**（30 分钟）：最小脚本——uds server accept 后不响应，httpx Client(uds=..., timeout=2) 发请求，观察是否 2s 超时还是永久挂。若复现 → 库级确认，绕法：E2E client 换手写 socket + select 超时，或请求层 watchdog
 2. **定位 Thread-1 泄漏源**（1 小时）：逐个 ipc/uds 测试后检查 `threading.enumerate()`；泄漏修复后 [77] 直跑可能直接通过（桥 upstream 失效的触发条件消失）
 3. **若 1+2 后仍挂**：心跳复跑抓最新栈，对比本档案铁证 B
-4. 工具已就位：`/tmp/heartbeat_inject.py`（主进程/子进程注入法均已在档案中记录用法）
+4. 工具：心跳注入脚本（代码与两处用法见 §10）
 
 ## 6. 相关文件快照（暂停时点）
 
@@ -150,3 +151,62 @@ execv 在多线程进程中做镜像替换/fd 关闭，与任意线程的 malloc
 - [77] 恢复全量直跑（子进程隔离形态保留——防 TestClient 循环互锁，这是独立且真实的防御）; TC_FULL_RUN 守卫删除，环境变量零残留
 - 验证: 无守卫全量 3/3 通过（70.03/69.06/69.30s），80/80
 - §2.2 深挖点（httpx uds timeout 库缺陷嫌疑、Thread-1 泄漏）随结案关闭——其观测均产生于 execv 污染环境，如后续独立复现再立新档
+
+---
+
+## 10. 复验与诊断注入拆除（2026-09-29）
+
+### 10.1 复验结论（[77] 无复发）
+
+结案（§9）后全量套件持续演进（79 → 93 测试），数十轮全量顺序跑零挂起；
+2026-09-29 单日 6 轮 93/93（每轮含 restart 测试 + 本档案 [77] 测试 + OCR
+全族），原触发场景（全量顺序跑）反复通过。MLX 挂死结案消灭了"前置堆积"
+变体（见 2026-09-27-mlx-hang-investigation.md）。本档确认无独立复发迹象，
+维持结案。
+
+### 10.2 拆除诊断注入（覆盖 §8 的临时措施）
+
+[77] 调查期装入"子进程心跳注入"并随 commit 266489f 固化进
+`tests/test_control.py` 的 `ControlProcess.start()`：每个 E2E 控制台子进程
+启动命令为 `exec(open('/tmp/heartbeat_inject.py'))` + runpy 两段式。诊断
+终了后该注入成为纯负担——依赖 /tmp 常驻文件（被系统清理时全部 E2E 测试
+崩）、每子进程一持久写栈线程、累积 `/tmp/hb_stacks.txt` 13.5MB。
+
+**拆除**：`ControlProcess.start()` 恢复原始形态
+`[sys.executable, str(BACKEND_DIR / "server.py")]`；删除 /tmp 两文件
+（heartbeat_inject.py / hb_stacks.txt）。终验：全量 93/93 且
+hb_stacks.txt 零重建。
+
+### 10.3 心跳注入脚本（归档——C 层挂起唯一有效取证工具）
+
+适用场景: 进程疑似卡在 C 层系统调用（SIGALRM/faulthandler 到期不触发、
+sample 采样只见 kevent/活锁假象）时，用本脚本注入全线程 Python 栈心跳。
+不持锁、不受 C 层阻塞影响、无需特权。
+
+```python
+"""心跳线程注入: 每 5s dump 全线程 Python 栈（sys._current_frames 不受 C 层阻塞影响）。"""
+import threading, sys, traceback, time, os
+
+def _heartbeat():
+    while True:
+        time.sleep(5)
+        try:
+            with open("/tmp/hb_stacks.txt", "a") as f:
+                f.write(f"\n===== {time.strftime('%H:%M:%S')} pid={os.getpid()} =====\n")
+                frames = sys._current_frames()
+                names = {t.ident: t.name for t in threading.enumerate()}
+                for tid, frame in frames.items():
+                    f.write(f"--- {names.get(tid, f'tid-{tid}')} ---\n")
+                    f.write("".join(traceback.format_stack(frame))[-1500:])
+        except Exception:
+            pass
+
+threading.Thread(target=_heartbeat, daemon=True, name="stack-heartbeat").start()
+```
+
+用法（将上文件存为 hb.py；输出路径 /tmp/hb_stacks.txt 可按需改）:
+- 主进程注入: `python -c "exec(open('hb.py').read())\n<目标启动代码>"`
+- 子进程注入: 启动命令前段拼 `exec(open('hb.py').read())\n` 再接目标
+  （即本次拆除的 `ControlProcess` 两段式形态）
+- 读取: `/tmp/hb_stacks.txt` 按 `===== HH:MM:SS pid=N =====` 分块，逐线程
+  栈（每帧截尾 1500 字符）
