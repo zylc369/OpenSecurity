@@ -302,4 +302,7 @@
 3. **新增 `plugins/lib/reflection.ts` 单一来源模块**：两通道的开关（`isReflectEnabled`）、到期判定（`isReflectionDue`）、共同守卫、状态更新（`markReflectionFired`——顺序敏感的差值计算唯一实现点）、两段文案渲染、纸条附加与心跳发送全部收口一处；`persistence.ts` 与 `security-analysis.ts` 改为薄调用（消除"两个文件各一套类似逻辑"）。
 4. **web-methodology.md 的 reflection-protocol 引用行由用户删除**（与 skill 内容重复，知识库不重复承载同一规则）。
 5. **A6 验收记录勘误**：首轮污染（夹具把任务目录当原始材料——设计缺陷在夹具不在契约）曾被误记为"第二轮突破输入边界"；实际第二轮（干净夹具 + 硬边界）**盲测通过**，详见 progress 的 A6 记录。
+6. **心跳自停语义**（Phase 6 审计发现）：心跳原缺完成标记机制——任务完成后的空闲会话会被每间隔重复唤醒（resume 靠标记自停，心跳没接；resume 关闭时标记永远不会被种下）。修复：`generateCompletionMarker` 移入 lib/reflection.ts（避免循环依赖），`sendReflection` 种下 `session.resumeMarker` 并在文案尾部加完成指令——下一次 idle 顶部的既有完成检测拦停一切注入。心跳与 resume 共用同一自停机制。
+7. **下游消费方同步**（Phase 6 审计发现）：`commands/analysis-attribution.md` 的取证源清单仍列"认知检查点"——更新为"反思心跳与反思纸条的触发计数与时序（任务级 plugin.log + 全局 plugin_debug.log 双源）"；同时清除 security-analysis.ts 两处墓碑/过时注释（规则 6：删功能不留墓碑）。
+8. **重启后活体验证（2026-09-30 00:03 重启）**：8 项通过（启动冒烟/纸条真实触发/送达/存储不污染/照办性首个活体命中/注入器 idle 路径含开关重排行为验证/台账模板落盘/测试配置清理），2 项留自然验证（心跳活体——idle 时未到期；分析会话压缩回归）。排障知识：debugLog 在有任务目录后写任务级 plugin.log。
 

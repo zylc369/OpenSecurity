@@ -790,11 +790,6 @@ function fireAndForgetMemory(
   );
 }
 
-/**
- * 认知检查点机制已删除（实测零行动合规，由反思系统取代：忙时纸条 + 空闲心跳，
- * 实现收口 lib/reflection.ts）。system.transform 保留环境注入与片段展开职责。
- */
-
 export const SecurityAnalysisPlugin: Plugin = async (input) => {
   const { client, directory } = input;
 
@@ -1281,7 +1276,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           );
           return;
         }
-        // ── 认知检查点计数（仅根会话 + 五分析 agent）──
+        // ── 工具/命令计数（反思心跳与纸条渲染、日志用；仅根会话 + 五分析 agent）──
         if (
           session.isRootAgent &&
           SECURITY_ANALYSIS_AGENTS.includes(session.agentName)

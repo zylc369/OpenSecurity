@@ -11,11 +11,12 @@ import { ctx } from "./context";
 import { debugLog } from "./logging";
 import { SessionData } from "./session-manager";
 import StringUtils from "./string-utils";
-import { fetchConfig } from "./control-config";
+import { fetchConfig, getCachedConfig } from "./control-config";
 import {
   sendReflection,
   isReflectEnabled,
   isReflectionDue,
+  generateCompletionMarker,
 } from "./reflection";
 
 // ─── 完成标记（动态生成 + 精确匹配）──────────────────────────────
@@ -30,17 +31,12 @@ import {
 // 这样能阻止 LLM 通过"模仿格式"（自己造一个 >>>COMPLETE-yyyy<<<）绕过完成检测，
 // 强制它必须原样复制本次植入的具体值。
 
+// 生成动态完成标记的实现在 lib/reflection.ts（generateCompletionMarker，
+// 与反思心跳共用；移入 reflection 以避免 persistence ↔ reflection 循环依赖）。
+
 // prompt 模板里的占位符，会被 getResumePrompt() 替换成动态生成的 marker。
 // 用双下划线包裹避免与正常文本混淆。
 const COMPLETION_MARKER_PLACEHOLDER = "__COMPLETION_MARKER__";
-
-// 生成动态完成标记。4 位 hex = 65536 种组合，LLM 瞎猜中的概率可忽略。
-function generateCompletionMarker(): string {
-  const hash = Math.floor(Math.random() * 0x10000)
-    .toString(16)
-    .padStart(4, "0");
-  return `>>>COMPLETE-${hash}<<<`;
-}
 
 // 多条语义等价的恢复提示词模板：每次随机选用且不与上次相同，
 // 避免反复发送同一文本导致 LLM 习惯性"皮掉"、不再继续分析。
@@ -228,24 +224,12 @@ export async function maybeResumeAnalysis(
   viaCooldownTimer = false,
 ): Promise<void> {
   try {
-    // 全局开关：默认启用；仅当值严格为 "0" 或 tolower 后 "false" 才禁用。
-    // 放在最前面（requireSecurityAgent 之前）——禁用时零开销，不查 session。
-    // 未找到 / "1" / "true" / 任何其他值 → 启用，保持向后兼容。
     // 配置读取收口到 control-config（HTTP /api/config 直读）：
     // fail-closed 语义——控制台不可达时 fetchConfig throw，由本函数外层 catch
-    // 记录（session.idle: 恢复异常）并跳过本轮恢复，不基于陈旧缓存发恢复消息。
-    const allConfigs = await fetchConfig();
-    const enabledRaw = allConfigs[ENV_KEY_RESUME_ANALYSIS];
-    if (
-      enabledRaw !== undefined &&
-      (enabledRaw === "0" || enabledRaw.toLowerCase() === "false")
-    ) {
-      debugLog(
-        `session.idle: 跳过恢复 — 开关已禁用 (${ENV_KEY_RESUME_ANALYSIS}=${enabledRaw}) sessionID=${sessionID}`,
-        sessionID,
-      );
-      return;
-    }
+    // 记录（session.idle: 恢复异常）并跳过本轮注入，不基于陈旧缓存发消息。
+    // 注意：resume 开关的判定下移到 resume 专属分支之前——反思心跳有独立开关
+    // （REFLECT_NUDGE_ENABLED），不能被 RESUME_ANALYSIS_ENABLED 连带门禁。
+    await fetchConfig();
 
     const session = ctx.sessionManager.requireSecurityAgent(
       "session.idle",
@@ -335,6 +319,19 @@ export async function maybeResumeAnalysis(
     }
     if (!isReflectEnabled()) {
       debugLog(`session.idle: 反思开关禁用，走 resume 路径 sessionID=${sessionID}`, sessionID);
+    }
+
+    // ── resume 专属开关（原位于函数最顶部；下移至此，避免门禁反思心跳） ──
+    const enabledRaw = getCachedConfig()[ENV_KEY_RESUME_ANALYSIS];
+    if (
+      enabledRaw !== undefined &&
+      (enabledRaw === "0" || enabledRaw.toLowerCase() === "false")
+    ) {
+      debugLog(
+        `session.idle: 跳过恢复 — 开关已禁用 (${ENV_KEY_RESUME_ANALYSIS}=${enabledRaw}) sessionID=${sessionID}`,
+        sessionID,
+      );
+      return;
     }
 
     const resumeCount = session.resumeCount;

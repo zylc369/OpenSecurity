@@ -23,6 +23,20 @@ import {
 /** 反思纸条标记（附加到 bash 输出末尾的定界行；复读型命令命中即跳过再附） */
 export const REFLECT_NUDGE_MARKER = "——— [系统·反思提醒] ———";
 
+/**
+ * 生成动态完成标记（resume 与反思心跳共用）。
+ * 动态化的目的：避免 LLM 学会"拒绝输出 >>>COMPLETE<<<"后污染所有后续注入轮次；
+ * 完成检测用精确匹配（本次植入的具体值存入 session.resumeMarker，
+ * 下一轮 idle 检查 last assistant 文本是否原样包含它）。
+ * 心跳种下标记的意义：任务完成后的空闲会话不会再被心跳/resume 反复唤醒。
+ */
+export function generateCompletionMarker(): string {
+  const hash = Math.floor(Math.random() * 0x10000)
+    .toString(16)
+    .padStart(4, "0");
+  return `>>>COMPLETE-${hash}<<<`;
+}
+
 /** 反思总开关（未设置=启用；"0"/"false"=禁用，与既有开关同语义；两通道共用） */
 export function isReflectEnabled(): boolean {
   const raw = getCachedConfig()[ENV_KEY_REFLECT_NUDGE]?.toLowerCase();
@@ -174,9 +188,15 @@ export async function sendReflection(session: SessionData): Promise<void> {
   }
 
   const { sinceMin, sinceTools } = markReflectionFired(session);
-  const prompt = renderReflectionHeartbeat(session, sinceMin, sinceTools);
+  // 种下完成标记：任务完成后模型原样输出它 → 下一次 idle 顶部的完成检测
+  // 拦停一切注入（心跳与 resume 共用该自停机制，避免对已完成会话反复唤醒）。
+  const marker = generateCompletionMarker();
+  session.resumeMarker = marker;
+  const prompt =
+    renderReflectionHeartbeat(session, sinceMin, sinceTools) +
+    `\n若任务已全部完成：输出最终结论，然后在最后一行原样输出这个标记（原样复制，不要修改）：${marker}；未完成时绝对不要输出该标记。`;
   debugLog(
-    `session.idle: 反思心跳 #${session.reflectionCount} (距上次 ${sinceMin}min, 期间 ${sinceTools} 次工具调用) sessionID=${sessionID}`,
+    `session.idle: 反思心跳 #${session.reflectionCount} (距上次 ${sinceMin}min, 期间 ${sinceTools} 次工具调用, marker=${marker}) sessionID=${sessionID}`,
     sessionID,
   );
 
