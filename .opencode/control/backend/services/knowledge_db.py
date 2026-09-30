@@ -30,10 +30,25 @@ import struct
 import threading
 import time
 from pathlib import Path
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Any, Protocol, TypedDict, cast
 
 import numpy as np
 
+
+
+@dataclass
+class SearchHit:
+    """检索命中（search 返回项; 字段名=JSON 键名）。"""
+    id: int
+    question: str
+    answer: str
+    score: float
+
+
+class _SeenEntry(TypedDict):
+    id: int
+    score: float
 
 
 class EmbedderLike(Protocol):
@@ -44,7 +59,7 @@ class EmbedderLike(Protocol):
     测试用 fake 只需实现 encode（单线程下无锁无害）。
     """
 
-    def encode(self, texts: Any, /, **kwargs: Any) -> "np.ndarray": ...
+    def encode(self, texts: "str | list[str]", /, *, convert_to_numpy: bool = True) -> "np.ndarray": ...
 
 class MemoryDB:
     """向量存储（schema/阈值常量为类静态字段）。"""
@@ -106,7 +121,9 @@ class MemoryDB:
 
     def _migrate_schema(self) -> None:
         """检查并添加缺失的列（向后兼容旧数据库）。"""
-        col_info = {row[1]: row for row in self._conn.execute("PRAGMA table_info(answers)").fetchall()}
+        col_info = {row[1]: row for row in cast(
+            "list[tuple[object, str, str, int, object, object]]",
+            self._conn.execute("PRAGMA table_info(answers)").fetchall())}
         columns = set(col_info.keys())
         for col_name, col_def in self.MIGRATE_COLUMNS:
             if col_name not in columns:
@@ -130,12 +147,12 @@ class MemoryDB:
         同协议）。SQLite 访问另由 self._lock 串行，两者职责不同。
         """
         vec = self.embedder.encode(text, convert_to_numpy=True)
-        return struct.pack(f"{MemoryDB.EMBEDDING_DIM}f", *vec.tolist())
+        return struct.pack(f"{MemoryDB.EMBEDDING_DIM}f", *cast("list[float]", vec.tolist()))
 
     def _embed_batch(self, texts: list[str]) -> list[bytes]:
         """批量编码 → 向量字节流列表（search 多问题用）：一次前向、一次持锁。"""
         vecs = self.embedder.encode(texts, convert_to_numpy=True)
-        return [struct.pack(f"{MemoryDB.EMBEDDING_DIM}f", *v.tolist()) for v in vecs]
+        return [struct.pack(f"{MemoryDB.EMBEDDING_DIM}f", *cast("list[float]", v.tolist())) for v in vecs]  # pyright: ignore[reportAny] —— numpy stub 的 tolist/__iter__ 为 Any（库级）
 
     def store(
         self,
@@ -175,7 +192,7 @@ class MemoryDB:
         lang: str = "",
         top_k: int | None = None,
         flow_id: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> "list[SearchHit]":
         """对每个查询：按 cosine 找最近的，按 doc_type + lang/flow_id 过滤，再合并。
         （top_k 默认值在方法体解析——类定义期默认参数无法引用同类。）
 
@@ -188,7 +205,7 @@ class MemoryDB:
             return []
 
         per_query = max(top_k * 3, top_k)
-        seen: dict[int, dict[str, Any]] = {}
+        seen: "dict[int, _SeenEntry]" = {}
         # embed 在 self._lock 外（CPU-bound，不涉及 SQL）；并发安全由注入的
         # LockedEmbedder 保证（推理全进程串行）。批量化：N 个问题一次前向。
         q_embs = self._embed_batch(questions)
@@ -200,7 +217,7 @@ class MemoryDB:
                     "ORDER BY distance",
                     (q_emb, per_query),
                 ).fetchall()
-                for row_id, distance in rows:
+                for row_id, distance in cast("list[tuple[int, float]]", rows):
                     score = 1.0 - float(distance)
                     if score < self.SCORE_THRESHOLD:
                         continue
@@ -208,7 +225,7 @@ class MemoryDB:
                         if score > seen[row_id]["score"]:
                             seen[row_id]["score"] = score
                         continue
-                    seen[row_id] = {"id": int(row_id), "score": score}
+                    seen[row_id] = _SeenEntry(id=int(row_id), score=score)
 
             if not seen:
                 return []
@@ -217,7 +234,7 @@ class MemoryDB:
             ids = list(seen.keys())
             placeholders = ",".join("?" * len(ids))
             conditions = [f"id IN ({placeholders})", "doc_type = ?"]
-            params: list[Any] = [*ids, doc_type]
+            params: "list[int | str]" = [*ids, doc_type]
 
             if lang:
                 conditions.append("code_lang = ?")
@@ -233,17 +250,17 @@ class MemoryDB:
                 params,
             ).fetchall()
 
-            results = []
-            for row_id, question, answer in rows:
+            results: "list[SearchHit]" = []
+            for row_id, question, answer in cast("list[tuple[int, str, str]]", rows):
                 entry = seen[row_id]
-                results.append({
-                    "id": int(row_id),
-                    "question": question,
-                    "answer": answer,
-                    "score": round(entry["score"], 4),
-                })
+                results.append(SearchHit(
+                    id=int(row_id),
+                    question=question,
+                    answer=answer,
+                    score=round(entry["score"], 4),
+                ))
 
-        results.sort(key=lambda r: r["score"], reverse=True)
+        results.sort(key=lambda r: r.score, reverse=True)
         return results[:top_k]
 
     def close(self) -> None:

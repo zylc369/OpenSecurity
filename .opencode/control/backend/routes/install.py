@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import dataclass
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -40,6 +42,15 @@ def _install_command(pip_name: str) -> list[str] | None:
 router = APIRouter(prefix="/api/install", tags=["install"])
 
 
+@dataclass
+class InstallPackageResult:
+    success: bool
+    package: str
+    stdout: str = ""
+    stderr: str = ""
+    error: "str | None" = None
+
+
 # 白名单唯一数据源 = detect_py_deps.PYTHON_PACKAGES（one_click_installable：
 # installer=pip 且平台适用的全部包）。加包只改清单，本路由零改动。
 # installer=conda 的包（sage）不可 pip，天然不在白名单。
@@ -51,7 +62,7 @@ class InstallRequest(BaseModel):
 
 
 @router.post("")
-async def install_package(req: InstallRequest) -> dict:
+async def install_package(req: InstallRequest) -> "InstallPackageResult":
     """同步执行 pip install，返回完整 stdout + stderr。
 
     安全：包名必须在白名单内。
@@ -73,15 +84,15 @@ async def install_package(req: InstallRequest) -> dict:
         )
         if r.returncode == 0:
             invalidate_deps_snapshot()  # 装包成功 → 快照立即失效（下条消息见新状态）
-        return {
-            "success": r.returncode == 0,
-            "package": pkg,
-            "stdout": r.stdout[-500:],  # 截取最后 500 字符避免响应过大
-            "stderr": r.stderr[-500:],
-        }
+        return InstallPackageResult(
+            success=r.returncode == 0,
+            package=pkg,
+            stdout=r.stdout[-500:],  # 截取最后 500 字符避免响应过大
+            stderr=r.stderr[-500:],
+        )
     except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "package": pkg,
-            "error": "安装超时（1800s）",
-        }
+        return InstallPackageResult(
+            success=False,
+            package=pkg,
+            error="安装超时（1800s）",
+        )

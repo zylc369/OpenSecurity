@@ -10,7 +10,7 @@ IPC 发现：control_url.py（读注入的 IPC 地址，事实来源）；控制
 """
 import json
 from contextlib import asynccontextmanager
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -19,7 +19,7 @@ from pydantic import Field
 # control_url 与后端模块的导入路径由启动方注入（插件 mcp-manager 设置 PYTHONPATH）
 from control_url import resolve_control, make_control_client
 
-_CONTROL: dict = {"base": None}
+_CONTROL: "dict[str, str | None]" = {"base": None}
 _client: httpx.AsyncClient | None = None
 
 
@@ -45,7 +45,7 @@ async def _lifespan(server: FastMCP):
         _client = None
 
 
-async def _post(path: str, payload: dict) -> dict:
+async def _post(path: str, payload: "dict[str, object]") -> "dict[str, object]":
     """POST 控制台返回 dict；HTTP 层失败返回降级空结构。"""
     if _client is None:
         return {"edges": [], "nodes": [], "episodes": [], "error": "MCP 未完成初始化（lifespan 未启动）"}
@@ -53,7 +53,7 @@ async def _post(path: str, payload: dict) -> dict:
         r = await _client.post(f"{_base_url()}{path}", json=payload)
         _CONTROL["base"] = None if r.status_code in (404, 502) else _CONTROL["base"]
         if r.status_code == 200:
-            return r.json()
+            return cast("dict[str, object]", r.json())  # 控制台 SearchPayload JSON——跨进程 transit
         return {"edges": [], "nodes": [], "episodes": [], "error": f"控制台返回 {r.status_code}: {r.text[:200]}"}
     except httpx.HTTPError as e:
         _CONTROL["base"] = None  # 清缓存 → 下次重新解析端口（控制台重启自愈）

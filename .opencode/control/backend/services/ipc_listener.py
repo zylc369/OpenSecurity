@@ -250,7 +250,7 @@ class IpcListener:
         import pywintypes
 
         try:
-            handle = win32pipe.CreateNamedPipe(
+            handle = win32pipe.CreateNamedPipe(  # pyright: ignore[reportUnknownMemberType] —— pywin32 stub 不精确（CI 裁决）
                 ConfigManager.get_instance().ipc_addr(),
                 win32pipe.PIPE_ACCESS_DUPLEX | win32pipe.FILE_FLAG_FIRST_PIPE_INSTANCE,
                 win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE | win32pipe.PIPE_WAIT,
@@ -272,7 +272,7 @@ class IpcListener:
         logger.info("IPC accept loop: 启动（unix）")
         while True:
             try:
-                conn, _ = srv.accept()
+                conn, _ = srv.accept()  # pyright: ignore[reportAny] —— typeshed socket accept 元组
             except OSError as e:
                 logger.info("IPC accept loop: 退出（监听 socket 关闭: %s）", e)
                 return  # 进程退出
@@ -308,13 +308,13 @@ class IpcListener:
                 # 返回 0=正常连接; 535=ERROR_PIPE_CONNECTED（客户端先行连入的
                 # 时序竞争，pywin32 以返回值而非异常暴露——win32pipe.i @comm）
                 # ——两者均"连接就绪"继续服务; 其余错误抛异常退出。
-                win32pipe.ConnectNamedPipe(handle, None)
+                win32pipe.ConnectNamedPipe(handle, None)  # pyright: ignore[reportUnknownMemberType] —— pywin32 stub（CI 裁决）
             except _PLATFORM_OS_ERRORS as e:
                 logger.info("IPC accept loop: 退出（%s）", e)
                 return
             logger.info("IPC accept: 管道客户端连入")
             try:
-                nxt = win32pipe.CreateNamedPipe(
+                nxt = win32pipe.CreateNamedPipe(  # pyright: ignore[reportUnknownMemberType] —— pywin32 stub 不精确（CI 裁决）
                     ConfigManager.get_instance().ipc_addr(),
                     win32pipe.PIPE_ACCESS_DUPLEX,
                     win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_READMODE_BYTE | win32pipe.PIPE_WAIT,
@@ -356,7 +356,7 @@ class IpcListener:
                 # 管道 → 上游
                 try:
                     # size=1 而非 0：C 层 malloc(0) 可能返回 NULL 误报 NoMemory
-                    _, avail, _ = win32pipe.PeekNamedPipe(handle, 1)
+                    _, avail, _ = win32pipe.PeekNamedPipe(handle, 1)  # pyright: ignore[reportUnknownMemberType, reportAny] —— pywin32 stub（CI 裁决）
                 except _PLATFORM_OS_ERRORS:
                     break  # 管道断开
                 if avail:

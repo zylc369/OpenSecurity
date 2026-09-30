@@ -22,6 +22,7 @@ import argparse
 import logging
 import os
 import subprocess
+from typing import cast
 import sys
 from dataclasses import dataclass, field
 
@@ -172,9 +173,11 @@ def _main() -> int:
                         help="目标架构（默认 both; amd64 走 QEMU 模拟，约 40min）")
     parser.add_argument("--no-smoke", action="store_true", help="跳过构建后轻量冒烟")
     args = parser.parse_args()
+    arch = cast("str", args.arch)
+    no_smoke = cast("bool", args.no_smoke)
 
-    print(f"[*] 构建 {ToolboxBuilder.PREFIX}-core / {ToolboxBuilder.PREFIX}-full  arch={args.arch}（终端实时透传 docker build 输出）")
-    report = ToolboxBuilder.build_all(arch=args.arch, smoke=not args.no_smoke, interactive=True)
+    print(f"[*] 构建 {ToolboxBuilder.PREFIX}-core / {ToolboxBuilder.PREFIX}-full  arch={arch}（终端实时透传 docker build 输出）")
+    report = ToolboxBuilder.build_all(arch=arch, smoke=not no_smoke, interactive=True)
     print(f"[{'✓' if report.ok else '✗'}] {report.summary()}")
     return 0 if report.ok else 1
 

@@ -22,9 +22,12 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, TYPE_CHECKING, cast
 
 from services.config_manager import ConfigManager
+
+if TYPE_CHECKING:
+    import threading
 
 
 # ─── 已知容器/镜像清单 ───────────────────────────────────
@@ -59,7 +62,7 @@ class DockerManager:
     """Docker 操作收口（全局单例; 容器/镜像清单为类静态字段——其他模块禁直调 docker CLI）。"""
 
     _instance: "DockerManager | None" = None
-    _instance_lock = __import__("threading").Lock()
+    _instance_lock: "threading.Lock" = __import__("threading").Lock()  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
 
 
     KNOWN_CONTAINERS: list[KnownContainer] = [
@@ -117,7 +120,7 @@ class DockerManager:
 
 
     @staticmethod
-    def _run_docker(args: list[str], timeout: int = 10) -> subprocess.CompletedProcess:
+    def _run_docker(args: list[str], timeout: int = 10) -> subprocess.CompletedProcess[str]:
         """执行 docker 命令，返回 CompletedProcess。失败抛 CalledProcessError。"""
         return subprocess.run(
             ["docker"] + args,
@@ -147,7 +150,7 @@ class DockerManager:
     # ─── 容器操作 ─────────────────────────────────────────────
 
     @staticmethod
-    def list_containers(all_: bool = False) -> list[dict]:
+    def list_containers(all_: bool = False) -> "list[object]":
         """列出容器。
 
         Args:
@@ -160,9 +163,9 @@ class DockerManager:
             args.append("-a")
         try:
             r = DockerManager._run_docker(args, timeout=10)
-            # 每行一个 JSON
+            # 每行一个 JSON——docker {{json .}} 原样转发（真透传边界，不检查内容）
             import json
-            return [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
+            return cast("list[object]", [json.loads(line) for line in r.stdout.splitlines() if line.strip()])
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return []
 
@@ -237,7 +240,7 @@ class DockerManager:
     # ─── 镜像操作 ─────────────────────────────────────────────
 
     @staticmethod
-    def list_images() -> list[dict]:
+    def list_images() -> "list[object]":
         """列出本地镜像。"""
         if not DockerManager.is_daemon_running():
             return []
@@ -247,7 +250,7 @@ class DockerManager:
                 timeout=10,
             )
             import json
-            return [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
+            return cast("list[object]", [json.loads(line) for line in r.stdout.splitlines() if line.strip()])
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return []
 

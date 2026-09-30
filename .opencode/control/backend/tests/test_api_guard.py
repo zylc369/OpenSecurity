@@ -11,7 +11,7 @@
 用 starlette TestClient 的 app 直接构建 + ASGI 手动调用太重——此处用
 monkeypatch _is_local 间接控制（单元级验证 dispatch 逻辑分支）。
 """
-# pyright: reportMissingParameterType=false
+# pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
 import os

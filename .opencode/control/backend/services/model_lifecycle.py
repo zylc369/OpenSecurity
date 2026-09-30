@@ -30,7 +30,7 @@ import threading
 
 import time
 from dataclasses import dataclass
-from typing import Callable, TypeVar
+from typing import cast, Callable, TypeVar
 
 # 模块级 logger（原类体绑定——类命名空间不在方法名字查找链）
 logger = logging.getLogger(__name__ + ".ManagedModel")
@@ -84,7 +84,7 @@ class ModelWorker:
     """
 
     def __init__(self, name: str) -> None:
-        self._queue: "queue.Queue[tuple[Callable[[], object], concurrent.futures.Future]]" = queue.Queue()
+        self._queue: "queue.Queue[tuple[Callable[[], object], concurrent.futures.Future[object]]]" = queue.Queue()
         self._thread: threading.Thread | None = None
         self._start_lock = threading.Lock()
         self._name = name
@@ -111,7 +111,7 @@ class ModelWorker:
         """
         self._ensure_started()
         fut: "concurrent.futures.Future[T]" = concurrent.futures.Future()
-        self._queue.put((fn, fut))
+        self._queue.put((fn, cast("concurrent.futures.Future[object]", fut)))  # Future 不变式——边界统一 object
         return fut.result()
 
     def post(self, fn: Callable[[], object]) -> "concurrent.futures.Future[object]":

@@ -18,7 +18,7 @@ from pydantic import Field
 # control_url 与后端模块的导入路径由启动方注入（插件 mcp-manager 设置 PYTHONPATH）
 from control_url import resolve_control, make_control_client
 
-_CONTROL: dict = {"base": None}
+_CONTROL: "dict[str, str | None]" = {"base": None}
 _client: httpx.AsyncClient | None = None
 
 
@@ -45,7 +45,7 @@ async def _lifespan(server: FastMCP):
 mcp = FastMCP("proxy", lifespan=_lifespan)
 
 
-async def _call(method: str, path: str, json_body: dict | None = None) -> str:
+async def _call(method: str, path: str, json_body: "dict[str, object] | None" = None) -> str:
     """统一转发：200 返回 JSON 文本；错误返回明确错误说明（含自愈重解析）。"""
     if _client is None:
         return "[错误] MCP 未完成初始化（lifespan 未启动）"

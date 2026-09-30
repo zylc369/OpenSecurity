@@ -19,9 +19,18 @@ logger = logging.getLogger(__name__)
 import asyncio
 import queue
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Coroutine
+from typing import TYPE_CHECKING, Callable, Coroutine, TypeAlias, TypeVar, cast
+
+if TYPE_CHECKING:
+    from graphiti_core.graphiti import Graphiti
+    from graphiti_core.nodes import EpisodicNode
+    from graphiti_core.search.search_config import SearchConfig, SearchResults
+    from graphiti_core.search.search_filters import SearchFilters
+
+_T = TypeVar("_T")
+GraphitiFactoryResult: TypeAlias = "tuple[Graphiti | None, str | None]"
 
 MAX_CONCURRENT = 10
 BRIDGE_TIMEOUT = 600.0  # 桥接调用上限（覆盖 daemon 冷启动 180s + bolt 90s + 初始化）
@@ -43,6 +52,58 @@ class DeleteGroup:
     group_id: str
 
 
+# ── 搜索结果模型（与 MCP 工具原返回结构逐字段一致; 字段名=JSON 键名）─────────
+
+
+@dataclass
+class EdgePayload:
+    name: str
+    fact: str
+    uuid: str
+    created_at: str | None
+    source_node_uuid: str
+    target_node_uuid: str
+
+
+@dataclass
+class NodePayload:
+    name: str
+    uuid: str
+    labels: list[str]
+    summary: str | None
+    created_at: str | None
+
+
+@dataclass
+class EpisodePayload:
+    # source 为 graphiti 的 EpisodeType 枚举，此处存其 .value 字符串
+    # （急切字符串化——与原先 FastAPI 序列化枚举的输出逐字相同，且免去
+    #   响应模型对枚举类型的运行时解析依赖）
+    source: str | None
+    content: str | None
+    source_description: str | None
+    created_at: str | None
+    uuid: str | None
+
+
+@dataclass
+class SearchPayload:
+    query: str | None = None
+    edges: list[EdgePayload] = field(default_factory=list)
+    edge_scores: list[float] = field(default_factory=list)
+    nodes: list[NodePayload] = field(default_factory=list)
+    node_scores: list[float] = field(default_factory=list)
+    episodes: list[EpisodePayload] = field(default_factory=list)
+    episode_scores: list[float] = field(default_factory=list)
+    error: str | None = None
+
+
+def _episode_source_value(ep: "EpisodicNode") -> "str | None":
+    """EpisodeType 枚举 → 其字符串值（typeshed 的 Enum.value 是 Any，cast 收口）。"""
+    src = getattr(ep, "source", None)
+    return cast("str", src.value) if src is not None else None
+
+
 class EventStoreService:
     """常驻事件库服务（全局单例，get_instance() 获取）。
 
@@ -54,7 +115,7 @@ class EventStoreService:
     _instance: "EventStoreService | None" = None
     _instance_lock = threading.Lock()
 
-    def __new__(cls, graphiti_factory: Callable[[], Any] | None = None) -> "EventStoreService":
+    def __new__(cls, graphiti_factory: Callable[[], GraphitiFactoryResult] | None = None) -> "EventStoreService":
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
@@ -68,10 +129,10 @@ class EventStoreService:
         return cls()
 
     @classmethod
-    def _create_fresh(cls, *args: Any, **kwargs: Any):
+    def _create_fresh(cls, graphiti_factory: Callable[[], GraphitiFactoryResult] | None = None):
         """构造独立实例（绕过单例——测试 fake 注入用; 生产代码禁用）。"""
         inst = object.__new__(cls)
-        inst._init_once(*args, **kwargs)
+        inst._init_once(graphiti_factory)
         return inst
 
     @classmethod
@@ -89,24 +150,21 @@ class EventStoreService:
 
 
     @staticmethod
-    def empty_result(error: str | None = None) -> dict:
+    def empty_result(error: str | None = None) -> "SearchPayload":
         """搜索降级空返回（初始化失败/异常时端点层使用）。"""
-        payload: dict[str, Any] = {"edges": [], "nodes": [], "episodes": []}
-        if error:
-            payload["error"] = error
-        return payload
+        return SearchPayload(error=error)
 
-    def _init_once(self, graphiti_factory: Callable[[], Any] | None = None) -> None:
+    def _init_once(self, graphiti_factory: Callable[[], GraphitiFactoryResult] | None = None) -> None:
         self._graphiti_factory = graphiti_factory
 
         self._queue: queue.Queue[EventEntry | DeleteGroup | None] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._reader: threading.Thread | None = None
         self._loop_ready = threading.Event()   # _loop 就绪信号（消除 start 竞态）
-        self._graphiti = None    # 仅专用循环内触碰
+        self._graphiti: "Graphiti | None" = None    # 仅专用循环内触碰
         self._loop: asyncio.AbstractEventLoop | None = None  # 专用循环（_thread_main 设置）
         self._stop_event: asyncio.Event | None = None        # 专用循环内创建
-        self._tasks: list[asyncio.Task] = []                 # 专用循环内维护
+        self._tasks: "list[asyncio.Task[None]]" = []         # 专用循环内维护
         self._semaphore: asyncio.Semaphore | None = None     # 专用循环内创建
 
     # ── 生命周期 ──────────────────────────────────────────
@@ -157,7 +215,7 @@ class EventStoreService:
 
     # ── 跨循环桥（任意线程/循环 → 专用循环）───────────────
 
-    async def _on_loop(self, coro: Coroutine[Any, Any, Any]):
+    async def _on_loop(self, coro: "Coroutine[object, object, _T]") -> "_T":
         """在专用事件循环上执行 coro（FastAPI 协程/worker 线程均可调用）。"""
         if self._loop is None or self._thread is None or not self._thread.is_alive():
             self.start()
@@ -169,7 +227,7 @@ class EventStoreService:
             fut.cancel()
             raise RuntimeError(f"事件库操作超时（{BRIDGE_TIMEOUT:.0f}s，可能卡在 Docker 冷启动）")
 
-    async def _ensure_graphiti(self):
+    async def _ensure_graphiti(self) -> "Graphiti":
         """惰性初始化（专用循环内执行）：Docker → 容器 → Graphiti → 索引。
 
         graphiti_factory 注入（测试）时跳过基础设施 ensure——fake 场景
@@ -289,8 +347,12 @@ class EventStoreService:
 
     # ── 读路径（5 种搜索；FastAPI 协程调用，经桥进专用循环）──
 
-    async def _search(self, **kwargs: Any) -> Any:
-        """graphiti.search_ 的桥接执行（kwargs 原样透传）。
+    async def _search(
+        self, query: str, group_ids: "list[str]", config: "SearchConfig",
+        search_filter: "SearchFilters | None" = None,
+        bfs_origin_node_uuids: "list[str] | None" = None,
+    ) -> "SearchResults":
+        """graphiti.search_ 的桥接执行（显式参数透传）。
 
         连接类失败（容器停/daemon 死）→ 重置实例重试一次：
         重试路径的 _ensure_graphiti 会走完整 ensure 链（拉 daemon → 起容器 →
@@ -298,16 +360,22 @@ class EventStoreService:
         """
         try:
             graphiti = await self._on_loop(self._ensure_graphiti())
-            return await self._on_loop(graphiti.search_(**kwargs))
+            return await self._on_loop(graphiti.search_(
+                query=query, group_ids=group_ids, config=config,
+                search_filter=search_filter,
+                bfs_origin_node_uuids=bfs_origin_node_uuids))
         except Exception as e:
             logger.warning("搜索失败（reset 后重试）: %s", e)
             await self._on_loop(self._reset_graphiti())
             graphiti = await self._on_loop(self._ensure_graphiti())
-            return await self._on_loop(graphiti.search_(**kwargs))
+            return await self._on_loop(graphiti.search_(
+                query=query, group_ids=group_ids, config=config,
+                search_filter=search_filter,
+                bfs_origin_node_uuids=bfs_origin_node_uuids))
 
     async def search_time(self, query: str, group_id: str,
                           time_start: str = "", time_end: str = "",
-                          max_results: int = 15) -> dict:
+                          max_results: int = 15) -> "SearchPayload":
         from graphiti_core.search.search_config import (
             SearchConfig, EdgeSearchConfig, NodeSearchConfig,
             EdgeSearchMethod, NodeSearchMethod,
@@ -340,7 +408,7 @@ class EventStoreService:
                                           center_node_uuid: str, max_depth: int = 2,
                                           node_labels: list[str] | None = None,
                                           edge_types: list[str] | None = None,
-                                          max_results: int = 20) -> dict:
+                                          max_results: int = 20) -> "SearchPayload":
         """从中心实体 BFS 遍历关系。
 
         注意: graphiti 的 BFS 走 bfs_origin_node_uuids 参数（列表），
@@ -364,7 +432,7 @@ class EventStoreService:
         return self._results_payload(results, query)
 
     async def search_diverse(self, query: str, group_id: str,
-                             diversity_level: str = "medium", max_results: int = 10) -> dict:
+                             diversity_level: str = "medium", max_results: int = 10) -> "SearchPayload":
         from graphiti_core.search.search_config import (
             SearchConfig, EdgeSearchConfig, EdgeSearchMethod, EdgeReranker,
         )
@@ -382,7 +450,7 @@ class EventStoreService:
         return self._results_payload(results, query)
 
     async def search_episode_context(self, query: str, group_id: str,
-                                     max_results: int = 10) -> dict:
+                                     max_results: int = 10) -> "SearchPayload":
         from graphiti_core.search.search_config import (
             SearchConfig, EpisodeSearchConfig, EpisodeSearchMethod,
         )
@@ -398,7 +466,7 @@ class EventStoreService:
 
     async def search_entities(self, query: str, group_id: str, node_labels: list[str],
                               min_mentions: int = 0, edge_types: list[str] | None = None,
-                              max_results: int = 25) -> dict:
+                              max_results: int = 25) -> "SearchPayload":
         from graphiti_core.search.search_config import (
             SearchConfig, NodeSearchConfig, NodeSearchMethod,
         )
@@ -430,34 +498,34 @@ class EventStoreService:
     # ── 结果格式化（与 MCP 工具原返回结构逐字段一致）────────
 
     @staticmethod
-    def _results_payload(results: Any, query: str) -> dict:
-        return {
-            "query": query,
-            "edges": [{
-                "name": e.name,
-                "fact": e.fact,
-                "uuid": e.uuid,
-                "created_at": e.created_at.isoformat() if e.created_at else None,
-                "source_node_uuid": e.source_node_uuid,
-                "target_node_uuid": e.target_node_uuid,
-            } for e in results.edges],
-            "edge_scores": list(results.edge_reranker_scores),
-            "nodes": [{
-                "name": n.name,
-                "uuid": n.uuid,
-                "labels": list(n.labels) if hasattr(n, "labels") else [],
-                "summary": getattr(n, "summary", None),
-                "created_at": n.created_at.isoformat() if hasattr(n, "created_at") and n.created_at else None,
-            } for n in results.nodes],
-            "node_scores": list(results.node_reranker_scores),
-            "episodes": [{
-                "source": getattr(ep, "source", None),
-                "content": getattr(ep, "content", None),
-                "source_description": getattr(ep, "source_description", None),
-                "created_at": ep.created_at.isoformat() if hasattr(ep, "created_at") and ep.created_at else None,
-                "uuid": getattr(ep, "uuid", None),
-            } for ep in results.episodes],
-            "episode_scores": list(results.episode_reranker_scores),
-        }
+    def _results_payload(results: "SearchResults", query: str) -> "SearchPayload":
+        return SearchPayload(
+            query=query,
+            edges=[EdgePayload(
+                name=e.name,
+                fact=e.fact,
+                uuid=e.uuid,
+                created_at=e.created_at.isoformat() if e.created_at else None,
+                source_node_uuid=e.source_node_uuid,
+                target_node_uuid=e.target_node_uuid,
+            ) for e in results.edges],
+            edge_scores=list(results.edge_reranker_scores),
+            nodes=[NodePayload(
+                name=n.name,
+                uuid=n.uuid,
+                labels=list(n.labels) if hasattr(n, "labels") else [],
+                summary=getattr(n, "summary", None),
+                created_at=n.created_at.isoformat() if hasattr(n, "created_at") and n.created_at else None,
+            ) for n in results.nodes],
+            node_scores=list(results.node_reranker_scores),
+            episodes=[EpisodePayload(
+                source=_episode_source_value(ep),
+                content=getattr(ep, "content", None),
+                source_description=getattr(ep, "source_description", None),
+                created_at=ep.created_at.isoformat() if hasattr(ep, "created_at") and ep.created_at else None,
+                uuid=getattr(ep, "uuid", None),
+            ) for ep in results.episodes],
+            episode_scores=list(results.episode_reranker_scores),
+        )
 
 

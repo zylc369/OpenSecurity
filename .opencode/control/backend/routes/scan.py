@@ -4,28 +4,20 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from fastapi import APIRouter, Query
+from fastapi.responses import JSONResponse
 
-from services.scanner import Scanner
+from services.scanner import Scanner, ScanResult
 
 router = APIRouter(prefix="/api/scan", tags=["scan"])
 
 
 @router.get("")
-async def scan_all(force_refresh: bool = Query(False)) -> dict:
+async def scan_all(force_refresh: bool = Query(False)) -> JSONResponse:
     """全量扫描所有 agent + 全局资源。
 
-    Args:
-        force_refresh: 强制刷新缓存。
+    ScanResult.global_ 字段（"global" 是 Python 关键字）序列化时键名归位。
     """
     result = await Scanner.get_instance().scan_all(force_refresh=force_refresh)
-    return {
-        "agents": {agent: [asdict(t) for t in tools]
-                   for agent, tools in result.agents.items()},
-        "global": {
-            "docker": asdict(result.global_.docker),
-            "required_configs": {c.key: asdict(c) for c in result.global_.required_configs},
-            "python_packages": [asdict(p) for p in result.global_.python_packages],
-            "models": [asdict(m) for m in result.global_.models],
-        },
-        "timestamp": result.timestamp,
-    }
+    payload = asdict(result)
+    payload["global"] = payload.pop("global_")
+    return JSONResponse(content=payload)

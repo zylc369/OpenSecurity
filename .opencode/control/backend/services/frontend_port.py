@@ -32,7 +32,7 @@ class FrontendPortRegistry:
     """前端可达端口的注册、查询与生命周期（全局单例）。"""
 
     _instance: "FrontendPortRegistry | None" = None
-    _instance_lock = __import__("threading").Lock()
+    _instance_lock: "threading.Lock" = __import__("threading").Lock()  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
 
     def __new__(cls) -> "FrontendPortRegistry":
         if cls._instance is None:
@@ -53,10 +53,10 @@ class FrontendPortRegistry:
             cls._instance = None
 
     def _init_once(self) -> None:
-        self._lock = __import__("threading").Lock()
+        self._lock: "threading.Lock" = __import__("threading").Lock()  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
         self._tcp_port: int | None = None        # 控制台浏览器通道（bind 后注册）
         self._vite_port: int | None = None       # vite dev（IPC 上报）
-        self._launch_lock = __import__("threading").Lock()  # vite 拉起防并发双拉
+        self._launch_lock: "threading.Lock" = __import__("threading").Lock()  # vite 拉起防并发双拉  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
 
     @staticmethod
     def _port_alive(port: int) -> bool:

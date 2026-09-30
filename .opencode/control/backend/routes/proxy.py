@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import logging
 
+from dataclasses import dataclass
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services.config_manager import ConfigManager
+from services.proxy_pool import ProxyPoolStatus
 
 logger = logging.getLogger(__name__)
 from services.proxy_pool import JuliangError, ProxyPool
@@ -38,6 +41,32 @@ class RotateBody(BaseModel):
     reason: str = "agent_rotate"
 
 
+@dataclass
+class RotateResult:
+    current: str
+    expire_in_sec: int
+    surplus: int
+    reason: str
+
+
+@dataclass
+class ModeResult:
+    mode: str
+
+
+@dataclass
+class DomainCoolResult:
+    ok: bool
+    domain: str
+
+
+@dataclass
+class ProxyEntryResult:
+    proxy: str
+    mode: str
+    warning: str | None
+
+
 def _relay_port() -> int:
     """relay 真实端口：优先 relay 注册值（步骤 3a 起生效），否则配置起点。"""
     try:
@@ -49,15 +78,15 @@ def _relay_port() -> int:
 
 
 @router.get("/status")
-async def proxy_status() -> dict:
+async def proxy_status() -> ProxyPoolStatus:
     """全量状态（含 rotate_history——判定 SOP 第一步，铁律一）。"""
     st = ProxyPool.get_instance().status()
-    st["relay_port"] = _relay_port()
+    st.relay_port = _relay_port()
     return st
 
 
 @router.post("/rotate")
-async def proxy_rotate(body: RotateBody | None = None) -> dict:
+async def proxy_rotate(body: RotateBody | None = None) -> "RotateResult":
     """换出口。reason=bad_ip 时旧 IP 进黑名单（SOP 场景 C 烂 IP 淘汰）。
     成功后触发存量隧道优雅关闭（在飞响应送达，新连接走新出口）。"""
     reason = (body.reason if body else None) or "agent_rotate"
@@ -70,12 +99,12 @@ async def proxy_rotate(body: RotateBody | None = None) -> dict:
     except JuliangError as e:
         raise HTTPException(422, str(e)) from e
     st = ProxyPool.get_instance().status()
-    return {"current": info.ip, "expire_in_sec": st["expire_in_sec"],
-            "surplus": st["surplus"], "reason": reason}
+    return RotateResult(current=info.ip, expire_in_sec=st.expire_in_sec,
+                        surplus=st.surplus, reason=reason)
 
 
 @router.post("/mode")
-async def proxy_mode(body: ModeBody) -> dict:
+async def proxy_mode(body: ModeBody) -> "ModeResult":
     """全局粗开关 direct↔proxy（校验枚举，记 history）。切换后优雅关闭存量。"""
     if body.mode not in ("direct", "proxy"):
         raise HTTPException(400, "mode 必须为 direct 或 proxy")
@@ -86,11 +115,11 @@ async def proxy_mode(body: ModeBody) -> dict:
     except Exception as e:
         import logging
         logging.getLogger("proxy_routes").debug("模式切换后关闭存量隧道跳过（relay 未启动属正常）: %r", e)
-    return {"mode": result}
+    return ModeResult(mode=result)
 
 
 @router.post("/domain_limited")
-async def proxy_domain_limited(body: DomainLimitedBody) -> dict:
+async def proxy_domain_limited(body: DomainLimitedBody) -> "DomainCoolResult":
     """登记域名冷却（url 必传；归一化提取域名后入表，§5.1）。"""
     if not body.url or not body.url.strip():
         raise HTTPException(400, "url 必传")
@@ -98,20 +127,20 @@ async def proxy_domain_limited(body: DomainLimitedBody) -> dict:
         domain = ProxyPool.get_instance().domain_cool(body.url, body.minutes)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    return {"ok": True, "domain": domain}
+    return DomainCoolResult(ok=True, domain=domain)
 
 
 @router.get("/entry")
-async def proxy_entry() -> dict:
+async def proxy_entry() -> "ProxyEntryResult":
     """代理入口（端口读真实值）。仅 proxy 模式下确保池内有可用 IP——
     direct 模式流量走本机不需要 IP，避免白白提取浪费配额（冷却域场景由
     relay 建隧道时惰性提取兜底）。"""
     pool = ProxyPool.get_instance()
     warning = None
-    if pool.status()["mode"] == "proxy":
+    if pool.status().mode == "proxy":
         try:
             await pool.get()
         except JuliangError as e:
             warning = str(e)  # 提取失败不阻塞入口返回（direct 可用，附警告）
-    return {"proxy": f"http://127.0.0.1:{_relay_port()}", "mode": pool.status()["mode"],
-            "warning": warning}
+    return ProxyEntryResult(proxy=f"http://127.0.0.1:{_relay_port()}", mode=pool.status().mode,
+                            warning=warning)

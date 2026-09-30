@@ -24,13 +24,17 @@ from services.detect_py_deps import PyPkgStatus
 from services.detect_tools import ToolStatus
 from services.docker_manager import DockerGlobal
 from services.model_assets import ModelAssetStatus
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import threading
 
 
 @dataclass
 class GlobalResources:
     """全局资源（docker + 配置 + Python 包 + 模型）。"""
     docker: DockerGlobal = field(default_factory=DockerGlobal.unavailable)
-    required_configs: list = field(default_factory=list)   # ConfigManager.get_instance().required_status 返回
+    required_configs: "list[ConfigManager.ConfigStatusView]" = field(default_factory=list)
     python_packages: list[PyPkgStatus] = field(default_factory=list)
     models: list[ModelAssetStatus] = field(default_factory=list)
 
@@ -47,7 +51,7 @@ class Scanner:
     """（全局单例，get_instance() 获取。）"""
 
     _instance: "Scanner | None" = None
-    _instance_lock = __import__("threading").Lock()
+    _instance_lock: "threading.Lock" = __import__("threading").Lock()  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
 
     def __new__(cls) -> "Scanner":
         if cls._instance is None:

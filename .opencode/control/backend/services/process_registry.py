@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 import time
+from typing import cast
 from dataclasses import asdict, dataclass
 
 import psutil
@@ -101,7 +102,7 @@ class ProcessRegistryUtil:
         """安全读取 pid 的 RSS(MB)、命令行、footprint(MB)。进程消失返回 (None, "", None)。"""
         try:
             p = psutil.Process(pid)
-            mem = round(p.memory_info().rss / 1048576, 1)
+            mem = round(cast(int, p.memory_info().rss) / 1048576, 1)  # psutil 字段 stub 为 Any——cast 恒等
             cmd = " ".join(p.cmdline())[:200]
             return mem, cmd, ProcessRegistryUtil._footprint_mb(pid)
         except (psutil.NoSuchProcess, psutil.AccessDenied):

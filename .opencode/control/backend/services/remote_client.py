@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import Any, TypedDict, cast
 
 import httpx
 
@@ -22,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 class RemoteUnavailable(RuntimeError):
     """远程节点不可用（连接/超时/鉴权/服务端错误/响应畸形统一面）。"""
+
+
+class _RemoteHealthJson(TypedDict, total=False):
+    """远程 /api/remote/health 响应（解析边界模型）。"""
+    service: str
+    version: str
+    models: "list[dict[str, object]]"
 
 
 @dataclass(frozen=True)
@@ -62,7 +70,7 @@ class RemoteConsoleClient:
             h["Authorization"] = f"Bearer {self._token}"
         return h
 
-    def _post_json(self, path: str, payload: dict, timeout: float | None = None):
+    def _post_json(self, path: str, payload: dict[str, Any], timeout: float | None = None):
         """POST 并解析 JSON; 任何失败统一 RemoteUnavailable。"""
         url = f"{self._base}{path}"
         try:
@@ -81,7 +89,7 @@ class RemoteConsoleClient:
             raise RemoteUnavailable(f"连接远程失败: {e}") from e
         return self._parse(r, url)
 
-    def _put_json(self, path: str, payload: dict, timeout: float | None = None):
+    def _put_json(self, path: str, payload: dict[str, Any], timeout: float | None = None):
         """PUT 并解析 JSON; 任何失败统一 RemoteUnavailable。"""
         url = f"{self._base}{path}"
         try:
@@ -92,7 +100,7 @@ class RemoteConsoleClient:
         return self._parse(r, url)
 
     @staticmethod
-    def _parse(r: httpx.Response, url: str) -> dict:
+    def _parse(r: httpx.Response, url: str) -> dict[str, Any]:
         if r.status_code == 401:
             raise RemoteUnavailable(f"远程拒绝令牌（401）: {url}")
         if r.status_code >= 500:
@@ -100,7 +108,7 @@ class RemoteConsoleClient:
         if r.status_code >= 400:
             raise RemoteUnavailable(f"远程客户端错误（{r.status_code}）: {r.text[:200]}")
         try:
-            return r.json()
+            return cast("dict[str, Any]", r.json())  # httpx json() 边界——cast 收口
         except ValueError as e:
             raise RemoteUnavailable(f"远程响应非 JSON: {url}: {e}") from e
 
@@ -108,14 +116,14 @@ class RemoteConsoleClient:
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """向量化（POST /embed，兼容 sentence-transformers 调用约定）。"""
-        data = self._post_json("/embed", {"inputs": texts})
+        data = cast("list[list[float]]", self._post_json("/embed", {"inputs": texts}))  # 运行时恒等; 形状由下方 isinstance 守卫验证
         if not isinstance(data, list) or (data and not isinstance(data[0], list)):
             raise RemoteUnavailable(f"远程 /embed 响应畸形: {str(data)[:120]}")
         return data
 
     def rerank(self, query: str, texts: list[str]) -> list[float]:
         """重排序（POST /rerank）。"""
-        data = self._post_json("/rerank", {"query": query, "texts": texts})
+        data = cast("list[float]", self._post_json("/rerank", {"query": query, "texts": texts}))  # 同上
         if not isinstance(data, list):
             raise RemoteUnavailable(f"远程 /rerank 响应畸形: {str(data)[:120]}")
         return data
@@ -136,7 +144,7 @@ class RemoteConsoleClient:
         供心跳周期调用——延迟纳入返回值（前端健康度展示）。
         """
         t0 = time.monotonic()
-        data = self._get_json("/api/remote/health", timeout=self._probe_timeout)
+        data = cast("_RemoteHealthJson", self._get_json("/api/remote/health", timeout=self._probe_timeout))
         latency = round((time.monotonic() - t0) * 1000, 1)
         models = [
             ModelFingerprint(
@@ -155,22 +163,22 @@ class RemoteConsoleClient:
 
     # ─── 节点管理转发（主控代理调远程节点，routes/remote.py 用）───
 
-    def get_node_config(self) -> dict:
+    def get_node_config(self) -> "dict[str, str]":
         """读取远程节点的三项节点配置。"""
-        return self._get_json("/api/remote/node-config")
+        return cast("dict[str, str]", self._get_json("/api/remote/node-config"))
 
-    def put_node_config(self, updates: dict[str, str]) -> dict:
+    def put_node_config(self, updates: dict[str, str]) -> "dict[str, object]":
         """更新远程节点配置（PUT /api/remote/node-config，仅三 KEY）。
 
         载荷契约: {"configs": {...}}（NodeConfigUpdate pydantic 模型）。
         """
-        return self._put_json("/api/remote/node-config", {"configs": updates})
+        return cast("dict[str, object]", self._put_json("/api/remote/node-config", {"configs": updates}))
 
-    def get_autostart(self) -> dict:
-        return self._get_json("/api/remote/autostart")
+    def get_autostart(self) -> "dict[str, object]":
+        return cast("dict[str, object]", self._get_json("/api/remote/autostart"))
 
-    def post_autostart(self, enable: bool) -> dict:
-        return self._post_json("/api/remote/autostart", {"enable": enable})
+    def post_autostart(self, enable: bool) -> "dict[str, object]":
+        return cast("dict[str, object]", self._post_json("/api/remote/autostart", {"enable": enable}))
 
     # ─── 生命周期 ─────────────────────────────────────────
 

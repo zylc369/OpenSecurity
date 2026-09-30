@@ -9,7 +9,7 @@
 
 非 Windows 平台直接跳过（exit 0）。
 """
-# pyright: reportMissingParameterType=false
+# pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
 import os

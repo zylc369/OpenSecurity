@@ -8,19 +8,29 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import unquote
 
+from dataclasses import dataclass
+
 from fastapi import APIRouter, Query
 
 router = APIRouter(prefix="/api/fs", tags=["fs"])
 
 
+@dataclass
+class PathCheckResult:
+    path: str
+    resolved: str
+    exists: bool
+    is_dir: bool
+
+
 @router.get("/check")
-async def check_path(path: str = Query(..., min_length=1)) -> dict:
+async def check_path(path: str = Query(..., min_length=1)) -> "PathCheckResult":
     """检查路径存在性（支持 ~ 展开）。"""
     resolved = str(Path(path).expanduser())
     p = Path(resolved)
-    return {
-        "path": path,
-        "resolved": resolved,
-        "exists": p.exists(),
-        "is_dir": p.is_dir() if p.exists() else False,
-    }
+    return PathCheckResult(
+        path=path,
+        resolved=resolved,
+        exists=p.exists(),
+        is_dir=p.is_dir() if p.exists() else False,
+    )

@@ -1,5 +1,5 @@
 """proxy MCP 协议级测试：工具清单/描述含判定 SOP/真实调用形态（REVIEW 补齐项 8）。"""
-# pyright: reportMissingParameterType=false
+# pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
 import json

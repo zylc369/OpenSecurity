@@ -16,7 +16,7 @@
   - 每个测试独立 group_id（e2er-<pid>-<tag>），结束清理，不污染生产库
   - 与 test_control.py（fake 单测层）分离：本套件全真依赖，失败即真问题
 """
-# pyright: reportMissingParameterType=false
+# pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
 import concurrent.futures
@@ -171,7 +171,14 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 async def main():
-    params = StdioServerParameters(command=sys.executable, args=[".opencode/mcp-servers/{shell}/server.py"])
+    # 与生产 mcp-manager 注入契约对齐：薄壳需要 PYTHONPATH=mcp-servers 才能
+    # import control_url（MCP SDK 的子进程环境默认过滤，不继承调用方 PYTHONPATH）
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=[".opencode/mcp-servers/{shell}/server.py"],
+        env={{"PYTHONPATH": ".opencode/mcp-servers",
+             "OPENSECURITY_CONTROL_IPC": "{SOCK_FILE}"}},
+    )
     async with stdio_client(params) as (r, w):
         async with ClientSession(r, w) as s:
             await s.initialize()

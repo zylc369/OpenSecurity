@@ -13,6 +13,7 @@ tag 语义:
 原理: 层内容寻址（相同内容 = 相同 ID），重复 push 只补 manifest JSON（几十 KB）。
 """
 from __future__ import annotations
+from typing import IO, TypedDict, cast
 
 import argparse
 import logging
@@ -22,6 +23,13 @@ import time
 import subprocess
 import sys
 from dataclasses import dataclass, field
+
+class _DockerConfigJson(TypedDict, total=False):
+    """~/.docker/config.json（解析边界模型）。"""
+    credsStore: str
+    auths: "dict[str, object]"
+
+
 
 
 
@@ -61,7 +69,8 @@ class ToolboxPusher:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             lines: list[str] = []
             assert proc.stdout is not None
-            for line in proc.stdout:
+            out = cast("IO[str]", proc.stdout)  # text=True 下 typeshed 标注为 IO[Any]——窄化
+            for line in out:
                 print(line, end="", flush=True)
                 lines.append(line)
             proc.wait()
@@ -95,13 +104,14 @@ class ToolboxPusher:
         import json
         try:
             with open(os.path.expanduser("~/.docker/config.json")) as fh:
-                cfg = json.load(fh)
+                cfg = cast("_DockerConfigJson", json.load(fh))
             store = cfg.get("credsStore") or ""
             if store:
                 h = subprocess.run([f"docker-credential-{store}", "list"],
                                    capture_output=True, text=True, timeout=15)
                 if h.returncode == 0:
-                    user = json.loads(h.stdout or "{}").get("https://index.docker.io/v1/")
+                    creds = cast("dict[str, str]", json.loads(h.stdout or "{}"))
+                    user = creds.get("https://index.docker.io/v1/")
                     if user:
                         return True, f"已登录 Docker Hub（{user}, credential helper）"
             if any("docker.io" in k for k in cfg.get("auths", {})):
@@ -118,7 +128,7 @@ class ToolboxPusher:
     @staticmethod
     def _images_ready() -> str | None:
         """本地 4 个实体 tag 齐备检查; 返回缺失描述（None=齐）。"""
-        missing = []
+        missing: "list[str]" = []
         for repo in (f"{ToolboxPusher.PREFIX}-core", f"{ToolboxPusher.PREFIX}-full"):
             for arch in ("arm64", "amd64"):
                 ref = f"{repo}:{arch}"
@@ -264,7 +274,7 @@ def _main() -> int:
     parser = argparse.ArgumentParser(description="工具箱镜像推送（双架构 manifest）")
     parser.add_argument("--ver", required=True, help="版本号，必填（如 --ver 1.0 或 --ver v1.1，等价）")
     args = parser.parse_args()
-    ver, err = ToolboxPusher._normalize_ver(args.ver)
+    ver, err = ToolboxPusher._normalize_ver(cast("str", args.ver))  # argparse Namespace 属性为 Any——cast 定型
     if err:
         print(f"[✗] {err}", file=sys.stderr)
         return 2

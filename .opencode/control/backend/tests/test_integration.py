@@ -9,7 +9,7 @@
 
 注意：自杀场景经 HEARTBEAT_* 小值 env 加速（超时 3s + sweep 1s + 宽限 5s）。
 """
-# pyright: reportMissingParameterType=false
+# pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
 import json

@@ -69,8 +69,8 @@ class RemoteLinkStatus:
     recover_streak: int
     last_ok_at: float | None           # wall clock 秒
     last_fail_reason: str | None
-    remote_health: dict | None         # service/version/models/latency_ms
-    local_models: dict                 # 三模型本地加载态
+    remote_health: "dict[str, object] | None"  # service/version/models/latency_ms
+    local_models: "dict[str, str]"  # 三模型本地加载态
     unload_countdown_sec: float | None # 恢复稳定期倒计时（未安排 → None）
 
 
@@ -83,7 +83,7 @@ class RemoteLinkService:
     STATE_REMOTE = "remote"
     STATE_DEGRADED = "degraded"
     _instance: "RemoteLinkService | None" = None
-    _instance_lock = __import__("threading").Lock()
+    _instance_lock: "threading.Lock" = __import__("threading").Lock()  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
 
     def __new__(cls) -> "RemoteLinkService":
         if cls._instance is None:
@@ -126,7 +126,7 @@ class RemoteLinkService:
         self._last_health: "RemoteHealthInfo | None" = None
         self._unload_timer: "threading.Timer | None" = None
         self._unload_due_at: float | None = None
-        self._task: "asyncio.Task | None" = None
+        self._task: "asyncio.Task[None] | None" = None
 
     def _read_config(self) -> tuple[str, bool, str]:
         """读远程三 KEY（ConfigManager 唯一读写方）。"""
@@ -394,7 +394,7 @@ class RemoteLinkService:
     def status(self) -> RemoteLinkStatus:
         url, enabled, token = self._read_config()
         with self._lock:
-            local_models: dict = {}
+            local_models: "dict[str, str]" = {}
             try:
                 local_models["embedder"] = self._model_inference().embedder_status().state
                 local_models["reranker"] = self._model_inference().reranker_status().state

@@ -32,9 +32,12 @@ import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
-from typing import Never
+from typing import cast, Never, TYPE_CHECKING
 
 from services.runtime_paths import RuntimePaths
+
+if TYPE_CHECKING:
+    import threading
 
 VENV_DIR = RuntimePaths.VENV_DIR
 
@@ -77,7 +80,7 @@ class PyDepsDetector:
     """Python 依赖检测器（全局单例; import 调用与 CLI 子命令共用同一 scan）。"""
 
     _instance: "PyDepsDetector | None" = None
-    _instance_lock = __import__("threading").Lock()
+    _instance_lock: "threading.Lock" = __import__("threading").Lock()  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
 
     def __new__(cls) -> "PyDepsDetector":
         if cls._instance is None:
@@ -646,21 +649,28 @@ def _main() -> int:
                                             "torch 的 canonical，根治 OMP Error #15；幂等）")
 
     args = parser.parse_args()
+    # argparse Namespace 属性在 typeshed 为 Any——解析后立即定型（CLI 边界）
+    command = cast("str", args.command)
+    # 子命令作用域属性——getattr 带默认
+    dry_run = cast("bool", getattr(args, "dry_run", False))
+    agent = cast("str", getattr(args, "agent", "all"))
+    python = cast("str | None", getattr(args, "python", None))
+    as_json = cast("bool", getattr(args, "json", False))
 
-    if args.command == "install":
-        _run_install(dry_run=args.dry_run)
+    if command == "install":
+        _run_install(dry_run=dry_run)
         return 0
 
-    if args.command == "fix-libomp":
+    if command == "fix-libomp":
         _fix_macos_libomp()
         return 0
 
     # scan
-    result = PyDepsDetector.get_instance().scan(agent=args.agent, python_exe=args.python)
-    if args.json:
+    result = PyDepsDetector.get_instance().scan(agent=agent, python_exe=python)
+    if as_json:
         print(json.dumps({
-            "agent": args.agent,
-            "python": args.python or sys.executable,
+            "agent": agent,
+            "python": python or sys.executable,
             "platform": platform.platform(),
             "packages": [asdict(p) for p in result],
         }, ensure_ascii=False, indent=2))

@@ -18,7 +18,7 @@ from pydantic import Field
 # control_url 与后端模块的导入路径由启动方注入（插件 mcp-manager 设置 PYTHONPATH）
 from control_url import resolve_control, make_control_client
 
-_CONTROL: dict = {"base": None}
+_CONTROL: "dict[str, str | None]" = {"base": None}
 _client: httpx.AsyncClient | None = None
 
 
@@ -44,7 +44,7 @@ async def _lifespan(server: FastMCP):
         _client = None
 
 
-async def _post(path: str, payload: dict) -> str:
+async def _post(path: str, payload: "dict[str, object]") -> str:
     """POST 控制台并返回工具结果 JSON 字符串；失败返回与原降级一致的错误结构。"""
     if _client is None:
         return json.dumps({"error": "MCP 未完成初始化（lifespan 未启动）", "results": [], "count": 0})

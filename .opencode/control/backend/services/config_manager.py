@@ -31,6 +31,18 @@ from services.runtime_paths import RuntimePaths
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class ConfigMetaEntry:
+    """配置项元数据（config_meta 载荷; 字段名=JSON 键名）。"""
+    label: str
+    type: str            # password / path / text / bool
+    hint: str
+    required: bool
+    default_value: str
+    hidden: bool
+    source: str
+
+
 class ConfigManager:
     """全项目配置唯一权威（get_instance() 获取; 全进程单例）。"""
 
@@ -551,21 +563,22 @@ DEEPSEEK_API_KEY=
             f(k.ROTATE_HISTORY_LIMIT, "轮换历史上限", pt.rotate_history_limit, "rotate_history 条数上限"),
         ]
 
-    def config_meta(self) -> dict[str, dict]:
+    def config_meta(self) -> "dict[str, ConfigMetaEntry]":
         """配置项元数据（前端差异化渲染驱动; hidden 键不进配置页）。"""
-        meta: dict[str, dict] = {}
+        meta: "dict[str, ConfigMetaEntry]" = {}
         for field in [*self.required_configs(), *self.extra_configs(),
                       *self.remote_tab_configs(), *self.tunable_configs()]:
-            meta[field.key] = {
-                "label": field.label, "type": field.type, "hint": field.hint,
-                "required": field.required, "default_value": field.default_value,
-                "hidden": field.hidden, "source": field.source,
-            }
+            meta[field.key] = ConfigMetaEntry(
+                label=field.label, type=field.type, hint=field.hint,
+                required=field.required, default_value=field.default_value,
+                hidden=field.hidden, source=field.source,
+            )
         for key in self.get_all():
             if key not in meta:
-                meta[key] = {"label": key, "type": "text", "hint": "",
-                             "required": False, "default_value": "", "hidden": False,
-                             "source": "ai_env"}
+                meta[key] = ConfigMetaEntry(
+                    label=key, type="text", hint="",
+                    required=False, default_value="", hidden=False,
+                    source="ai_env")
         return meta
 
     @dataclass(frozen=True)

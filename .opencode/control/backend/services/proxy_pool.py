@@ -18,6 +18,7 @@ import logging
 import threading
 import time
 from dataclasses import asdict, dataclass, field
+from typing import TypedDict, cast
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -56,8 +57,59 @@ class PoolState:
     rotate_history: list[RotateEvent] = field(default_factory=list)
 
 
+def _opt_str(v: "float | str | None") -> "str | None":
+    """持久化边界：None 保留、其余转 str（良态数据上为恒等）。"""
+    return None if v is None else str(v)
+
+
 class JuliangError(RuntimeError):
     """供应商 API 调用失败（网络/业务码/凭证）。"""
+
+
+class _JuliangData(TypedDict, total=False):
+    """聚量 API data 字段（解析边界模型）。"""
+    proxy_list: "list[str]"
+    surplus_quantity: int
+
+
+class _JuliangResponse(TypedDict, total=False):
+    code: int
+    msg: str
+    data: _JuliangData
+
+
+class _PersistedRotateEvent(TypedDict):
+    """rotate_history 条目（asdict(RotateEvent) 形; ts/reason 恒存在）。"""
+    ts: float
+    reason: str
+    old: "str | None"
+    new: "str | None"
+
+
+class _PersistedState(TypedDict, total=False):
+    """状态文件形（_persist 写出 / _load 读入; 解析边界模型）。"""
+    current: "dict[str, float | str]"
+    bad_ips: "list[str]"
+    domain_limited: "dict[str, float]"
+    mode: str
+    surplus: int
+    total_fetched: int
+    rotate_history: "list[_PersistedRotateEvent]"
+
+
+@dataclass
+class ProxyPoolStatus:
+    """/api/proxy/status 载荷（字段名=JSON 键名; 全字段零值默认——测试 stub 友好）。"""
+    mode: str = "direct"
+    current: "str | None" = None
+    expire_in_sec: int = 0
+    bad_count: int = 0
+    domain_limited: "dict[str, int]" = field(default_factory=dict)
+    surplus: int = -1
+    total_fetched: int = 0
+    credentials_configured: bool = False
+    rotate_history: "list[RotateEvent]" = field(default_factory=list)
+    relay_port: int = 0   # 路由层填充（/status）; 服务层缺省 0
 
 
 
@@ -105,8 +157,8 @@ class ProxyPool:
     @staticmethod
     def selftest_sign() -> bool:
         """签名自测：官方文档 §1.2 演示数据（明文→期望 MD5）。"""
-        demo_params = {"city_name": 1, "ip_remain": 1, "num": 10,
-                       "result_type": "json", "trade_no": "1178311789392776"}
+        demo_params: "dict[str, int | str]" = {"city_name": 1, "ip_remain": 1, "num": 10,
+                                               "result_type": "json", "trade_no": "1178311789392776"}
         return ProxyPool._julang_sign(demo_params, "99064631962e4e838dac1143092f6112") == \
             "8f35c3e56bf640cb2597ea2492ca62db"
 
@@ -114,7 +166,7 @@ class ProxyPool:
     # ─── IP 池 ────────────────────────────────────────────────
 
     @staticmethod
-    def _julang_sign(params: dict, key: str) -> str:
+    def _julang_sign(params: "dict[str, int | str]", key: str) -> str:
         """官方签名：参数 ASCII 字典序 + '&key=' + MD5 小写。"""
         raw = "&".join(f"{k}={v}" for k, v in sorted(params.items())) + f"&key={key}"
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
@@ -168,15 +220,20 @@ class ProxyPool:
             return
         try:
             import json
-            data = json.loads(self._path.read_text())
+            data = cast("_PersistedState", json.loads(self._path.read_text()))
+            cur = data.get("current")
             st = PoolState(
-                current=ProxyInfo(**data["current"]) if data.get("current") else None,
+                current=ProxyInfo(ip=str(cur["ip"]), fetched_at=float(cur["fetched_at"]),
+                                  expire_at=float(cur["expire_at"])) if cur else None,
                 bad_ips=list(data.get("bad_ips", [])),
                 domain_limited={k: float(v) for k, v in data.get("domain_limited", {}).items()},
                 mode=data.get("mode", "direct"),
                 surplus=int(data.get("surplus", -1)),
                 total_fetched=int(data.get("total_fetched", 0)),
-                rotate_history=[RotateEvent(**e) for e in data.get("rotate_history", [])],
+                rotate_history=[RotateEvent(
+                    ts=float(e["ts"]), reason=str(e["reason"]),
+                    old=_opt_str(e.get("old")), new=_opt_str(e.get("new")),
+                ) for e in data.get("rotate_history", [])],
             )
             self._state = st
         except (ValueError, KeyError, TypeError) as e:
@@ -206,18 +263,20 @@ class ProxyPool:
         if not self.credentials_configured():
             raise JuliangError("供应商凭证未配置（控制台配置页填写 JULIANG_TRADE_NO / JULIANG_API_KEY）")
         cfg = config_manager.ConfigManager.get_instance().get_all()
-        params = {"trade_no": cfg[config_manager.ConfigManager.get_instance().Keys.JULIANG_TRADE_NO], "num": 1, "pt": 1,
-                  "result_type": "json", "ip_remain": 1, "filter": 1}
-        params["sign"] = ProxyPool._julang_sign(params, cfg[config_manager.ConfigManager.get_instance().Keys.JULIANG_API_KEY])
+        trade_no = cast("str", cfg[config_manager.ConfigManager.get_instance().Keys.JULIANG_TRADE_NO])  # credentials_configured 已保证存在
+        api_key = cast("str", cfg[config_manager.ConfigManager.get_instance().Keys.JULIANG_API_KEY])
+        params: "dict[str, int | str]" = {"trade_no": trade_no, "num": 1, "pt": 1,
+                                          "result_type": "json", "ip_remain": 1, "filter": 1}
+        params["sign"] = ProxyPool._julang_sign(params, api_key)
         last_err = ""
         for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=15) as client:
                     resp = await client.get(config_manager.ConfigManager.Protocol.JULIANG_API_URL, params=params)
-                    data = resp.json()
+                    data = cast("_JuliangResponse", resp.json())
                 if data.get("code") != 200:
                     raise JuliangError(f"供应商业务错误 {data.get('code')}: {data.get('msg', '')}")
-                d = data.get("data") or {}
+                d = data.get("data") or _JuliangData()
                 proxy_list = d.get("proxy_list") or []
                 first_entry = str(proxy_list[0]).split(",")[0].strip() if proxy_list else ""
                 if not first_entry:
@@ -231,8 +290,8 @@ class ProxyPool:
                 self._state.total_fetched += 1
                 return info, int(remain_part or 0)
             except (httpx.HTTPError, ValueError) as e:
-                last_err = f"{type(e).__name__}: {e}"
-                await asyncio.sleep(0.5 * (2 ** attempt))
+                last_err = f"{type(e).__name__}: {e!s}"
+                await asyncio.sleep(0.5 * (2 ** attempt))  # pyright: ignore[reportAny] —— typeshed 的 int.__pow__ 返回 Any（负指数语义）; attempt 恒 ≥0
         raise JuliangError(f"供应商 API 重试 3 次失败: {last_err}")
 
     # ── 对外方法 ──
@@ -306,18 +365,18 @@ class ProxyPool:
         if len(self._state.rotate_history) > config_manager.ConfigManager.get_instance().proxy_tunables().rotate_history_limit:
             self._state.rotate_history = self._state.rotate_history[-config_manager.ConfigManager.get_instance().proxy_tunables().rotate_history_limit:]
 
-    def status(self) -> dict:
+    def status(self) -> "ProxyPoolStatus":
         cur = self._state.current
         now = time.time()
-        return {
-            "mode": self._state.mode,
-            "current": cur.ip if cur else None,
-            "expire_in_sec": int(cur.expire_at - now) if cur else 0,
-            "bad_count": len(self._state.bad_ips),
-            "domain_limited": {k: int(v - now) for k, v in self._state.domain_limited.items() if v > now},
-            "surplus": self._state.surplus,
-            "total_fetched": self._state.total_fetched,
-            "credentials_configured": self.credentials_configured(),
-            "rotate_history": [asdict(e) for e in self._state.rotate_history],
-        }
+        return ProxyPoolStatus(
+            mode=self._state.mode,
+            current=cur.ip if cur else None,
+            expire_in_sec=int(cur.expire_at - now) if cur else 0,
+            bad_count=len(self._state.bad_ips),
+            domain_limited={k: int(v - now) for k, v in self._state.domain_limited.items() if v > now},
+            surplus=self._state.surplus,
+            total_fetched=self._state.total_fetched,
+            credentials_configured=self.credentials_configured(),
+            rotate_history=list(self._state.rotate_history),
+        )
 

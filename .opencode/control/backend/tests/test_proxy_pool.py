@@ -3,7 +3,7 @@
 覆盖：归一化全表逐行（§5.1 十形态含拒绝分支）、签名官方自测、
 mock 代理IP供应商 API 的缓存/过期/黑名单/冷却/history/持久化往返、凭证缺失行为。
 """
-# pyright: reportMissingParameterType=false
+# pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
 import asyncio
@@ -117,9 +117,9 @@ def test_pool_lifecycle(pool):
         st = pool.status()
         assert c.ip == "2.2.2.2:2"
         assert "1.1.1.1:1" in pool._state.bad_ips
-        assert st["rotate_history"][-1]["reason"] == "bad_ip"
-        assert st["rotate_history"][-1]["old"] == "1.1.1.1:1"
-        assert st["rotate_history"][-1]["new"] == "2.2.2.2:2"
+        assert st.rotate_history[-1].reason == "bad_ip"
+        assert st.rotate_history[-1].old == "1.1.1.1:1"
+        assert st.rotate_history[-1].new == "2.2.2.2:2"
 
         # 过期：current 到期后 get 提取新
         pool._state.current.expire_at = time.time() - 1
@@ -151,15 +151,15 @@ def test_mode_validation_and_history(pool):
         pool.set_mode("turbo")
     pool.set_mode("proxy")
     st = pool.status()
-    assert st["mode"] == "proxy"
-    assert st["rotate_history"][-1]["reason"] == "mode_direct_to_proxy"
+    assert st.mode == "proxy"
+    assert st.rotate_history[-1].reason == "mode_direct_to_proxy"
 
 
 def test_credentials_missing_no_crash(pool, monkeypatch):
     """铁律二：凭证缺失时 status 正常返回未配置标记，提取抛 JuliangError（带指引）。"""
     monkeypatch.setattr(pool, "credentials_configured", lambda: False)
     st = pool.status()
-    assert st["credentials_configured"] is False and st["mode"] == "direct"
+    assert st.credentials_configured is False and st.mode == "direct"
     with pytest.raises(pp.JuliangError, match="未配置"):
         asyncio.run(pool.get(force_new=True))
 

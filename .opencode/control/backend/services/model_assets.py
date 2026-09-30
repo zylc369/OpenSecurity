@@ -15,6 +15,7 @@ import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypedDict, cast
 
 import psutil
 
@@ -22,6 +23,15 @@ from services.config_manager import ConfigManager
 
 # 模块级 logger（原类体绑定导致方法内裸名 NameError——类命名空间不在方法名字查找链）
 logger = logging.getLogger(__name__ + ".ModelAssetRegistry")
+
+class _OllamaTagEntry(TypedDict, total=False):
+    """ollama /api/tags 条目（解析边界模型）。"""
+    name: str
+
+
+class _OllamaTagsResponse(TypedDict, total=False):
+    models: "list[_OllamaTagEntry]"
+
 
 @dataclass(frozen=True)
 class ModelCacheState:
@@ -162,7 +172,7 @@ class ModelAssetRegistry:
         self._states: dict[str, DownloadState] = {m.id: DownloadState() for m in self.MODELS}
         self._lock = threading.Lock()
         # 下载完成/失败时的变更回调（deps 快照失效等消费方注册；service 不 import routes）
-        self._change_callbacks: list = []
+        self._change_callbacks: "list[Callable[[str], None]]" = []
 
 
     def add_change_callback(self, fn: "Callable[[str], None]") -> None:
@@ -220,7 +230,8 @@ class ModelAssetRegistry:
             return ModelCacheState(False, "缺少 httpx（依赖页可安装）", 0.0)
         try:
             r = httpx.get("http://127.0.0.1:11434/api/tags", timeout=3.0)
-            names = [m.get("name", "") for m in r.json().get("models", [])]
+            tags = cast("_OllamaTagsResponse", r.json())
+            names = [m.get("name", "") for m in tags.get("models", [])]
             hit = next((m for m in names if m.split(":")[0] == model.ollama_model), None)
             if hit:
                 return ModelCacheState(True, f"ollama:{hit}", 2.2)
@@ -240,7 +251,7 @@ class ModelAssetRegistry:
 
     def hardware_summary(self) -> HardwareSummary:
         """整体硬件评估: 全部已缓存模型同时驻留的总内存需求 vs 当前可用。"""
-        avail = round(psutil.virtual_memory().available / 1024**3, 1)
+        avail = round(cast(int, psutil.virtual_memory().available) / 1024**3, 1)
         cached = [m for m in self.MODELS if (
             self._ocr_cache_state(m).cached if m.type == "ocr" else self._is_cached(m.repo_id).cached)]
         total = round(sum(m.min_free_gb for m in cached), 1)

@@ -14,11 +14,12 @@
 
 每个测试独立运行（自带 setup + teardown），失败一个不影响其他。
 """
-# pyright: reportMissingParameterType=false
+# pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
 import os
 import sys
+from typing import Callable, cast
 import shutil
 import time
 import asyncio
@@ -510,9 +511,10 @@ def test_detect_tools_binwalk_consistency():
     assert_true("binwalk-full" not in ext, "binwalk-full 旧名残留")
     rs = [r for r in installable_tools() if r.name == "binwalk"]
     assert_eq(len(rs), 1, "binwalk 配方应恰一条")
-    assert_true(isinstance(rs[0], PkgToolRecipe), f"配方类型 {type(rs[0])}")
-    assert_eq(rs[0].pkg_brew, "binwalk", "mac 包名")
-    assert_eq(rs[0].pkg_linux, "binwalk", "linux 包名")
+    r0 = rs[0]
+    assert isinstance(r0, PkgToolRecipe), f"配方类型 {type(r0)}"  # 真断言（isinstance 收窄）——语义同 assert_true
+    assert_eq(r0.pkg_brew, "binwalk", "mac 包名")
+    assert_eq(r0.pkg_linux, "binwalk", "linux 包名")
     assert_eq(ext["binwalk"].version_cmd, ["--version"], "version_cmd")
 
 
@@ -524,7 +526,7 @@ def test_detect_tools_rg_recipe():
     rs = [r for r in installable_tools() if r.name == "rg"]
     assert_eq(len(rs), 1, "rg 配方应恰一条")
     r = rs[0]
-    assert_true(isinstance(r, ReleaseRecipe), f"配方类型 {type(r)}")
+    assert isinstance(r, ReleaseRecipe), f"配方类型 {type(r)}"  # 真断言（isinstance 收窄）
     assert_eq(r.bins, ["rg"], "bins")
     assert_true("sha256" in r.excl, f"excl 缺 sha256: {r.excl}")
     assert_eq(len(r.plats), 6, f"应六平台: {sorted(r.plats)}")
@@ -1197,8 +1199,8 @@ def test_system_start_time():
     import time as _t
 
     assert_true(
-        isinstance(info["control_start_time"], float)
-        and _t.time() - info["control_start_time"] < 3600,
+        isinstance(info.control_start_time, float)
+        and _t.time() - info.control_start_time < 3600,
         "control_start_time 应为近过去的 Unix 时间戳",
     )
 
@@ -2668,7 +2670,7 @@ def test_knowledge_store_paths():
 @test("event_store: entry/delete 写路径 + add_episode 参数完整（fake graphiti）")
 def test_event_store_write_paths():
     from unittest.mock import AsyncMock, patch
-    from services.event_store import EventEntry, DeleteGroup, EventStoreService
+    from services.event_store import EventEntry, DeleteGroup, EventStoreService, GraphitiFactoryResult
 
     calls = []
 
@@ -2681,7 +2683,7 @@ def test_event_store_write_paths():
         async def close(self):
             calls.append("close")
 
-    svc = EventStoreService._create_fresh(graphiti_factory=lambda: (FakeGraphiti(), None))
+    svc = EventStoreService._create_fresh(graphiti_factory=cast("Callable[[], GraphitiFactoryResult]", lambda: (FakeGraphiti(), None)))
     svc.start()
     assert_true(svc.submit(EventEntry(name="bash execution", body="b", source="s", group_id="g1", timestamp=1755432000000.0)), "事件应入队")
     assert_true(svc.submit(DeleteGroup(group_id="g1")), "delete 应入队")
@@ -2706,7 +2708,7 @@ def _knowledge_events_routes_inner():
     import numpy as np
     from fastapi.testclient import TestClient
     from services.knowledge_store import KnowledgeStoreService as ks
-    from services.event_store import EventStoreService as es
+    from services.event_store import EventStoreService as es, GraphitiFactoryResult
 
     class FakeEmbedder:
         def encode(self, inputs, **kw):
@@ -2734,7 +2736,7 @@ def _knowledge_events_routes_inner():
     ks._reset_for_tests()
     es._reset_for_tests()
     ks._force_instance(ks._create_fresh(db_path=db_path, embedder_factory=FakeEmbedder))
-    es._force_instance(es._create_fresh(graphiti_factory=lambda: (FakeGraphiti(), None)))
+    es._force_instance(es._create_fresh(graphiti_factory=cast("Callable[[], GraphitiFactoryResult]", lambda: (FakeGraphiti(), None))))
     try:
         from server import create_app
         with TestClient(create_app()) as client:
@@ -2806,19 +2808,19 @@ def test_knowledge_store_sync_methods():
     svc = KnowledgeStoreService._create_fresh(db_path=db_path, embedder_factory=FakeEmbedder)
 
     r = svc.store_knowledge("如何扫描 192.168.1.1 端口", "nmap -sS 10.0.0.1")
-    assert_true(r["stored"] is True, f"store 失败: {r}")
+    assert_true(r.stored is True, f"store 失败: {r}")
     r = svc.search_knowledge(["如何扫描端口"])
-    assert_true(r["count"] == 1 and "<IP>" in r["results"][0]["answer"], f"脱敏失效: {r}")
+    assert_true(r.count == 1 and "<IP>" in r.results[0].answer, f"脱敏失效: {r}")
 
     svc.start()
     svc.submit(MemoryEntry(question="bash execution", answer="out", type="bash", flow_id="flow-A"))
     svc.stop(timeout=10)
     r = svc.search_memory(["执行过什么"], flow_id="flow-A")
-    assert_true(r["count"] == 1 and r["results"][0]["question"].startswith("[bash]"), f"memory 检索: {r}")
+    assert_true(r.count == 1 and r.results[0].question.startswith("[bash]"), f"memory 检索: {r}")
     r = svc.search_memory(["执行过什么"], flow_id="flow-B")
-    assert_true(r["count"] == 0, "flow 隔离失效")
-    assert_true(svc.search_knowledge([])["count"] == 0, "空 questions 应 count=0")
-    assert_true(svc.store_knowledge("", "")["stored"] is False, "空 question/content 应 stored=false")
+    assert_true(r.count == 0, "flow 隔离失效")
+    assert_true(svc.search_knowledge([]).count == 0, "空 questions 应 count=0")
+    assert_true(svc.store_knowledge("", "").stored is False, "空 question/content 应 stored=false")
 
 
 @test("event_store 搜索: time filter + min_mentions 过滤 + 异常重置（fake graphiti）")
@@ -2826,7 +2828,7 @@ def test_event_store_search_paths():
     import asyncio
     from types import SimpleNamespace as NS
     from datetime import datetime
-    from services.event_store import EventStoreService
+    from services.event_store import EventStoreService, GraphitiFactoryResult
 
     def mk():
         n1 = NS(name="nmap", uuid="n1", labels=["Tool"], summary="s",
@@ -2845,15 +2847,15 @@ def test_event_store_search_paths():
             searched.update(kw)
             return mk()
 
-    svc = EventStoreService._create_fresh(graphiti_factory=lambda: (FakeGraphiti(), None))
+    svc = EventStoreService._create_fresh(graphiti_factory=cast("Callable[[], GraphitiFactoryResult]", lambda: (FakeGraphiti(), None)))
 
     async def run():
         p = await svc.search_time("查工具", "g1", time_start="2026-01-01T00:00:00Z")
-        assert_true(p["nodes"][0]["name"] == "nmap", "time_search 节点")
+        assert_true(p.nodes[0].name == "nmap", "time_search 节点")
         assert_true(searched.get("search_filter") is not None, "time filter 未构建")
         p = await svc.search_entities("q", "g1", node_labels=["Tool"], min_mentions=2)
-        assert_true([n["name"] for n in p["nodes"]] == ["nmap"], "min_mentions 过滤")
-        assert_true(p["node_scores"] == [0.8], "过滤后 scores 对齐")
+        assert_true([n.name for n in p.nodes] == ["nmap"], "min_mentions 过滤")
+        assert_true(p.node_scores == [0.8], "过滤后 scores 对齐")
 
     asyncio.run(run())
     svc.stop(timeout=10)

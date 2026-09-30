@@ -15,6 +15,10 @@ import logging
 import logging.handlers
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import threading
 
 _FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _MAX_BYTES = 5 * 1024 * 1024   # 单文件 5MB
@@ -25,7 +29,7 @@ class LogManager:
     """统一日志装配（root control.log + 子系统独立文件，全局单例）。"""
 
     _instance: "LogManager | None" = None
-    _instance_lock = __import__("threading").Lock()
+    _instance_lock: "threading.Lock" = __import__("threading").Lock()  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
 
     def __new__(cls) -> "LogManager":
         if cls._instance is None:

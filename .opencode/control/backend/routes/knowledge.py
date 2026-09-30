@@ -11,7 +11,11 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from services.knowledge_store import KnowledgeStoreService, MemoryEntry
+from routes.events import QueuedAck
+from services.knowledge_store import (
+    KnowledgeStoreService, MemoryEntry,
+    SearchKnowledgeResponse, StoreKnowledgeResponse,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -40,35 +44,35 @@ class MemoryEntryIn(BaseModel):
 
 
 @router.post("/knowledge/search")
-def knowledge_search(req: KnowledgeSearchIn) -> dict:
+def knowledge_search(req: KnowledgeSearchIn) -> SearchKnowledgeResponse:
     try:
         return KnowledgeStoreService.get_instance().search_knowledge(req.questions, lang=req.lang)
     except Exception as e:
         # 降级契约与 events 路由一致：200 + error 结构，错误消息直达 LLM
-        return {"error": f"knowledge_search failed: {e}", "results": [], "count": 0}
+        return SearchKnowledgeResponse(error=f"knowledge_search failed: {e}")
 
 
 @router.post("/knowledge/store")
-def knowledge_store_(req: KnowledgeStoreIn) -> dict:
+def knowledge_store_(req: KnowledgeStoreIn) -> StoreKnowledgeResponse:
     try:
         return KnowledgeStoreService.get_instance().store_knowledge(
             req.question, req.content, lang=req.lang)
     except Exception as e:
-        return {"stored": False, "error": f"knowledge_store failed: {e}"}
+        return StoreKnowledgeResponse(stored=False, error=f"knowledge_store failed: {e}")
 
 
 @router.post("/memory/search")
-def memory_search(req: MemorySearchIn) -> dict:
+def memory_search(req: MemorySearchIn) -> SearchKnowledgeResponse:
     try:
         return KnowledgeStoreService.get_instance().search_memory(req.questions, flow_id=req.flow_id)
     except Exception as e:
-        return {"error": f"memory_search failed: {e}", "results": [], "count": 0}
+        return SearchKnowledgeResponse(error=f"memory_search failed: {e}")
 
 
 @router.post("/memory/entry", status_code=202)
-def memory_entry(req: MemoryEntryIn) -> dict:
+def memory_entry(req: MemoryEntryIn) -> QueuedAck:
     queued = KnowledgeStoreService.get_instance().submit(
         MemoryEntry(
             question=req.question, answer=req.answer,
             type=req.type, flow_id=req.flow_id))
-    return {"queued": queued}
+    return QueuedAck(queued=queued)

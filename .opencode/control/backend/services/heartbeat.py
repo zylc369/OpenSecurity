@@ -48,7 +48,7 @@ class HeartbeatRegistry:
     """心跳内存表（全局单例）。线程安全。"""
 
     _instance: "HeartbeatRegistry | None" = None
-    _instance_lock = __import__("threading").Lock()
+    _instance_lock: "threading.Lock" = __import__("threading").Lock()  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
     _entries: "dict[int, HeartbeatEntry]"
     _lock: "threading.Lock"
 
@@ -94,7 +94,7 @@ class HeartbeatRegistry:
             本轮移除的条目数。
         """
         now = time.monotonic()
-        removed = []
+        removed: "list[int]" = []
         with self._lock:
             for pid, entry in self._entries.items():
                 if now - entry.last_seen > ConfigManager.get_instance().heartbeat_tunables().timeout_sec:

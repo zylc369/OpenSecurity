@@ -122,7 +122,7 @@ class DepsService:
     """
 
     _instance: "DepsService | None" = None
-    _instance_lock = __import__("threading").Lock()
+    _instance_lock: "threading.Lock" = __import__("threading").Lock()  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
 
     def __new__(cls) -> "DepsService":
         if cls._instance is None:
@@ -329,17 +329,16 @@ _register_invalidation_hooks()
 
 
 @router.get("")
-async def get_all_deps() -> dict[str, list[dict]]:
+async def get_all_deps() -> "dict[str, list[ToolStatus]]":
     """所有 agent 的工具状态（前端依赖页用）。"""
-    return {agent: [asdict(t) for t in tools]
-            for agent, tools in detect_tools.ToolsScanner.get_instance().scan_all().items()}
+    return detect_tools.ToolsScanner.get_instance().scan_all()
 
 
 @router.get("/{agent}")
-async def get_agent_deps(agent: str, refresh: bool = False) -> dict:
+async def get_agent_deps(agent: str, refresh: bool = False) -> "AgentDepsResponse":
     """指定 agent 的完整依赖状态 + 环境就绪 summary。
 
     ?refresh=1 强制重建快照（排查用；正常路径走 TTL 缓存）。
     """
     snap = await DepsService.get_instance().get_snapshot(force=refresh)
-    return asdict(DepsService.get_instance().assemble(agent, snap))
+    return DepsService.get_instance().assemble(agent, snap)

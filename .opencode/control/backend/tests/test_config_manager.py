@@ -2,7 +2,7 @@
 
 运行: cd .opencode/control/backend && python3 tests/test_config_manager.py
 """
-# pyright: reportMissingParameterType=false
+# pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
 import os
@@ -87,8 +87,8 @@ def test_meta():
     cm = _fresh()
     meta = cm.config_meta()
     assert_true(cm.Keys.REMOTE_CONSOLE_URL in meta, "远程 TAB 键")
-    assert_eq(meta[cm.Keys.REMOTE_CONSOLE_URL]["hidden"], True, "远程键 hidden")
-    assert_eq(meta[cm.Keys.DEEPSEEK_API_KEY]["hidden"], False, "常规键可见")
+    assert_eq(meta[cm.Keys.REMOTE_CONSOLE_URL].hidden, True, "远程键 hidden")
+    assert_eq(meta[cm.Keys.DEEPSEEK_API_KEY].hidden, False, "常规键可见")
     assert_eq(len(cm.tunable_configs()), 14, "可调参数 14 项")
     cm.set({"SOME_UNKNOWN_KEY": "v"})
     assert_true("SOME_UNKNOWN_KEY" in cm.config_meta(), "未知键 text 兜底")

@@ -30,7 +30,7 @@ class Tunnel:
     def __init__(self, client_w: asyncio.StreamWriter, up_w: asyncio.StreamWriter):
         self.client_w = client_w
         self.up_w = up_w
-        self.tasks: list[asyncio.Task] = []
+        self.tasks: "list[asyncio.Task[None]]" = []
         self.draining = False           # 优雅排空中（见 graceful_close_upstream）
         self.drain_deadline: float = 0.0  # 排空宽限截止（monotonic）
 
@@ -153,7 +153,7 @@ class ProxyRelay:
         proxy 出口新建连接满阈值自动轮换并优雅关闭存量（记 history，铁律一）。"""
         pool = ProxyPool.get_instance()
         domain = ProxyPool.normalize_domain(host)  # 与控制接口同一归一化（收口）
-        use_proxy = pool.domain_cooled(domain) or pool.status()["mode"] == "proxy"
+        use_proxy = pool.domain_cooled(domain) or pool.status().mode == "proxy"
         if use_proxy:
             threshold = config_manager.ConfigManager.get_instance().proxy_tunables().rotate_conn_threshold
             info = await pool.get()  # 缓存复用；过期/黑名单自动提取（惰性）

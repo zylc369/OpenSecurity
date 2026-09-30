@@ -37,7 +37,7 @@ from services.model_loader import ModelInferenceService
 
 import asyncio  # noqa: E402 —— 供 _relay_supervise_task 注解解析（字符串注解引用）
 
-_relay_supervise_task: "asyncio.Task | None" = None
+_relay_supervise_task: "asyncio.Task[None] | None" = None
 
 
 def create_app() -> FastAPI:

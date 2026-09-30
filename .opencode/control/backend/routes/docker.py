@@ -5,50 +5,57 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from dataclasses import asdict
+from dataclasses import dataclass
 
 from services import docker_manager
+from services.docker_manager import DockerGlobal
 from routes.deps import invalidate_deps_snapshot
 
 router = APIRouter(prefix="/api/docker", tags=["docker"])
 
 
+@dataclass
+class ContainerAction:
+    success: bool
+    message: str
+
+
 @router.get("/status")
-async def get_status() -> dict:
+async def get_status() -> DockerGlobal:
     """Docker daemon + 已知容器 + 已知镜像状态。"""
-    return asdict(docker_manager.DockerManager.scan_global())
+    return docker_manager.DockerManager.scan_global()
 
 
 @router.get("/containers")
-async def list_containers(all_: bool = True) -> list[dict]:
-    """列出容器（默认包含停止的）。"""
-    return docker_manager.DockerManager.list_containers(all_=all_)
+async def list_containers(all_: bool = True) -> JSONResponse:
+    """列出容器（默认包含停止的）。docker JSON 原样直通（不经响应模型）。"""
+    return JSONResponse(content=docker_manager.DockerManager.list_containers(all_=all_))
 
 
 @router.post("/containers/{name}/start")
-async def start_container(name: str) -> dict:
+async def start_container(name: str) -> ContainerAction:
     """启动容器。"""
     success, message = docker_manager.DockerManager.start_container(name)
     if success:
         invalidate_deps_snapshot()  # 容器状态变化 → 快照失效
-    return {"success": success, "message": message}
+    return ContainerAction(success=success, message=message)
 
 
 @router.post("/containers/{name}/stop")
-async def stop_container(name: str) -> dict:
+async def stop_container(name: str) -> ContainerAction:
     """停止容器。"""
     success, message = docker_manager.DockerManager.stop_container(name)
     if success:
         invalidate_deps_snapshot()  # 容器状态变化 → 快照失效
-    return {"success": success, "message": message}
+    return ContainerAction(success=success, message=message)
 
 
 @router.get("/images")
-async def list_images() -> list[dict]:
-    """列出本地镜像。"""
-    return docker_manager.DockerManager.list_images()
+async def list_images() -> JSONResponse:
+    """列出本地镜像。docker JSON 原样直通（不经响应模型）。"""
+    return JSONResponse(content=docker_manager.DockerManager.list_images())
 
 
 @router.post("/images/{image}/pull")

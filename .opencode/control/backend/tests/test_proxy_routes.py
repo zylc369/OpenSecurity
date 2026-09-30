@@ -1,5 +1,5 @@
 """proxy_routes + pool 响应边界 测试（需求 REVIEW 补齐项 5/6/7）。"""
-# pyright: reportMissingParameterType=false
+# pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
 import asyncio

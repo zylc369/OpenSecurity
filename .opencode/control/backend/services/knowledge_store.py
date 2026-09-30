@@ -20,12 +20,12 @@ logger = logging.getLogger(__name__)
 import queue
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from services.runtime_paths import RuntimePaths
-from services.knowledge_db import EmbedderLike, MemoryDB
+from services.knowledge_db import EmbedderLike, MemoryDB, SearchHit
 
 DEFAULT_DB_PATH = Path(RuntimePaths.KNOWLEDGE_DB)
 
@@ -39,13 +39,28 @@ class MemoryEntry:
     flow_id: str | None = None
 
 
+@dataclass
+class SearchKnowledgeResponse:
+    """检索响应（error/results/count; 字段名=JSON 键名）。"""
+    error: str | None = None
+    results: "list[SearchHit]" = field(default_factory=list)
+    count: int = 0
+
+
+@dataclass
+class StoreKnowledgeResponse:
+    stored: bool
+    id: int | None = None
+    error: str | None = None
+
+
 class KnowledgeStoreService:
     """（全局单例，get_instance() 获取。）"""
 
     _instance: "KnowledgeStoreService | None" = None
     _instance_lock = threading.Lock()
 
-    def __new__(cls, db_path: str | None = None,
+    def __new__(cls, db_path: "str | Path | None" = None,
                 embedder_factory: Callable[[], EmbedderLike] | None = None) -> "KnowledgeStoreService":
         if cls._instance is None:
             with cls._instance_lock:
@@ -60,10 +75,11 @@ class KnowledgeStoreService:
         return cls()
 
     @classmethod
-    def _create_fresh(cls, *args: Any, **kwargs: Any):
+    def _create_fresh(cls, db_path: "str | Path | None" = None,
+                     embedder_factory: "Callable[[], EmbedderLike] | None" = None):
         """构造独立实例（绕过单例——测试 fake 注入用; 生产代码禁用）。"""
         inst = object.__new__(cls)
-        inst._init_once(*args, **kwargs)
+        inst._init_once(db_path, embedder_factory)
         return inst
 
     @classmethod
@@ -86,7 +102,7 @@ class KnowledgeStoreService:
     注入点：db_path / embedder_factory（测试用 fake）。
     """
 
-    def _init_once(self, db_path: str | None = None,
+    def _init_once(self, db_path: "str | Path | None" = None,
                    embedder_factory: Callable[[], EmbedderLike] | None = None) -> None:
         self._db_path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
         self._embedder_factory = embedder_factory  # () -> EmbedderLike；None = model_loader
@@ -138,30 +154,30 @@ class KnowledgeStoreService:
 
     # ── agent 同步读写方法（FastAPI 线程池内调用）──────────
 
-    def search_knowledge(self, questions: list[str], lang: str = "") -> dict:
+    def search_knowledge(self, questions: list[str], lang: str = "") -> "SearchKnowledgeResponse":
         """检索知识库（doc_type=knowledge）。"""
         if not questions:
-            return {"error": "questions must be non-empty", "results": [], "count": 0}
+            return SearchKnowledgeResponse(error="questions must be non-empty")
         results = self._ensure_db().search(
             questions, doc_type="knowledge", lang=lang, top_k=MemoryDB.DEFAULT_TOP_K)
-        return {"results": results, "count": len(results)}
+        return SearchKnowledgeResponse(results=results, count=len(results))
 
-    def store_knowledge(self, question: str, content: str, lang: str = "") -> dict:
+    def store_knowledge(self, question: str, content: str, lang: str = "") -> "StoreKnowledgeResponse":
         """存知识（存储前 anonymize 脱敏）。"""
         from services.anonymizer import Anonymizer
         if not question.strip() or not content.strip():
-            return {"stored": False, "error": "question and content must be non-empty"}
+            return StoreKnowledgeResponse(stored=False, error="question and content must be non-empty")
         row_id = self._ensure_db().store(
             Anonymizer.anonymize(question), Anonymizer.anonymize(content), doc_type="knowledge", lang=lang)
-        return {"stored": True, "id": row_id}
+        return StoreKnowledgeResponse(stored=True, id=row_id)
 
-    def search_memory(self, questions: list[str], flow_id: str | None = None) -> dict:
+    def search_memory(self, questions: list[str], flow_id: str | None = None) -> "SearchKnowledgeResponse":
         """检索执行记忆（doc_type=memory，按 flow_id 隔离）。"""
         if not questions:
-            return {"error": "questions must be non-empty", "results": [], "count": 0}
+            return SearchKnowledgeResponse(error="questions must be non-empty")
         results = self._ensure_db().search(
             questions, doc_type="memory", top_k=MemoryDB.DEFAULT_TOP_K, flow_id=flow_id)
-        return {"results": results, "count": len(results)}
+        return SearchKnowledgeResponse(results=results, count=len(results))
 
     # ── 内部 ──────────────────────────────────────────────
 

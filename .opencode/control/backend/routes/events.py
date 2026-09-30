@@ -6,14 +6,23 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import time
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from services.event_store import EventStoreService, EventEntry, DeleteGroup
+from services.event_store import (
+    EventStoreService, EventEntry, DeleteGroup, SearchPayload,
+)
 
 router = APIRouter(prefix="/api/events")
+
+
+@dataclass
+class QueuedAck:
+    queued: bool
 
 
 class EventEntryIn(BaseModel):
@@ -71,23 +80,23 @@ class EntitySearchIn(BaseModel):
 
 
 @router.post("/entry", status_code=202)
-async def events_entry(req: EventEntryIn) -> dict:
+async def events_entry(req: EventEntryIn) -> QueuedAck:
     queued = EventStoreService.get_instance().submit(
         EventEntry(
             name=req.name, body=req.body, source=req.source,
             group_id=req.group_id,
             timestamp=req.timestamp if req.timestamp is not None else time.time() * 1000))
-    return {"queued": queued}
+    return QueuedAck(queued=queued)
 
 
 @router.post("/delete", status_code=202)
-async def events_delete(req: EventDeleteIn) -> dict:
+async def events_delete(req: EventDeleteIn) -> QueuedAck:
     queued = EventStoreService.get_instance().submit(DeleteGroup(group_id=req.group_id))
-    return {"queued": queued}
+    return QueuedAck(queued=queued)
 
 
 @router.post("/time-search")
-async def time_search(req: TimeSearchIn) -> dict:
+async def time_search(req: TimeSearchIn) -> SearchPayload:
     try:
         return await EventStoreService.get_instance().search_time(
             req.query, req.group_id,
@@ -98,7 +107,7 @@ async def time_search(req: TimeSearchIn) -> dict:
 
 
 @router.post("/entity-relationships-search")
-async def entity_relationships_search(req: EntityRelationsIn) -> dict:
+async def entity_relationships_search(req: EntityRelationsIn) -> SearchPayload:
     try:
         return await EventStoreService.get_instance().search_entity_relationships(
             req.query, req.group_id,
@@ -110,7 +119,7 @@ async def entity_relationships_search(req: EntityRelationsIn) -> dict:
 
 
 @router.post("/diverse-results-search")
-async def diverse_results_search(req: DiverseIn) -> dict:
+async def diverse_results_search(req: DiverseIn) -> SearchPayload:
     try:
         return await EventStoreService.get_instance().search_diverse(
             req.query, req.group_id,
@@ -120,7 +129,7 @@ async def diverse_results_search(req: DiverseIn) -> dict:
 
 
 @router.post("/episode-context-search")
-async def episode_context_search(req: EpisodeContextIn) -> dict:
+async def episode_context_search(req: EpisodeContextIn) -> SearchPayload:
     try:
         return await EventStoreService.get_instance().search_episode_context(
             req.query, req.group_id, max_results=req.max_results)
@@ -129,7 +138,7 @@ async def episode_context_search(req: EpisodeContextIn) -> dict:
 
 
 @router.post("/entity-search")
-async def entity_search(req: EntitySearchIn) -> dict:
+async def entity_search(req: EntitySearchIn) -> SearchPayload:
     try:
         return await EventStoreService.get_instance().search_entities(
             req.query, req.group_id,

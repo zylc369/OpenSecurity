@@ -196,3 +196,14 @@ Ollama 分支，win/linux + httpx 缺失 → /api/models 500）。已修
 - unknown/Any 类规则逐档（reportUnknownParameterType / reportUnknownMemberType
   / reportAny——当前 none）;
 - 注解档位继续收紧后的类型流精确性复审。
+
+### 三期实施结果（2026-09-30 完成，需求: 2026-09-30-pyright-unknown-any-tier.md）
+
+- **六规则正式开启**（backend + mcp 双配置）: reportUnknown{Parameter,Variable,
+  Argument,Member}Type / reportAny / reportMissingTypeArgument 全部 error。
+- **终态**: backend **0 error / 0 warning（71 文件）**; mcp-servers
+  **0/0（5 文件）**; 前端 tsc strict 0 error + 显式 any 0 处。
+- **实施形态（用户两次方向裁定）**: 模型替代 dict（规则 9 机械化——
+  dataclass 响应模型族 + 解析边界 TypedDict + 库类型直用 + 显式子集签名
+  替代 Any 转发）; 全家族测试绿（含 104 处 tests 侧修复）。
+- 教训与过程详见需求文档执行进度节。

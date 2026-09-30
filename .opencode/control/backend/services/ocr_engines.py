@@ -10,6 +10,7 @@
   unload = del + mx.clear_cache() 归还 1.2GB 权重（92%），推理足迹稳态 ~380MB 无泄漏。
 """
 from __future__ import annotations
+from typing import Protocol, TypedDict, cast
 
 import gc
 import importlib.util
@@ -25,6 +26,21 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 import httpx
+
+class _OllamaTagEntry(TypedDict, total=False):
+    """ollama /api/tags 条目（解析边界模型）。"""
+    name: str
+
+
+class _OllamaTags(TypedDict, total=False):
+    models: "list[_OllamaTagEntry]"
+
+
+class _OllamaGenerate(TypedDict, total=False):
+    """ollama /api/generate 响应（解析边界模型）。"""
+    response: str
+
+
 
 
 @dataclass
@@ -48,6 +64,23 @@ class PreparedOcrInput:
     image: object      # PIL.Image（RGB）
 
 
+class _MlxModelLike(Protocol):
+    """mlx_vlm Apple-only：Linux CI 无此包——最小表面 Protocol 收口。"""
+
+    @property
+    def config(self) -> object: ...
+
+
+class _MlxGenResult(Protocol):
+    text: str
+
+
+class _MlxGenerateFn(Protocol):
+    def __call__(self, model: "_MlxModelLike", processor: object,
+                 prompt: str, image: object, *,
+                 max_tokens: int, verbose: bool) -> "_MlxGenResult": ...
+
+
 class MlxEngine:
     """进程内 MLX 推理引擎（macOS Apple Silicon 分支）。
 
@@ -67,8 +100,8 @@ class MlxEngine:
     DEFAULT_PROMPT = "Extract all text from this image. Output text only."
 
     def __init__(self) -> None:
-        self._model = None
-        self._processor = None
+        self._model: "_MlxModelLike | None" = None
+        self._processor: "object | None" = None
 
     @property
     def loaded(self) -> bool:
@@ -122,8 +155,10 @@ class MlxEngine:
         before = self.footprint_mb()
         t0 = time.monotonic()
         try:
-            from mlx_vlm import load as _load  # pyright: ignore[reportPrivateImportUsage]  mlx_vlm 未声明 __all__
-            self._model, self._processor = _load(model_path)
+            from mlx_vlm import load as _load  # pyright: ignore[reportPrivateImportUsage, reportUnknownMemberType, reportUnknownVariableType]  mlx_vlm 无类型标注
+            loaded_model, loaded_processor = _load(model_path)  # pyright: ignore[reportUnknownVariableType] —— Linux CI 无 mlx_vlm（本地有真类型）
+            self._model = cast("_MlxModelLike", loaded_model)  # mlx.nn.Module 的 config 为运行期挂载——最小 Protocol 收口
+            self._processor = loaded_processor
         except Exception as e:
             self._model = self._processor = None
             raise RuntimeError(f"MLX 模型加载失败: {e}") from e
@@ -150,7 +185,7 @@ class MlxEngine:
             raise RuntimeError(f"图片解析失败: {e}") from e
         return PreparedOcrInput(text_prompt=prompt or self.DEFAULT_PROMPT, image=image)
 
-    def _infer_impl(self, prepared: PreparedOcrInput):
+    def _infer_impl(self, prepared: PreparedOcrInput) -> "tuple[str, GenerationStats]":
         """串行推理段（ManagedModel worker 内执行）。返回耗时画像。
 
         防御: 未加载 → RuntimeError（worker 内检查，覆盖竞争窗口）；
@@ -162,14 +197,15 @@ class MlxEngine:
             raise RuntimeError("MLX 引擎未加载（推理窗口内被卸载，请重试）")
         t0 = time.monotonic()
         try:
-            from mlx_vlm.prompt_utils import apply_chat_template
-            from mlx_vlm import generate as _generate  # pyright: ignore[reportPrivateImportUsage]  mlx_vlm 未声明 __all__
-            text_prompt = apply_chat_template(
+            from mlx_vlm.prompt_utils import apply_chat_template  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType] —— mlx_vlm 无类型标注
+            from mlx_vlm import generate as _generate  # pyright: ignore[reportPrivateImportUsage, reportUnknownVariableType]  mlx_vlm 未声明 __all__/Linux CI 无此包
+            text_prompt = cast("str", apply_chat_template(  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType, reportUnknownMemberType] —— mlx_vlm 无类型标注（库级）
                 processor, model.config,
                 prepared.text_prompt, num_images=1,
-            )
-            result = _generate(
-                model, processor, text_prompt, prepared.image,  # pyright: ignore[reportArgumentType]  mlx_vlm stub 与运行时签名不符
+            ))
+            generate_fn = cast("_MlxGenerateFn", _generate)  # mlx_vlm 无类型标注——最小 Protocol 收口
+            result = generate_fn(
+                model, processor, text_prompt, prepared.image,
                 max_tokens=self.MAX_TOKENS, verbose=False,
             )
         except RuntimeError:
@@ -191,7 +227,7 @@ class MlxEngine:
         self._model = self._processor = None
         try:
             import mlx.core as mx
-            mx.clear_cache()
+            mx.clear_cache()  # pyright: ignore[reportUnknownMemberType] —— mlx Apple-only（Linux CI 无此包）
         except Exception as e:  # clear_cache 失败不影响语义（仅缓存残留）
             logger.warning("MLX clear_cache 异常（忽略，仅缓存残留）: %s", e)
         gc.collect()
@@ -217,14 +253,15 @@ class OllamaEngine:
         """服务端是否已有 glm-ocr 模型。"""
         try:
             r = httpx.get(f"{self.OLLAMA_BASE}/api/tags", timeout=3.0)
-            names = [m.get("name", "") for m in r.json().get("models", [])]
+            tags = cast("_OllamaTags", r.json())
+            names = [m.get("name", "") for m in tags.get("models", [])]
             return any(n.split(":")[0] == self.OLLAMA_MODEL for n in names)
         except (httpx.HTTPError, ValueError):
             return False
 
     async def infer(self, image_b64: str, prompt: str) -> tuple[str, GenerationStats]:
         t0 = time.monotonic()
-        payload = {
+        payload: "dict[str, object]" = {
             "model": self.OLLAMA_MODEL,
             "prompt": prompt or MlxEngine.DEFAULT_PROMPT,
             "images": [image_b64],
@@ -234,7 +271,7 @@ class OllamaEngine:
         }
         r = await self._http.post(f"{self.OLLAMA_BASE}/api/generate", json=payload)
         r.raise_for_status()
-        text = r.json().get("response", "")
+        text = cast("_OllamaGenerate", r.json()).get("response", "")
         stats = GenerationStats(
             elapsed_sec=round(time.monotonic() - t0, 2),
             output_chars=len(text),

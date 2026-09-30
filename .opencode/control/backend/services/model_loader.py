@@ -29,7 +29,7 @@ import asyncio
 import gc
 import logging
 import threading
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, TypeAlias, cast
 
 import numpy as np
 
@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__ + ".ModelInferenceService")
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer, CrossEncoder
+
+# 向量数组精确类型（encode: str→1D/列表→2D; predict: 1D 分数）
+EmbedArray: TypeAlias = "np.ndarray[tuple[int] | tuple[int, int], np.dtype[np.float32]]"
+ScoreArray: TypeAlias = "np.ndarray[tuple[int], np.dtype[np.float32]]"
 
 
 class ModelInferenceService:
@@ -114,12 +118,18 @@ class ModelInferenceService:
         def __init__(self, inner: "SentenceTransformer | None" = None) -> None:
             self._inner = inner
 
-        def encode(self, sentences: str | list[str], **kwargs: Any):
+        def encode(self, sentences: str | list[str], *,
+                   convert_to_numpy: bool = True) -> "EmbedArray":
+            """显式子集镜像: 系统仅使用 convert_to_numpy（恒 True → ndarray）。
+
+            其余库参数不透传（全仓调用方未使用）; 需要时按库签名显式追加。
+            """
             svc = ModelInferenceService.get_instance()
             if self._inner is not None:  # 测试注入直通（fake 直连，不经路由）
                 with svc._infer_lock:
-                    return self._inner.encode(sentences, **kwargs)
-            return svc._route_encode(sentences, kwargs)
+                    return cast("EmbedArray", self._inner.encode(  # pyright: ignore[reportUnknownMemberType] —— ST 未注解 **kwargs（库级）
+                        sentences, convert_to_numpy=convert_to_numpy))
+            return svc._route_encode(sentences, convert_to_numpy=convert_to_numpy)
 
     class LockedReranker:
         """CrossEncoder 的线程安全包装: predict 经远程路由（失败 fallback 本地锁串行）。
@@ -132,12 +142,13 @@ class ModelInferenceService:
         def __init__(self, inner: "CrossEncoder | None" = None) -> None:
             self._inner = inner
 
-        def predict(self, pairs: list[tuple[str, str]], **kwargs: Any):
+        def predict(self, pairs: list[tuple[str, str]]) -> "ScoreArray":
+            """全仓调用方未使用任何 kwarg——零参签名（需要时按库签名显式追加）。"""
             svc = ModelInferenceService.get_instance()
             if self._inner is not None:  # 测试注入直通
                 with svc._infer_lock:
-                    return self._inner.predict(pairs, **kwargs)
-            return svc._route_predict(pairs, kwargs)
+                    return cast("ScoreArray", self._inner.predict(pairs))  # pyright: ignore[reportUnknownMemberType] —— ST 未注解 **kwargs（库级）
+            return svc._route_predict(pairs)
 
     # ─── 模型名（ConfigManager 协议常量）───────────────────
 
@@ -213,7 +224,8 @@ class ModelInferenceService:
             return [sentences]
         return list(sentences)
 
-    def _route_encode(self, sentences: str | list[str], kwargs: dict[str, Any]):
+    def _route_encode(self, sentences: str | list[str], *,
+                      convert_to_numpy: bool = True) -> "EmbedArray":
         """embed 路由: 远程优先（失败 fallback 本地，HOLD 语义=懒加载阻塞）。"""
         if self._use_remote():
             from services.remote_client import RemoteUnavailable
@@ -233,10 +245,11 @@ class ModelInferenceService:
             with self._infer_lock:
                 target = self._embedder
                 if target is not None:
-                    return target.encode(sentences, **kwargs)
+                    return cast("EmbedArray", target.encode(  # pyright: ignore[reportUnknownMemberType] —— ST 未注解 **kwargs（库级）
+                        sentences, convert_to_numpy=convert_to_numpy))
         raise RuntimeError("embedder 竞态重试耗尽（连续卸载窗口内被清空）")
 
-    def _route_predict(self, pairs: list[tuple[str, str]], kwargs: dict[str, Any]):
+    def _route_predict(self, pairs: list[tuple[str, str]]) -> "ScoreArray":
         """rerank 路由（语义同 _route_encode）。"""
         if self._use_remote():
             from services.remote_client import RemoteUnavailable
@@ -253,7 +266,7 @@ class ModelInferenceService:
             with self._infer_lock:
                 target = self._reranker
                 if target is not None:
-                    return target.predict(pairs, **kwargs)
+                    return cast("ScoreArray", target.predict(pairs))  # pyright: ignore[reportUnknownMemberType] —— ST 未注解 **kwargs（库级）
         raise RuntimeError("reranker 竞态重试耗尽（连续卸载窗口内被清空）")
 
     # ─── 公开 API ─────────────────────────────────────────
@@ -330,7 +343,7 @@ class ModelInferenceService:
     def embed_batch_sync(self, texts: list[str]) -> list[list[float]]:
         """同步批量 embed（/embed 路由）：一次前向，返回向量列表（每个 1024 维）。"""
         vecs = self.get_embedder().encode(texts, convert_to_numpy=True)
-        return [np.asarray(v).tolist() for v in vecs]
+        return [cast("list[float]", np.asarray(v).tolist()) for v in vecs]  # pyright: ignore[reportAny] —— numpy stub 的 tolist/__iter__ 为 Any（库级）
 
     def rerank_sync(self, query: str, passages: list[str]) -> list[float]:
         """同步 rerank：输入 query + 候选文本列表，返回 score 列表。"""

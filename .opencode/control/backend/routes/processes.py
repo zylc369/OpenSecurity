@@ -5,17 +5,15 @@ OCR MLX 子进程（引用计数 + 持有者明细 + 最后活跃时间）、vit
 """
 from __future__ import annotations
 
-from dataclasses import asdict
 
 from fastapi import APIRouter
 
-from services.process_registry import ProcessRegistryUtil
+from services.process_registry import ProcessRegistryUtil, ProcessRegistryView
 
 router = APIRouter(prefix="/api", tags=["processes"])
 
 
 @router.get("/processes")
-def get_processes() -> dict:
+def get_processes() -> "ProcessRegistryView":
     """受管进程清单（前端进程页 10s 轮询）。"""
-    view = ProcessRegistryUtil.collect_processes()
-    return asdict(view)
+    return ProcessRegistryUtil.collect_processes()

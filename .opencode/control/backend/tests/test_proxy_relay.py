@@ -4,7 +4,7 @@
 全部运行在**同一个事件循环**内（跨 run 的 server 对象会随旧循环失活，连接挂死）。
 全部 127.0.0.1 回环，零外网、零真实配额消耗。
 """
-# pyright: reportMissingParameterType=false
+# pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false
 from __future__ import annotations
 
 import asyncio
@@ -17,6 +17,7 @@ import pytest
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
+from services.proxy_pool import ProxyPoolStatus
 from services import proxy_relay as pr
 
 def _patch_threshold(n: int):
@@ -73,8 +74,8 @@ class FakePool:
     def domain_cooled(self, domain_raw: str) -> bool:
         return self._force_proxy
 
-    def status(self) -> dict:
-        return {"mode": "proxy" if self._force_proxy else "direct"}
+    def status(self) -> "ProxyPoolStatus":
+        return ProxyPoolStatus(mode="proxy" if self._force_proxy else "direct")
 
 
 async def start_mock_origin(slow: bool = False) -> int:

@@ -13,7 +13,10 @@ from __future__ import annotations
 import os
 import secrets
 
+from dataclasses import asdict, dataclass
+
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 # 进程镜像启动令牌：每次进程启动（含 execv 自重启）生成新值。
 # 用途：前端判定"重启已完成"——exec 下 PID 与 process start_time 均不变，
@@ -27,41 +30,67 @@ from services.process_lock import ProcessLockUtil
 router = APIRouter()
 
 
+class DevUrlIn(BaseModel):
+    port: "object | None" = None   # 原样收下（int 校验在 handler 内，非 422）
+
+
+@dataclass
+class DevUrlAck:
+    ok: bool
+    port: "int | None" = None
+    error: "str | None" = None
+
+
+@dataclass
+class ConsoleUrlInfo:
+    url: str
+    tcp_port: "int | None"
+    tcp_candidates: "list[int]"
+
+
+@dataclass
+class HealthIdentity:
+    """控制台实例身份字段（探测协议）。"""
+    service: str
+    pid: int
+    start_time: float
+    boot_token: str
+
+
 @router.post("/api/dev-url")
-async def report_dev_url(payload: dict) -> dict:
+async def report_dev_url(payload: DevUrlIn) -> DevUrlAck:
     """vite dev server 上报实际端口（经 IPC，取代 .vite-dev.port 文件）。
 
     vite 冲突自动递增（5173→5174）时上报的是递增后的真实端口。
     注册进 FrontendPortRegistry（唯一事实源）。
     """
-    port = payload.get("port")
+    port = payload.port
     if isinstance(port, int) and 0 < port < 65536:
         from services.frontend_port import FrontendPortRegistry
         FrontendPortRegistry.get_instance().register_vite_port(port)
-        return {"ok": True, "port": port}
-    return {"ok": False, "error": "invalid port"}
+        return DevUrlAck(ok=True, port=port)
+    return DevUrlAck(ok=False, error="invalid port")
 
 
 @router.get("/api/console-url")
-async def console_url() -> dict:
+async def console_url() -> ConsoleUrlInfo:
     """控制台前端真实地址（浏览器 TCP 顺延后插件/vite 从这里取）。"""
     from services.frontend_port import FrontendPortRegistry
-    tcp_port = FrontendPortRegistry.get_instance().tcp_port()
-    return {
-        "url": FrontendPortRegistry.get_instance().console_url(),
-        "tcp_port": tcp_port,
-        "tcp_candidates": FrontendPortRegistry.get_instance().tcp_candidates(),
-    }
+    return ConsoleUrlInfo(
+        url=FrontendPortRegistry.get_instance().console_url(),
+        tcp_port=FrontendPortRegistry.get_instance().tcp_port(),
+        tcp_candidates=FrontendPortRegistry.get_instance().tcp_candidates(),
+    )
 
 
-def _identity() -> dict:
+def _identity() -> HealthIdentity:
     """控制台实例身份字段（探测协议）。"""
-    return {
-        "service": "opencode-control",
-        "pid": os.getpid(),
-        "start_time": ProcessLockUtil.get_process_start_time(os.getpid()) or 0,
-        "boot_token": BOOT_TOKEN,
-    }
+    return HealthIdentity(
+        service="opencode-control",
+        pid=os.getpid(),
+        start_time=ProcessLockUtil.get_process_start_time(os.getpid()) or 0,
+        boot_token=BOOT_TOKEN,
+    )
 
 
 def _code_fingerprint() -> tuple[int, float]:
@@ -87,8 +116,8 @@ async def health() -> JSONResponse:
     stale = _code_fingerprint() != _BOOT_FINGERPRINT
     if not ModelInferenceService.get_instance().is_models_ready():
         return JSONResponse(
-            {"status": "loading", "code_stale": stale, **_identity()},
+            {"status": "loading", "code_stale": stale, **asdict(_identity())},
             status_code=503,
             headers={"Retry-After": "5"},
         )
-    return JSONResponse({"status": "ok", "code_stale": stale, **_identity()})
+    return JSONResponse({"status": "ok", "code_stale": stale, **asdict(_identity())})

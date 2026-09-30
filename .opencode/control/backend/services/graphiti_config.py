@@ -20,7 +20,11 @@ import numpy as np
 
 from services.config_manager import ConfigManager
 from graphiti_core.embedder.client import EmbedderClient
+from typing import TYPE_CHECKING
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from graphiti_core.graphiti import Graphiti
 
 # ── 安全分析专用实体类型 ────────────────────────────────────
 # graphiti 的 _build_entity_types_context 会在这些基础上加 {id:0, name:"Entity"}（兜底）。
@@ -59,7 +63,7 @@ class PromptEntity(BaseModel):
     """A prompt, system instruction, or injection payload targeting AI systems (e.g., jailbreak prompt, system prompt leak)."""
 
 
-CUSTOM_ENTITY_TYPES = {
+CUSTOM_ENTITY_TYPES: "dict[str, type[BaseModel]]" = {
     "Tool": ToolEntity,
     "Host": HostEntity,
     "Vulnerability": VulnerabilityEntity,
@@ -84,7 +88,7 @@ class GraphitiFactory:
         return cm.get(cm.Keys.DEEPSEEK_API_KEY)
 
     @staticmethod
-    def create_graphiti():
+    def create_graphiti() -> "tuple[Graphiti | None, str | None]":
         """创建配置好的 Graphiti 实例（DeepSeek LLM + BGE-M3 embedding + BGE-Reranker）。
 
         必须在 async 上下文中调用（graphiti-core 的初始化是 async）。

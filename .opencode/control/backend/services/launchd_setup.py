@@ -17,6 +17,10 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import threading
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +34,19 @@ class AutostartStatus:
     loaded: bool             # launchctl list 可见
 
 
+@dataclass
+class LaunchdActionResult:
+    """LaunchAgent 安装/卸载结果（uninstall 分支的 plist/hint 为加性空值）。"""
+    installed: bool
+    plist: str = ""
+    hint: str = ""
+
+
 class LaunchdManager:
     """LaunchAgent 安装/卸载/状态（全局单例）。"""
 
     _instance: "LaunchdManager | None" = None
-    _instance_lock = __import__("threading").Lock()
+    _instance_lock: "threading.Lock" = __import__("threading").Lock()  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
 
     LABEL = "com.opensecurity.control"
     PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
@@ -130,7 +142,7 @@ class LaunchdManager:
 </plist>
 """
 
-    def install(self) -> dict:
+    def install(self) -> "LaunchdActionResult":
         """安装 LaunchAgent（写 plist + launchctl load）。幂等（重复安装先卸载旧的）。"""
         self._check_darwin()
         if self.status().installed:
@@ -139,17 +151,17 @@ class LaunchdManager:
         self.PLIST_PATH.write_text(self._plist_content(), encoding="utf-8")
         self._load()
         logger.info("LaunchAgent 已安装: %s（提示: Mac 需开启自动登录）", self.PLIST_PATH)
-        return {"installed": True, "plist": str(self.PLIST_PATH),
-                "hint": "LaunchAgent 在登录后运行——设备需开启自动登录"}
+        return LaunchdActionResult(installed=True, plist=str(self.PLIST_PATH),
+                                    hint="LaunchAgent 在登录后运行——设备需开启自动登录")
 
-    def uninstall(self) -> dict:
+    def uninstall(self) -> "LaunchdActionResult":
         """卸载 LaunchAgent（launchctl unload + 删 plist）。幂等。"""
         self._check_darwin()
         self._unload()
         if self.PLIST_PATH.exists():
             self.PLIST_PATH.unlink()
         logger.info("LaunchAgent 已卸载")
-        return {"installed": False}
+        return LaunchdActionResult(installed=False)
 
     def status(self) -> AutostartStatus:
         """查询安装状态（非 darwin 返回 supported=False 而非异常——供页面展示）。"""

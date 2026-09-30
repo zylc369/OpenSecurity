@@ -33,6 +33,10 @@ from dataclasses import dataclass, field
 
 from services.config_manager import ConfigManager
 from services.runtime_paths import RuntimePaths
+from typing import TypedDict, cast, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import threading
 
 class ToolsEnv:
     """工具环境常量与平台推导（静态方法类; 路径来自 services.runtime_paths——唯一来源）。"""
@@ -479,7 +483,13 @@ InstallRecipe = (ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | Prebuilt
 _INSTALLABLE_TOOLS: list[InstallRecipe] | None = None
 
 
-def installable_tools() -> "list":
+class _GHRelease(TypedDict, total=False):
+    """GitHub Releases API 响应（解析边界模型）。"""
+    tag_name: str
+    assets: "list[dict[str, object]]"
+
+
+def installable_tools() -> "list[InstallRecipe]":
     """INSTALLABLE_TOOLS 的惰性构建入口。
 
     封装为函数的原因: 清单内配方可引用 PM_PREFIX 等"检测后才有值"的全局变量
@@ -930,7 +940,7 @@ class ToolsScanner:
     """（全局单例，get_instance() 获取。）"""
 
     _instance: "ToolsScanner | None" = None
-    _instance_lock = __import__("threading").Lock()
+    _instance_lock: "threading.Lock" = __import__("threading").Lock()  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
 
     def __new__(cls) -> "ToolsScanner":
         if cls._instance is None:
@@ -1169,7 +1179,7 @@ class ToolsInstaller:
     """（全局单例，get_instance() 获取。）"""
 
     _instance: "ToolsInstaller | None" = None
-    _instance_lock = __import__("threading").Lock()
+    _instance_lock: "threading.Lock" = __import__("threading").Lock()  # pyright: ignore[reportAny] —— __import__ 动态模块成员，类型不可知
 
     def __new__(cls) -> "ToolsInstaller":
         if cls._instance is None:
@@ -1849,11 +1859,11 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     def _configure_opencode_shell(bash_exe: str) -> str:
         """写项目级 opencode.json 的 shell 键（JSON 合并保留其他键）。返回结果描述。"""
         path = os.path.join(RuntimePaths.OPENCODE_ROOT, "opencode.json")
-        cfg: dict = {}
+        cfg: "dict[str, object]" = {}
         if os.path.isfile(path):
             try:
                 with open(path, encoding="utf-8") as fh:
-                    cfg = json.load(fh)
+                    cfg = cast("dict[str, object]", json.load(fh))
             except (json.JSONDecodeError, OSError):
                 cfg = {}
         if cfg.get("shell") == bash_exe:
@@ -1964,7 +1974,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             shutil.rmtree(dest)
         # 递归找 bin/java（macOS Temurin 为 <顶>/Contents/Home/bin/java 多层嵌套）
         java_name = "java.exe" if os.name == "nt" else "java"
-        roots = []
+        roots: "list[str]" = []
         for dp, _dn, fn in os.walk(tmp):
             if java_name in fn and dp.endswith("bin"):
                 roots.append(os.path.dirname(dp))
@@ -2030,7 +2040,7 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         finally:
             os.chdir(saved)
         os.makedirs(ToolsEnv.CMD_DIR, exist_ok=True)
-        placed = []
+        placed: "list[str]" = []
         for b in r.bins:
             found = self._find_file(dst, b)
             if not found:
@@ -2260,12 +2270,13 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
         if tok:
             headers["Authorization"] = f"Bearer {tok}"
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            d = json.loads(resp.read().decode())
-        assets = [a["name"] for a in d.get("assets", [])]
+        # urlopen(Request) 返回类型在 typeshed 为 Any（read/decode 随之）——行内抑制
+        with urllib.request.urlopen(req, timeout=30) as resp:  # pyright: ignore[reportAny]
+            d = cast("_GHRelease", json.loads(resp.read().decode()))  # pyright: ignore[reportAny]
+        assets = [cast("str", a["name"]) for a in d.get("assets", [])]
         if not assets:
             raise RuntimeError(f"{repo}@{tag or 'latest'} 无二进制资产")
-        return assets, d["tag_name"]
+        return assets, d["tag_name"]  # pyright: ignore[reportTypedDictNotRequiredAccess] —— GitHub releases 恒有 tag_name; KeyError 行为保留
 
     @staticmethod
     def _match_assets(assets: list[str], keywords: list[str], extra_excl: str) -> list[str]:
@@ -2297,8 +2308,8 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     @staticmethod
     def _download(url: str) -> bytes:
         req = urllib.request.Request(url, headers=_UA)
-        with urllib.request.urlopen(req, timeout=ToolsInstaller.TIMEOUT) as resp:
-            return resp.read()
+        with urllib.request.urlopen(req, timeout=ToolsInstaller.TIMEOUT) as resp:  # pyright: ignore[reportAny] —— urlopen(Request) typeshed 为 Any
+            return resp.read()  # pyright: ignore[reportAny]
 
     @staticmethod
     def _write(data: bytes, path: str) -> None:
@@ -2398,19 +2409,25 @@ def _main() -> int:
     sub.add_parser("list-installable", help="列出可自动安装清单")
 
     args = parser.parse_args()
+    # argparse Namespace 属性在 typeshed 为 Any——解析后立即定型（CLI 边界）
+    command = cast("str", args.command)
+    # 子命令作用域属性（list-installable 时无 tool/force 等）——getattr 带默认
+    tool = cast("str | None", getattr(args, "tool", None))
+    force = cast("bool", getattr(args, "force", False))
+    agent = cast("str", getattr(args, "agent", "all"))
 
-    if args.command == "list-installable":
+    if command == "list-installable":
         for r in installable_tools():
             print(r.name)
         return 0
 
-    if args.command == "install":
+    if command == "install":
         installer = ToolsInstaller.get_instance()
-        if args.tool:
-            results = [installer.install_tool(args.tool, force=args.force)]
+        if tool:
+            results = [installer.install_tool(tool, force=force)]
         else:
             print("[*] 开始安装 INSTALLABLE_TOOLS 清单（单工具失败不中断）...")
-            results = installer.install_all(force=args.force)
+            results = installer.install_all(force=force)
         ok = sum(1 for r in results if r.status == "installed")
         skip = sum(1 for r in results if r.status == "skipped")
         fail = [r for r in results if r.status == "failed"]
@@ -2426,14 +2443,14 @@ def _main() -> int:
         return 0
 
     # scan
-    if args.agent == "all":
+    if agent == "all":
         for agent, statuses in ToolsScanner.get_instance().scan_all().items():
             print(f"── {agent}")
             for s in statuses:
                 mark = "+" if s.available else ("*" if s.skipped else "-")
                 print(f"  [{mark}] {s.name:20s} {s.version or '':16s} {s.description}")
     else:
-        for s in ToolsScanner.get_instance().scan_agent(args.agent):
+        for s in ToolsScanner.get_instance().scan_agent(agent):
             mark = "+" if s.available else ("*" if s.skipped else "-")
             print(f"[{mark}] {s.name:20s} {s.version or '':16s} {s.description}")
     return 0

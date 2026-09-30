@@ -14,15 +14,17 @@ from __future__ import annotations
 
 import dataclasses
 import platform
-from dataclasses import asdict
-from typing import Any, Callable
+from typing import Any, Callable, ParamSpec, TypeVar
+
+from dataclasses import asdict, dataclass, field
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from services.config_manager import ConfigManager
-from services.remote_client import RemoteConsoleClient
-from services.remote_link import RemoteLinkService
+from services.remote_client import ModelFingerprint, RemoteConsoleClient
+from services.remote_link import RemoteLinkService, RemoteLinkStatus
 
 router = APIRouter(prefix="/api/remote", tags=["remote"])
 
@@ -30,19 +32,38 @@ router = APIRouter(prefix="/api/remote", tags=["remote"])
 # ─── 主控端点 ─────────────────────────────────────────
 
 @router.get("/status")
-async def get_status() -> dict:
+async def get_status() -> "RemoteLinkStatus":
     """状态机快照（RemoteLinkStatus 序列化; token 仅回传前 6 位）。"""
-    st = RemoteLinkService.get_instance().status()
-    d = asdict(st)
-    return d
+    return RemoteLinkService.get_instance().status()
 
 
 class SwitchRequest(BaseModel):
     target: str  # "remote" | "local"
 
 
+@dataclass
+class SwitchOutcome:
+    ok: bool
+    error: str = ""
+    warnings: "list[str]" = field(default_factory=list)
+    detail: "str | None" = None   # 仅失败时（前端 axios 拦截器读 detail 展示）
+
+
+@dataclass
+class ConfigUpdateResult:
+    ok: bool
+    updated: "list[str]"
+
+
+@dataclass
+class FingerprintPayload:
+    service: str
+    version: str
+    models: "list[ModelFingerprint]"
+
+
 @router.post("/switch")
-async def switch(req: SwitchRequest) -> dict:
+async def switch(req: SwitchRequest) -> SwitchOutcome:
     """切换远程（先校验远程有效——失败返回原因不置位）/ 切换本地。"""
     if req.target == "remote":
         result = await RemoteLinkService.get_instance().switch_to_remote()
@@ -50,10 +71,8 @@ async def switch(req: SwitchRequest) -> dict:
         result = RemoteLinkService.get_instance().switch_to_local()
     else:
         raise HTTPException(status_code=422, detail="target 必须是 remote 或 local")
-    d = asdict(result)
-    if not result.ok:
-        d["detail"] = result.error  # 前端 axios 拦截器读 detail 展示
-    return d
+    return SwitchOutcome(ok=result.ok, error=result.error, warnings=result.warnings,
+                         detail=result.error if not result.ok else None)
 
 
 class RemoteConfigUpdate(BaseModel):
@@ -62,7 +81,7 @@ class RemoteConfigUpdate(BaseModel):
 
 
 @router.put("/config")
-async def update_config(req: RemoteConfigUpdate) -> dict:
+async def update_config(req: RemoteConfigUpdate) -> ConfigUpdateResult:
     """写远程链接 URL/TOKEN 并热重载（ENABLED 只能经 switch——D10）。"""
     updates: dict[str, str] = {}
     if req.url != "":
@@ -73,7 +92,7 @@ async def update_config(req: RemoteConfigUpdate) -> dict:
         raise HTTPException(status_code=422, detail="无可更新字段")
     ConfigManager.get_instance().set(updates)
     RemoteLinkService.get_instance().reload_config()
-    return {"ok": True, "updated": sorted(updates.keys())}
+    return ConfigUpdateResult(ok=True, updated=sorted(updates.keys()))
 
 
 # ─── 节点端点（本机直连 = 操作本机; node=remote = 主控转发）────
@@ -94,36 +113,39 @@ def _remote_url_configured() -> bool:
     return bool((ConfigManager.get_instance().get(ConfigManager.Keys.REMOTE_CONSOLE_URL) or "").strip())
 
 
-def _fingerprint_payload() -> dict:
+def _fingerprint_payload() -> FingerprintPayload:
     """本机三模型指纹（HF snapshot hash; 不加载模型）。"""
     
     from services.model_loader import ModelInferenceService
     from services.ocr_service import OcrService
     fps = RemoteLinkService.get_instance()._local_fingerprints()
-    return {
-        "service": "opencode-control",
-        "version": f"{platform.system()}/{ConfigManager.Protocol.EMBED_MODEL}",
-        "models": [
-            {"repo_id": ConfigManager.Protocol.EMBED_MODEL, "snapshot": fps.get(ConfigManager.Protocol.EMBED_MODEL, ""),
-             "loaded": ModelInferenceService.get_instance().embedder_status().state == "ready"},
-            {"repo_id": ConfigManager.Protocol.RERANKER_MODEL, "snapshot": fps.get(ConfigManager.Protocol.RERANKER_MODEL, ""),
-             "loaded": ModelInferenceService.get_instance().reranker_status().state == "ready"},
-            {"repo_id": "glm-ocr", "snapshot": fps.get("glm-ocr", ""),
-             "loaded": OcrService.get_instance().status().state == "ready"},
+    return FingerprintPayload(
+        service="opencode-control",
+        version=f"{platform.system()}/{ConfigManager.Protocol.EMBED_MODEL}",
+        models=[
+            ModelFingerprint(repo_id=ConfigManager.Protocol.EMBED_MODEL,
+                             snapshot=fps.get(ConfigManager.Protocol.EMBED_MODEL, ""),
+                             loaded=ModelInferenceService.get_instance().embedder_status().state == "ready"),
+            ModelFingerprint(repo_id=ConfigManager.Protocol.RERANKER_MODEL,
+                             snapshot=fps.get(ConfigManager.Protocol.RERANKER_MODEL, ""),
+                             loaded=ModelInferenceService.get_instance().reranker_status().state == "ready"),
+            ModelFingerprint(repo_id="glm-ocr",
+                             snapshot=fps.get("glm-ocr", ""),
+                             loaded=OcrService.get_instance().status().state == "ready"),
         ],
-    }
+    )
 
 
 @router.get("/health")
-async def node_health(node: str = Query(default="local")) -> dict:
-    """轻量健康（心跳探测目标; 局域网 + token）。"""
+async def node_health(node: str = Query(default="local")) -> JSONResponse:
+    """轻量健康（心跳探测目标; 局域网 + token）。transit 端点：JSON 直通。"""
     client = _forward_or_local(node)
     if client is not None:
-        return await _forward_get(client, "/api/remote/health")
-    return _fingerprint_payload()
+        return JSONResponse(content=await _forward_get(client, "/api/remote/health"))
+    return JSONResponse(content=asdict(_fingerprint_payload()))
 
 
-async def _forward_get(client: RemoteConsoleClient, path: str) -> dict:
+async def _forward_get(client: RemoteConsoleClient, path: str) -> "dict[str, object]":
     """经 remote_client 的底层 GET 转发（to_thread——同步 httpx 禁跑事件循环，
     节点网络黑洞时冻结整个控制台是 B2 级故障）。"""
     import asyncio
@@ -133,11 +155,15 @@ async def _forward_get(client: RemoteConsoleClient, path: str) -> dict:
         raise HTTPException(status_code=502, detail=f"远程节点不可达: {e}")
 
 
-async def _forward_call(fn: Callable[..., Any], *args: Any):
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+async def _forward_call(fn: Callable[_P, _R], *args: _P.args, **kwargs: _P.kwargs) -> _R:
     """转发写操作（to_thread，同 _forward_get 的线程域约束）。"""
     import asyncio
     try:
-        return await asyncio.to_thread(fn, *args)
+        return await asyncio.to_thread(fn, *args, **kwargs)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"转发失败: {e}")
 
@@ -146,18 +172,18 @@ _NODE_CONFIG_KEYS = frozenset({ConfigManager.Keys.CONTROL_RESIDENT, ConfigManage
 
 
 @router.get("/node-config")
-async def get_node_config(node: str = Query(default="local")) -> dict:
-    """读节点三 KEY（本机或转发; API_KEY 脱敏为前 6 位）。"""
+async def get_node_config(node: str = Query(default="local")) -> JSONResponse:
+    """读节点三 KEY（本机或转发; API_KEY 脱敏为前 6 位）。transit 端点：JSON 直通。"""
     client = _forward_or_local(node)
     if client is not None:
-        return await _forward_get(client, "/api/remote/node-config")
+        return JSONResponse(content=await _forward_get(client, "/api/remote/node-config"))
     result: dict[str, str] = {}
     for key in sorted(_NODE_CONFIG_KEYS):
         val = (ConfigManager.get_instance().get(key) or "").strip()
         if key == ConfigManager.Keys.CONTROL_API_KEY and val:
             val = val[:6]  # 脱敏
         result[key] = val
-    return result
+    return JSONResponse(content=result)
 
 
 class NodeConfigUpdate(BaseModel):
@@ -165,29 +191,29 @@ class NodeConfigUpdate(BaseModel):
 
 
 @router.put("/node-config")
-async def put_node_config(req: NodeConfigUpdate, node: str = Query(default="local")) -> dict:
-    """写节点三 KEY（白名单外拒绝; API_KEY 变更提示重启生效——绑定地址）。"""
+async def put_node_config(req: NodeConfigUpdate, node: str = Query(default="local")) -> JSONResponse:
+    """写节点三 KEY（白名单外拒绝; API_KEY 变更提示重启生效——绑定地址）。transit 端点。"""
     illegal = sorted(set(req.configs.keys()) - _NODE_CONFIG_KEYS)
     if illegal:
         raise HTTPException(status_code=422, detail=f"仅允许 {_NODE_CONFIG_KEYS}，非法键: {illegal}")
     client = _forward_or_local(node)
     if client is not None:
-        return await _forward_call(client.put_node_config, req.configs)
+        return JSONResponse(content=await _forward_call(client.put_node_config, req.configs))
     ConfigManager.get_instance().set({k: v.strip() for k, v in req.configs.items()})
     changed_binding = ConfigManager.Keys.CONTROL_API_KEY in req.configs
-    return {"ok": True, "reboot_required": changed_binding,
-            "hint": "CONTROL_API_KEY 变更后需重启控制台生效（绑定地址与鉴权）" if changed_binding else ""}
+    return JSONResponse(content={"ok": True, "reboot_required": changed_binding,
+                                  "hint": "CONTROL_API_KEY 变更后需重启控制台生效（绑定地址与鉴权）" if changed_binding else ""})
 
 
 @router.get("/autostart")
-async def get_autostart(node: str = Query(default="local")) -> dict:
-    """LaunchAgent 安装状态。"""
+async def get_autostart(node: str = Query(default="local")) -> JSONResponse:
+    """LaunchAgent 安装状态。transit 端点。"""
     client = _forward_or_local(node)
     if client is not None:
-        return await _forward_get(client, "/api/remote/autostart")
+        return JSONResponse(content=await _forward_get(client, "/api/remote/autostart"))
     from services.launchd_setup import LaunchdManager
     st = LaunchdManager.get_instance().status()
-    return dataclasses.asdict(st)
+    return JSONResponse(content=dataclasses.asdict(st))
 
 
 class AutostartRequest(BaseModel):
@@ -195,13 +221,14 @@ class AutostartRequest(BaseModel):
 
 
 @router.post("/autostart")
-async def set_autostart(req: AutostartRequest, node: str = Query(default="local")) -> dict:
-    """安装/卸载 LaunchAgent。"""
+async def set_autostart(req: AutostartRequest, node: str = Query(default="local")) -> JSONResponse:
+    """安装/卸载 LaunchAgent。transit 端点。"""
     client = _forward_or_local(node)
     if client is not None:
-        return await _forward_call(client.post_autostart, req.enable)
+        return JSONResponse(content=await _forward_call(client.post_autostart, req.enable))
     from services.launchd_setup import LaunchdManager
     try:
-        return LaunchdManager.get_instance().install() if req.enable else LaunchdManager.get_instance().uninstall()
+        result = LaunchdManager.get_instance().install() if req.enable else LaunchdManager.get_instance().uninstall()
+        return JSONResponse(content=asdict(result))
     except RuntimeError as e:
         raise HTTPException(status_code=422, detail=str(e))

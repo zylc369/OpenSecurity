@@ -9,10 +9,19 @@ from collections.abc import Collection
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from services.config_manager import ConfigManager
+from dataclasses import dataclass
+
+from services.config_manager import ConfigManager, ConfigMetaEntry
 from routes.deps import invalidate_deps_snapshot
 
 router = APIRouter(prefix="/api/config", tags=["config"])
+
+
+@dataclass
+class KeyValue:
+    key: str
+    value: str
+
 
 
 class ConfigUpdate(BaseModel):
@@ -32,7 +41,7 @@ async def get_all_configs() -> dict[str, str]:
 
 
 @router.get("/meta")
-async def get_config_meta() -> dict[str, dict]:
+async def get_config_meta() -> "dict[str, ConfigMetaEntry]":
     """配置项元数据（前端差异化渲染的驱动数据）。
 
     数据源：REQUIRED_CONFIGS ∪ EXTRA_CONFIG_META ∪ REMOTE_TAB_CONFIGS
@@ -45,19 +54,18 @@ async def get_config_meta() -> dict[str, dict]:
 
 
 @router.get("/required-status")
-async def get_required_status() -> dict[str, dict]:
+async def get_required_status() -> "dict[str, ConfigManager.ConfigStatusView]":
     """获取必要配置完整性（前端 banner 用，keyed dict 契约）。"""
-    from dataclasses import asdict
-    return {c.key: asdict(c) for c in ConfigManager.get_instance().required_status()}
+    return {c.key: c for c in ConfigManager.get_instance().required_status()}
 
 
 @router.get("/{key}")
-async def get_config(key: str) -> dict[str, str]:
+async def get_config(key: str) -> KeyValue:
     """获取单个配置。"""
     value = ConfigManager.get_instance().get(key)
     if value is None:
         raise HTTPException(status_code=404, detail=f"配置项 {key} 不存在")
-    return {"key": key, "value": value}
+    return KeyValue(key=key, value=value)
 
 
 def _guard_protected_keys(keys: Collection[str]) -> None:

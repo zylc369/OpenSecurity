@@ -12,7 +12,7 @@ IPC 发现：control_url.py（读注入的 IPC 地址，事实来源）。
 import base64
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -80,7 +80,7 @@ async def extract_text(
         )
         _CONTROL["base"] = None if r.status_code in (404, 502) else _CONTROL["base"]
         if r.status_code == 200:
-            return r.json().get("text", "")
+            return cast("dict[str, str]", r.json()).get("text", "")  # 控制台 OcrExtractResult JSON——transit
         return f"[错误] 控制台 OCR 返回 {r.status_code}: {r.text[:200]}"
     except httpx.HTTPError as e:
         _CONTROL["base"] = None  # 清缓存 → 下次重新解析端口（控制台重启自愈）

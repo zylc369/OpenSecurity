@@ -74,18 +74,17 @@ class ControlIpc:
 
     # ── httpx 客户端工厂 ──────────────────────────────────
 
-    def make_client(self, **kwargs) -> httpx.AsyncClient:
+    def make_client(self, timeout: "httpx.Timeout | float" = 30.0) -> httpx.AsyncClient:
         """构造连控制台 IPC 的 httpx AsyncClient（薄壳 lifespan 用）。
 
-        kwargs 透传 httpx.AsyncClient（timeout 等）。
+        显式子集签名: 全部薄壳只传 timeout; base_url 不可传（防覆盖 IPC 地址）。
         """
         self.resolve()  # 确保 Windows 代理线程已启动
         if IS_WINDOWS:
-            return httpx.AsyncClient(**kwargs)
-        kwargs.pop("base_url", None)
+            return httpx.AsyncClient(timeout=timeout)
         return httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(uds=_ipc_address()),
-            **kwargs,
+            timeout=timeout,
         )
 
     # ── Windows 管道代理（127.0.0.1 随机端口 → 管道）──────
@@ -99,7 +98,7 @@ class ControlIpc:
             srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             srv.bind(("127.0.0.1", 0))          # 随机端口：进程内实现细节
             srv.listen(8)
-            port = srv.getsockname()[1]
+            port = cast(int, srv.getsockname()[1])  # typeshed 的 getsockname 返回宽元组——cast 收口
             self._proxy_port = port
             threading.Thread(target=self._proxy_accept_loop, args=(srv,), daemon=True).start()
             return port
@@ -107,7 +106,7 @@ class ControlIpc:
     def _proxy_accept_loop(self, srv: socket.socket) -> None:
         while True:
             try:
-                conn, _ = srv.accept()
+                conn, _ = srv.accept()  # pyright: ignore[reportAny] —— typeshed accept 元组
             except OSError:
                 return
             threading.Thread(target=self._proxy_serve, args=(conn,), daemon=True).start()
@@ -149,7 +148,7 @@ class ControlIpc:
                 # 管道 → TCP
                 try:
                     # size=1 而非 0：C 层 malloc(0) 可能返回 NULL 误报 NoMemory
-                    _, avail, _ = win32pipe.PeekNamedPipe(pipe, 1)
+                    _, avail, _ = win32pipe.PeekNamedPipe(pipe, 1)  # pyright: ignore[reportAny] —— pywin32 stub（Windows-only，CI 裁决）
                 except win_errs:
                     break
                 if avail:
@@ -191,5 +190,5 @@ def resolve_control() -> ControlAddr | None:
     return _control_ipc.resolve()
 
 
-def make_control_client(**kwargs) -> httpx.AsyncClient:
-    return _control_ipc.make_client(**kwargs)
+def make_control_client(timeout: "httpx.Timeout | float" = 30.0) -> httpx.AsyncClient:
+    return _control_ipc.make_client(timeout=timeout)
