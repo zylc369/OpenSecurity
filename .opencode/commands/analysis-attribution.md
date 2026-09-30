@@ -30,7 +30,7 @@ $ARGUMENTS
    - 知识库：`read`/`grep` 命中 `knowledge-base` 路径的行为（timeline 的 read 条目不含路径 → 用 bash `detail`、`ledger.md`、`progress.md`、产出文档交叉还原；无法还原时标注"计数不完整"）；
    - 子 agent：task 派发对象（searcher / memorist / fresh-eyes / knowledge-scout）；
    - 其他分析工具调用（环境相关，如 idat）；
-   - **恢复/持续机制**：`session.idle`、`恢复消息已发送`、`检测到完成标记`、`跳过恢复 — 开关已禁用`、`反思心跳` 与 `反思纸条` 的触发计数与时序（任务级 plugin.log + 全局 plugin_debug.log 双源；注意有任务目录后 debugLog 写任务级）；记录**注入 → 完成（或完成标记）间隔**（硬指标）；
+   - **恢复/持续机制**：`session.idle`、`恢复消息已发送`、`检测到完成标记`、`跳过恢复 — 开关已禁用`、`反思唤醒` 与 `反思纸条` 的触发计数与时序（任务级 plugin.log + 全局 plugin_debug.log 双源；注意有任务目录后 debugLog 写任务级）；记录**注入 → 完成（或完成标记）间隔**（硬指标）；
    - 配置核对：相关 agent 的 frontmatter、片段挂载、工具权限（解释某机制"没有调用"的工具侧原因）。
 2. **落库状态核对（区分"没有/错过"）**：
    - 直读 `$OPENSECURITY_HOME/db/knowledge/knowledge.db`：`answers` 表按关键词/时间查条目、`answer_vectors_rowids` 查向量索引状态；

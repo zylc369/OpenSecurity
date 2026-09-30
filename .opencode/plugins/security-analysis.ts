@@ -1276,7 +1276,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           );
           return;
         }
-        // ── 工具/命令计数（反思心跳与纸条渲染、日志用；仅根会话 + 五分析 agent）──
+        // ── 工具/命令计数（反思唤醒与纸条渲染、日志用；仅根会话 + 五分析 agent）──
         if (
           session.isRootAgent &&
           SECURITY_ANALYSIS_AGENTS.includes(session.agentName)

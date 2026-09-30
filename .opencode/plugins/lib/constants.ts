@@ -149,11 +149,11 @@ export const ABORTED_ERROR_NAME = "MessageAbortedError";
 // 取值规则：未找到/非 0 非 false 的任意值 → 启用；值为 "0" 或 tolower 后 "false" → 禁用。
 export const ENV_KEY_RESUME_ANALYSIS = "RESUME_ANALYSIS_ENABLED";
 
-// 控制台配置中控制"反思"功能的总开关（反思纸条 + 反思心跳两通道共用，见 lib/reflection.ts）。
+// 控制台配置中控制"反思"功能的总开关（反思纸条 + 反思唤醒两通道共用，见 lib/reflection.ts）。
 // 取值规则与上述开关一致（未找到 → 启用；"0"/"false" → 禁用）。
 export const ENV_KEY_REFLECT_NUDGE = "REFLECT_NUDGE_ENABLED";
 
-// 反思到期间隔（分钟）。纸条与心跳共用：距上次反思超过该间隔即到期。验证时可经控制台配置调小。
+// 反思到期间隔（分钟）。纸条与唤醒共用：距上次反思超过该间隔即到期。验证时可经控制台配置调小。
 export const REFLECT_NUDGE_DEFAULT_INTERVAL_MIN = 30;
 
 // ─── venv ──────────────────────────────────────────────────────

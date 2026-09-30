@@ -32,7 +32,7 @@ import {
 // 强制它必须原样复制本次植入的具体值。
 
 // 生成动态完成标记的实现在 lib/reflection.ts（generateCompletionMarker，
-// 与反思心跳共用；移入 reflection 以避免 persistence ↔ reflection 循环依赖）。
+// 与反思唤醒共用；移入 reflection 以避免 persistence ↔ reflection 循环依赖）。
 
 // prompt 模板里的占位符，会被 getResumePrompt() 替换成动态生成的 marker。
 // 用双下划线包裹避免与正常文本混淆。
@@ -175,7 +175,7 @@ async function getLastAssistantText(sessionID: string): Promise<string | null> {
   }
 }
 
-// ─── 反思心跳（空闲通道）──────────────────────────────────────────
+// ─── 反思唤醒（空闲通道）──────────────────────────────────────────
 // 实现收口在 lib/reflection.ts（与忙时纸条共用开关/到期/守卫/状态更新）；
 // 本文件仅在 maybeResumeAnalysis 的统一注入器判定中调用 sendReflection。
 
@@ -227,7 +227,7 @@ export async function maybeResumeAnalysis(
     // 配置读取收口到 control-config（HTTP /api/config 直读）：
     // fail-closed 语义——控制台不可达时 fetchConfig throw，由本函数外层 catch
     // 记录（session.idle: 恢复异常）并跳过本轮注入，不基于陈旧缓存发消息。
-    // 注意：resume 开关的判定下移到 resume 专属分支之前——反思心跳有独立开关
+    // 注意：resume 开关的判定下移到 resume 专属分支之前——反思唤醒有独立开关
     // （REFLECT_NUDGE_ENABLED），不能被 RESUME_ANALYSIS_ENABLED 连带门禁。
     await fetchConfig();
 
@@ -308,10 +308,10 @@ export async function maybeResumeAnalysis(
       sessionID,
     );
 
-    // ── 统一注入器：反思到期 → 发心跳（优先于 resume；心跳自带续接指令，本次不再发 resume） ──
+    // ── 统一注入器：反思到期 → 发唤醒消息（优先于 resume；唤醒自带续接指令，本次不再发 resume） ──
     if (isReflectEnabled() && isReflectionDue(session)) {
       debugLog(
-        `session.idle: 反思到期（距上次 ${Math.round((Date.now() - session.lastReflectionAt) / 60000)}min ≥ 间隔），优先发心跳 sessionID=${sessionID}`,
+        `session.idle: 反思到期（距上次 ${Math.round((Date.now() - session.lastReflectionAt) / 60000)}min ≥ 间隔），优先发反思唤醒 sessionID=${sessionID}`,
         sessionID,
       );
       await sendReflection(session);
@@ -321,7 +321,7 @@ export async function maybeResumeAnalysis(
       debugLog(`session.idle: 反思开关禁用，走 resume 路径 sessionID=${sessionID}`, sessionID);
     }
 
-    // ── resume 专属开关（原位于函数最顶部；下移至此，避免门禁反思心跳） ──
+    // ── resume 专属开关（原位于函数最顶部；下移至此，避免门禁反思唤醒） ──
     const enabledRaw = getCachedConfig()[ENV_KEY_RESUME_ANALYSIS];
     if (
       enabledRaw !== undefined &&

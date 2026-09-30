@@ -4,7 +4,7 @@
  * 消费方（插件内插值；改本文件即全量同步）：
  *   - lib/task-session-persistence.ts：ledger.md 模板的节名与字段列
  *   - security-analysis.ts：压缩保留规则（结论台账与未测清单）
- *   - lib/reflection.ts：反思心跳/纸条文案引用节名
+ *   - lib/reflection.ts：反思唤醒/纸条文案引用节名
  *
  * 镜像点（静态文件无法 import，由 cognition.verifyMirrors()（插件启动自检）逐字比对）：
  *   - agents-rules/execution-discipline.md：禁止裸写词表 + 契约词汇（结论三件套 / 证据等级枚举 / 未测条件节名）

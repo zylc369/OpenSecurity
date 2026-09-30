@@ -74,15 +74,15 @@ export class SessionData
   /** 冷却中 pending 的 setTimeout handle。新 resume 前或用户手动发消息时清除。 */
   pendingResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // ── 计数（反思心跳/纸条渲染与日志用；仅根会话 + 五分析 agent 累加）──
+  // ── 计数（反思唤醒/纸条渲染与日志用；仅根会话 + 五分析 agent 累加）──
   /** 累计工具调用次数 */
   toolCallCount = 0;
   /** 其中 bash 命令调用次数 */
   commandCallCount = 0;
-  /** 上次反思触发时间戳（毫秒）。反思纸条（忙时）与反思心跳（空闲时）共同维护：任一通道触发即重置。
+  /** 上次反思触发时间戳（毫秒）。反思纸条（忙时）与反思唤醒（空闲时）共同维护：任一通道触发即重置。
    *  初值为会话创建时刻 → 首次反思在开场一个间隔之后；插件重启后内存态丢失 → 最多延迟一个间隔。 */
   lastReflectionAt = Date.now();
-  /** 反思累计触发次数（纸条 + 心跳合计；心跳文案的"每第 5 次死路复核"按此计数） */
+  /** 反思累计触发次数（纸条 + 唤醒合计；唤醒消息的"每第 5 次死路复核"调度按此计数） */
   reflectionCount = 0;
   /** 上次反思触发时的工具调用计数（用于渲染"期间工具调用 N 次"） */
   lastReflectionToolCount = 0;
