@@ -37,7 +37,7 @@ export function useHardware(): {
 }
 
 /** 必要配置状态（用于 banner） */
-export function useRequiredStatus(refreshKey = 0): {
+export function useRequiredStatus(surface: ConfigSurface, refreshKey = 0): {
   data: RequiredStatusMap | null;
   loading: boolean;
   error: string | null;
@@ -49,11 +49,11 @@ export function useRequiredStatus(refreshKey = 0): {
 
   const refresh = useCallback(() => {
     setLoading(true);
-    api.getRequiredStatus()
+    api.getRequiredStatus(surface)
       .then((d) => { setData(d); setError(null); })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [surface]);
 
   useEffect(() => {
     refresh();
@@ -114,11 +114,11 @@ export function useAllConfig(surface: ConfigSurface): {
 
   const refresh = useCallback(() => {
     setLoading(true);
-    api.getConfig()
+    api.getConfig(surface)
       .then((d) => { setData(d); setError(null); })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [surface]);
 
   const save = useCallback(async (updates: ConfigMap) => {
     const updated = await api.updateConfig(updates, surface);

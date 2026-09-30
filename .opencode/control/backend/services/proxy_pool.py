@@ -254,7 +254,7 @@ class ProxyPool:
 
     @staticmethod
     def credentials_configured() -> bool:
-        cfg = config_manager.ConfigManager.get_instance().get_all()
+        cfg = config_manager.ConfigManager.get_instance().get_kv_list(config_manager.Surface.CONFIG)
         return bool(cfg.get(config_manager.ConfigManager.get_instance().Keys.JULIANG_TRADE_NO)) and bool(cfg.get(config_manager.ConfigManager.get_instance().Keys.JULIANG_API_KEY))
 
     # ── 供应商提取（3 次指数退避）──
@@ -262,7 +262,7 @@ class ProxyPool:
     async def _fetch_from_julang(self) -> tuple[ProxyInfo, int]:
         if not self.credentials_configured():
             raise JuliangError("供应商凭证未配置（控制台配置页填写 JULIANG_TRADE_NO / JULIANG_API_KEY）")
-        cfg = config_manager.ConfigManager.get_instance().get_all()
+        cfg = config_manager.ConfigManager.get_instance().get_kv_list(config_manager.Surface.CONFIG)
         trade_no = cast("str", cfg[config_manager.ConfigManager.get_instance().Keys.JULIANG_TRADE_NO])  # credentials_configured 已保证存在
         api_key = cast("str", cfg[config_manager.ConfigManager.get_instance().Keys.JULIANG_API_KEY])
         params: "dict[str, int | str]" = {"trade_no": trade_no, "num": 1, "pt": 1,

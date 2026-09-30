@@ -102,7 +102,15 @@ const _managers: PermissionTimeoutManager[] = [];
 function makeManager(
   configReader: () => Record<string, string>,
 ): PermissionTimeoutManager {
-  const manager = new PermissionTimeoutManager(configReader);
+  // 模拟服务端 effective 语义: 用例未显式给 TYPES 时按服务端声明默认提供
+  //（生产中默认值经 /api/config 返回，插件侧无默认副本）
+  const wrapped = () => {
+    const vals = configReader();
+    return vals.PERMISSION_ASK_TIMEOUT_TYPES === undefined
+      ? { ...vals, PERMISSION_ASK_TIMEOUT_TYPES: "external_directory" }
+      : vals;
+  };
+  const manager = new PermissionTimeoutManager(wrapped);
   _managers.push(manager);
   return manager;
 }
@@ -139,12 +147,26 @@ async function main(): Promise<void> {
     assertEq(extractPermissionAskInfo({ id: "per_3" }), null, "缺字段应返回 null");
   });
 
-  await test("getPermissionTimeoutMs: 默认/优先/0 关闭/非法回退", () => {
-    assertEq(getPermissionTimeoutMs(readerOf({})), 300_000, "未配置默认 300s");
+  await test("getPermissionTimeoutMs: 生效值解析/0 关闭/缺失与非法不启用", () => {
     assertEq(
       getPermissionTimeoutMs(readerOf({ PERMISSION_ASK_TIMEOUT_SEC: "60" })),
       60_000,
-      "配置生效",
+      "生效值",
+    );
+    assertEq(
+      getPermissionTimeoutMs(readerOf({ PERMISSION_ASK_TIMEOUT_SEC: "0.3" })),
+      300,
+      "小数秒",
+    );
+    assertEq(
+      getPermissionTimeoutMs(readerOf({ PERMISSION_ASK_TIMEOUT_SEC: " 60 " })),
+      60_000,
+      "首尾空格 trim",
+    );
+    assertEq(
+      getPermissionTimeoutMs(readerOf({})),
+      0,
+      "未取到生效值→不启用（默认值唯一权威在服务端，插件零副本）",
     );
     assertEq(
       getPermissionTimeoutMs(readerOf({ PERMISSION_ASK_TIMEOUT_SEC: "0" })),
@@ -158,31 +180,21 @@ async function main(): Promise<void> {
     );
     assertEq(
       getPermissionTimeoutMs(readerOf({ PERMISSION_ASK_TIMEOUT_SEC: "abc" })),
-      300_000,
-      "非法回退默认",
-    );
-    assertEq(
-      getPermissionTimeoutMs(readerOf({ PERMISSION_ASK_TIMEOUT_SEC: "0.3" })),
-      300,
-      "小数秒",
-    );
-    assertEq(
-      getPermissionTimeoutMs(readerOf({ PERMISSION_ASK_TIMEOUT_SEC: " 60 " })),
-      60_000,
-      "首尾空格 trim",
+      0,
+      "非法→不启用",
     );
     assertEq(
       getPermissionTimeoutMs(readerOf({ PERMISSION_ASK_TIMEOUT_SEC: "Infinity" })),
-      300_000,
-      "Infinity 回退默认",
+      0,
+      "Infinity→不启用",
     );
   });
 
-  await test("getPermissionTimeoutTypes: 默认/列表/中文逗号/空白", () => {
+  await test("getPermissionTimeoutTypes: 列表/容错/缺失空集", () => {
     assertEq(
-      [...getPermissionTimeoutTypes(readerOf({}))].join(","),
-      "external_directory",
-      "默认仅目录权限",
+      getPermissionTimeoutTypes(readerOf({})).size,
+      0,
+      "未取到生效值→空集（默认值唯一权威在服务端）",
     );
     assertEq(
       [
@@ -203,13 +215,11 @@ async function main(): Promise<void> {
       "中文逗号容错",
     );
     assertEq(
-      [
-        ...getPermissionTimeoutTypes(
-          readerOf({ PERMISSION_ASK_TIMEOUT_TYPES: "  " }),
-        ),
-      ].join(","),
-      "external_directory",
-      "空白回退默认",
+      getPermissionTimeoutTypes(
+        readerOf({ PERMISSION_ASK_TIMEOUT_TYPES: "  " }),
+      ).size,
+      0,
+      "空白→空集",
     );
     assertEq(
       [

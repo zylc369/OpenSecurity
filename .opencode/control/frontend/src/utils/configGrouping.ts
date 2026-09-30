@@ -47,10 +47,11 @@ export function findGroup(
 }
 
 /**
- * 页面可保存子集: 仅属于本页面（meta entries）且非 readonly 的键。
+ * 页面可保存子集: 仅属于本页面（meta entries 声明）且非 readonly 的键。
  *
- * GET /api/config 返回全量值（含其他 surface 的键），整包回传会被服务端
- * surface 写校验 422——保存前必须过滤（服务端校验的前端镜像，双保险）。
+ * 值接口已按场景返回生效值（surface 轴），但过滤仍必要——readonly 键
+ * （写接口 422）与未声明键的防御性剔除，与服务端 _guard_surface 校验
+ * 对齐（双保险）。
  */
 export function writableUpdates(
   values: Record<string, string>,
@@ -60,6 +61,26 @@ export function writableUpdates(
   for (const [k, v] of Object.entries(values)) {
     const m = entries[k];
     if (m && !m.readonly) out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * 保存子集: 仅与基准值（base = 加载时的生效值）不同的键（先经 writableUpdates
+ * 的页面/readonly 过滤，值统一 trim 后比较与提交）。
+ *
+ * 值接口返回生效值（未配置键含声明默认）——全量回传会把默认值冻结进 .ai_env
+ * （服务端后续调默认不再跟随），故只提交变化键; "改回默认同值"不写盘。
+ */
+export function dirtyUpdates(
+  values: Record<string, string>,
+  base: Record<string, string>,
+  entries: ConfigMetaMap,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(writableUpdates(values, entries))) {
+    const trimmed = (v ?? "").trim();
+    if ((base[k] ?? "") !== trimmed) out[k] = trimmed;
   }
   return out;
 }

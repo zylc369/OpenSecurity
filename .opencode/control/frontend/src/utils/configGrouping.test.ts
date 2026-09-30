@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  groupByCategory, findGroup, writableUpdates,
+  groupByCategory, findGroup, writableUpdates, dirtyUpdates,
   estimateTileHeight, masonryDistribute,
 } from "./configGrouping";
 import type { GroupedCategory } from "./configGrouping";
@@ -12,7 +12,7 @@ import type { ConfigMetaMap, ConfigCategoryView, ConfigMetaItem } from "../types
 function item(over: Partial<ConfigMetaItem>): ConfigMetaItem {
   return {
     label: "", type: "text", hint: "", required: false,
-    default_value: "", readonly: false,
+    default_value: "", value: "", readonly: false,
     category_code: "other", category_desc: "其他", ...over,
   };
 }
@@ -71,6 +71,27 @@ describe("groupByCategory", () => {
       OWN: "1", RO: "1", REMOTE_KEY: "x", UNKNOWN: "y",
     };
     expect(writableUpdates(values, entries)).toEqual({ OWN: "1" });
+  });
+
+  it("dirtyUpdates: 仅提交与基准不同的键（trim 后比较; 防默认值冻结进 .ai_env）", () => {
+    const entries: ConfigMetaMap = {
+      A: item({ label: "a" }),
+      B: item({ label: "b" }),
+      RO: item({ label: "ro", readonly: true }),
+    };
+    const base: Record<string, string> = { A: "300", B: "x" };
+    const values: Record<string, string> = {
+      A: "400",      // 变化 → 提交
+      B: "x",        // 未变 → 不提交
+      RO: "y",       // readonly → 过滤
+    };
+    expect(dirtyUpdates(values, base, entries)).toEqual({ A: "400" });
+    // 改回默认同值 + 首尾空格 → 不写盘
+    expect(dirtyUpdates({ ...values, A: " 300 " }, base, entries))
+      .toEqual({});
+    // 基准缺的键（新值）→ 提交
+    expect(dirtyUpdates({ C_NEW: "v" } as Record<string, string>, base, { C_NEW: item({ label: "c" }) }))
+      .toEqual({ C_NEW: "v" });
   });
 
   it("findGroup 命中与空态", () => {

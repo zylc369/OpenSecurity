@@ -12,9 +12,10 @@
  *   ② client._client.post（hey-api 底层方法，任意端点; 当前主路径，支持 feedback）
  *   ③ client.postSessionIdPermissionsPermissionId（v1 SDK 生成方法兜底，无 feedback）
  *
- * 配置（控制台配置页 → .ai_env → /api/config 缓存读取）:
- *   PERMISSION_ASK_TIMEOUT_SEC   超时秒数; 未配置/非法 → 默认 300; 0 → 关闭
- *   PERMISSION_ASK_TIMEOUT_TYPES 生效类型（逗号分隔）; 未配置 → external_directory
+ * 配置（控制台配置页 → .ai_env → /api/config 生效值读取——默认值唯一权威在
+ * 服务端 ConfigField.default_value，插件不持有默认值副本）:
+ *   PERMISSION_ASK_TIMEOUT_SEC   超时秒数; 未取到生效值/非法（非正数）→ 功能不启用（记日志）
+ *   PERMISSION_ASK_TIMEOUT_TYPES 生效类型（逗号分隔）; 未取到 → 不启用任何类型（记日志）
  */
 import { ctx } from "./context";
 import { debugLog } from "./logging";
@@ -22,8 +23,6 @@ import { getCachedConfig } from "./control-config";
 import {
   ENV_KEY_PERMISSION_TIMEOUT_SEC,
   ENV_KEY_PERMISSION_TIMEOUT_TYPES,
-  PERMISSION_TIMEOUT_DEFAULT_SEC,
-  PERMISSION_TIMEOUT_DEFAULT_TYPES,
   PERMISSION_TIMEOUT_REJECT_MESSAGE,
 } from "./constants";
 
@@ -54,25 +53,54 @@ export function extractPermissionAskInfo(
   return { requestID, sessionID, permissionType };
 }
 
-/** 超时毫秒数: 未配置/非法 → 默认 300s; 0 → 0（关闭）; 正数 → 秒*1000 */
+/**
+ * 超时毫秒数: 服务端生效值（配置值或声明默认，经 /api/config 返回）。
+ * 未取到生效值或非法（非正数秒）→ 0（不启用，记排查日志）——
+ * 默认值唯一权威在服务端，插件取不到值即 fail-safe。
+ */
 export function getPermissionTimeoutMs(
   configReader: () => Record<string, string> = getCachedConfig,
 ): number {
   const raw = (configReader()[ENV_KEY_PERMISSION_TIMEOUT_SEC] ?? "").trim();
-  if (raw === "") return PERMISSION_TIMEOUT_DEFAULT_SEC * 1000;
+  if (raw === "") {
+    debugLog(
+      `权限超时: ${ENV_KEY_PERMISSION_TIMEOUT_SEC} 未取到生效值（服务端未声明默认或控制台不可达），功能不启用`,
+    );
+    return 0;
+  }
   const sec = Number(raw);
-  if (!Number.isFinite(sec)) return PERMISSION_TIMEOUT_DEFAULT_SEC * 1000;
-  return sec <= 0 ? 0 : sec * 1000;
+  if (!Number.isFinite(sec)) {
+    debugLog(
+      `权限超时: ${ENV_KEY_PERMISSION_TIMEOUT_SEC}=${raw} 非法（应为正数秒或 0），功能不启用`,
+    );
+    return 0;
+  }
+  if (sec === 0) return 0; // 0=关闭（文档化语义——正常关闭，不打异常告警）
+  if (sec < 0) {
+    debugLog(
+      `权限超时: ${ENV_KEY_PERMISSION_TIMEOUT_SEC}=${raw} 非法（负数），按关闭处理`,
+    );
+    return 0;
+  }
+  return sec * 1000;
 }
 
-/** 生效类型集合: 未配置 → 默认; 逗号分隔 trim 过滤空项（英文/中文逗号均容错） */
+/**
+ * 生效类型集合: 服务端生效值（逗号分隔; 英文/中文逗号均容错）。
+ * 未取到生效值 → 空集（不启用任何类型，记排查日志）。
+ */
 export function getPermissionTimeoutTypes(
   configReader: () => Record<string, string> = getCachedConfig,
 ): Set<string> {
   const raw = (configReader()[ENV_KEY_PERMISSION_TIMEOUT_TYPES] ?? "").trim();
-  const source = raw === "" ? PERMISSION_TIMEOUT_DEFAULT_TYPES : raw;
+  if (raw === "") {
+    debugLog(
+      `权限超时: ${ENV_KEY_PERMISSION_TIMEOUT_TYPES} 未取到生效值（服务端未声明默认或控制台不可达），不启用任何类型`,
+    );
+    return new Set();
+  }
   return new Set(
-    source
+    raw
       .replaceAll("，", ",")
       .split(",")
       .map((s) => s.trim())

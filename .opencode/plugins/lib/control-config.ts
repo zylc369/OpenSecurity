@@ -2,7 +2,8 @@
  * 控制台配置 API 客户端（Plugin 端）。
  *
  * 收口原则：Plugin 不直接读 .ai_env（控制台 config_store 是唯一读写方）。
- * 通过 HTTP GET /api/config 拉配置 + 内存缓存（TTL + SWR）。
+ * 通过 HTTP GET /api/config?surface=config 拉配置生效值 + 内存缓存（TTL + SWR）。
+ * （值接口以场景为轴必填 surface; 插件消费的键全部在 config 场景）
  *
  * 使用场景：
  *   • shell.env hook 注入 IDA_PRO_HOME 到 agent 子进程（同步走缓存）
@@ -38,10 +39,10 @@ let backgroundRefreshInFlight = false;
  * 失败: throw（旧缓存保留）。
  */
 export async function fetchConfig(): Promise<Record<string, string>> {
-  const resp = await controlFetch("/api/config", { timeoutMs: 3000 });
+  const resp = await controlFetch("/api/config?surface=config", { timeoutMs: 3000 });
   if (!resp.ok) {
-    debugLog(`fetchConfig 失败: /api/config HTTP ${resp.status}`);
-    throw new Error(`fetchConfig 失败: /api/config HTTP ${resp.status}`);
+    debugLog(`fetchConfig 失败: /api/config?surface=config HTTP ${resp.status}`);
+    throw new Error(`fetchConfig 失败: /api/config?surface=config HTTP ${resp.status}`);
   }
   cachedConfig = await resp.json() as Record<string, string>;
   cachedAt = Date.now();

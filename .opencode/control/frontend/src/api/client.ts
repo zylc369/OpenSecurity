@@ -60,13 +60,15 @@ export const api = {
   },
 
   // ─── /api/config ────────────────────────────────────────
-  async getConfig(): Promise<ConfigMap> {
-    const r = await instance.get<ConfigMap>("/api/config");
+  async getConfig(surface: ConfigSurface): Promise<ConfigMap> {
+    const r = await instance.get<ConfigMap>("/api/config",
+      { params: { surface } });
     return r.data;
   },
 
-  async getRequiredStatus(): Promise<RequiredStatusMap> {
-    const r = await instance.get<RequiredStatusMap>("/api/config/required-status");
+  async getRequiredStatus(surface: ConfigSurface): Promise<RequiredStatusMap> {
+    const r = await instance.get<RequiredStatusMap>("/api/config/required-status",
+      { params: { surface } });
     return r.data;
   },
 

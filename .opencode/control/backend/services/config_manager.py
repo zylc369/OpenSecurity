@@ -4,11 +4,13 @@
   • 引导参数: CONTROL_TCP_PORT / CONTROL_FRONTEND_DEV
     （路径类引导参数 OPENSECURITY_HOME / OPENCODE_ROOT 收口于 services.runtime_paths——
      .ai_env 路径本身由 OPENCODE_ROOT 决定，配置文件的位置无法从配置文件读取）
-  • .ai_env 唯一读写: get/get_all/set/delete/ensure_template
-  • 键名常量（Keys）/ 可调参数默认值（Defaults）/ 协议常量（Protocol）
+  • .ai_env 唯一读写: _load_from_ai_env（私有加载）/ set / delete / ensure_template
+  • 统一配置获取: 静态声明 _FIELDS + 领域模型 get_entries（.ai_env 值与声明默认
+    合并、validator 构建层校验）→ 各场景组装: get_kv_list / get / config_meta /
+    required_status（接口与消费方不再各自解析）
+  • 键名常量（Keys）/ 可调参数默认值（tunables dataclass）/ 协议常量（Protocol）
   • 行为可调参数: remote/heartbeat/proxy 三组 tunables（.ai_env 优先，
     每次调用重读——改后即时生效; 非法值回退默认）
-  • 配置元数据: ConfigField 四清单 + config_meta + required_status + validators
 
 设计规则（后端 OOP 重构铁律）:
   • 单例模板: __new__ 双检锁 + _init_once（禁止 __init__）+ get_instance()
@@ -22,7 +24,7 @@ import os
 import re
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Callable, Literal, overload
@@ -99,22 +101,46 @@ class ConfigMetaView:
     entries: dict[str, "ConfigMetaEntry"]
 
 
+@dataclass(frozen=True)
+class ConfigEntry:
+    """配置领域模型（扁平: 消费方所需的最终结果，无嵌套、无中间数据）。
+
+    唯一获取入口 ConfigManager.get_entries()——.ai_env 加载值与静态声明
+    默认值在构建时合并为 value（配置值不合法时记日志并回落默认值），
+    调用方只消费 value，不做任何计算; 原始值/默认值/来源等构建细节
+    一律不进入领域模型。各场景（值接口/meta/写校验）从领域模型取数
+    组装 DTO，不再各自解析。
+    """
+
+    key: str
+    label: str
+    type: str  # password / path / text / bool
+    hint: str
+    required: bool
+    value: str  # 最终结果（.ai_env 值或声明默认; 无默认未配置=""）
+    category: ConfigCategory
+    surfaces: list[Surface]  # 生效场景（一键可多场景）
+    readonly: bool
+
+
 @dataclass
 class ConfigMetaEntry:
     """配置项元数据（config_meta 载荷; 字段名=JSON 键名）。
 
     不含 surface——整包响应已按请求面过滤（页面组成权在服务端）。
+    value 为生效值（领域模型合并结果），前端单请求即可渲染;
+    default_value 仅为前端展示"默认值"提示（ConfigFieldRow）。
     """
 
     label: str
-    type: str            # password / path / text / bool
+    type: str  # password / path / text / bool
     hint: str
     required: bool
     default_value: str
-    category_code: str   # 分类 code（ConfigCategory 枚举值）
-    category_desc: str   # 分类描述（服务端权威，前端原样显示）
-    readonly: bool       # true = 任何页面禁用态渲染 + 写接口 422
-    source: str
+    value: str  # 生效值（.ai_env 值或声明默认; 无默认未配置=""）
+    category_code: str  # 分类 code（ConfigCategory 枚举值）
+    category_desc: str  # 分类描述（服务端权威，前端原样显示）
+    readonly: bool  # true = 任何页面禁用态渲染 + 写接口 422
 
 
 class ConfigManager:
@@ -212,14 +238,14 @@ class ConfigManager:
         """协议/物理常量（plugin ↔ console 两端一致，不进 .ai_env）。"""
 
         # exit code 约定（Plugin 通过 exit code 判断控制台状态）
-        EXIT_CODE_REUSE = 2            # 已有实例运行，本进程主动退出复用
-        EXIT_CODE_PORT_EXHAUSTED = 3   # 候选端口全部占用
-        EXIT_CODE_NORMAL = 0           # 正常退出（心跳表空，自杀）
+        EXIT_CODE_REUSE = 2  # 已有实例运行，本进程主动退出复用
+        EXIT_CODE_PORT_EXHAUSTED = 3  # 候选端口全部占用
+        EXIT_CODE_NORMAL = 0  # 正常退出（心跳表空，自杀）
         # IPC 与网络
         IS_WINDOWS = sys.platform == "win32"
         CONTROL_TCP_PORT_START = 9776  # 浏览器 TCP 通道候选段起点（顺延 +1）
         TCP_CANDIDATE_COUNT = 10
-        BIND_HOST = "127.0.0.1"        # 仅本机（安全约束; 节点模式经节点配置放开）
+        BIND_HOST = "127.0.0.1"  # 仅本机（安全约束; 节点模式经节点配置放开）
         IPC_UNIX_SOCKET_NAME = "opensecurity-control.sock"
         # 6 位随机后缀：一次性生成写死（openssl rand），非运行期分配
         IPC_WINDOWS_PIPE = r"\\.\pipe\opensecurity-control-482964"
@@ -242,46 +268,45 @@ class ConfigManager:
     class RemoteTunables:
         """远程链接可调参数（默认值唯一来源; .ai_env 优先，每轮重读即时生效）。"""
 
-        heartbeat_interval_sec: float = 5.0   # 心跳探测周期
-        fail_threshold: int = 2               # 连续失败→降级
-        recover_threshold: int = 3            # 连续成功→恢复
-        unload_delay_sec: float = 300.0       # 恢复后稳定期
-        infer_timeout_sec: float = 30.0       # 推理请求超时
-        probe_timeout_sec: float = 3.0        # 健康探测超时
+        heartbeat_interval_sec: float = 5.0  # 心跳探测周期
+        fail_threshold: int = 2  # 连续失败→降级
+        recover_threshold: int = 3  # 连续成功→恢复
+        unload_delay_sec: float = 300.0  # 恢复后稳定期
+        infer_timeout_sec: float = 30.0  # 推理请求超时
+        probe_timeout_sec: float = 3.0  # 健康探测超时
 
     @dataclass(frozen=True)
     class HeartbeatTunables:
         """心跳协议可调参数（opencode 插件每 10s POST /api/heartbeat）。"""
 
-        timeout_sec: float = 60.0     # 超时未跳 → 移除条目
+        timeout_sec: float = 60.0  # 超时未跳 → 移除条目
         sweep_interval_sec: float = 10.0  # 后台 sweep 周期
-        grace_sec: float = 90.0      # 启动宽限（覆盖 spawn 就绪等待+首跳）
+        grace_sec: float = 90.0  # 启动宽限（覆盖 spawn 就绪等待+首跳）
 
     @dataclass(frozen=True)
     class ProxyTunables:
         """代理池可调参数（实测依据: 2026-09-25-proxy-ip-manager.md 附录A）。"""
 
-        ip_ttl_sec: float = 300.0          # 单 IP 存活（5 分钟档）
-        ttl_margin_sec: float = 30.0       # 到期安全余量
-        rotate_conn_threshold: int = 35    # 新建连接数满此值自动轮换
-        domain_cooldown_sec: float = 600.0 # 域名限流冷却
-        rotate_history_limit: int = 50     # rotate_history 上限
+        ip_ttl_sec: float = 300.0  # 单 IP 存活（5 分钟档）
+        ttl_margin_sec: float = 30.0  # 到期安全余量
+        rotate_conn_threshold: int = 35  # 新建连接数满此值自动轮换
+        domain_cooldown_sec: float = 600.0  # 域名限流冷却
+        rotate_history_limit: int = 50  # rotate_history 上限
 
     @dataclass
     class ConfigField:
         """配置字段元数据。"""
-        key: str                                # .ai_env 中的 key
-        label: str                              # 前端展示的中文名
-        type: str                               # password / path / text / bool
-        hint: str = ""                          # 字段说明 / 获取地址
-        required: bool = True                   # 是否必要（缺失时 banner 提醒）
+        key: str  # .ai_env 中的 key
+        label: str  # 前端展示的中文名
+        type: str  # password / path / text / bool
+        hint: str = ""  # 字段说明 / 获取地址
+        required: bool = True  # 是否必要（缺失时 banner 提醒）
         validator: Callable[[str], tuple[bool, str]] | None = None
-        default_value: str = ""                 # 不配置时后端默认值（回传前端）
+        default_value: str = ""  # 不配置时后端默认值（生效值合并来源）
         category: ConfigCategory = ConfigCategory.OTHER  # 分类（分组归属）
-        surface: Surface = Surface.CONFIG       # 渲染面（页面归属声明）
-        readonly: bool = False                  # 只读（禁用渲染 + 写接口 422）
-        source: str = "ai_env"                  # 配置来源: ai_env=文件权威
-                                                # （env 同名值不参与读取）
+        surfaces: list[Surface] = field(  # 生效场景（页面归属声明; 一键可多场景）
+            default_factory=lambda: [Surface.CONFIG])
+        readonly: bool = False  # 只读（禁用渲染 + 写接口 422）
 
     # ═══════════════ 实例状态与构造 ═══════════════
 
@@ -292,6 +317,10 @@ class ConfigManager:
         #   置空 _instance、重建单例对象，无 fork/子进程）——refresh 重算类属性。
         RuntimePaths.refresh()
         self._dev_mode = self._read_dev_mode_once()
+        # validator 结果缓存（(key, value) → 结果）——高频读取路径（heartbeat
+        # 每 10s sweep 经 get()）不重复跑校验/打告警; 同组合只校验+告警一次，
+        # value 变化自动重新校验
+        self._validation_cache: dict[tuple[str, str], tuple[bool, str]] = {}
 
     def _read_dev_mode_once(self) -> bool:
         """启动期一次性读取（.ai_env 优先——source=ai_env 键的文件是权威，
@@ -351,18 +380,91 @@ class ConfigManager:
     # ═══════════════ .ai_env 读写（唯一方）═══════════════
 
     def get(self, key: str) -> str | None:
-        return self.get_all().get(key)
+        """单键生效值（全场景; 无默认且未配置 → None）。"""
+        for entry in self.get_entries():
+            if entry.key == key:
+                return entry.value or None
+        return None
 
-    def get_all(self) -> dict[str, str]:
+    def _load_from_ai_env(self) -> dict[str, str]:
+        """解析 .ai_env 全量原始键值（含未声明手写键）; 对全部声明字段的
+        path 型值做读时归一化（expanduser + abspath; 写侧保留原文）——
+        消费方拿到的即绝对展开路径。"""
         path = self.ai_env_path
         if not path.exists():
             return {}
         configs = self._parse(path.read_text(errors="ignore"))
-        # 路径型配置读时归一化（expanduser + abspath；写侧保留原文）——消费者拿到的即绝对展开路径
-        for field in self.required_configs() + self.extra_configs():
-            if field.type == "path" and configs.get(field.key):
-                configs[field.key] = os.path.abspath(os.path.expanduser(configs[field.key]))
+        for decl in self._FIELDS:
+            if decl.type == "path" and configs.get(decl.key):
+                configs[decl.key] = os.path.abspath(os.path.expanduser(configs[decl.key]))
         return configs
+
+    @staticmethod
+    def _default_of(decl: "ConfigManager.ConfigField") -> str:
+        """声明默认值（path 型与配置值同规归一化; 无默认 → ""）。"""
+        if not decl.default_value:
+            return ""
+        if decl.type == "path":
+            return os.path.abspath(os.path.expanduser(decl.default_value))
+        return decl.default_value
+
+    def get_entries(
+            self,
+            surfaces: "Surface | list[Surface] | tuple[Surface, ...] | None" = None,
+    ) -> list[ConfigEntry]:
+        """统一配置获取（单一事实来源）: _load_from_ai_env 与静态 _FIELDS
+        声明默认值合并 → 新建扁平配置领域模型列表。
+
+        入参 surfaces 按场景过滤（None=全量——内部消费（required_status 等）;
+        单值或序列——字段声明为多场景数组，任一交集即命中）; 未声明手写键
+        合成 OTHER 条目（仅 CONFIG 场景可见，等价既有兜底语义）。
+        """
+        raw = self._load_from_ai_env()
+        entries: list[ConfigEntry] = []
+        declared: set[str] = set()
+        for decl in self._FIELDS:
+            declared.add(decl.key)
+            raw_value = raw.get(decl.key, "")
+            value = raw_value.strip() or self._default_of(decl)
+            if raw_value.strip() and decl.validator is not None:
+                cache_key = (decl.key, raw_value)
+                cached = self._validation_cache.get(cache_key)
+                if cached is None:
+                    cached = decl.validator(raw_value)
+                    self._validation_cache[cache_key] = cached
+                    if not cached[0]:
+                        logger.warning("配置 %s=%r 非法（%s），回落声明默认值 %r",
+                                       decl.key, raw_value, cached[1], self._default_of(decl))
+                if not cached[0]:
+                    value = self._default_of(decl)
+            entries.append(ConfigEntry(
+                key=decl.key, label=decl.label, type=decl.type, hint=decl.hint,
+                required=decl.required, value=value,
+                category=decl.category, surfaces=decl.surfaces,
+                readonly=decl.readonly,
+            ))
+        for key, raw_value in raw.items():
+            if key in declared or not raw_value.strip():
+                continue
+            entries.append(ConfigEntry(
+                key=key, label=key, type="text", hint="", required=False,
+                value=raw_value,
+                category=ConfigCategory.OTHER, surfaces=[Surface.CONFIG],
+                readonly=False,
+            ))
+        if surfaces is None:
+            return entries
+        wanted = {surfaces} if isinstance(surfaces, Surface) else set(surfaces)
+        return [e for e in entries if wanted.intersection(e.surfaces)]
+
+    def get_kv_list(
+            self,
+            surfaces: "Surface | list[Surface]",
+    ) -> dict[str, str]:
+        """对外标准 KV 结果: 指定场景内每个配置的生效值（来自 .ai_env 或
+        声明默认; 无默认且未配置的键不出现——消费方按 fail-safe 处理）。
+        场景必填——值获取以场景为轴，不再返回跨场景全量。"""
+        return {e.key: e.value for e in self.get_entries(surfaces) if e.value}
 
     def set(self, updates: dict[str, str]) -> dict[str, str]:
         """批量更新（保留注释 + 未改字段; 值统一 strip）。"""
@@ -465,9 +567,13 @@ DEEPSEEK_API_KEY=
     # ═══════════════ tunables 读取器（.ai_env 优先，非法回退默认）═══════════════
 
     @overload
-    def _read_num(self, vals: dict[str, str], key: str, default: float | int, as_int: Literal[True]) -> int: ...
+    def _read_num(self, vals: dict[str, str], key: str, default: float | int, as_int: Literal[True]) -> int:
+        ...
+
     @overload
-    def _read_num(self, vals: dict[str, str], key: str, default: float | int, as_int: Literal[False]) -> float: ...
+    def _read_num(self, vals: dict[str, str], key: str, default: float | int, as_int: Literal[False]) -> float:
+        ...
+
     def _read_num(self, vals: dict[str, str], key: str, default: float | int, as_int: bool) -> float | int:
         raw = (vals.get(key) or "").strip()
         if not raw:
@@ -480,11 +586,12 @@ DEEPSEEK_API_KEY=
 
     def remote_tunables(self) -> RemoteTunables:
         """远程链接可调参数（每次调用重读——心跳周期取值，改配置即时生效）。"""
-        vals = self.get_all()
+        vals = self._load_from_ai_env()
         d = self.RemoteTunables()
         k = self.Keys
         return self.RemoteTunables(
-            heartbeat_interval_sec=self._read_num(vals, k.REMOTE_HEARTBEAT_INTERVAL_SEC, d.heartbeat_interval_sec, False),
+            heartbeat_interval_sec=self._read_num(vals, k.REMOTE_HEARTBEAT_INTERVAL_SEC, d.heartbeat_interval_sec,
+                                                  False),
             fail_threshold=self._read_num(vals, k.REMOTE_FAIL_THRESHOLD, d.fail_threshold, True),
             recover_threshold=self._read_num(vals, k.REMOTE_RECOVER_THRESHOLD, d.recover_threshold, True),
             unload_delay_sec=self._read_num(vals, k.REMOTE_UNLOAD_DELAY_SEC, d.unload_delay_sec, False),
@@ -494,7 +601,7 @@ DEEPSEEK_API_KEY=
 
     def heartbeat_tunables(self) -> HeartbeatTunables:
         """心跳协议可调参数（每轮 sweep 重读）。"""
-        vals = self.get_all()
+        vals = self._load_from_ai_env()
         d = self.HeartbeatTunables()
         k = self.Keys
         return self.HeartbeatTunables(
@@ -505,7 +612,7 @@ DEEPSEEK_API_KEY=
 
     def proxy_tunables(self) -> ProxyTunables:
         """代理池可调参数（消费时重读）。"""
-        vals = self.get_all()
+        vals = self._load_from_ai_env()
         d = self.ProxyTunables()
         k = self.Keys
         return self.ProxyTunables(
@@ -516,270 +623,34 @@ DEEPSEEK_API_KEY=
             rotate_history_limit=self._read_num(vals, k.ROTATE_HISTORY_LIMIT, d.rotate_history_limit, True),
         )
 
-    # ═══════════════ 配置元数据（ConfigField 清单）═══════════════
-
-    def required_configs(self) -> list[ConfigField]:
-        k = self.Keys
-        return [
-            self.ConfigField(
-                key=k.DEEPSEEK_API_KEY, label="DeepSeek API 密钥", type="password",
-                hint="获取地址：https://platform.deepseek.com/api-keys",
-                validator=self.validate_api_key,
-                category=ConfigCategory.MODELS,
-            ),
-            self.ConfigField(
-                key=k.IDA_PRO_HOME, label="IDA Pro 安装目录", type="path",
-                hint="该目录下需有 idat 可执行文件",
-                validator=self.validate_ida_pro_home,
-                category=ConfigCategory.TOOLS,
-            ),
-        ]
-
-    def extra_configs(self) -> list[ConfigField]:
-        k = self.Keys
-        return [
-            self.ConfigField(
-                key=k.DEEPSEEK_MODEL, label="DeepSeek 模型名", type="text",
-                hint="不配置默认 deepseek-flash（events MCP 提取模型；需要更强提取质量可改 deepseek-v4-pro）",
-                required=False, default_value="deepseek-flash",
-                category=ConfigCategory.MODELS,
-            ),
-            self.ConfigField(
-                key=k.DEEPSEEK_SMALL_MODEL, label="DeepSeek 轻量模型名", type="text",
-                hint="时间戳推断模型; 不配置默认 deepseek-flash",
-                required=False, default_value="deepseek-flash",
-                category=ConfigCategory.MODELS,
-            ),
-            self.ConfigField(
-                key=k.HF_ENDPOINT, label="HuggingFace 端点", type="text",
-                hint="国内直连不稳时配置镜像，如 https://hf-mirror.com",
-                required=False,
-                category=ConfigCategory.MODELS,
-            ),
-            self.ConfigField(
-                key=k.GITHUB_TOKEN, label="GitHub API 令牌", type="password",
-                hint="外部工具下载加速（防未认证 60 次/小时配额耗尽）；未配置时兜底 gh auth token",
-                required=False,
-                category=ConfigCategory.TOOLS,
-            ),
-            self.ConfigField(
-                key=k.JULIANG_TRADE_NO, label="代理IP供应商订单号", type="text",
-                hint="代理 IP 池用（juliangip.com 企业版套餐的业务编号，会员中心-业务管理获取）",
-                required=False,
-                category=ConfigCategory.PROXY,
-            ),
-            self.ConfigField(
-                key=k.JULIANG_API_KEY, label="代理IP供应商 API 秘钥", type="password",
-                hint="与订单号配套的 API Key（同页面获取）；两项都配置后 proxy MCP/代理池才可用",
-                required=False,
-                category=ConfigCategory.PROXY,
-            ),
-            self.ConfigField(
-                key=k.RESUME_ANALYSIS_ENABLED, label="分析续传开关", type="bool",
-                hint="未配置=开启（默认），0=关闭——会话压缩后自动注入分析状态续传提示",
-                required=False,
-                category=ConfigCategory.BEHAVIOR,
-            ),
-            self.ConfigField(
-                key=k.REFLECT_NUDGE_ENABLED, label="反思提醒开关", type="bool",
-                hint="反思纸条+反思唤醒两通道总开关; 未配置=开启（默认），0=关闭",
-                required=False,
-                category=ConfigCategory.BEHAVIOR,
-            ),
-            self.ConfigField(
-                key=k.REFLECT_NUDGE_INTERVAL_MIN, label="反思提醒间隔（分钟）", type="text",
-                hint="距上次反思超过该间隔即注入提醒; 默认 30 分钟，改后 30s 内生效",
-                required=False, default_value="30",
-                category=ConfigCategory.BEHAVIOR,
-            ),
-            self.ConfigField(
-                key=k.PERMISSION_ASK_TIMEOUT_SEC, label="权限询问超时（秒）", type="text",
-                hint="权限询问超过该秒数未处理则自动拒绝（附引导反馈）; 0=关闭; 默认 300 秒，改后 30s 内生效",
-                required=False, default_value="300",
-                category=ConfigCategory.BEHAVIOR,
-            ),
-            self.ConfigField(
-                key=k.PERMISSION_ASK_TIMEOUT_TYPES, label="超时自动拒绝的权限类型", type="text",
-                hint="逗号分隔的权限类型名; 默认仅 external_directory（目录权限），可加 edit/bash 等",
-                required=False, default_value="external_directory",
-                category=ConfigCategory.BEHAVIOR,
-            ),
-            self.ConfigField(
-                key=k.CONTROL_FRONTEND_DEV, label="前端开发模式", type="bool",
-                hint="1=vite dev(5173)，0/删除=发布态(dist/)。改后需重启控制台生效",
-                required=False,
-                category=ConfigCategory.DEVELOPER,
-            ),
-        ]
-
-    def remote_link_configs(self) -> list[ConfigField]:
-        """远程连接配置（surface=remote——远程资源页渲染）。
-
-        ENABLED readonly=true: 写接口 422，只能经「切换远程」按钮
-        （switch_to_remote 先校验后置位，见 routes/remote.py D10 守卫）。
-        """
-        k = self.Keys
-        return [
-            self.ConfigField(
-                key=k.REMOTE_CONSOLE_URL, label="远程控制台链接", type="text",
-                hint="远程节点（如 Mac Mini）控制台地址，如 http://192.168.1.20:9776",
-                required=False,
-                category=ConfigCategory.REMOTE, surface=Surface.REMOTE,
-            ),
-            self.ConfigField(
-                key=k.REMOTE_CONSOLE_TOKEN, label="远程控制台令牌", type="password",
-                hint="与远程节点 CONTROL_API_KEY 相同的值（Bearer 鉴权）",
-                required=False,
-                category=ConfigCategory.REMOTE, surface=Surface.REMOTE,
-            ),
-            self.ConfigField(
-                key=k.REMOTE_CONSOLE_ENABLED, label="远程模型开关", type="bool",
-                hint="只读——只能经「切换远程」按钮变更（先校验后置位）",
-                required=False, readonly=True,
-                category=ConfigCategory.REMOTE, surface=Surface.REMOTE,
-            ),
-        ]
-
-    def node_side_configs(self) -> list[ConfigField]:
-        """节点侧配置（surface=hidden——远程页节点管理卡片经专用端点管理）。
-
-        写路径必须走 node-config 端点: CONTROL_API_KEY 变更触发重绑 0.0.0.0
-        副作用，且支持转发远端节点（通用写接口到不了这些键，见 _guard_surface）。
-        """
-        k = self.Keys
-        return [
-            self.ConfigField(
-                key=k.CONTROL_API_KEY, label="本机控制台鉴权令牌", type="password",
-                hint="配置后本控制台对局域网开放推理类 API（Bearer 校验）并绑 0.0.0.0；远程节点（Mac Mini）用",
-                required=False,
-                category=ConfigCategory.REMOTE, surface=Surface.HIDDEN,
-            ),
-            self.ConfigField(
-                key=k.CONTROL_RESIDENT, label="控制台常驻", type="bool",
-                hint="1=禁用心跳自杀机制（无 opencode 连接也不退出）；远程节点用",
-                required=False,
-                category=ConfigCategory.REMOTE, surface=Surface.HIDDEN,
-            ),
-            self.ConfigField(
-                key=k.CONTROL_AUTOSTART, label="开机自动启动", type="bool",
-                hint="1=安装 LaunchAgent 开机自启（macOS，需开启自动登录）；远程节点用",
-                required=False,
-                category=ConfigCategory.REMOTE, surface=Surface.HIDDEN,
-            ),
-        ]
-
-    # tunables 配置声明（拆三组; default_value 与 tunables dataclass 默认同源生成）
-
-    def _tunable_field(self, key: str, label: str, default: "float | int", hint: str,
-                       category: ConfigCategory, surface: Surface,
-                       readonly: bool = False) -> "ConfigManager.ConfigField":
-        return self.ConfigField(key=key, label=label, type="text", required=False,
-                                category=category, surface=surface, readonly=readonly,
-                                default_value=str(default), hint=hint)
-
-    def proxy_tunable_configs(self) -> list[ConfigField]:
-        """代理池调参（surface=config——配置页代理分类，可改，消费方重读即生效）。"""
-        k = self.Keys
-        pt = self.ProxyTunables()
-        c, s = ConfigCategory.PROXY, Surface.CONFIG
-        return [
-            self._tunable_field(k.JULIANG_IP_TTL_SEC, "代理单 IP 存活（秒）", pt.ip_ttl_sec,
-                                "单 IP 寿命（5 分钟档）", c, s),
-            self._tunable_field(k.JULIANG_TTL_MARGIN_SEC, "代理到期余量（秒）", pt.ttl_margin_sec,
-                                "到期安全余量", c, s),
-            self._tunable_field(k.PROXY_ROTATE_CONN_THRESHOLD, "代理轮换连接阈值", pt.rotate_conn_threshold,
-                                "proxy 模式下新建连接数满此值自动轮换", c, s),
-            self._tunable_field(k.DOMAIN_COOLDOWN_SEC, "域名限流冷却（秒）", pt.domain_cooldown_sec,
-                                "域名冷却 10 分钟档", c, s),
-            self._tunable_field(k.ROTATE_HISTORY_LIMIT, "轮换历史上限", pt.rotate_history_limit,
-                                "rotate_history 条数上限", c, s),
-        ]
-
-    def remote_tunable_configs(self) -> list[ConfigField]:
-        """远程调参（surface=remote + readonly——远程页只读展示，写接口 422）。"""
-        k = self.Keys
-        rt = self.RemoteTunables()
-        c, s = ConfigCategory.REMOTE_TUNING, Surface.REMOTE
-        return [
-            self._tunable_field(k.REMOTE_HEARTBEAT_INTERVAL_SEC, "远程心跳间隔（秒）", rt.heartbeat_interval_sec,
-                                "远程节点健康探测周期; 修改后下个周期生效", c, s, readonly=True),
-            self._tunable_field(k.REMOTE_FAIL_THRESHOLD, "远程降级阈值（连续失败次数）", rt.fail_threshold,
-                                "连续失败达此次数 → 降级本地", c, s, readonly=True),
-            self._tunable_field(k.REMOTE_RECOVER_THRESHOLD, "远程恢复阈值（连续成功次数）", rt.recover_threshold,
-                                "降级后连续成功达此次数 → 切回远程", c, s, readonly=True),
-            self._tunable_field(k.REMOTE_UNLOAD_DELAY_SEC, "恢复后稳定期（秒）", rt.unload_delay_sec,
-                                "切回远程后稳定此时长才卸载本地模型（释放内存）", c, s, readonly=True),
-            self._tunable_field(k.REMOTE_INFER_TIMEOUT_SEC, "远程推理超时（秒）", rt.infer_timeout_sec,
-                                "远程 embed/rerank/ocr 请求超时", c, s, readonly=True),
-            self._tunable_field(k.REMOTE_PROBE_TIMEOUT_SEC, "远程探测超时（秒）", rt.probe_timeout_sec,
-                                "健康探测请求超时（应远小于心跳间隔）", c, s, readonly=True),
-        ]
-
-    def heartbeat_tunable_configs(self) -> list[ConfigField]:
-        """心跳协议调参（surface=hidden——无页面; 手编 .ai_env，每轮 sweep 重读）。"""
-        k = self.Keys
-        ht = self.HeartbeatTunables()
-        c, s = ConfigCategory.SYSTEM, Surface.HIDDEN
-        return [
-            self._tunable_field(k.HEARTBEAT_TIMEOUT_SEC, "心跳超时（秒）", ht.timeout_sec,
-                                "opencode 超此时长未跳心跳 → 移除条目", c, s),
-            self._tunable_field(k.HEARTBEAT_SWEEP_INTERVAL_SEC, "心跳 sweep 周期（秒）", ht.sweep_interval_sec,
-                                "后台周期清理间隔", c, s),
-            self._tunable_field(k.HEARTBEAT_GRACE_SEC, "心跳启动宽限（秒）", ht.grace_sec,
-                                "表空超过此时长才自杀（覆盖 spawn 就绪等待+首跳）", c, s),
-        ]
-
-    def _all_fields(self) -> list[ConfigField]:
-        """全部声明字段（config_meta 过滤与 _guard_surface 校验的数据源）。
-
-        顺序约定: 清单内与清单间的声明顺序 = 配置页组内展示顺序
-        （meta 的 entries dict 按此序构造，前端按键序渲染）——同类配置
-        相邻声明即相邻展示，调整展示顺序在此处做。required_configs 先于
-        extra_configs 拼接 → 同分类内必要配置天然在前。
-        """
-        return [*self.required_configs(), *self.extra_configs(),
-                *self.remote_link_configs(), *self.node_side_configs(),
-                *self.proxy_tunable_configs(), *self.remote_tunable_configs(),
-                *self.heartbeat_tunable_configs()]
-
-    def field_of(self, key: str) -> "ConfigField | None":
-        """按键名查声明字段（未声明返回 None——写校验兜底语义用）。"""
-        for field in self._all_fields():
-            if field.key == key:
-                return field
+    def field_of(self, key: str) -> ConfigField | None:
+        """按键名查声明字段（静态 _FIELDS; 未声明返回 None——写校验兜底语义用）。"""
+        for decl in self._FIELDS:
+            if decl.key == key:
+                return decl
         return None
 
     def config_meta(self, surface: Surface) -> ConfigMetaView:
-        """单 surface 的配置元数据（页面组成权威; 分类序=枚举定义序）。
+        """单 surface 的配置元数据 + 生效值（页面组成权威; 分类序=枚举定义序）。
 
-        未知 .ai_env 键兜底: 仅 config 面，OTHER 分类（label=键名）;
-        remote 面不兜底（远程页只渲染已声明配置）。
+        从统一领域模型 get_entries(surfaces=surface) 组装——未声明手写键经
+        领域模型合成 OTHER 条目（仅 CONFIG 场景兜底; remote 面只渲染已声明
+        配置）。default_value 展示信息经声明表补充（field_of）。
         """
         entries: dict[str, ConfigMetaEntry] = {}
         cats_with_entries: set[ConfigCategory] = set()
-        for field in self._all_fields():
-            if field.surface != surface:
-                continue
-            entries[field.key] = ConfigMetaEntry(
-                label=field.label, type=field.type, hint=field.hint,
-                required=field.required, default_value=field.default_value,
-                category_code=field.category.value,
-                category_desc=field.category.desc,
-                readonly=field.readonly, source=field.source,
+        for entry in self.get_entries(surfaces=surface):
+            decl = self.field_of(entry.key)
+            entries[entry.key] = ConfigMetaEntry(
+                label=entry.label, type=entry.type, hint=entry.hint,
+                required=entry.required,
+                default_value=decl.default_value if decl else "",
+                value=entry.value,
+                category_code=entry.category.value,
+                category_desc=entry.category.desc,
+                readonly=entry.readonly,
             )
-            cats_with_entries.add(field.category)
-        if surface == Surface.CONFIG:
-            declared = {f.key for f in self._all_fields()}
-            for key in self.get_all():
-                if key not in declared:
-                    entries[key] = ConfigMetaEntry(
-                        label=key, type="text", hint="",
-                        required=False, default_value="",
-                        category_code=ConfigCategory.OTHER.value,
-                        category_desc=ConfigCategory.OTHER.desc,
-                        readonly=False, source="ai_env",
-                    )
-                    cats_with_entries.add(ConfigCategory.OTHER)
+            cats_with_entries.add(entry.category)
         categories = [CategoryView(code=c.value, desc=c.desc)
                       for c in ConfigCategory.ordered() if c in cats_with_entries]
         return ConfigMetaView(categories=categories, entries=entries)
@@ -793,36 +664,267 @@ DEEPSEEK_API_KEY=
         hint: str
         error: str
 
-    def required_status(self) -> list[ConfigStatusView]:
-        configs = self.get_all()
+    def required_status(
+            self,
+            surfaces: "Surface | list[Surface]",
+    ) -> list[ConfigStatusView]:
+        """必要配置完整性（前端 banner 用; 按场景过滤）。
+
+        值不合法已在领域模型构建层校验（记日志+回落默认）——此处只判
+        最终 value 是否为空（必要键均无声明默认，空即未配置）。
+        """
         result: list[ConfigManager.ConfigStatusView] = []
-        for field in self.required_configs():
-            value = configs.get(field.key, "")
-            ok = bool(value)
-            validator_msg = ""
-            if ok and field.validator:
-                v_ok, validator_msg = field.validator(value)
-                ok = v_ok
+        for entry in self.get_entries(surfaces):
+            if not entry.required:
+                continue
             result.append(self.ConfigStatusView(
-                key=field.key, label=field.label, ok=ok, hint=field.hint,
-                error=validator_msg if not ok and validator_msg else "",
+                key=entry.key, label=entry.label, ok=bool(entry.value.strip()),
+                hint=entry.hint, error="",
             ))
         return result
 
     # ═══════════════ validators ═══════════════
+    # staticmethod: 静态字段列表 _FIELDS（类体末尾）按名引用，不依赖实例
 
-    def validate_ida_pro_home(self, value: str) -> tuple[bool, str]:
+    @staticmethod
+    def validate_ida_pro_home(value: str) -> tuple[bool, str]:
         """校验 IDA_PRO_HOME: 目录存在 + idat 可执行文件存在。"""
         path = Path(os.path.abspath(os.path.expanduser(value)))
         if not path.exists():
             return False, f"目录不存在：{value}"
-        exe = "idat.exe" if self.is_windows else "idat"
+        exe = "idat.exe" if sys.platform == "win32" else "idat"
         if not (path / exe).exists():
             return False, f"目录下未找到 {exe}"
         return True, ""
 
-    def validate_api_key(self, value: str) -> tuple[bool, str]:
+    @staticmethod
+    def validate_api_key(value: str) -> tuple[bool, str]:
         """校验 API key 非空（具体格式不验证，DeepSeek 兼容多种格式）。"""
         if len(value) < 10:
             return False, "API key 长度异常（<10 字符）"
         return True, ""
+
+    # ═══════════════ 静态字段配置列表（唯一声明来源）═══════════════
+    # 合并原 required/extra/remote_link/node_side/三组 tunables 六个清单方法——
+    # 场景归属在 ConfigField.surfaces 数组声明（一键可多场景）。
+    # 顺序约定: 列表顺序 = 配置页组内展示顺序（同类配置相邻声明即相邻展示）。
+
+    _RT_D = RemoteTunables()
+    _HT_D = HeartbeatTunables()
+    _PT_D = ProxyTunables()
+
+    _FIELDS: list[ConfigField] = [
+        # ── 必要/常规 ──
+        ConfigField(
+            key=Keys.DEEPSEEK_API_KEY, label="DeepSeek API 密钥", type="password",
+            hint="获取地址：https://platform.deepseek.com/api-keys",
+            validator=validate_api_key,
+            category=ConfigCategory.MODELS,
+        ),
+        ConfigField(
+            key=Keys.IDA_PRO_HOME, label="IDA Pro 安装目录", type="path",
+            hint="该目录下需有 idat 可执行文件",
+            validator=validate_ida_pro_home,
+            category=ConfigCategory.TOOLS,
+        ),
+        # ── 常规可选 ──
+        ConfigField(
+            key=Keys.DEEPSEEK_MODEL, label="DeepSeek 模型名", type="text",
+            hint="不配置默认 deepseek-flash（events MCP 提取模型；需要更强提取质量可改 deepseek-v4-pro）",
+            required=False, default_value="deepseek-flash",
+            category=ConfigCategory.MODELS,
+        ),
+        ConfigField(
+            key=Keys.DEEPSEEK_SMALL_MODEL, label="DeepSeek 轻量模型名", type="text",
+            hint="时间戳推断模型; 不配置默认 deepseek-flash",
+            required=False, default_value="deepseek-flash",
+            category=ConfigCategory.MODELS,
+        ),
+        ConfigField(
+            key=Keys.HF_ENDPOINT, label="HuggingFace 端点", type="text",
+            hint="国内直连不稳时配置镜像，如 https://hf-mirror.com",
+            required=False,
+            category=ConfigCategory.MODELS,
+        ),
+        ConfigField(
+            key=Keys.GITHUB_TOKEN, label="GitHub API 令牌", type="password",
+            hint="外部工具下载加速（防未认证 60 次/小时配额耗尽）；未配置时兜底 gh auth token",
+            required=False,
+            category=ConfigCategory.TOOLS,
+        ),
+        ConfigField(
+            key=Keys.JULIANG_TRADE_NO, label="代理IP供应商订单号", type="text",
+            hint="代理 IP 池用（juliangip.com 企业版套餐的业务编号，会员中心-业务管理获取）",
+            required=False,
+            category=ConfigCategory.PROXY,
+        ),
+        ConfigField(
+            key=Keys.JULIANG_API_KEY, label="代理IP供应商 API 秘钥", type="password",
+            hint="与订单号配套的 API Key（同页面获取）；两项都配置后 proxy MCP/代理池才可用",
+            required=False,
+            category=ConfigCategory.PROXY,
+        ),
+        ConfigField(
+            key=Keys.RESUME_ANALYSIS_ENABLED, label="分析续传开关", type="bool",
+            hint="默认开启，0=关闭——会话压缩后自动注入分析状态续传提示",
+            required=False, default_value="1",
+            category=ConfigCategory.BEHAVIOR,
+        ),
+        ConfigField(
+            key=Keys.REFLECT_NUDGE_ENABLED, label="反思提醒开关", type="bool",
+            hint="反思纸条+反思唤醒两通道总开关; 默认开启，0=关闭",
+            required=False, default_value="1",
+            category=ConfigCategory.BEHAVIOR,
+        ),
+        ConfigField(
+            key=Keys.REFLECT_NUDGE_INTERVAL_MIN, label="反思提醒间隔（分钟）", type="text",
+            hint="距上次反思超过该间隔即注入提醒; 默认 30 分钟，改后 30s 内生效",
+            required=False, default_value="30",
+            category=ConfigCategory.BEHAVIOR,
+        ),
+        ConfigField(
+            key=Keys.PERMISSION_ASK_TIMEOUT_SEC, label="权限询问超时（秒）", type="text",
+            hint="权限询问超过该秒数未处理则自动拒绝（附引导反馈）; 0=关闭; 默认 300 秒，改后 30s 内生效",
+            required=False, default_value="300",
+            category=ConfigCategory.BEHAVIOR,
+        ),
+        ConfigField(
+            key=Keys.PERMISSION_ASK_TIMEOUT_TYPES, label="超时自动拒绝的权限类型", type="text",
+            hint="逗号分隔的权限类型名; 默认仅 external_directory（目录权限），可加 edit/bash 等",
+            required=False, default_value="external_directory",
+            category=ConfigCategory.BEHAVIOR,
+        ),
+        ConfigField(
+            key=Keys.CONTROL_FRONTEND_DEV, label="前端开发模式", type="bool",
+            hint="1=vite dev(5173)，0/删除=发布态(dist/)。改后需重启控制台生效",
+            required=False,
+            category=ConfigCategory.DEVELOPER,
+        ),
+        # ── 远程连接（REMOTE 页; ENABLED 只读——只能经「切换远程」按钮） ──
+        ConfigField(
+            key=Keys.REMOTE_CONSOLE_URL, label="远程控制台链接", type="text",
+            hint="远程节点（如 Mac Mini）控制台地址，如 http://192.168.1.20:9776",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+        ),
+        ConfigField(
+            key=Keys.REMOTE_CONSOLE_TOKEN, label="远程控制台令牌", type="password",
+            hint="与远程节点 CONTROL_API_KEY 相同的值（Bearer 鉴权）",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+        ),
+        ConfigField(
+            key=Keys.REMOTE_CONSOLE_ENABLED, label="远程模型开关", type="bool",
+            hint="只读——只能经「切换远程」按钮变更（先校验后置位）",
+            required=False, readonly=True,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+        ),
+        # ── 节点侧（hidden——远程页节点管理卡片经专用端点管理;
+        #    CONTROL_API_KEY 变更触发重绑 0.0.0.0 副作用，通用写接口不可达） ──
+        ConfigField(
+            key=Keys.CONTROL_API_KEY, label="本机控制台鉴权令牌", type="password",
+            hint="配置后本控制台对局域网开放推理类 API（Bearer 校验）并绑 0.0.0.0；远程节点（Mac Mini）用",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.HIDDEN],
+        ),
+        ConfigField(
+            key=Keys.CONTROL_RESIDENT, label="控制台常驻", type="bool",
+            hint="1=禁用心跳自杀机制（无 opencode 连接也不退出）；远程节点用",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.HIDDEN],
+        ),
+        ConfigField(
+            key=Keys.CONTROL_AUTOSTART, label="开机自动启动", type="bool",
+            hint="1=安装 LaunchAgent 开机自启（macOS，需开启自动登录）；远程节点用",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.HIDDEN],
+        ),
+        # ── 代理调参（config 页代理分类，可改，消费方重读即生效;
+        #    default_value 与 ProxyTunables 默认同源） ──
+        ConfigField(
+            key=Keys.JULIANG_IP_TTL_SEC, label="代理单 IP 存活（秒）", type="text",
+            hint="单 IP 寿命（5 分钟档）",
+            required=False, default_value=str(_PT_D.ip_ttl_sec),
+            category=ConfigCategory.PROXY,
+        ),
+        ConfigField(
+            key=Keys.JULIANG_TTL_MARGIN_SEC, label="代理到期余量（秒）", type="text",
+            hint="到期安全余量",
+            required=False, default_value=str(_PT_D.ttl_margin_sec),
+            category=ConfigCategory.PROXY,
+        ),
+        ConfigField(
+            key=Keys.PROXY_ROTATE_CONN_THRESHOLD, label="代理轮换连接阈值", type="text",
+            hint="proxy 模式下新建连接数满此值自动轮换",
+            required=False, default_value=str(_PT_D.rotate_conn_threshold),
+            category=ConfigCategory.PROXY,
+        ),
+        ConfigField(
+            key=Keys.DOMAIN_COOLDOWN_SEC, label="域名限流冷却（秒）", type="text",
+            hint="域名冷却 10 分钟档",
+            required=False, default_value=str(_PT_D.domain_cooldown_sec),
+            category=ConfigCategory.PROXY,
+        ),
+        ConfigField(
+            key=Keys.ROTATE_HISTORY_LIMIT, label="轮换历史上限", type="text",
+            hint="rotate_history 条数上限",
+            required=False, default_value=str(_PT_D.rotate_history_limit),
+            category=ConfigCategory.PROXY,
+        ),
+        # ── 远程调参（REMOTE 页只读展示; 写接口 422） ──
+        ConfigField(
+            key=Keys.REMOTE_HEARTBEAT_INTERVAL_SEC, label="远程心跳间隔（秒）", type="text",
+            hint="远程节点健康探测周期; 修改后下个周期生效",
+            required=False, default_value=str(_RT_D.heartbeat_interval_sec), readonly=True,
+            category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
+        ),
+        ConfigField(
+            key=Keys.REMOTE_FAIL_THRESHOLD, label="远程降级阈值（连续失败次数）", type="text",
+            hint="连续失败达此次数 → 降级本地",
+            required=False, default_value=str(_RT_D.fail_threshold), readonly=True,
+            category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
+        ),
+        ConfigField(
+            key=Keys.REMOTE_RECOVER_THRESHOLD, label="远程恢复阈值（连续成功次数）", type="text",
+            hint="降级后连续成功达此次数 → 切回远程",
+            required=False, default_value=str(_RT_D.recover_threshold), readonly=True,
+            category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
+        ),
+        ConfigField(
+            key=Keys.REMOTE_UNLOAD_DELAY_SEC, label="恢复后稳定期（秒）", type="text",
+            hint="切回远程后稳定此时长才卸载本地模型（释放内存）",
+            required=False, default_value=str(_RT_D.unload_delay_sec), readonly=True,
+            category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
+        ),
+        ConfigField(
+            key=Keys.REMOTE_INFER_TIMEOUT_SEC, label="远程推理超时（秒）", type="text",
+            hint="远程 embed/rerank/ocr 请求超时",
+            required=False, default_value=str(_RT_D.infer_timeout_sec), readonly=True,
+            category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
+        ),
+        ConfigField(
+            key=Keys.REMOTE_PROBE_TIMEOUT_SEC, label="远程探测超时（秒）", type="text",
+            hint="健康探测请求超时（应远小于心跳间隔）",
+            required=False, default_value=str(_RT_D.probe_timeout_sec), readonly=True,
+            category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
+        ),
+        # ── 心跳调参（hidden——无页面; 手编 .ai_env，每轮 sweep 重读） ──
+        ConfigField(
+            key=Keys.HEARTBEAT_TIMEOUT_SEC, label="心跳超时（秒）", type="text",
+            hint="opencode 超此时长未跳心跳 → 移除条目",
+            required=False, default_value=str(_HT_D.timeout_sec),
+            category=ConfigCategory.SYSTEM, surfaces=[Surface.HIDDEN],
+        ),
+        ConfigField(
+            key=Keys.HEARTBEAT_SWEEP_INTERVAL_SEC, label="心跳 sweep 周期（秒）", type="text",
+            hint="后台周期清理间隔",
+            required=False, default_value=str(_HT_D.sweep_interval_sec),
+            category=ConfigCategory.SYSTEM, surfaces=[Surface.HIDDEN],
+        ),
+        ConfigField(
+            key=Keys.HEARTBEAT_GRACE_SEC, label="心跳启动宽限（秒）", type="text",
+            hint="表空超过此时长才自杀（覆盖 spawn 就绪等待+首跳）",
+            required=False, default_value=str(_HT_D.grace_sec),
+            category=ConfigCategory.SYSTEM, surfaces=[Surface.HIDDEN],
+        ),
+    ]

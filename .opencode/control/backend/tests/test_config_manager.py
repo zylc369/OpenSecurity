@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
+from services.config_manager import Surface  # noqa: E402
 
 if TYPE_CHECKING:
     from services.config_manager import ConfigManager
@@ -62,6 +63,118 @@ def test_env_rw():
     assert_true("# IDA Pro 安装目录" in raw, "注释保留")
     cm.delete(cm.Keys.CONTROL_RESIDENT)
     assert_true(cm.get(cm.Keys.CONTROL_RESIDENT) is None, "删除生效")
+
+
+@test("ConfigManager: get_kv_list——场景生效值 KV（默认值唯一权威）")
+def test_get_kv_list():
+    cm = _fresh()
+    # 未配置声明键 → 声明默认值
+    eff = cm.get_kv_list(Surface.CONFIG)
+    assert_eq(eff.get(cm.Keys.PERMISSION_ASK_TIMEOUT_SEC), "300", "未配置回退默认")
+    assert_eq(eff.get(cm.Keys.REFLECT_NUDGE_ENABLED), "1", "开关键默认开启")
+    assert_eq(eff.get(cm.Keys.RESUME_ANALYSIS_ENABLED), "1", "续传开关默认开启")
+    # tunables 声明默认同样融合（值接口输出面含未配置调参的默认值）
+    assert_eq(eff.get(cm.Keys.JULIANG_IP_TTL_SEC), "300.0", "tunables 默认融合")
+    # 无默认且未配置 → 不出现
+    assert_true(cm.Keys.IDA_PRO_HOME not in eff, "无默认未配置不出现")
+    # 场景隔离: config 场景不含 remote/hidden 键
+    assert_true(cm.Keys.REMOTE_CONSOLE_URL not in eff, "config 场景不含 remote 键")
+    assert_true(cm.Keys.HEARTBEAT_TIMEOUT_SEC not in eff, "config 场景不含 hidden 键")
+    # remote 场景 KV: 不含 config 键; 有默认的远程键融合、用户配置的远程键出现
+    rem = cm.get_kv_list(Surface.REMOTE)
+    assert_true(cm.Keys.DEEPSEEK_API_KEY not in rem, "remote 场景不含 config 键")
+    assert_eq(rem.get(cm.Keys.REMOTE_HEARTBEAT_INTERVAL_SEC), "5.0",
+              "remote tunables 默认融合（在其声明场景内）")
+    cm.set({cm.Keys.REMOTE_CONSOLE_URL: "http://x"})
+    assert_true(cm.Keys.REMOTE_CONSOLE_URL in cm.get_kv_list(Surface.REMOTE),
+                "配置后远程键进入 remote 场景 KV")
+    # 配置值优先于默认
+    cm.set({cm.Keys.PERMISSION_ASK_TIMEOUT_SEC: "60"})
+    assert_eq(cm.get_kv_list(Surface.CONFIG)[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC], "60", "配置值优先")
+    # 空串配置 → 回退默认（清空=回到默认的语义）
+    cm.set({cm.Keys.PERMISSION_ASK_TIMEOUT_SEC: ""})
+    assert_eq(cm.get_kv_list(Surface.CONFIG)[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC], "300", "空串回退默认")
+    # 未声明的手写键非空 → 保留
+    cm.set({"SOME handwritten_KEY": "v"})
+    assert_eq(cm.get_kv_list(Surface.CONFIG).get("SOME handwritten_KEY"), "v", "手写键保留")
+    # 手写键空串 → 不出现
+    cm.set({"EMPTY_HANDWRITTEN": ""})
+    assert_true("EMPTY_HANDWRITTEN" not in cm.get_kv_list(Surface.CONFIG), "空手写键不出现")
+    # 非法配置值在构建层校验回落（validator 失败→日志+声明默认; 无默认→空）
+    cm.set({cm.Keys.DEEPSEEK_API_KEY: "short"})
+    assert_true(cm.get_kv_list(Surface.CONFIG).get(cm.Keys.DEEPSEEK_API_KEY, "") == "",
+                "非法 required 值回落空（无声明默认; 记日志）")
+    # validator 结果缓存: 同 (key, value) 二次读取不再重跑校验（缓存命中）
+    assert_true((cm.Keys.DEEPSEEK_API_KEY, "short") in cm._validation_cache,
+                "非法结果进入校验缓存")
+    cache_len = len(cm._validation_cache)
+    cm.get_kv_list(Surface.CONFIG)
+    cm.get_entries()  # 再读两遍
+    assert_eq(len(cm._validation_cache), cache_len, "同 (key,value) 命中缓存不重跑")
+    # get() 单键: 非法值回落默认后 → None（视同未配置）
+    assert_true(cm.get(cm.Keys.DEEPSEEK_API_KEY) is None, "get() 非法回落→None")
+
+
+@test("ConfigManager: path 归一化 + validator 链（~/ 展开/通过/回落）")
+def test_path_normalization():
+    import tempfile
+    cm = _fresh()
+    from pathlib import Path as _P
+    # 正向链: 真目录 + idat → ~/ 展开归一化 + validator 通过
+    with tempfile.TemporaryDirectory() as td:
+        ida_dir = _P(td) / "ida"
+        ida_dir.mkdir()
+        (ida_dir / "idat").touch()
+        old_home = os.environ.get("HOME")
+        try:
+            os.environ["HOME"] = td
+            cm.set({cm.Keys.IDA_PRO_HOME: "~/ida"})
+            assert_eq(cm.get_kv_list(Surface.CONFIG).get(cm.Keys.IDA_PRO_HOME),
+                      str(ida_dir), "~/ 展开归一化且 validator 通过")
+        finally:
+            if old_home is not None:
+                os.environ["HOME"] = old_home
+            else:
+                os.environ.pop("HOME", None)
+    # 负向链: 目录不存在 → validator 失败回落默认（kv 不含, 原因在日志）
+    cm.set({cm.Keys.IDA_PRO_HOME: "~/not_exist_dir_xyz"})
+    assert_true(cm.Keys.IDA_PRO_HOME not in cm.get_kv_list(Surface.CONFIG),
+                "目录不存在→validator 失败回落空")
+    # 未声明手写键不做归一化（无类型元数据）
+    cm.set({"HANDWRITTEN_PATH_LIKE": "~/raw"})
+    assert_eq(cm.get_kv_list(Surface.CONFIG).get("HANDWRITTEN_PATH_LIKE"),
+              "~/raw", "手写键不归一化")
+
+
+@test("ConfigManager: required_status——三态 + 场景过滤")
+def test_required_status_states():
+    cm = _fresh()
+    # 未配置 → ok False
+    st = {c.key: c for c in cm.required_status(Surface.CONFIG)}
+    assert_true(cm.Keys.DEEPSEEK_API_KEY in st, "必要键在列")
+    assert_true(not st[cm.Keys.DEEPSEEK_API_KEY].ok, "未配置 ok=False")
+    # 配置合法 → ok True
+    cm.set({cm.Keys.DEEPSEEK_API_KEY: "sk-abc123def456"})
+    st = {c.key: c for c in cm.required_status(Surface.CONFIG)}
+    assert_true(st[cm.Keys.DEEPSEEK_API_KEY].ok, "合法配置 ok=True")
+    # 非法值（validator 失败回落空）→ ok False（等同缺失; 原因在日志）
+    cm.set({cm.Keys.DEEPSEEK_API_KEY: "short"})
+    st = {c.key: c for c in cm.required_status(Surface.CONFIG)}
+    assert_true(not st[cm.Keys.DEEPSEEK_API_KEY].ok, "非法回落空 ok=False")
+    # 场景过滤: 必要键全在 config 场景 → remote 场景为空
+    assert_eq(len(cm.required_status(Surface.REMOTE)), 0, "remote 场景无必要键")
+
+
+@test("ConfigManager: get_entries——序列场景参数（多场景并集）")
+def test_get_entries_surface_sequence():
+    cm = _fresh()
+    both = cm.get_entries(surfaces=[Surface.CONFIG, Surface.REMOTE])
+    keys = {e.key for e in both}
+    assert_true(cm.Keys.DEEPSEEK_API_KEY in keys, "并集含 config 键")
+    assert_true(cm.Keys.REMOTE_CONSOLE_URL in keys, "并集含 remote 键")
+    assert_true(cm.Keys.HEARTBEAT_TIMEOUT_SEC not in keys, "并集不含 hidden 键")
+    single = cm.get_entries(surfaces=Surface.REMOTE)
+    assert_true(all(Surface.REMOTE in e.surfaces for e in single), "单值参数等价")
 
 
 @test("ConfigManager: tunables——.ai_env 优先/非法回退默认/三组齐全")
@@ -127,12 +240,19 @@ def test_meta():
     assert_eq(rem.entries[cm.Keys.REMOTE_CONSOLE_URL].readonly, False, "URL 可写")
     assert_true(cm.Keys.CONTROL_API_KEY not in rem.entries, "节点侧键不进 remote 面")
 
-    # hidden 面: 心跳 3 项 + 节点侧 3 键声明存在（surface=hidden 占位）
-    assert_eq(len(cm.heartbeat_tunable_configs()), 3, "心跳调参 3 项")
-    assert_eq(len(cm.node_side_configs()), 3, "节点侧 3 键")
+    # hidden 场景: 心跳 3 项 + 节点侧 3 键（静态 _FIELDS 的 surfaces 数组归属）
+    hidden = cm.get_entries(surfaces=Surface.HIDDEN)
+    assert_eq(len([e for e in hidden
+                   if e.key in {cm.Keys.HEARTBEAT_TIMEOUT_SEC,
+                                       cm.Keys.HEARTBEAT_SWEEP_INTERVAL_SEC,
+                                       cm.Keys.HEARTBEAT_GRACE_SEC}]), 3, "心跳调参 3 项")
+    assert_eq(len([e for e in hidden
+                   if e.key in {cm.Keys.CONTROL_API_KEY,
+                                       cm.Keys.CONTROL_RESIDENT,
+                                       cm.Keys.CONTROL_AUTOSTART}]), 3, "节点侧 3 键")
     hb = cm.field_of(cm.Keys.HEARTBEAT_GRACE_SEC)
-    assert_true(hb is not None and hb.surface == Surface.HIDDEN,
-                "心跳键 hidden 占位")
+    assert_true(hb is not None and Surface.HIDDEN in hb.surfaces,
+                "心跳键 hidden 场景归属")
 
     # 分类枚举: 顺序 + desc 全覆盖
     ordered = ConfigCategory.ordered()

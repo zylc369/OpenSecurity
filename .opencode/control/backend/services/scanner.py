@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 
 from services import detect_py_deps, detect_tools, docker_manager
-from services.config_manager import ConfigManager
+from services.config_manager import ConfigManager, Surface
 from services.detect_py_deps import PyPkgStatus
 from services.detect_tools import ToolStatus
 from services.docker_manager import DockerGlobal
@@ -113,7 +113,7 @@ class Scanner:
             # 并行扫描所有 agent + 全局
             agent_task = loop.run_in_executor(executor, detect_tools.ToolsScanner.get_instance().scan_all)
             docker_task = loop.run_in_executor(executor, docker_manager.DockerManager.scan_global)
-            config_task = loop.run_in_executor(executor, ConfigManager.get_instance().required_status)
+            config_task = loop.run_in_executor(executor, lambda: ConfigManager.get_instance().required_status(Surface.CONFIG))
             pydeps_task = loop.run_in_executor(executor, lambda: detect_py_deps.PyDepsDetector.get_instance().scan())
 
             agents = await agent_task

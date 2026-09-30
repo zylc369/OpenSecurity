@@ -175,3 +175,100 @@ plugins/lib/constants.ts                  [改] +6 常量（键名/默认值/反
   control 环境; 真实使用即验证）②用户点击与超时竞态端到端（单元层已覆盖
   onReplied 清理）③v2 事件真实流（当前 opencode 不发 permission.v2.*，
   提取函数已按 v2 形态单元验证; v2 接管后自然验证）
+
+## 后置轮: 默认值单一来源改造（2026-09-30，用户三点裁定驱动）
+
+裁定: ①反馈文案改 shell/bat/Python（跨平台脚本表述）②默认值唯一权威在服务端
+——GET /api/config 返回生效值（配置值优先，空/缺失回退声明默认），插件零默认
+副本，取不到生效值即不启用（fail-safe）+ 排查日志 ③反思/续传开关的"未配置=
+开启"语义上收服务端（default_value="1"）
+
+- 后端: ConfigManager.effective_all()（配置值优先/空回退默认/无默认不出现/
+  手写键保留）; GET /api/config 数据源切换; RESUME/REFLECT 开关键补
+  default_value="1" + hint 更新（"未配置=开启"→"默认开启"）
+- 前端: doSave 改 dirty 提交（dirtyUpdates 纯函数）——值接口返回生效值后
+  全量回传会把默认值冻结进 .ai_env（服务端后续调默认不再跟随），改为只提交
+  变化键（trim 后比较，改回默认同值不写盘）
+- 插件: constants 删 3 个默认值常量（PERMISSION_TIMEOUT_DEFAULT_SEC/TYPES、
+  REFLECT_NUDGE_DEFAULT_INTERVAL_MIN）; permission-timeout 缺失/非法→不启用+
+  日志; reflection 开关/间隔 fail-safe（忙通道高频路径 once 节流日志，间隔
+  缺失→Infinity 永不到期两通道不注入）; persistence resume 开关 fail-safe
+- 测试: test_config_manager +effective_all 用例（6/6）; test_control E2E
+  GET 生效值断言（94/94）; configGrouping +dirtyUpdates 用例（tsc 0 +
+  vitest 42/42）; harness 语义更新 + makeManager 模拟 effective 提供语义
+  （17/17）; 插件加载冒烟 + 被删常量残留 grep CLEAN
+- 实施 note: 上轮对 constants.ts 的两处编辑未持久化（本轮重做时发现文件为
+  旧状态，原因不明）——此后编辑关键文件后即时 grep 验证落盘为固定动作
+- 覆盖补齐（用户充分性审视驱动，3 缺口全修）:
+  ① reflection fail-safe 零测试 → isReflectEnabled/getReflectIntervalMs 加
+  configReader 注入点（默认参生产零影响）+ 新建 tests/test-reflection-config.ts
+  （开关三态/间隔 Infinity 语义，2/2）
+  ② tunables 声明默认融合无断言 → effective_all 用例补 JULIANG/REMOTE 调参
+  默认融合断言
+  ③ path 型默认值归一化缺口 → effective_all 对 default 走同规 expanduser+
+  abspath（当前无 path+default 组合，防御未来声明）
+- 终验: 后端 6/6 + reflection 2/2 + harness 17/17 + 插件加载 ✓
+
+## 后置轮: 独立代码评审修复（2026-09-30，review 子代理驱动）
+
+评审发现 4 问题全修复:
+1. **[中] PUT/DELETE 响应仍为原始值**——GET 切生效值后契约分裂: 保存响应
+   覆盖前端基线 → 默认值字段瞬间空白 → 用户填回再保存 = 默认值冻结进
+   .ai_env（复活本次要防的问题）。修复: PUT×2/DELETE 响应统一
+   effective_all()（值接口全路由同契约）; E2E 补 PUT 响应生效值断言
+2. **[低] effective_all 两循环 path 归一化不对称**（存在但空 vs 不存在
+   两条回退路径默认值处理不同）→ 默认回退收口 default_of 单点
+3. **[低] "0" 被日志记为"非法"**（0 是文档化关闭语义）→ 0 静默关闭不打
+   异常告警; 负数才记非法
+4. **[低] ConfigPage dirty（未 trim）与 dirtyUpdates（trim）口径不一**——
+   纯空格编辑亮按钮但点保存提示无修改 → dirty 改基于 dirtyUpdates 计算
+
+评审确认的两个有意行为变更（已在后置修订 2 记录）: 插件在控制台不可达时
+fail-safe 自禁用（带日志）; GET 不再返回空值键。
+终验: 后端 6/6 + 94/94 + pyright 0/0 · 前端 tsc 0 + 42/42 · 插件 17/17 + 2/2 + 加载 ✓
+
+## 后置轮: 配置管理统一重构（2026-09-30，用户蓝图驱动，两轮纠偏）
+
+用户裁定（蓝图）: 配置获取逻辑收口极差需重构——
+① get_all 实为 .ai_env 加载 → 私有 `_load_from_ai_env`（path 归一化覆盖全部声明字段），
+   不再对外
+② 场景归属是 ConfigField 的数据（surfaces **数组**，一键可多场景），不是清单函数的
+   硬编码——删除 required/extra/remote_link/node_side/三组 tunables 六个清单方法与
+   _tunable_field/_all_fields，收口为类体静态 `_FIELDS` 列表（唯一声明来源，顺序=
+   展示顺序，tunables 默认与 dataclass 同源生成）
+③ 统一获取函数 `get_entries(surfaces)` → 新建**扁平领域模型 ConfigEntry**
+   （用户二次纠偏: 删 raw/default_value/source/validator——调用方只消费最终 value，
+   不做任何计算; validator 收进构建层: 配置值非法→记日志+回落声明默认）
+④ 对外 KV 统一 `get_kv_list(surfaces)`（场景必填）; **全部配置接口场景轴统一**:
+   GET 值接口/required-status 的 surface 必填（缺省 422），PUT×2/DELETE 响应=该场景
+   KV（与 GET 同契约），单键 GET 接口删除（零消费）; meta 从领域模型组装并内嵌
+   value（DTO 保留 default_value 供前端展示，删零消费的 source）
+
+- 全量消费方同步: 前端 client/hooks（getConfig/getRequiredStatus 带 surface，
+  useAllConfig 数据源按场景）· 插件 control-config（?surface=config）·
+  proxy_pool · scanner（required_status 方法引用改 lambda——pyright 抓到的
+  真实运行时破坏）
+- 测试: 后端 6/6（+场景隔离/validator 回落/手写键合成断言）+ E2E 93/93
+  （单键用例随接口删除，GET/required-status 全部带 surface）+ pyright 0/0;
+  前端 tsc 0 + 42/42; 插件加载 ✓
+- 行为变化记录: ① banner 不再展示 validator 细节（非法值→日志+回落，
+  banner 只提醒缺失）② 值接口不返回跨场景全量/空值键
+- 配置全链路覆盖审计（用户交付前审视驱动）: 补 5 处缺口——后端单元
+  +path 归一化与 validator 链（临时 HOME 验 ~/ 展开/通过/回落/手写键不归一）
+  +validator 结果缓存不重跑 +get() 非法回落→None +required_status 三态与
+  场景过滤（未配置 False/合法 True/非法 False/remote 空）+get_entries 序列
+  场景参数（多场景并集）; E2E +值接口与 required-status 缺 surface 422 +
+  值接口场景隔离; 前端 +getConfig/getRequiredStatus surface 契约断言;
+  首次回归 test-control.ts（fetchConfig 改 surface 后）11/11
+- test-control.ts 两个失败经 stash 对照确认为存量环境问题（沙箱残留 unix
+  socket 致 EADDRINUSE 并干扰单飞用例），清理 /tmp 沙箱后 11/11 全绿
+- 交付读数: 后端 9/9 + E2E 93/93 + pyright 0/0 · 前端 tsc 0 + 44/44 ·
+  插件 17/17 + 2/2 + test-control 11/11 + 加载冒烟 ✓
+- 侧证: 交付审计期间一次 bash 外部路径访问被权限超时自动拒绝并返回引导
+  文案——功能生产链路真实生效（用户已重启加载新代码）
+- 二次评审处置（review 子代理，无正确性 bug、3 低severity 发现全处置）:
+  ①validator 副作用进所有读取路径（heartbeat 每 10s sweep 经 get() 触发全量
+  校验，配置失效时 WARNING 无限刷屏）→ (key,value) 结果缓存: 同组合只校验+
+  告警一次，value 变化自动重校; ②模块头/writableUpdates 过时注释改写;
+  ③本文件后置轮恢复编年顺序。三个有意行为变更（插件 fail-safe 自禁用/
+  get 返回合并值畸形静默回落/banner error 恒空）经逐一核对消费方确认无破坏

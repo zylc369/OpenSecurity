@@ -12,7 +12,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 import { Alert, App as AntApp, Button, Card, Space, Tag, Typography } from "antd";
 import { SaveOutlined } from "@ant-design/icons";
 import { useAllConfig, useConfigMeta } from "../hooks";
-import { groupByCategory, masonryDistribute, writableUpdates } from "../utils/configGrouping";
+import { groupByCategory, masonryDistribute, dirtyUpdates } from "../utils/configGrouping";
 import { categoryIcon } from "../constants/configIcons";
 import ConfigFieldRow from "../components/ConfigFieldRow";
 import type { ConfigMap } from "../types";
@@ -81,10 +81,14 @@ const ConfigPage: React.FC = () => {
     window.setTimeout(() => { jumping.current = false; }, 700);
   };
 
+  // dirty 与提交口径一致（dirtyUpdates 的 trim 比较）——纯空格编辑不再出现
+  // "按钮亮但提示没有修改"的不一致
   const dirty = useMemo(() => {
-    if (!configs) return false;
-    return Object.keys(values).some((k) => (values[k] ?? "") !== (configs[k] ?? ""));
-  }, [values, configs]);
+    if (!configs || !meta.data) return false;
+    return (
+      Object.keys(dirtyUpdates(values, configs, meta.data.entries)).length > 0
+    );
+  }, [values, configs, meta.data]);
 
   const requiredMissing = useMemo(() => {
     if (!meta.data) return [];
@@ -97,11 +101,13 @@ const ConfigPage: React.FC = () => {
     setSaving(true);
     try {
       const entries = meta.data?.entries ?? {};
-      // 只保存本页面可写键（全量 values 含其他 surface 键，整包回传会被 422）
-      const updates = Object.fromEntries(
-        Object.entries(writableUpdates(values, entries))
-          .map(([k, v]) => [k, (v ?? "").trim()]),
-      );
+      // 只提交变化键（值接口返回生效值——全量回传会把默认值冻结进 .ai_env，
+      // 服务端后续调默认不再跟随）
+      const updates = dirtyUpdates(values, configs ?? {}, entries);
+      if (Object.keys(updates).length === 0) {
+        message.info("没有修改需要保存");
+        return;
+      }
       await save(updates);
       message.success("配置已保存（已自动去除首尾空格）");
     } catch (e) {

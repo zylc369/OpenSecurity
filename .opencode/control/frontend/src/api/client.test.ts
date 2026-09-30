@@ -73,6 +73,20 @@ describe("URL 编码与请求形状", () => {
     });
   });
 
+  it("getConfig 按 surface 请求（值获取以场景为轴）", async () => {
+    await api.getConfig("config");
+    expect(h.calls[0]).toMatchObject({
+      method: "get", url: "/api/config", params: { surface: "config" },
+    });
+  });
+
+  it("getRequiredStatus 按 surface 请求", async () => {
+    await api.getRequiredStatus("config");
+    expect(h.calls[0]).toMatchObject({
+      method: "get", url: "/api/config/required-status", params: { surface: "config" },
+    });
+  });
+
   it("scan 的 force_refresh 走 query params", async () => {
     await api.scan(true);
     expect(h.calls[0]).toMatchObject({ method: "get", url: "/api/scan", params: { force_refresh: true } });

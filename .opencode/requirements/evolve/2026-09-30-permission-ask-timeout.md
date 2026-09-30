@@ -371,3 +371,12 @@ ctx.client"的收口约定（对照: 到控制台统一走 controlFetch）。重
 serverUrl 参数，三级通道全部经 ctx.client 收口。验证: harness 11 用例（含新增
 "404 不降级"）+ 端到端（布防→通道②→feedback 送达）全绿; serverUrl/手动 auth
 残留 grep 清零。详见 progress.md 后置轮记录。
+
+## 后置修订 2: 默认值单一来源（2026-09-30，用户裁定）
+
+§2.2 的 `PERMISSION_TIMEOUT_DEFAULT_SEC/TYPES` 常量与 §2.3 的"未配置→默认"设计
+**作废**——默认值唯一权威移至服务端: `GET /api/config` 返回生效值（配置值或
+ConfigField 声明默认）; 插件零默认副本，取不到生效值即不启用（fail-safe）+
+排查日志。反思/续传开关的"未配置=开启"语义同步上收（default_value="1"）。
+配置页保存改 dirty 提交（防默认值冻结进 .ai_env）。反馈文案改 shell/bat/Python
+跨平台表述。详见 progress.md 后置轮记录。

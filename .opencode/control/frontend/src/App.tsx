@@ -125,7 +125,7 @@ const App: React.FC = () => {
   // backend 代码陈旧（进程启动后 .py 有变更）→ 黄条提示重启生效
   const codeStale = system.data?.code_stale === true;
   const hardware = useHardware();
-  const required = useRequiredStatus();
+  const required = useRequiredStatus("config");
 
   // ── 页级 Tab: hash 驱动（URL 同步可刷新/书签; Segmented 受控）──
   const [page, setPage] = useState<PageKey>(pageFromHash);

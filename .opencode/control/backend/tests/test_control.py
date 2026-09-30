@@ -36,6 +36,7 @@ from fastapi import FastAPI
 # 配置测试环境
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
+from services.config_manager import Surface  # noqa: E402
 
 # 测试专用 OPENSECURITY_HOME 沙箱（TEST_OPENSECURITY_HOME 可显式覆盖;
 # 不读变量 OPENSECURITY_HOME——沿用生产值会把测试数据写进生产目录）
@@ -426,7 +427,7 @@ def test_config_read_all():
     if not OPENCODE_ROOT.exists():
         raise AssertionError("OPENCODE_ROOT 未设置或不存在")
     from services.config_manager import ConfigManager
-    configs = ConfigManager.get_instance().get_all()
+    configs = ConfigManager.get_instance().get_kv_list(Surface.CONFIG)
     assert_true("DEEPSEEK_API_KEY" in configs, "应该有 DEEPSEEK_API_KEY")
     assert_true("IDA_PRO_HOME" in configs, "应该有 IDA_PRO_HOME")
 
@@ -457,7 +458,7 @@ def test_config_write_preserve_comments():
 @test("ConfigManager.required_status: 必要配置状态")
 def test_required_status():
     from services.config_manager import ConfigManager
-    keys = {c.key for c in ConfigManager.get_instance().required_status()}
+    keys = {c.key for c in ConfigManager.get_instance().required_status(Surface.CONFIG)}
     assert_true("DEEPSEEK_API_KEY" in keys, "应有 DEEPSEEK_API_KEY")
     assert_true("IDA_PRO_HOME" in keys, "应有 IDA_PRO_HOME")
 
@@ -813,23 +814,39 @@ def test_e2e_singleton():
                 proc2.kill()
 
 
-@test("E2E: GET /api/config 返回配置")
+@test("E2E: GET /api/config 返回生效值（默认值融合）")
 def test_e2e_get_config():
     if not OPENCODE_ROOT.exists():
         raise AssertionError("OPENCODE_ROOT 未设置")
     cp = get_shared_server()
     import httpx
+    # surface 必填: 缺省 422（与 meta 同契约——值获取以场景为轴）
     r = cp.client.get("http://localhost/api/config", timeout=5)
+    assert_eq(r.status_code, 422, "缺 surface 应 422")
+    r = cp.client.get("http://localhost/api/config",
+                      params={"surface": "config"}, timeout=5)
     assert_eq(r.status_code, 200)
     data = r.json()
-    assert_true("DEEPSEEK_API_KEY" in data, "应有 DEEPSEEK_API_KEY")
+    # 声明了默认值的键恒有生效值（配置值或默认——沙箱副本来自生产 .ai_env，
+    # 具体回退逻辑由 test_config_manager 的干净沙箱用例锁定）
+    assert_true(data.get("PERMISSION_ASK_TIMEOUT_SEC") is not None,
+                "权限超时键应有生效值（配置值或声明默认）")
+    assert_true(data.get("REFLECT_NUDGE_ENABLED") is not None,
+                "反思开关键应有生效值")
+    # 场景隔离: config 面 KV 不含 remote/hidden 键
+    assert_true("REMOTE_CONSOLE_URL" not in data, "config 面不含 remote 键")
+    assert_true("HEARTBEAT_TIMEOUT_SEC" not in data, "config 面不含 hidden 键")
 
 
 @test("E2E: GET /api/config/required-status")
 def test_e2e_required_status():
     cp = get_shared_server()
     import httpx
+    # surface 必填: 缺省 422
     r = cp.client.get("http://localhost/api/config/required-status", timeout=5)
+    assert_eq(r.status_code, 422, "缺 surface 应 422")
+    r = cp.client.get("http://localhost/api/config/required-status",
+                      params={"surface": "config"}, timeout=5)
     assert_eq(r.status_code, 200)
     data = r.json()
     assert_true("DEEPSEEK_API_KEY" in data, "应有 DEEPSEEK_API_KEY 状态")
@@ -877,12 +894,16 @@ def test_e2e_config_meta():
                 "PERMISSION_ASK_TIMEOUT_SEC", "PERMISSION_ASK_TIMEOUT_TYPES"):
         assert_true(key in data["entries"], f"config 面缺 {key}")
         field = data["entries"][key]
-        for prop in ("label", "type", "required", "default_value", "readonly",
-                     "category_code", "category_desc", "source"):
+        for prop in ("label", "type", "required", "default_value", "value",
+                     "readonly", "category_code", "category_desc"):
             assert_true(prop in field, f"{key}.{prop} 缺失")
         assert_true("hidden" not in field, f"{key} 不应再有 hidden 字段")
+    # value = 领域模型合并的生效值（与值接口 GET /api/config 同源一致）
+    r_vals = cp.client.get("http://localhost/api/config", params={"surface": "config"}, timeout=5)
+    assert_eq(data["entries"]["PERMISSION_ASK_TIMEOUT_SEC"]["value"],
+              r_vals.json().get("PERMISSION_ASK_TIMEOUT_SEC"),
+              "meta.value 应与值接口同键一致（同一领域模型来源）")
     assert_true(data["entries"]["DEEPSEEK_API_KEY"]["required"], "API_KEY 应 required")
-    assert_eq(data["entries"]["DEEPSEEK_API_KEY"]["source"], "ai_env", "source 应标注 ai_env")
     assert_eq(data["entries"]["REFLECT_NUDGE_ENABLED"]["category_code"], "behavior",
               "反思开关归行为分类")
     assert_eq(data["entries"]["PERMISSION_ASK_TIMEOUT_SEC"]["category_code"], "behavior",
@@ -1051,6 +1072,10 @@ def test_e2e_config_write():
         timeout=5,
     )
     assert_eq(r.status_code, 200)
+    # 响应为生效值全集（与 GET 同契约——保存方以响应为新基线，
+    # 默认值支撑的表单状态不被原始值响应覆盖）
+    assert_true(r.json().get("PERMISSION_ASK_TIMEOUT_SEC") is not None,
+                "PUT 响应应含未配置键的声明默认（生效值契约）")
     # 验证文件实际改变
     content = ai_env_path.read_text()
     assert_true("E2E_TEST_KEY=e2e_value" in content, "文件应包含新 key")
@@ -1856,9 +1881,9 @@ def test_config_overwrite():
     original = cm.ai_env_path.read_text()
     try:
         cm.set({"TEST_OV": "v1"})
-        assert_eq(cm.get_all().get("TEST_OV"), "v1")
+        assert_eq(cm.get_kv_list(__import__("services.config_manager", fromlist=["Surface"]).Surface.CONFIG).get("TEST_OV"), "v1")
         cm.set({"TEST_OV": "v2"})
-        assert_eq(cm.get_all().get("TEST_OV"), "v2", "覆盖后应新值")
+        assert_eq(cm.get_kv_list(__import__("services.config_manager", fromlist=["Surface"]).Surface.CONFIG).get("TEST_OV"), "v2", "覆盖后应新值")
     finally:
         cm.ai_env_path.write_text(original)
 
@@ -1870,7 +1895,7 @@ def test_config_multi_keys():
     original = cm.ai_env_path.read_text()
     try:
         cm.set({"TEST_M1": "v1", "TEST_M2": "v2", "TEST_M3": "v3"})
-        cfg = cm.get_all()
+        cfg = cm.get_kv_list(__import__("services.config_manager", fromlist=["Surface"]).Surface.CONFIG)
         assert_eq(cfg.get("TEST_M1"), "v1")
         assert_eq(cfg.get("TEST_M2"), "v2")
         assert_eq(cfg.get("TEST_M3"), "v3")
@@ -2067,14 +2092,6 @@ def test_graphiti_adapter_real_chain():
     asyncio.run(run())
 
 
-@test("E2E: /api/config/{key} 不存在 → 404")
-def test_e2e_config_404():
-    cp = get_shared_server()
-    import httpx
-    r = cp.client.get("http://localhost/api/config/NOT_EXIST_12345", timeout=5)
-    assert_eq(r.status_code, 404)
-
-
 @test("E2E: DELETE /api/config/{key}")
 def test_e2e_config_delete():
     cp = get_shared_server()
@@ -2084,8 +2101,9 @@ def test_e2e_config_delete():
     r = cp.client.delete("http://localhost/api/config/E2E_DEL",
                          params={"surface": "config"}, timeout=5)
     assert_eq(r.status_code, 200)
-    r = cp.client.get("http://localhost/api/config/E2E_DEL", timeout=5)
-    assert_eq(r.status_code, 404, "删后应 404")
+    # 删除后经场景值接口确认键回落（单键 GET 接口已随统一场景轴移除）
+    r = cp.client.get("http://localhost/api/config", params={"surface": "config"}, timeout=5)
+    assert_true("E2E_DEL" not in r.json(), "删后不应出现在场景 KV 中")
 
 
 @test("E2E: /api/deps/{agent} 不存在 agent → 工具空 + summary 就绪")

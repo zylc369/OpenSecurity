@@ -322,11 +322,16 @@ export async function maybeResumeAnalysis(
     }
 
     // ── resume 专属开关（原位于函数最顶部；下移至此，避免门禁反思唤醒） ──
+    // 生效值（默认开启）由服务端经 /api/config 返回; 未取到 → 不启用（fail-safe）
     const enabledRaw = getCachedConfig()[ENV_KEY_RESUME_ANALYSIS];
-    if (
-      enabledRaw !== undefined &&
-      (enabledRaw === "0" || enabledRaw.toLowerCase() === "false")
-    ) {
+    if (enabledRaw === undefined || enabledRaw === "") {
+      debugLog(
+        `session.idle: 跳过恢复 — ${ENV_KEY_RESUME_ANALYSIS} 未取到生效值（服务端未声明默认或控制台不可达），恢复功能不启用 sessionID=${sessionID}`,
+        sessionID,
+      );
+      return;
+    }
+    if (enabledRaw === "0" || enabledRaw.toLowerCase() === "false") {
       debugLog(
         `session.idle: 跳过恢复 — 开关已禁用 (${ENV_KEY_RESUME_ANALYSIS}=${enabledRaw}) sessionID=${sessionID}`,
         sessionID,

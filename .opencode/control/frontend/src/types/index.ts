@@ -241,6 +241,8 @@ export interface ConfigMetaItem {
   required: boolean;
   /** 不配置时后端消费方使用的默认值（空串 = 无默认，必须配置） */
   default_value: string;
+  /** 生效值（.ai_env 值或声明默认; 服务端领域模型合并结果，单请求可渲染） */
+  value: string;
   /** true = 任何页面禁用态渲染 + 写接口 422（服务端强制） */
   readonly: boolean;
   /** 分类 code（分组归属; 顺序与可选值由服务端 categories 数组驱动） */

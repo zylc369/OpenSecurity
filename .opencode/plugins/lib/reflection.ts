@@ -8,7 +8,7 @@ import { getCachedConfig } from "./control-config";
 import {
   SECURITY_ANALYSIS_AGENTS,
   ENV_KEY_REFLECT_NUDGE,
-  REFLECT_NUDGE_DEFAULT_INTERVAL_MIN,
+  ENV_KEY_REFLECT_NUDGE_INTERVAL_MIN,
 } from "./constants";
 
 // ─── 反思系统共用逻辑（两通道单一来源）────────────────────────────
@@ -38,18 +38,54 @@ export function generateCompletionMarker(): string {
   return `>>>COMPLETE-${hash}<<<`;
 }
 
-/** 反思总开关（未设置=启用；"0"/"false"=禁用，与既有开关同语义；两通道共用） */
-export function isReflectEnabled(): boolean {
-  const raw = getCachedConfig()[ENV_KEY_REFLECT_NUDGE]?.toLowerCase();
+// ── 配置缺失日志节流（忙通道每 bash 检查一次配置——缺失时只打一次防刷屏，
+//    取到有效值后重置，下一轮缺失可再报）────────────────────────
+let reflectEnabledMissingLogged = false;
+let reflectIntervalMissingLogged = false;
+
+/**
+ * 反思总开关（反思纸条 + 反思唤醒两通道共用）。
+ * 生效值（默认开启）由服务端经 /api/config 返回——"0"/"false"=禁用;
+ * 未取到生效值 → 不启用（fail-safe，记排查日志; 默认值唯一权威在服务端）。
+ * configReader 注入点供测试使用（生产默认 getCachedConfig）。
+ */
+export function isReflectEnabled(
+  configReader: () => Record<string, string> = getCachedConfig,
+): boolean {
+  const raw = configReader()[ENV_KEY_REFLECT_NUDGE]?.toLowerCase();
+  if (raw === undefined || raw === "") {
+    if (!reflectEnabledMissingLogged) {
+      debugLog(
+        `反思: ${ENV_KEY_REFLECT_NUDGE} 未取到生效值（服务端未声明默认或控制台不可达），反思功能不启用`,
+      );
+      reflectEnabledMissingLogged = true;
+    }
+    return false;
+  }
+  reflectEnabledMissingLogged = false;
   return !(raw === "0" || raw === "false");
 }
 
-/** 反思到期间隔（毫秒）：控制台配置 REFLECT_NUDGE_INTERVAL_MIN 覆盖默认值（验证时可调小） */
-export function getReflectIntervalMs(): number {
-  const min = Number(getCachedConfig()["REFLECT_NUDGE_INTERVAL_MIN"]);
-  return Number.isFinite(min) && min > 0
-    ? min * 60_000
-    : REFLECT_NUDGE_DEFAULT_INTERVAL_MIN * 60_000;
+/**
+ * 反思到期间隔（毫秒）。生效值（含默认 30 分钟）由服务端经 /api/config 返回;
+ * 未取到/非法 → Infinity（永不到期 → 两通道均不注入，记排查日志）。
+ * configReader 注入点供测试使用（生产默认 getCachedConfig）。
+ */
+export function getReflectIntervalMs(
+  configReader: () => Record<string, string> = getCachedConfig,
+): number {
+  const min = Number(configReader()[ENV_KEY_REFLECT_NUDGE_INTERVAL_MIN]);
+  if (!Number.isFinite(min) || min <= 0) {
+    if (!reflectIntervalMissingLogged) {
+      debugLog(
+        `反思: ${ENV_KEY_REFLECT_NUDGE_INTERVAL_MIN} 未取到生效值或非法（应为正数分钟），反思到期判定不生效`,
+      );
+      reflectIntervalMissingLogged = true;
+    }
+    return Number.POSITIVE_INFINITY;
+  }
+  reflectIntervalMissingLogged = false;
+  return min * 60_000;
 }
 
 /** 反思是否到期（两通道共用的时机判定） */
