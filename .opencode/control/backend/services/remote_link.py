@@ -360,7 +360,7 @@ class RemoteLinkService:
         return SwitchResult(ok=True)
 
     def reload_config(self) -> None:
-        """配置热重载: 重建 client + 清零计数（PUT /api/remote/config 后调用）。"""
+        """配置热重载: 重建 client + 清零计数（PUT /api/config?surface=remote 写 URL/TOKEN 后由写边界钩子调用）。"""
         url, _enabled, token = self._read_config()
         with self._lock:
             self._sync_client_locked(url, token)

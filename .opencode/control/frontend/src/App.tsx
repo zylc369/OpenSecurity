@@ -39,7 +39,7 @@ import DockerSection from "./sections/DockerSection";
 import ModelsSection from "./sections/ModelsSection";
 import PythonDepsSection from "./sections/PythonDepsSection";
 import ToolsSection from "./sections/ToolsSection";
-import ConfigSection from "./sections/ConfigSection";
+import ConfigPage from "./sections/ConfigPage";
 import ProcessSection from "./sections/ProcessSection";
 import OpencodeSection from "./sections/OpencodeSection";
 import RemoteSection from "./sections/RemoteSection";
@@ -61,12 +61,13 @@ const { Header, Content } = Layout;
 
 // ─── 页级 Tab（环境总览 / 运行状态 / 远程资源）── hash 路由 ───────────
 // "#/runtime" → 运行状态页; "#/remote" → 远程资源页; 其余 → 环境总览。
-type PageKey = "overview" | "runtime" | "remote";
+type PageKey = "overview" | "runtime" | "remote" | "config";
 
 function pageFromHash(): PageKey {
   const h = window.location.hash;
   if (h === "#/runtime") return "runtime";
   if (h === "#/remote") return "remote";
+  if (h === "#/config") return "config";
   return "overview";
 }
 
@@ -136,8 +137,8 @@ const App: React.FC = () => {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   const switchPage = (key: string) => {
-    if (key === "runtime" || key === "remote") {
-      window.location.hash = key === "runtime" ? "#/runtime" : "#/remote"; // 触发 hashchange → setPage（幂等）
+    if (key === "runtime" || key === "remote" || key === "config") {
+      window.location.hash = `#/${key}`; // 触发 hashchange → setPage（幂等）
     } else {
       // 清 hash: 设 hash="" 会残留 "#"，用 replaceState 干净移除（不触发 hashchange，手动 set）
       history.replaceState(null, "", window.location.pathname + window.location.search);
@@ -541,6 +542,7 @@ const App: React.FC = () => {
               { label: "环境总览", value: "overview" },
               { label: "运行状态", value: "runtime" },
               { label: "远程资源", value: "remote" },
+              { label: "配置", value: "config" },
             ]}
           />
         </div>
@@ -867,7 +869,14 @@ const App: React.FC = () => {
                 </Space>
               }
             >
-              <ConfigSection />
+              <Space direction="vertical" size={10}>
+                <Typography.Text type="secondary">
+                  配置在独立的「配置」页按分类管理：工具 / 模型 / 代理 / 行为 / 开发。
+                </Typography.Text>
+                <div>
+                  <Button type="primary" ghost href="#/config">打开配置页 →</Button>
+                </div>
+              </Space>
             </Card>
           </Col>
 
@@ -903,6 +912,10 @@ const App: React.FC = () => {
             </Col>
           </Row>
         </>
+        ) : page === "config" ? (
+        /* 配置页：服务端分类驱动（surface=config）——独立 TAB，环境总览只留
+           完整性状态徽标 + 跳转入口。 */
+        <ConfigPage />
         ) : (
         /* 远程资源页：模型远程化管理（远程连接 / 当前模式 / 远程节点管理）。
            自轮询（5s）后端状态机单一事实源，不依赖本页刷新信号。 */

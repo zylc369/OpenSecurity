@@ -241,11 +241,30 @@ export interface ConfigMetaItem {
   required: boolean;
   /** 不配置时后端消费方使用的默认值（空串 = 无默认，必须配置） */
   default_value: string;
-  /** true = 不在配置页渲染（专属 TAB 管理，如远程资源的六项 KEY） */
-  hidden: boolean;
+  /** true = 任何页面禁用态渲染 + 写接口 422（服务端强制） */
+  readonly: boolean;
+  /** 分类 code（分组归属; 顺序与可选值由服务端 categories 数组驱动） */
+  category_code: string;
+  /** 分类描述（服务端权威，原样显示，前端不自行发挥） */
+  category_desc: string;
 }
 
 export type ConfigMetaMap = Record<string, ConfigMetaItem>;
+
+/** 页面身份（接口请求参数值域; hidden 是存储态，不是页面身份） */
+export type ConfigSurface = "config" | "remote";
+
+export interface ConfigCategoryView {
+  code: string;
+  desc: string;
+}
+
+/** GET /api/config/meta?surface=… 响应（一页一请求拿全渲染所需） */
+export interface ConfigMetaResponse {
+  /** 有序分类（顺序 = 服务端枚举定义序，前端不自行排序） */
+  categories: ConfigCategoryView[];
+  entries: ConfigMetaMap;
+}
 
 // ─── /api/remote（远程资源 TAB）────────────────────────────
 

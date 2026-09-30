@@ -50,3 +50,47 @@ body {
 .remote-degraded-blink {
   animation: remote-degraded-blink 1.2s ease-in-out infinite;
 }
+
+
+/* ── 配置页分类导航（Apple 系统设置风; 桌面竖列 sticky / 窄屏横滚胶囊）── */
+.config-cats {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 4px;
+  scrollbar-width: thin;
+}
+.config-cat {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  padding: 8px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 14px;
+  color: inherit;
+  white-space: nowrap;
+  transition: background 0.15s ease;
+}
+.config-cat:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+.config-cat.on {
+  background: rgba(10, 108, 255, 0.10);
+  color: #0a6cff;
+  font-weight: 500;
+}
+@media (min-width: 992px) {
+  .config-cats {
+    flex-direction: column;
+    width: 168px;
+    flex-shrink: 0;
+    position: sticky;
+    top: 76px;
+  }
+  .config-cat {
+    width: 100%;
+  }
+}

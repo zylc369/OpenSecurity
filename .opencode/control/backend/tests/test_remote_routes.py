@@ -175,28 +175,41 @@ def test_node_config_whitelist():
         _cmi.get = orig_read
 
 
-@test("routes/remote: /config 更新触发热重载")
+@test("routes/config: surface=remote 写 URL/TOKEN 触发热重载（旧专用端点已废除）")
 def test_config_reload():
     import services.remote_link as rl_module
     import services.config_manager as cs
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routes import remote, config_route
     calls = []
     svc = rl_module.RemoteLinkService.get_instance()
     orig = svc.reload_config
-    # 隔离: patch config_store.write（路由层调 write 而非 write_one——
-    # 不 patch 会把测试值写进真实 .ai_env，污染生产配置）
+    # 隔离: patch ConfigManager.set（不 patch 会把测试值写进沙箱外的真实 .ai_env）
     _cmi = cs.ConfigManager.get_instance()
     orig_write = _cmi.set
     _cmi.set = lambda updates: dict(updates)  # noqa: E731
     try:
         _fake_remote_link()
         svc.reload_config = lambda: calls.append(1)
-        c = _client()
+        app = FastAPI()
+        app.include_router(config_route.router)
+        app.include_router(remote.router)
+        c = TestClient(app)
+        # 旧专用端点已废除
         r = c.put("/api/remote/config", json={"url": "http://new:2", "token": "newtok"})
+        assert_eq(r.status_code, 404, "旧端点应 404")
+        # 通用接口 surface=remote 写 URL/TOKEN → 热重载
+        r = c.put("/api/config", params={"surface": "remote"},
+                  json={"configs": {"REMOTE_CONSOLE_URL": "http://new:2",
+                                    "REMOTE_CONSOLE_TOKEN": "newtok"}})
         assert_eq(r.status_code, 200)
         assert_eq(calls, [1], "reload_config 被调用")
-        # 空更新 422
-        r = c.put("/api/remote/config", json={"url": "", "token": ""})
-        assert_eq(r.status_code, 422)
+        # config 面写远程键 → 422 且不触发重载
+        r = c.put("/api/config", params={"surface": "config"},
+                  json={"configs": {"REMOTE_CONSOLE_URL": "http://evil"}})
+        assert_eq(r.status_code, 422, "跨面写拒绝")
+        assert_eq(calls, [1], "拒绝路径不触发重载")
     finally:
         svc.reload_config = orig
         _cmi.set = orig_write

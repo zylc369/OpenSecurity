@@ -850,23 +850,90 @@ def test_cli_deps_scan_consumer():
               f"scan 应 exit 0（stderr 尾: {r.stderr[-200:] if r.stderr else '空'}）")
 
 
-@test("E2E: GET /api/config/meta 配置页元数据")
+@test("E2E: GET /api/config/meta 配置页元数据（surface 页面声明模型）")
 def test_e2e_config_meta():
-    """配置页渲染唯一数据源（曾因引用已删模块级常量 500——页面永久"加载中"，
-    无测试覆盖而溜进生产; 本用例锚定端点 200 + 结构契约）。"""
+    """配置页/远程页渲染唯一数据源（曾因引用已删模块级常量 500——页面永久
+    "加载中"无测试覆盖而溜进生产; 本用例锚定 surface 必填 + 页面过滤契约）。"""
     cp = get_shared_server()
     import httpx
+    # surface 必填: 缺省 422; hidden 是存储态不是页面身份 → 422
     r = cp.client.get("http://localhost/api/config/meta", timeout=5)
+    assert_eq(r.status_code, 422, "缺 surface 应 422")
+    r = cp.client.get("http://localhost/api/config/meta",
+                      params={"surface": "hidden"}, timeout=5)
+    assert_eq(r.status_code, 422, "surface=hidden 应 422")
+
+    # config 面: categories 有序内嵌 + 条目新契约字段
+    r = cp.client.get("http://localhost/api/config/meta",
+                      params={"surface": "config"}, timeout=5)
     assert_eq(r.status_code, 200)
     data = r.json()
-    assert_true(isinstance(data, dict) and len(data) > 5, f"meta 应为非空 dict: {type(data)}")
-    for key in ("DEEPSEEK_API_KEY", "IDA_PRO_HOME", "DEEPSEEK_MODEL"):
-        assert_true(key in data, f"meta 缺 {key}")
-        field = data[key]
-        for prop in ("label", "type", "required", "default_value", "hidden", "source"):
+    assert_true("categories" in data and "entries" in data, "ConfigMetaView 双键")
+    codes = [c["code"] for c in data["categories"]]
+    assert_eq(codes, ["tools", "models", "proxy", "behavior", "developer"],
+              "config 面分类序")
+    for key in ("DEEPSEEK_API_KEY", "IDA_PRO_HOME", "DEEPSEEK_MODEL",
+                "REFLECT_NUDGE_ENABLED", "JULIANG_IP_TTL_SEC"):
+        assert_true(key in data["entries"], f"config 面缺 {key}")
+        field = data["entries"][key]
+        for prop in ("label", "type", "required", "default_value", "readonly",
+                     "category_code", "category_desc", "source"):
             assert_true(prop in field, f"{key}.{prop} 缺失")
-    assert_true(data["DEEPSEEK_API_KEY"]["required"], "API_KEY 应 required")
-    assert_eq(data["DEEPSEEK_API_KEY"]["source"], "ai_env", "source 应标注 ai_env")
+        assert_true("hidden" not in field, f"{key} 不应再有 hidden 字段")
+    assert_true(data["entries"]["DEEPSEEK_API_KEY"]["required"], "API_KEY 应 required")
+    assert_eq(data["entries"]["DEEPSEEK_API_KEY"]["source"], "ai_env", "source 应标注 ai_env")
+    assert_eq(data["entries"]["REFLECT_NUDGE_ENABLED"]["category_code"], "behavior",
+              "反思开关归行为分类")
+    for hidden_key in ("REMOTE_CONSOLE_URL", "CONTROL_API_KEY", "HEARTBEAT_TIMEOUT_SEC"):
+        assert_true(hidden_key not in data["entries"], f"{hidden_key} 不进 config 面")
+
+    # remote 面: 连接三键 + 远程调参 readonly 语义
+    r = cp.client.get("http://localhost/api/config/meta",
+                      params={"surface": "remote"}, timeout=5)
+    assert_eq(r.status_code, 200)
+    rem = r.json()
+    assert_eq([c["code"] for c in rem["categories"]], ["remote", "remote_tuning"],
+              "remote 面分类序")
+    assert_eq(len(rem["entries"]), 9, "remote 面 9 条目")
+    assert_true(rem["entries"]["REMOTE_CONSOLE_ENABLED"]["readonly"], "ENABLED 只读")
+    assert_true(rem["entries"]["REMOTE_HEARTBEAT_INTERVAL_SEC"]["readonly"],
+                "远程调参只读")
+    assert_true(not rem["entries"]["REMOTE_CONSOLE_URL"]["readonly"], "URL 可写")
+
+
+@test("E2E: PUT /api/config surface 写校验（页面归属/readonly/hidden）")
+def test_e2e_config_write_surface():
+    """写接口与 meta 同一声明数据源校验: 跨面 422 / readonly 422 /
+    hidden 键 422 / 未声明键仅 config 面放行语义; ENABLED 专用文案保留。"""
+    cp = get_shared_server()
+    # config 面写远程键 → 422
+    r = cp.client.put("http://localhost/api/config", params={"surface": "config"},
+                      json={"configs": {"REMOTE_CONSOLE_URL": "http://x"}}, timeout=5)
+    assert_eq(r.status_code, 422, "config 面写远程键应 422")
+    # remote 面写 readonly 调参 → 422
+    r = cp.client.put("http://localhost/api/config", params={"surface": "remote"},
+                      json={"configs": {"REMOTE_HEARTBEAT_INTERVAL_SEC": "1"}}, timeout=5)
+    assert_eq(r.status_code, 422, "readonly 调参写应 422")
+    # remote 面写 hidden 节点键 → 422（堵 node-config 旁路）
+    r = cp.client.put("http://localhost/api/config", params={"surface": "remote"},
+                      json={"configs": {"CONTROL_API_KEY": "x"}}, timeout=5)
+    assert_eq(r.status_code, 422, "hidden 节点键写应 422")
+    # remote 面写未声明键 → 422
+    r = cp.client.put("http://localhost/api/config", params={"surface": "remote"},
+                      json={"configs": {"NOT_DECLARED_KEY": "x"}}, timeout=5)
+    assert_eq(r.status_code, 422, "remote 面写未声明键应 422")
+    # ENABLED: 专用守卫文案（引导「切换远程」按钮）先于通用校验
+    r = cp.client.put("http://localhost/api/config", params={"surface": "remote"},
+                      json={"configs": {"REMOTE_CONSOLE_ENABLED": "1"}}, timeout=5)
+    assert_eq(r.status_code, 422)
+    assert_true("切换远程" in str(r.json().get("detail", "")), "ENABLED 报错引导按钮")
+    # DELETE 同一守卫链: 跨面删除拒绝 + readonly 键删除拒绝
+    r = cp.client.delete("http://localhost/api/config/REMOTE_CONSOLE_URL",
+                         params={"surface": "config"}, timeout=5)
+    assert_eq(r.status_code, 422, "config 面删远程键应 422")
+    r = cp.client.delete("http://localhost/api/config/REMOTE_HEARTBEAT_INTERVAL_SEC",
+                         params={"surface": "remote"}, timeout=5)
+    assert_eq(r.status_code, 422, "remote 面删 readonly 调参应 422")
 
 
 @test("E2E: 全端点冒烟——所有 GET 路由非 5xx")
@@ -976,6 +1043,7 @@ def test_e2e_config_write():
     import httpx
     r = cp.client.put(
         f"http://localhost/api/config",
+        params={"surface": "config"},
         json={"configs": {"E2E_TEST_KEY": "e2e_value"}},
         timeout=5,
     )
@@ -2009,8 +2077,9 @@ def test_e2e_config_delete():
     cp = get_shared_server()
     import httpx
     cp.client.put("http://localhost/api/config/E2E_DEL",
-              json={"value": "test"}, timeout=5)
-    r = cp.client.delete("http://localhost/api/config/E2E_DEL", timeout=5)
+              params={"surface": "config"}, json={"value": "test"}, timeout=5)
+    r = cp.client.delete("http://localhost/api/config/E2E_DEL",
+                         params={"surface": "config"}, timeout=5)
     assert_eq(r.status_code, 200)
     r = cp.client.get("http://localhost/api/config/E2E_DEL", timeout=5)
     assert_eq(r.status_code, 404, "删后应 404")

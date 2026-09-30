@@ -21,8 +21,8 @@ const h = vi.hoisted(() => {
       calls.push({ method: "put", url, data, params: cfg?.params });
       return { data: {} };
     },
-    delete: async (url: string) => {
-      calls.push({ method: "delete", url });
+    delete: async (url: string, cfg?: { params?: unknown }) => {
+      calls.push({ method: "delete", url, params: cfg?.params });
       return { data: {} };
     },
     interceptors: {
@@ -50,14 +50,27 @@ describe("URL 编码与请求形状", () => {
     expect(h.calls[0]).toMatchObject({ method: "get", url: "/api/hardware" });
   });
 
-  it("路径参数做 encodeURIComponent（含斜杠）", async () => {
-    await api.deleteConfig("A/B C");
-    expect(h.calls[0]).toMatchObject({ method: "delete", url: "/api/config/A%2FB%20C" });
+  it("路径参数做 encodeURIComponent（含斜杠）+ surface 必填", async () => {
+    await api.deleteConfig("A/B C", "config");
+    expect(h.calls[0]).toMatchObject({
+      method: "delete", url: "/api/config/A%2FB%20C",
+      params: { surface: "config" },
+    });
   });
 
-  it("updateConfig 载荷收进 configs 键", async () => {
-    await api.updateConfig({ X: "1" });
-    expect(h.calls[0]).toMatchObject({ method: "put", url: "/api/config", data: { configs: { X: "1" } } });
+  it("updateConfig 载荷收进 configs 键 + surface 必填", async () => {
+    await api.updateConfig({ X: "1" }, "config");
+    expect(h.calls[0]).toMatchObject({
+      method: "put", url: "/api/config",
+      data: { configs: { X: "1" } }, params: { surface: "config" },
+    });
+  });
+
+  it("getConfigMeta 按 surface 请求（页面身份声明）", async () => {
+    await api.getConfigMeta("remote");
+    expect(h.calls[0]).toMatchObject({
+      method: "get", url: "/api/config/meta", params: { surface: "remote" },
+    });
   });
 
   it("scan 的 force_refresh 走 query params", async () => {

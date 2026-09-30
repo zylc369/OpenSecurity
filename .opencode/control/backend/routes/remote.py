@@ -50,12 +50,6 @@ class SwitchOutcome:
 
 
 @dataclass
-class ConfigUpdateResult:
-    ok: bool
-    updated: "list[str]"
-
-
-@dataclass
 class FingerprintPayload:
     service: str
     version: str
@@ -73,26 +67,6 @@ async def switch(req: SwitchRequest) -> SwitchOutcome:
         raise HTTPException(status_code=422, detail="target 必须是 remote 或 local")
     return SwitchOutcome(ok=result.ok, error=result.error, warnings=result.warnings,
                          detail=result.error if not result.ok else None)
-
-
-class RemoteConfigUpdate(BaseModel):
-    url: str = ""
-    token: str = ""
-
-
-@router.put("/config")
-async def update_config(req: RemoteConfigUpdate) -> ConfigUpdateResult:
-    """写远程链接 URL/TOKEN 并热重载（ENABLED 只能经 switch——D10）。"""
-    updates: dict[str, str] = {}
-    if req.url != "":
-        updates[ConfigManager.Keys.REMOTE_CONSOLE_URL] = req.url.strip()
-    if req.token != "":
-        updates[ConfigManager.Keys.REMOTE_CONSOLE_TOKEN] = req.token.strip()
-    if not updates:
-        raise HTTPException(status_code=422, detail="无可更新字段")
-    ConfigManager.get_instance().set(updates)
-    RemoteLinkService.get_instance().reload_config()
-    return ConfigUpdateResult(ok=True, updated=sorted(updates.keys()))
 
 
 # ─── 节点端点（本机直连 = 操作本机; node=remote = 主控转发）────

@@ -82,16 +82,66 @@ def test_tunables():
     assert_eq(cm.heartbeat_tunables().timeout_sec, 9.0, "心跳参数生效")
 
 
-@test("ConfigManager: 元数据——四清单/hidden/config_meta 兜底")
+@test("ConfigManager: 元数据——surface 过滤/分类/readonly/兜底")
 def test_meta():
+    from services.config_manager import Surface, ConfigCategory
     cm = _fresh()
-    meta = cm.config_meta()
-    assert_true(cm.Keys.REMOTE_CONSOLE_URL in meta, "远程 TAB 键")
-    assert_eq(meta[cm.Keys.REMOTE_CONSOLE_URL].hidden, True, "远程键 hidden")
-    assert_eq(meta[cm.Keys.DEEPSEEK_API_KEY].hidden, False, "常规键可见")
-    assert_eq(len(cm.tunable_configs()), 14, "可调参数 14 项")
+
+    # config 面: 五分类有序，不含远程/系统面条目
+    cfg = cm.config_meta(Surface.CONFIG)
+    assert_eq([c.code for c in cfg.categories],
+              ["tools", "models", "proxy", "behavior", "developer"], "config 面分类序")
+    assert_true(cm.Keys.DEEPSEEK_API_KEY in cfg.entries, "常规键进 config 面")
+    assert_true(cm.Keys.REFLECT_NUDGE_ENABLED in cfg.entries, "反思开关已声明")
+    assert_eq(cfg.entries[cm.Keys.REFLECT_NUDGE_INTERVAL_MIN].default_value, "30",
+              "反思间隔默认 30")
+    assert_eq(cfg.entries[cm.Keys.REFLECT_NUDGE_ENABLED].category_desc, "行为",
+              "分类描述服务端权威")
+    for k in (cm.Keys.REMOTE_CONSOLE_URL, cm.Keys.CONTROL_API_KEY,
+              cm.Keys.HEARTBEAT_TIMEOUT_SEC):
+        assert_true(k not in cfg.entries, f"{k} 不进 config 面")
+    # 代理池 5 调参进 config 面 proxy 分类且可写
+    proxy_keys = [cm.Keys.JULIANG_IP_TTL_SEC, cm.Keys.JULIANG_TTL_MARGIN_SEC,
+                  cm.Keys.PROXY_ROTATE_CONN_THRESHOLD, cm.Keys.DOMAIN_COOLDOWN_SEC,
+                  cm.Keys.ROTATE_HISTORY_LIMIT]
+    for k in proxy_keys:
+        assert_eq(cfg.entries[k].category_code, "proxy", f"{k} 归代理分类")
+        assert_eq(cfg.entries[k].readonly, False, f"{k} 可写")
+
+    # remote 面: 连接三键 + 远程 6 调参; ENABLED/调参 readonly
+    rem = cm.config_meta(Surface.REMOTE)
+    assert_eq([c.code for c in rem.categories], ["remote", "remote_tuning"],
+              "remote 面分类序")
+    assert_eq(len(rem.entries), 9, "remote 面 9 条目")
+    assert_eq(rem.entries[cm.Keys.REMOTE_CONSOLE_ENABLED].readonly, True,
+              "ENABLED 只读")
+    assert_eq(rem.entries[cm.Keys.REMOTE_HEARTBEAT_INTERVAL_SEC].readonly, True,
+              "远程调参只读")
+    assert_eq(rem.entries[cm.Keys.REMOTE_CONSOLE_URL].readonly, False, "URL 可写")
+    assert_true(cm.Keys.CONTROL_API_KEY not in rem.entries, "节点侧键不进 remote 面")
+
+    # hidden 面: 心跳 3 项 + 节点侧 3 键声明存在（surface=hidden 占位）
+    assert_eq(len(cm.heartbeat_tunable_configs()), 3, "心跳调参 3 项")
+    assert_eq(len(cm.node_side_configs()), 3, "节点侧 3 键")
+    hb = cm.field_of(cm.Keys.HEARTBEAT_GRACE_SEC)
+    assert_true(hb is not None and hb.surface == Surface.HIDDEN,
+                "心跳键 hidden 占位")
+
+    # 分类枚举: 顺序 + desc 全覆盖
+    ordered = ConfigCategory.ordered()
+    assert_eq(len(ordered), 9, "9 分类")
+    assert_eq(ordered[0].value, "tools", "首分类 tools")
+    for c in ordered:
+        assert_true(c.desc, f"{c.value} 有描述")
+
+    # 未知键兜底: 仅 config 面 OTHER 分类; remote 面不兜底
     cm.set({"SOME_UNKNOWN_KEY": "v"})
-    assert_true("SOME_UNKNOWN_KEY" in cm.config_meta(), "未知键 text 兜底")
+    cfg2 = cm.config_meta(Surface.CONFIG)
+    assert_true("SOME_UNKNOWN_KEY" in cfg2.entries, "未知键 config 面兜底")
+    assert_eq(cfg2.entries["SOME_UNKNOWN_KEY"].category_code, "other", "未知键归其他")
+    assert_true("other" in [c.code for c in cfg2.categories], "其他分类出现")
+    assert_true("SOME_UNKNOWN_KEY" not in cm.config_meta(Surface.REMOTE).entries,
+                "未知键不进 remote 面")
 
 
 @test("ConfigManager: 引导属性——dev_mode 优先级/is_windows/ipc_addr")

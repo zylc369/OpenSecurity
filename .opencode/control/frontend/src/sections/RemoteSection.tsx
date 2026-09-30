@@ -11,18 +11,23 @@
  *
  * 数据源: api.getRemoteStatus() 5s 轮询（后端状态机单一事实源）。
  */
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Alert, Badge, Button, Card, Descriptions, Input, Popconfirm, Space,
-  Switch, Tag, Tooltip, Typography, App as AntApp,
+  Alert, Badge, Button, Card, Col, Descriptions, Input, Popconfirm, Row,
+  Space, Switch, Tag, Tooltip, Typography, App as AntApp,
 } from "antd";
 import {
   ApiOutlined, CheckCircleOutlined, CloudServerOutlined,
   DesktopOutlined, LinkOutlined, ReloadOutlined, SaveOutlined,
-  SettingOutlined, WarningOutlined,
+  SettingOutlined, SyncOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import { api } from "../api/client";
-import type { AutostartView, NodeConfigView, RemoteLinkStatusView } from "../types";
+import { useAllConfig, useConfigMeta } from "../hooks";
+import ConfigFieldRow from "../components/ConfigFieldRow";
+import { findGroup, groupByCategory, writableUpdates } from "../utils/configGrouping";
+import type {
+  AutostartView, ConfigMap, NodeConfigView, RemoteLinkStatusView,
+} from "../types";
 
 const POLL_MS = 5000;
 
@@ -59,8 +64,10 @@ function ModeBadge({ status }: { status: RemoteLinkStatusView | null }) {
 const RemoteSection: React.FC = () => {
   const { message } = AntApp.useApp();
   const [status, setStatus] = useState<RemoteLinkStatusView | null>(null);
-  const [url, setUrl] = useState("");
-  const [token, setToken] = useState("");
+  // 连接配置: meta 驱动（surface=remote——URL/TOKEN 可写 + ENABLED 只读）
+  const rmeta = useConfigMeta("remote");
+  const { data: rconfigs, save: saveRemote } = useAllConfig("remote");
+  const [rvalues, setRvalues] = useState<ConfigMap>({});
   const [saving, setSaving] = useState(false);
   const [switching, setSwitching] = useState(false);
   // 卡片 3: 远程节点管理（经转发）
@@ -88,32 +95,41 @@ const RemoteSection: React.FC = () => {
     };
   }, []);
 
-  // 首帧回填表单一次（此后用户编辑不受轮询覆盖——ref 标记防清空重编辑时被回填打断）
-  const backfilled = React.useRef(false);
   useEffect(() => {
-    if (status && !backfilled.current) {
-      setUrl(status.url);
-      setToken(status.token_configured ? "（已配置，输入以更换）" : "");
-      backfilled.current = true;
-    }
-  }, [status]);
+    if (rconfigs) setRvalues(rconfigs);
+  }, [rconfigs]);
 
-  const saveConfig = useCallback(async () => {
-    if (!url.trim()) {
+  const rgroups = useMemo(
+    () => (rmeta.data ? groupByCategory(rmeta.data.entries, rmeta.data.categories) : []),
+    [rmeta.data]);
+  const linkGroup = findGroup(rgroups, "remote");
+  const tuningGroup = findGroup(rgroups, "remote_tuning");
+  const remoteUrl = rvalues["REMOTE_CONSOLE_URL"] ?? "";
+
+  const rdirty = useMemo(() => {
+    if (!rconfigs || !rmeta.data) return false;
+    return Object.entries(writableUpdates(rvalues, rmeta.data.entries))
+      .some(([k, v]) => (v ?? "") !== (rconfigs[k] ?? ""));
+  }, [rvalues, rconfigs, rmeta.data]);
+
+  const saveRemoteConfig = useCallback(async () => {
+    if (!remoteUrl.trim()) {
       message.warning("远程链接不能为空");
       return;
     }
     setSaving(true);
     try {
-      const tokenToSave = token.includes("（已配置") ? "" : token.trim();
-      await api.updateRemoteConfig(url.trim(), tokenToSave);
+      const updates = Object.fromEntries(
+        Object.entries(writableUpdates(rvalues, rmeta.data?.entries ?? {}))
+          .map(([k, v]) => [k, (v ?? "").trim()]));
+      await saveRemote(updates);
       message.success("远程连接配置已保存");
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
-  }, [url, token, message]);
+  }, [remoteUrl, rvalues, rmeta.data, saveRemote, message]);
 
   const doSwitch = useCallback(async (target: "remote" | "local") => {
     setSwitching(true);
@@ -139,6 +155,8 @@ const RemoteSection: React.FC = () => {
   const health = status?.remote_health ?? null;
   const enabled = status?.enabled ?? false;
   const degraded = status?.state === "degraded";
+  // 守卫后捕获（JSX 回调内属性窄化会丢失）
+  const rmetaEntries = rmeta.data?.entries ?? null;
 
   // ── 卡片 3: 远程节点管理加载 ─────────────────────────
   const loadNodeInfo = useCallback(async () => {
@@ -251,7 +269,7 @@ const RemoteSection: React.FC = () => {
               type="primary"
               icon={<ApiOutlined />}
               loading={switching}
-              disabled={!url.trim()}
+              disabled={!remoteUrl.trim()}
               onClick={() => void doSwitch("remote")}
             >
               切换远程
@@ -260,24 +278,32 @@ const RemoteSection: React.FC = () => {
         }
       >
         <Space direction="vertical" size={10} style={{ width: "100%" }}>
-          <Space.Compact style={{ width: "100%" }}>
-            <Input
-              addonBefore="链接"
-              placeholder="http://192.168.1.20:9776"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-            />
-            <Input.Password
-              addonBefore="令牌"
-              placeholder="与远程节点 CONTROL_API_KEY 相同"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              style={{ width: 320 }}
-            />
-            <Button type="primary" icon={<SaveOutlined />} loading={saving} onClick={() => void saveConfig()}>
-              保存
-            </Button>
-          </Space.Compact>
+          {linkGroup && rmetaEntries ? (
+            <Row gutter={[16, 0]} align="bottom">
+              {linkGroup.keys.map((key) => {
+                const m = rmetaEntries[key];
+                return (
+                  <Col xs={24} md={12} key={key}>
+                    <ConfigFieldRow
+                      meta={m}
+                      value={rvalues[key] ?? ""}
+                      onChange={m.readonly
+                        ? undefined
+                        : (v) => setRvalues((s) => ({ ...s, [key]: v }))}
+                    />
+                  </Col>
+                );
+              })}
+              <Col xs={24}>
+                <Button type="primary" icon={<SaveOutlined />} loading={saving}
+                        disabled={!rdirty} onClick={() => void saveRemoteConfig()}>
+                  保存{rdirty ? "（有未保存修改）" : ""}
+                </Button>
+              </Col>
+            </Row>
+          ) : (
+            <Typography.Text type="secondary">连接配置加载中…</Typography.Text>
+          )}
           {degraded && (
             <Alert
               type="error" showIcon
@@ -316,6 +342,28 @@ const RemoteSection: React.FC = () => {
           )}
         </Space>
       </Card>
+
+      {/* ── 卡片 1.5: 远程调参（meta 驱动只读展示）────────── */}
+      {tuningGroup && rmetaEntries && (
+        <Card
+          {...cardProps}
+          title={
+            <Space size={8}>
+              <SyncOutlined />
+              <span>{tuningGroup.desc}</span>
+              <Tag style={{ marginInlineEnd: 0 }}>只读</Tag>
+            </Space>
+          }
+        >
+          <Row gutter={[16, 0]}>
+            {tuningGroup.keys.map((key) => (
+              <Col xs={24} md={12} xl={8} key={key}>
+                <ConfigFieldRow meta={rmetaEntries[key]} value={rvalues[key] ?? ""} />
+              </Col>
+            ))}
+          </Row>
+        </Card>
+      )}
 
       {/* ── 卡片 2: 当前模式 ─────────────────────────────── */}
       <Card

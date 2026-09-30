@@ -12,7 +12,8 @@ import axios, { AxiosInstance } from "axios";
 import type {
   HardwareInfo, ConfigMap, RequiredStatusMap, ToolStatus, AgentTools,
   DockerScanGlobal, ScanResult, InstallResult,
-  SystemInfo, ModelsResponse, FsCheckResult, ConfigMetaMap,
+  SystemInfo, ModelsResponse, FsCheckResult,
+  ConfigSurface, ConfigMetaResponse,
   ProcessRegistryView, HeartbeatsResponse,
   RemoteLinkStatusView, SwitchResultView, NodeConfigView, AutostartView,
 } from "../types";
@@ -69,13 +70,15 @@ export const api = {
     return r.data;
   },
 
-  async updateConfig(updates: ConfigMap): Promise<ConfigMap> {
-    const r = await instance.put<ConfigMap>("/api/config", { configs: updates });
+  async updateConfig(updates: ConfigMap, surface: ConfigSurface): Promise<ConfigMap> {
+    const r = await instance.put<ConfigMap>("/api/config", { configs: updates },
+      { params: { surface } });
     return r.data;
   },
 
-  async deleteConfig(key: string): Promise<ConfigMap> {
-    const r = await instance.delete<ConfigMap>(`/api/config/${encodeURIComponent(key)}`);
+  async deleteConfig(key: string, surface: ConfigSurface): Promise<ConfigMap> {
+    const r = await instance.delete<ConfigMap>(`/api/config/${encodeURIComponent(key)}`,
+      { params: { surface } });
     return r.data;
   },
 
@@ -130,8 +133,9 @@ export const api = {
   },
 
   // ─── /api/config/meta ───────────────────────────────────
-  async getConfigMeta(): Promise<ConfigMetaMap> {
-    const r = await instance.get<ConfigMetaMap>("/api/config/meta");
+  async getConfigMeta(surface: ConfigSurface): Promise<ConfigMetaResponse> {
+    const r = await instance.get<ConfigMetaResponse>("/api/config/meta",
+      { params: { surface } });
     return r.data;
   },
 
@@ -159,11 +163,6 @@ export const api = {
 
   async switchRemote(target: "remote" | "local"): Promise<SwitchResultView> {
     const r = await instance.post<SwitchResultView>("/api/remote/switch", { target });
-    return r.data;
-  },
-
-  async updateRemoteConfig(url: string, token: string): Promise<{ ok: boolean }> {
-    const r = await instance.put("/api/remote/config", { url, token });
     return r.data;
   },
 

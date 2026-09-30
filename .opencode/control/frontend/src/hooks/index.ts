@@ -7,7 +7,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { api } from "../api/client";
 import type {
   HardwareInfo, RequiredStatusMap, ScanResult, ConfigMap,
-  SystemInfo, ModelsResponse, ConfigMetaMap,
+  SystemInfo, ModelsResponse, ConfigSurface, ConfigMetaResponse,
 } from "../types";
 
 /** 硬件信息（默认拉一次；Popover 内刷新按钮可强制重拉，如插了内存/外置 GPU 后） */
@@ -101,7 +101,7 @@ export function useScan(autoRefresh = false): {
 }
 
 /** 全部配置（编辑表单用） */
-export function useAllConfig(): {
+export function useAllConfig(surface: ConfigSurface): {
   data: ConfigMap | null;
   loading: boolean;
   error: string | null;
@@ -121,9 +121,9 @@ export function useAllConfig(): {
   }, []);
 
   const save = useCallback(async (updates: ConfigMap) => {
-    const updated = await api.updateConfig(updates);
+    const updated = await api.updateConfig(updates, surface);
     setData(updated);
-  }, []);
+  }, [surface]);
 
   useEffect(() => {
     refresh();
@@ -202,21 +202,21 @@ export function useModels(): {
 }
 
 /** 配置元数据（label/type/hint/required，一次拉取） */
-export function useConfigMeta(): {
-  data: ConfigMetaMap | null;
+export function useConfigMeta(surface: ConfigSurface): {
+  data: ConfigMetaResponse | null;
   loading: boolean;
   error: string | null;
 } {
-  const [data, setData] = useState<ConfigMetaMap | null>(null);
+  const [data, setData] = useState<ConfigMetaResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    api.getConfigMeta()
+    api.getConfigMeta(surface)
       .then((d) => { setData(d); setError(null); })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [surface]);
 
   return { data, loading, error };
 }
