@@ -101,3 +101,36 @@ frontend/src/api/client.test.ts     [改]
     remote_tab_configs/updateRemoteConfig/旧端点）零引用
   - 事件: 原控制台已死 → 手动按插件 spawn 契约拉起（server.py + 最小环境
     + 日志落盘），opencode 心跳已接管
+
+## Review 轮（commit 14bf01e5 配置优化-1，独立审查）
+
+- 结论: surface 模型端到端一致、旧端点清理干净、热重载保留、默认值与
+  消费方匹配（审查者实测全绿）
+- 发现 3 项: ①ENABLED 只读行切换后数据过时（低-中，**已修**: doSwitch
+  成功后 refreshRemoteConfig——useAllConfig 解构 refresh）②Token 回显/
+  往返（低，有意设计: 配置页对齐 + 清空=删 token 能力，不改）③冗余三元
+  （外观，**已修**）
+- 修复验证: tsc 0 + vitest 37/37 + build ✓（vite dev HMR 即时生效）
+
+## UI 走查反馈轮（用户截图反馈）
+
+- 反馈 1: hint 位置不一致（宽输入框下方 vs 窄下拉框右侧）。根因: hint 是
+  控件后的行内元素——Input 为 width:100% 占满整行（hint 换行到下方），
+  Select 仅 140px 行内宽（hint 留在同排右侧）。修复: 统一走 Form.Item
+  extra（恒在控件下方; 用户认可下方位置）——ConfigFieldRow 一处改动，
+  配置页/远程页共享组件同时生效
+- 反馈 2: 屏幕使用率低（单分类视图大面积留白）。重构为分类平铺:
+  - 全部分类卡多列瀑布（column-width 440 / count 上限 3; 窄屏自动单列）
+  - 左导航改为跳转（scrollIntoView 平滑滚动 + scroll-margin 122 落点）+
+    滚动联动高亮（程序化滚动期间抑制闪烁）
+  - 保存收敛为顶部 sticky 全局按钮（移除逐卡保存）
+  - 窄屏（<992）导航胶囊条置顶、卡片单列（原横排会与内容抢宽度）
+- 反馈 3: 卡片分布失衡（CSS 多列列优先——左列提前结束、行为/开发堆右列，
+  观感"右对齐"；真实数据下左 580 vs 右 972）。修复: 弃 CSS 多列，改
+  JS 贪心分列（最短列优先，估算高度驱动）:
+  - 纯函数 estimateTileHeight / masonryDistribute 入 configGrouping
+    （+4 测试: 估算公式/高卡回填/并列取最左/1 列与空列）
+  - 列数按容器宽 1..3 动态（ResizeObserver，440px 最小列宽）
+  - 真实数据模拟: 2 列 [工具,代理]806 | [模型,行为,开发]816（差 10px）
+- 验证: tsc 0 + vitest 41/41 + build ✓ + vite dev 服务新模块 ✓
+  （视觉终验待用户刷新页面）

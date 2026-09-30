@@ -66,7 +66,7 @@ const RemoteSection: React.FC = () => {
   const [status, setStatus] = useState<RemoteLinkStatusView | null>(null);
   // 连接配置: meta 驱动（surface=remote——URL/TOKEN 可写 + ENABLED 只读）
   const rmeta = useConfigMeta("remote");
-  const { data: rconfigs, save: saveRemote } = useAllConfig("remote");
+  const { data: rconfigs, save: saveRemote, refresh: refreshRemoteConfig } = useAllConfig("remote");
   const [rvalues, setRvalues] = useState<ConfigMap>({});
   const [saving, setSaving] = useState(false);
   const [switching, setSwitching] = useState(false);
@@ -145,12 +145,14 @@ const RemoteSection: React.FC = () => {
       }
       const st = await api.getRemoteStatus();
       setStatus(st);
+      // 切换会写 REMOTE_CONSOLE_ENABLED → 刷新配置源，只读行与状态机同步
+      refreshRemoteConfig();
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e));
     } finally {
       setSwitching(false);
     }
-  }, [message]);
+  }, [message, refreshRemoteConfig]);
 
   const health = status?.remote_health ?? null;
   const enabled = status?.enabled ?? false;

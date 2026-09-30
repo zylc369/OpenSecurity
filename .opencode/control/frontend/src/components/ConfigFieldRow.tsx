@@ -1,10 +1,12 @@
 /**
  * 配置条目共享渲染组件（配置页 + 远程页复用——meta 驱动，零页面定制）。
  *
- * 一行 = label（必要/可选徽标）+ 类型差异化控件 + hint:
+ * 一行 = label（必要/可选徽标）+ 类型差异化控件; hint 统一渲染在控件下方
+ * （Form.Item extra——与控件宽度无关，避免「宽输入框 hint 换行 / 窄下拉框
+ * hint 同行」的位置不一致）:
  *   password → Input.Password（小眼睛）   path → Input + 实时存在性徽标
  *   bool     → Select(1/0)                text  → Input
- * readonly=true → 控件禁用 + 显示生效值（值或默认）+「只读」徽标。
+ *   readonly=true → 控件禁用 + 显示生效值（值或默认）+「只读」徽标。
  */
 import React, { useEffect, useState } from "react";
 import { Form, Input, Select, Space, Tag, Tooltip, Typography } from "antd";
@@ -55,7 +57,7 @@ const ConfigFieldRow: React.FC<{
     if (m.type === "password") {
       return (
         <Input.Password
-          value={ro ? (value || "") : value}
+          value={value}
           placeholder={ro ? effectiveText() : "输入密钥（默认隐藏）"}
           disabled={disabled}
           autoComplete="new-password"
@@ -116,6 +118,13 @@ const ConfigFieldRow: React.FC<{
   return (
     <Form.Item
       style={{ marginBottom: 14 }}
+      extra={
+        m.hint ? (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {m.hint}
+          </Typography.Text>
+        ) : undefined
+      }
       label={
         <Space size={8}>
           <span>{m.label}</span>
@@ -146,11 +155,6 @@ const ConfigFieldRow: React.FC<{
       }
     >
       {control}
-      {m.hint && (
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {m.hint}
-        </Typography.Text>
-      )}
     </Form.Item>
   );
 };

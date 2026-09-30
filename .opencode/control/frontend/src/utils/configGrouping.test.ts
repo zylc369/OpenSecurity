@@ -1,8 +1,12 @@
 /**
- * configGrouping 纯函数测试: 顺序/剔除/组内排序/契约防御。
+ * configGrouping 纯函数测试: 顺序/剔除/组内排序/契约防御/平铺分列。
  */
 import { describe, expect, it } from "vitest";
-import { groupByCategory, findGroup, writableUpdates } from "./configGrouping";
+import {
+  groupByCategory, findGroup, writableUpdates,
+  estimateTileHeight, masonryDistribute,
+} from "./configGrouping";
+import type { GroupedCategory } from "./configGrouping";
 import type { ConfigMetaMap, ConfigCategoryView, ConfigMetaItem } from "../types";
 
 function item(over: Partial<ConfigMetaItem>): ConfigMetaItem {
@@ -72,5 +76,55 @@ describe("groupByCategory", () => {
       { Y: item({ category_code: "tools", label: "Y" }) }, cats);
     expect(findGroup(groups, "tools")?.desc).toBe("工具");
     expect(findGroup(groups, "models")).toBeNull();
+  });
+});
+
+describe("平铺分列（estimateTileHeight / masonryDistribute）", () => {
+  const mk = (code: string, keys: string[]): GroupedCategory => ({
+    code, desc: code, keys,
+  });
+
+  it("estimateTileHeight: 无 hint = 62 + 46/字段; hint 每行 +20（42 字/行）", () => {
+    const entries: ConfigMetaMap = {
+      k1: item({}),
+      k2: item({ hint: "a".repeat(43) }), // 43 字 → 2 行
+    };
+    expect(estimateTileHeight(mk("a", ["k1"]), entries)).toBe(108);
+    expect(estimateTileHeight(mk("a", ["k2"]), entries)).toBe(62 + 46 + 40);
+  });
+
+  it("最短列优先: 高卡之后的卡回填矮列，不堆到后列", () => {
+    const entries: ConfigMetaMap = {
+      k1: item({}), k2: item({}), k3: item({}), k4: item({}), k5: item({}),
+    };
+    const gs = [
+      mk("a", ["k1"]),             // 108
+      mk("b", ["k2", "k3"]),       // 154
+      mk("c", ["k1", "k2", "k3"]), // 200——高卡
+      mk("d", ["k4"]),             // 108
+      mk("e", ["k5"]),             // 108
+    ];
+    const cols = masonryDistribute(gs, entries, 2);
+    expect(cols.map((b) => b.map((g) => g.code)))
+      .toEqual([["a", "c"], ["b", "d", "e"]]);
+  });
+
+  it("列高并列时取最左列", () => {
+    const entries: ConfigMetaMap = { k: item({}) };
+    const gs = [mk("a", ["k"]), mk("b", ["k"]), mk("c", ["k"])];
+    // a→c0(122); b→c1(122); c: c0/c1 并列 → 最左 c0
+    const cols = masonryDistribute(gs, entries, 2);
+    expect(cols.map((b) => b.map((g) => g.code))).toEqual([["a", "c"], ["b"]]);
+  });
+
+  it("1 列 = 全部原序; 列数 > 组数时保留空列", () => {
+    const entries: ConfigMetaMap = { k: item({}) };
+    const gs = [mk("a", ["k"]), mk("b", ["k"])];
+    expect(masonryDistribute(gs, entries, 1).map((b) => b.map((g) => g.code)))
+      .toEqual([["a", "b"]]);
+    const wide = masonryDistribute(gs, entries, 4);
+    expect(wide).toHaveLength(4);
+    expect(wide.map((b) => b.map((g) => g.code)))
+      .toEqual([["a"], ["b"], [], []]);
   });
 });

@@ -1,20 +1,18 @@
 /**
  * 配置页（#/config）——服务端分类驱动的配置管理面。
  *
- * 布局（Apple 系统设置风; 样式见 global.css .config-cats）:
- *   ≥lg: 左侧分类导航（图标+desc，选中态圆角高亮块，sticky）+ 右侧当前分类卡片
- *   <lg: 顶部水平滚动分类胶囊条
- *   卡片内双列网格（信息密度优先）; 保存按钮在卡片右上（dirty 提示）
+ * 布局（Apple 系统设置风; 样式见 global.css .config-*）:
+ *   左: 分类导航（图标+desc; 点击平滑滚动到对应分类卡; 滚动联动高亮）
+ *   右: 全部分类卡平铺（CSS 多列瀑布，一屏纵览全部配置; 窄屏自动单列）
+ *      + 顶部 sticky 保存条（全局唯一保存入口，dirty 提示）
  * 页面组成零定制: 分类/顺序/描述全部来自 /api/config/meta?surface=config，
  * 前端不硬编码任何配置项判断（图标映射除外——纯视觉）。
  */
-import React, { useEffect, useMemo, useState } from "react";
-import {
-  Alert, App as AntApp, Button, Card, Col, Row, Space, Tag, Typography,
-} from "antd";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Alert, App as AntApp, Button, Card, Space, Tag, Typography } from "antd";
 import { SaveOutlined } from "@ant-design/icons";
 import { useAllConfig, useConfigMeta } from "../hooks";
-import { groupByCategory, writableUpdates } from "../utils/configGrouping";
+import { groupByCategory, masonryDistribute, writableUpdates } from "../utils/configGrouping";
 import { categoryIcon } from "../constants/configIcons";
 import ConfigFieldRow from "../components/ConfigFieldRow";
 import type { ConfigMap } from "../types";
@@ -26,6 +24,11 @@ const ConfigPage: React.FC = () => {
   const [values, setValues] = useState<ConfigMap>({});
   const [saving, setSaving] = useState(false);
   const [active, setActive] = useState("");
+  // 程序化滚动（导航点击）期间抑制滚动联动，避免途经分类的高亮闪烁
+  const jumping = useRef(false);
+  // 平铺列数（1..3）: 按容器宽动态计算（440px 最小列宽）; 容器宽与列数无关，无回环
+  const tilesRef = useRef<HTMLDivElement>(null);
+  const [cols, setCols] = useState(2);
 
   useEffect(() => {
     if (configs) setValues(configs);
@@ -35,10 +38,48 @@ const ConfigPage: React.FC = () => {
     () => (meta.data ? groupByCategory(meta.data.entries, meta.data.categories) : []),
     [meta.data]);
 
-  // 默认选中首个分类（服务端序）
+  useLayoutEffect(() => {
+    const el = tilesRef.current;
+    if (!el) return;
+    const update = () => {
+      setCols(Math.max(1, Math.min(3, Math.floor((el.clientWidth + 14) / 454))));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [meta.data]);
+
+  // 瀑布流分列: 最短列优先，各列收尾齐平（替代 CSS 多列的列优先堆叠）
+  const columns = useMemo(
+    () => (meta.data ? masonryDistribute(groups, meta.data.entries, cols) : []),
+    [groups, meta.data, cols]);
+
+  // 滚动联动：视口顶部之下最靠下的分类卡 = 当前分类（列平铺下并列卡取先者）
   useEffect(() => {
-    if (!active && groups.length > 0) setActive(groups[0].code);
-  }, [groups, active]);
+    const onScroll = () => {
+      if (jumping.current) return;
+      let cur = groups[0]?.code ?? "";
+      let bestTop = -Infinity;
+      for (const g of groups) {
+        const el = document.getElementById(`cat-${g.code}`);
+        if (!el) continue;
+        const top = el.getBoundingClientRect().top;
+        if (top <= 150 && top > bestTop) { bestTop = top; cur = g.code; }
+      }
+      setActive(cur);
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, [groups]);
+
+  const jumpTo = (code: string) => {
+    setActive(code);
+    jumping.current = true;
+    document.getElementById(`cat-${code}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    window.setTimeout(() => { jumping.current = false; }, 700);
+  };
 
   const dirty = useMemo(() => {
     if (!configs) return false;
@@ -77,8 +118,6 @@ const ConfigPage: React.FC = () => {
     return <Typography.Text type="secondary">无配置项</Typography.Text>;
   }
 
-  const current = groups.find((g) => g.code === active) ?? groups[0];
-  const HeadIcon = categoryIcon(current.code);
   // 守卫后捕获（JSX 回调内属性窄化会丢失）
   const entries = meta.data.entries;
 
@@ -90,17 +129,16 @@ const ConfigPage: React.FC = () => {
           message={`必要配置缺失：${requiredMissing.join("、")}`}
         />
       )}
-      <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+      <div className="config-layout">
         <nav className="config-cats" aria-label="配置分类">
           {groups.map((g) => {
             const GIcon = categoryIcon(g.code);
-            const on = g.code === current.code;
             return (
               <button
                 key={g.code}
                 type="button"
-                className={`config-cat${on ? " on" : ""}`}
-                onClick={() => setActive(g.code)}
+                className={`config-cat${g.code === active ? " on" : ""}`}
+                onClick={() => jumpTo(g.code)}
               >
                 <GIcon />
                 <span>{g.desc}</span>
@@ -108,38 +146,49 @@ const ConfigPage: React.FC = () => {
             );
           })}
         </nav>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <Card
-            size="small"
-            title={
-              <Space size={8}>
-                <HeadIcon />
-                <span>{current.desc}</span>
-                <Tag style={{ marginInlineEnd: 0 }}>{current.keys.length} 项</Tag>
-              </Space>
-            }
-            extra={
-              <Button
-                type="primary" icon={<SaveOutlined />} loading={saving}
-                disabled={!dirty}
-                onClick={() => void doSave()}
-              >
-                保存{dirty ? "（有未保存修改）" : ""}
-              </Button>
-            }
-          >
-            <Row gutter={[16, 0]}>
-              {current.keys.map((key) => (
-                <Col xs={24} lg={12} key={key}>
-                  <ConfigFieldRow
-                    meta={entries[key]}
-                    value={values[key] ?? ""}
-                    onChange={(v) => setValues((s) => ({ ...s, [key]: v }))}
-                  />
-                </Col>
-              ))}
-            </Row>
-          </Card>
+        <div className="config-main">
+          <div className="config-savebar">
+            <Button
+              type="primary" icon={<SaveOutlined />} loading={saving}
+              disabled={!dirty}
+              onClick={() => void doSave()}
+            >
+              保存{dirty ? "（有未保存修改）" : ""}
+            </Button>
+          </div>
+          <div className="config-tiles" ref={tilesRef}>
+            {columns.map((bucket, i) => (
+              <div className="config-col" key={i}>
+                {bucket.map((g) => {
+                  const GIcon = categoryIcon(g.code);
+                  return (
+                    <Card
+                      key={g.code}
+                      id={`cat-${g.code}`}
+                      size="small"
+                      className="config-tile"
+                      title={
+                        <Space size={8}>
+                          <GIcon />
+                          <span>{g.desc}</span>
+                          <Tag style={{ marginInlineEnd: 0 }}>{g.keys.length} 项</Tag>
+                        </Space>
+                      }
+                    >
+                      {g.keys.map((key) => (
+                        <ConfigFieldRow
+                          key={key}
+                          meta={entries[key]}
+                          value={values[key] ?? ""}
+                          onChange={(v) => setValues((s) => ({ ...s, [key]: v }))}
+                        />
+                      ))}
+                    </Card>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </Space>

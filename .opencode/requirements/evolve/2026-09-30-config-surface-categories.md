@@ -403,4 +403,5 @@ ConfigMetaResponse）; `useAllConfig` 不变（值读取）。
 全部 11 步执行完毕、三类验收全过: 功能（live 契约 9 项 + 反思键 roundtrip）/
 回归（pyright 双 scope 0/0 + 后端 12 套件全绿含 e2e 双真链路 + 前端 tsc/vitest/
 build）/架构（页面组成完全由 surface+category 声明驱动，前端零配置项硬编码）。
-待用户: 视觉走查（dev server localhost:5173 或控制台 9776）。
+后续轮: 独立审查修复（ENABLED 只读行刷新）+ UI 走查反馈（hint 统一控件下方 /
+分类平铺 + sticky 全局保存），证据见 progress.md。

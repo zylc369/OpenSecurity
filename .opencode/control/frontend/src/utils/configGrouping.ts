@@ -1,5 +1,5 @@
 /**
- * 配置分组纯函数（服务端 categories 数组驱动，前端零自行排序/过滤）。
+ * 配置页纯函数（分组 / 可写过滤 / 平铺分列；服务端 categories 数组驱动）。
  *
  * 规则:
  *   • 分组顺序 = categories 数组顺序（服务端枚举定义序）
@@ -60,4 +60,45 @@ export function writableUpdates(
     if (m && !m.readonly) out[k] = v;
   }
   return out;
+}
+
+/**
+ * 平铺卡高度估算（仅用于列分配——相对大小决定贪心结果，无需像素精确）:
+ *   卡头 + 内边距 ≈ 62; 每字段（label/控件行）≈ 46; hint 每行 ≈ 20（约 42 字/行）。
+ */
+export function estimateTileHeight(
+  g: GroupedCategory,
+  entries: ConfigMetaMap,
+): number {
+  let h = 62;
+  for (const k of g.keys) {
+    const hint = entries[k]?.hint ?? "";
+    h += 46 + (hint ? 20 * Math.ceil(hint.length / 42) : 0);
+  }
+  return h;
+}
+
+/**
+ * 平铺列分配——瀑布流同策略: 最短列优先（高度并列取最左列），各列收尾齐平。
+ *
+ * 为什么不用 CSS 多列（column-count）: 多列是列优先平衡且卡片不可切割——某列
+ * 一旦放入高卡就提前结束，后续卡全部堆到下一列，出现「左列空、右列堆」失衡。
+ */
+export function masonryDistribute(
+  groups: GroupedCategory[],
+  entries: ConfigMetaMap,
+  cols: number,
+): GroupedCategory[][] {
+  const n = Math.max(1, Math.floor(cols));
+  const buckets: GroupedCategory[][] = Array.from({ length: n }, () => []);
+  const heights = new Array<number>(n).fill(0);
+  for (const g of groups) {
+    let idx = 0;
+    for (let i = 1; i < n; i++) {
+      if (heights[i] < heights[idx]) idx = i;
+    }
+    buckets[idx].push(g);
+    heights[idx] += estimateTileHeight(g, entries) + 14; // 14 = 列内卡片间距
+  }
+  return buckets;
 }
