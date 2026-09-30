@@ -175,6 +175,9 @@ class ConfigManager:
         # 反思提醒（插件 lib/reflection.ts 经 /api/config 消费; 语义: 未配置=启用）
         REFLECT_NUDGE_ENABLED = "REFLECT_NUDGE_ENABLED"
         REFLECT_NUDGE_INTERVAL_MIN = "REFLECT_NUDGE_INTERVAL_MIN"
+        # 权限询问超时自动拒绝（插件 lib/permission-timeout.ts 经 /api/config 消费）
+        PERMISSION_ASK_TIMEOUT_SEC = "PERMISSION_ASK_TIMEOUT_SEC"
+        PERMISSION_ASK_TIMEOUT_TYPES = "PERMISSION_ASK_TIMEOUT_TYPES"
         JULIANG_TRADE_NO = "JULIANG_TRADE_NO"
         JULIANG_API_KEY = "JULIANG_API_KEY"
         GITHUB_TOKEN = "GITHUB_TOKEN"
@@ -590,6 +593,18 @@ DEEPSEEK_API_KEY=
                 category=ConfigCategory.BEHAVIOR,
             ),
             self.ConfigField(
+                key=k.PERMISSION_ASK_TIMEOUT_SEC, label="权限询问超时（秒）", type="text",
+                hint="权限询问超过该秒数未处理则自动拒绝（附引导反馈）; 0=关闭; 默认 300 秒，改后 30s 内生效",
+                required=False, default_value="300",
+                category=ConfigCategory.BEHAVIOR,
+            ),
+            self.ConfigField(
+                key=k.PERMISSION_ASK_TIMEOUT_TYPES, label="超时自动拒绝的权限类型", type="text",
+                hint="逗号分隔的权限类型名; 默认仅 external_directory（目录权限），可加 edit/bash 等",
+                required=False, default_value="external_directory",
+                category=ConfigCategory.BEHAVIOR,
+            ),
+            self.ConfigField(
                 key=k.CONTROL_FRONTEND_DEV, label="前端开发模式", type="bool",
                 hint="1=vite dev(5173)，0/删除=发布态(dist/)。改后需重启控制台生效",
                 required=False,
@@ -715,7 +730,13 @@ DEEPSEEK_API_KEY=
         ]
 
     def _all_fields(self) -> list[ConfigField]:
-        """全部声明字段（config_meta 过滤与 _guard_surface 校验的数据源）。"""
+        """全部声明字段（config_meta 过滤与 _guard_surface 校验的数据源）。
+
+        顺序约定: 清单内与清单间的声明顺序 = 配置页组内展示顺序
+        （meta 的 entries dict 按此序构造，前端按键序渲染）——同类配置
+        相邻声明即相邻展示，调整展示顺序在此处做。required_configs 先于
+        extra_configs 拼接 → 同分类内必要配置天然在前。
+        """
         return [*self.required_configs(), *self.extra_configs(),
                 *self.remote_link_configs(), *self.node_side_configs(),
                 *self.proxy_tunable_configs(), *self.remote_tunable_configs(),

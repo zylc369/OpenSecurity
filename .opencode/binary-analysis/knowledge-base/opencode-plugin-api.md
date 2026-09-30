@@ -151,6 +151,39 @@ async (input: {
 
 ---
 
+### 权限询问事件与自动回复（v1/v2）
+
+权限询问产生时发布 `permission.asked`，被回复（用户点击或程序回复）后发布 `permission.replied`；v2 事件名为 `permission.v2.asked` / `permission.v2.replied`（字段重命名，见下表）。插件的 `event` hook 可收到这两组事件，与 agent 无关（所有会话生效）。
+
+**事件字段对照**：
+
+| 字段语义 | v1 `permission.asked` | v2 `permission.v2.asked` |
+|---------|----------------------|--------------------------|
+| 请求 ID | `id`（`per_` 前缀） | `id` |
+| 会话 ID | `sessionID` | `sessionID` |
+| 权限类型 | `permission`（`external_directory` / `edit` / `bash` 等） | `action` |
+| 请求模式 | `patterns`（数组） | `resources` |
+| 记住项 | `always` | `save` |
+| 工具调用来源 | `tool: {messageID, callID}` | `source` |
+| 元数据 | `metadata` | `metadata` |
+
+**回复端点**：
+
+| 端点 | body | message 反馈 |
+|------|------|-------------|
+| `POST /permission/{requestID}/reply`（推荐） | `{reply: "once"/"always"/"reject", message?}` | 支持 |
+| `POST /session/{sessionID}/permissions/{permissionID}`（旧） | `{response: "once"/"always"/"reject"}` | 不支持 |
+
+v1 SDK 注入 client 无 `permission` 命名空间，旧端点对应 SDK 方法 `client.postSessionIdPermissionsPermissionId({path: {id, permissionID}, body: {response}})`；新端点用同一 client 的 hey-api 底层方法调用（`client._client.post({url, headers, body})`——SDK 生成方法内部即调它，baseUrl/认证/拦截器统一复用，比裸 fetch 更符合请求收口）。v2 端点：`POST /api/session/{sessionID}/permission/{requestID}/reply`，body `{reply, message?}`（v2 SDK 面 `client.permission.reply({requestID, reply, message})`）。
+
+**message 反馈机制**：`reply: "reject"` 携带 `message` 时，被拒工具的错误结果变为 `The user rejected permission to use this specific tool call with the following feedback: <message>`；模型读到反馈后继续执行（不中断会话、不创建新消息）。不带 `message` 则为通用拒绝文案。
+
+**未生成端点的统一调用方式**：插件 input 注入的 client 是 hey-api 生成客户端，底层方法面对所有端点可用——`client._client.post({url: "/permission/{id}/reply", headers: {"Content-Type": "application/json"}, body: {...}})`；返回 `{data, error, request, response}`（默认不 throw，按 `response.status` 判定; 200/404 语义见上文）。`_client` 还有 `get/put/delete/request/buildUrl/getConfig` 等方法（hey-api 公开运行时面）。不要在插件里裸 fetch opencode server——绕开 client 的 baseUrl/认证配置，破坏请求收口。
+
+**⚠ `permission.ask` plugin hook 未接线**：`Hooks` 类型里有 `"permission.ask"` 定义，但运行时无触发点（1.18.32 与 dev 最新版均无）——权限拦截与自动回复必须走「事件 + reply 端点」路径，不要依赖该 hook。
+
+---
+
 ### `chat.params`
 
 **触发时机**: 构建请求参数时
@@ -161,6 +194,8 @@ async (input: unknown, output: unknown) => Promise<void>
 ```
 
 **用途**: 修改 temperature、topP、maxOutputTokens、reasoning effort 等参数。
+
+**output.options 可修改**: options 是 merge(provider 基础项, model.options, agent.options, variant) 的结果——agent frontmatter 的未知字段会透传进来（详见 `$AGENT_DIR/knowledge-base/opencode-references.md` 的"agent frontmatter 未知字段透传"节）; hook 内 `delete output.options["<字段>"]` 在请求发出前生效。
 
 ---
 

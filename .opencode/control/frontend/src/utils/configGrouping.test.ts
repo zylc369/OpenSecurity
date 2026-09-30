@@ -41,14 +41,16 @@ describe("groupByCategory", () => {
     expect(groups.map((g) => g.code)).toEqual(["models"]);
   });
 
-  it("组内排序: required 优先 + label 字典序", () => {
+  it("组内顺序 = entries 声明序（服务端权威，不本地排序）", () => {
     const entries: ConfigMetaMap = {
-      b_opt: item({ category_code: "tools", label: "B" }),
-      a_req: item({ category_code: "tools", label: "A", required: true }),
-      c_opt: item({ category_code: "tools", label: "C" }),
+      z_first: item({ category_code: "tools", label: "超" }),
+      a_mid: item({ category_code: "tools", label: "安", required: true }),
+      m_last: item({ category_code: "tools", label: "权" }),
     };
     const groups = groupByCategory(entries, cats);
-    expect(groups[0]?.keys).toEqual(["a_req", "b_opt", "c_opt"]);
+    // 不按 label 拼音/码点、不按 required 重排——保持服务端声明序
+    //（required 在前由后端清单拼接序保证，非前端职责）
+    expect(groups[0]?.keys).toEqual(["z_first", "a_mid", "m_last"]);
   });
 
   it("category_code 不在 categories 列表 → 静默丢弃", () => {

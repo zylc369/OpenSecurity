@@ -82,13 +82,15 @@ _base.py ← _utils.py ← _analysis.py ← query.py / update.py / scripts/*.py
 | Hook | 用途 |
 |------|------|
 | chat.message | 追踪 session 的当前 agent 和主 agent |
+| chat.params | 清理透传的 agent frontmatter 未知字段（buwai-extension-id，防严格网关拒绝） |
 | shell.env | 注入环境变量（$SESSION_ID/$PYTHON_CMD/$IDAT/$AGENT_DIR 等）到 bash 命令 |
 | experimental.session.compacting | 压缩时注入分析状态保留提示 + TASK_DIR; 置 justCompacted 标识 |
 | experimental.chat.system.transform | 每轮注入环境信息 + 占位符展开; 检测 justCompacted 强制重注入 |
 | session.idle | 会话空闲时统一注入器判定（反思唤醒 / resume 续推，见 lib/persistence.ts） |
 | tool.execute.before | 记录工具执行时间线 |
 | tool.execute.after | 工具结果时间线/事件库/记忆库记录 + 反思纸条附加（存储之后追加，实现收口 lib/reflection.ts） |
-| event | 管理 session 生命周期 + 子 session 继承 |
+| event | 管理 session 生命周期 + 子 session 继承 + 权限询问超时自动拒绝（实现收口 lib/permission-timeout.ts） |
+| dispose | 插件卸载时清理权限超时定时器 |
 
 ## 环境变量表
 

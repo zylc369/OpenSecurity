@@ -873,7 +873,8 @@ def test_e2e_config_meta():
     assert_eq(codes, ["tools", "models", "proxy", "behavior", "developer"],
               "config 面分类序")
     for key in ("DEEPSEEK_API_KEY", "IDA_PRO_HOME", "DEEPSEEK_MODEL",
-                "REFLECT_NUDGE_ENABLED", "JULIANG_IP_TTL_SEC"):
+                "REFLECT_NUDGE_ENABLED", "JULIANG_IP_TTL_SEC",
+                "PERMISSION_ASK_TIMEOUT_SEC", "PERMISSION_ASK_TIMEOUT_TYPES"):
         assert_true(key in data["entries"], f"config 面缺 {key}")
         field = data["entries"][key]
         for prop in ("label", "type", "required", "default_value", "readonly",
@@ -884,6 +885,8 @@ def test_e2e_config_meta():
     assert_eq(data["entries"]["DEEPSEEK_API_KEY"]["source"], "ai_env", "source 应标注 ai_env")
     assert_eq(data["entries"]["REFLECT_NUDGE_ENABLED"]["category_code"], "behavior",
               "反思开关归行为分类")
+    assert_eq(data["entries"]["PERMISSION_ASK_TIMEOUT_SEC"]["category_code"], "behavior",
+              "权限超时归行为分类")
     for hidden_key in ("REMOTE_CONSOLE_URL", "CONTROL_API_KEY", "HEARTBEAT_TIMEOUT_SEC"):
         assert_true(hidden_key not in data["entries"], f"{hidden_key} 不进 config 面")
 

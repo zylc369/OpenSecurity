@@ -36,6 +36,7 @@ import TaskSessionPersistence, {
   LEDGER_TEMPLATE,
 } from "./lib/task-session-persistence";
 import { maybeAttachReflectNudge } from "./lib/reflection";
+import { PermissionTimeoutManager } from "./lib/permission-timeout";
 import { getPythonCmd, getInstallHint, getCompilerName } from "./lib/venv";
 import { isControlHealthy, startControl } from "./lib/control-manager";
 import { controlFetch } from "./lib/control-http";
@@ -797,6 +798,10 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
   const sessionManager = new SessionDataManager(client);
   ctx.init(client, directory, sessionManager);
 
+  // 权限询问超时自动拒绝管理器（事件驱动; 配置经控制台 .ai_env 缓存读取;
+  // 拒绝请求经 ctx.client 统一收口——与体系其他 server 请求同通道）
+  const permissionTimeout = new PermissionTimeoutManager();
+
   debugLog(`=== SecurityAnalysisPlugin loaded ===`);
   debugLog(`  PLUGIN_DIR: ${PLUGIN_DIR}`);
   debugLog(`  OPENCODE_ROOT: ${OPENCODE_ROOT}`);
@@ -988,6 +993,27 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         } catch {
           // reportErrorAndAbort 本身也失败了，只能靠日志
         }
+      }
+    },
+
+    // LLM 请求参数构建时触发（awaited）
+    // 职责: 清理 opencode 透传的 agent frontmatter 未知字段
+    // （opencode 把 frontmatter 非标准字段收进 agent.options 并 merge 进请求参数;
+    //   体系的 buwai-extension-id 标记会被严格校验的网关拒绝——
+    //   报 "Extra inputs are not permitted"，请求发出前删除）
+    "chat.params": async (input, output) => {
+      try {
+        if ("buwai-extension-id" in output.options) {
+          delete output.options["buwai-extension-id"];
+          debugLog(
+            `chat.params: 已清理透传的 buwai-extension-id（agent=${input.agent}）`,
+          );
+        }
+      } catch (e) {
+        debugLog(
+          `chat.params: 清理异常 sessionID=${input.sessionID} err=${(e as Error)?.message}`,
+          input.sessionID,
+        );
       }
     },
 
@@ -1421,6 +1447,16 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         const props = event.properties as Record<string, any>;
         const sessionID: string | undefined = props.info?.id ?? props.sessionID;
 
+        // ── 权限询问超时自动拒绝（全会话生效，独立于 agent 判断）──
+        // 事件名双兼容: v1 permission.asked/replied; v2 permission.v2.asked/replied
+        const eventType: string = event.type;
+        if (eventType === "permission.asked" || eventType === "permission.v2.asked") {
+          permissionTimeout.onAsked(props);
+        }
+        if (eventType === "permission.replied" || eventType === "permission.v2.replied") {
+          permissionTimeout.onReplied(props);
+        }
+
         if (event.type === "session.created") {
           if (sessionID) {
             const result = await ctx.sessionManager.create(sessionID);
@@ -1561,6 +1597,12 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           props?.info?.id ?? props?.sessionID,
         );
       }
+    },
+
+    // 插件卸载（opencode 实例销毁时）：清理权限超时定时器，防孤儿
+    dispose: async () => {
+      permissionTimeout.dispose();
+      debugLog("SecurityAnalysisPlugin dispose: 已清理权限超时定时器");
     },
   };
 };

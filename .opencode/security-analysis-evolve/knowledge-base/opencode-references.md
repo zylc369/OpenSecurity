@@ -78,3 +78,44 @@ env: {
   正常——本仓库当前未启用，MCP 保持合并语义直跑）。
 - **验证方式**: MCP 子进程 `ps eww <pid>` 看 environ 键集合（快照=execve
   传入值，不反映运行时 os.environ 修改）。
+
+### 权限询问的自动处理路径（事件 + reply 端点）
+
+**权限拦截/自动回复的正确路径是「事件 + reply 端点」，`permission.ask` plugin hook 不可用**：
+
+- `permission.ask` hook 未接线——类型定义存在，运行时无触发点（1.18.32 与 dev 最新版均无）。
+- 插件 `event` hook 可收到 `permission.asked` / `permission.replied`（v2 为 `permission.v2.asked` / `permission.v2.replied`），事件含请求 ID / 会话 ID / 权限类型等完整字段。
+- `POST /permission/{requestID}/reply` body `{reply:"reject", message}` 完成拒绝；`message` 生成 `CorrectedError.feedback`，随被拒工具的错误结果送达模型，模型继续执行、不中断会话。
+- API 用法（事件字段对照 / 端点差异 / 底层调用要点）详见 `$SHARED_DIR/knowledge-base/opencode-plugin-api.md`。
+- 验证方式：起 `opencode serve` + 临时项目插件监听事件并调用 reply；检查插件日志（asked → 超时 reply 时序）与 session 消息（`GET /session/{id}/message`，工具错误含 feedback 文本）。
+
+**v1/v2 双轨对照**（升级迁移用）：
+
+| 项 | v1（1.18.x 现行） | v2（dev 已实现，未接管主流程） |
+|---|---|---|
+| 事件 | `permission.asked` / `permission.replied` | `permission.v2.asked` / `permission.v2.replied` |
+| 字段 | permission / patterns / always | action / resources / save |
+| 回复 | `/permission/{requestID}/reply` body `{reply, message?}`；旧 `/session/{sid}/permissions/{pid}` body `{response}` | `/api/session/{sid}/permission/{rid}/reply` body `{reply, message?}` |
+| SDK | `postSessionIdPermissionsPermissionId`（无 message）；注入 client 无 `permission` 命名空间 | `client.permission.reply({requestID, reply, message})`（v2 SDK 面） |
+| 插件形态 | named export 函数返回 hooks 对象；`.opencode/plugins/*.ts` 自动发现 | `export default {id, effect/setup}`；v2 loader 只认此形态（v1 形态文件不会被 v2 runtime 加载） |
+
+**bash 工具的外部目录检查边界**：`external_directory` 权限只对命令行中静态可解析的路径触发（命令解析器扫描）；脚本文件内部的路径访问不被扫描——`python script.py` 命令行不含外部路径即不触发，脚本内 `open("/outside/file")` 正常执行。引导模型"通过脚本访问"时，须提示把脚本写到可写位置（项目内 / 已放行目录）再运行。
+
+**CLI `opencode run` 权限行为**：非交互模式对权限询问自动回复——`--auto` 回复 "once"（自动允许）；未加 `--auto` 打印警告并回复 "reject"（不会挂起等待）。
+
+### agent frontmatter 未知字段透传与严格网关冲突
+
+**opencode 把 agent 文件 frontmatter 的非标准字段收进 `agent.options` 并透传进 LLM 请求参数**：
+
+- 收集点 `core/src/v1/config/agent.ts` 的 normalize: 非 KNOWN_KEYS（name/model/variant/prompt/description/temperature/top_p/mode/hidden/color/steps/maxSteps/options/permission/disable/tools）的字段全部塞 options
+- 合并点 `session/llm/request.ts`: `options = merge(base, model.options, agent.options, variant)` → 进最终请求参数
+
+**触发情境**: 请求报 `Extra inputs are not permitted, field: '<自定义字段名>'`——网关侧 Pydantic extra=forbid 类严格校验所致；宽容网关忽略额外字段不报错（同一 agent 在不同 provider 表现不同即此原因，且同一网关的校验行为可能随其服务端变更而变化）。
+
+**处理**: 插件 `chat.params` hook 里 `delete output.options["<自定义字段>"]`——请求构建的最后关口（plugin.trigger 在参数汇总后、发送前调用，修改 `output.options` 直接生效，清理后请求参数中不再含该字段）。
+
+**体系约定**: agent frontmatter 仅用 `buwai-extension-id` 一个自定义字段（占位符展开标记，见 lib/snippet.ts）; 插件 chat.params 已统一清理。**新增 frontmatter 自定义字段时必须同步登记 chat.params 清理列表**，否则严格网关下复现同类报错。
+
+**诊断手法**:
+- 测试插件在 chat.params 打印 `Object.keys(output.options)` 直接看透传字段集
+- 本地重现: `opencode serve` + prompt 请求体带 `"agent": "<name>"`（注意: agent 必须放 prompt body，仅在 session 创建时传不生效——实际请求会回落到 build agent）

@@ -3,9 +3,14 @@
  *
  * 规则:
  *   • 分组顺序 = categories 数组顺序（服务端枚举定义序）
+ *   • 组内顺序 = entries 键序 = 服务端声明序（与分类顺序同源权威——
+ *     后端 _all_fields 清单拼接序天然 required 在前、同类配置相邻声明即
+ *     相邻展示; 调整展示顺序在后端声明处做）
  *   • 零条目的分类剔除（服务端已保证，此处防御性兜底）
- *   • 组内排序: required 优先 + label 字典序（沿用配置页既有排序规则）
  *   • 条目 category_code 不在 categories 列表中 → 静默丢弃（契约异常防御）
+ *
+ * 不在前端本地排序: 曾用 label.localeCompare 组内排序——中文 locale 下按拼音
+ * 重排（"超…"与"权…"被拆到首尾）、跨机器顺序随客户端 locale 漂移不可复现。
  */
 
 import type { ConfigMetaMap, ConfigCategoryView } from "../types";
@@ -25,9 +30,6 @@ export function groupByCategory(
   for (const cat of categories) {
     const keys = Object.entries(entries)
       .filter(([, m]) => m.category_code === cat.code)
-      .sort((a, b) =>
-        Number(b[1].required) - Number(a[1].required) ||
-        a[1].label.localeCompare(b[1].label))
       .map(([k]) => k);
     if (keys.length > 0) {
       result.push({ code: cat.code, desc: cat.desc, keys });

@@ -97,6 +97,13 @@ def test_meta():
               "反思间隔默认 30")
     assert_eq(cfg.entries[cm.Keys.REFLECT_NUDGE_ENABLED].category_desc, "行为",
               "分类描述服务端权威")
+    assert_true(cm.Keys.PERMISSION_ASK_TIMEOUT_SEC in cfg.entries, "权限超时键已声明")
+    assert_eq(cfg.entries[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC].default_value, "300",
+              "权限超时默认 300 秒")
+    assert_eq(cfg.entries[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC].category_code, "behavior",
+              "权限超时归行为分类")
+    assert_eq(cfg.entries[cm.Keys.PERMISSION_ASK_TIMEOUT_TYPES].default_value,
+              "external_directory", "权限类型默认 external_directory")
     for k in (cm.Keys.REMOTE_CONSOLE_URL, cm.Keys.CONTROL_API_KEY,
               cm.Keys.HEARTBEAT_TIMEOUT_SEC):
         assert_true(k not in cfg.entries, f"{k} 不进 config 面")

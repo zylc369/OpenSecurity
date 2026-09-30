@@ -156,6 +156,23 @@ export const ENV_KEY_REFLECT_NUDGE = "REFLECT_NUDGE_ENABLED";
 // 反思到期间隔（分钟）。纸条与唤醒共用：距上次反思超过该间隔即到期。验证时可经控制台配置调小。
 export const REFLECT_NUDGE_DEFAULT_INTERVAL_MIN = 30;
 
+// ─── 权限询问超时自动拒绝 ──────────────────────────────────────
+
+// 控制台配置中控制"权限询问超时自动拒绝"的超时秒数（见 lib/permission-timeout.ts）。
+// 取值规则: 未配置/非法 → 默认 300 秒; 0 → 关闭; 正数 → 秒数。
+export const ENV_KEY_PERMISSION_TIMEOUT_SEC = "PERMISSION_ASK_TIMEOUT_SEC";
+
+// 超时自动拒绝的权限类型（逗号分隔; 英文/中文逗号均容错）。未配置 → 仅 external_directory。
+export const ENV_KEY_PERMISSION_TIMEOUT_TYPES = "PERMISSION_ASK_TIMEOUT_TYPES";
+
+// 默认超时（秒）与默认适用类型（未配置时生效）。
+export const PERMISSION_TIMEOUT_DEFAULT_SEC = 300;
+export const PERMISSION_TIMEOUT_DEFAULT_TYPES = "external_directory";
+
+// 超时拒绝时携带的反馈文案（经拒绝接口的 message 字段随工具错误送达模型，不创建新消息）。
+export const PERMISSION_TIMEOUT_REJECT_MESSAGE =
+  "请先检查访问路径的合理性；如果确实需要访问，请将访问逻辑写进 Python 脚本并运行脚本（不要在命令行中直接写外部路径）。";
+
 // ─── venv ──────────────────────────────────────────────────────
 
 // venv 与 OPENSECURITY_HOME 解耦：测试用沙箱 OPENSECURITY_HOME 时仍可指向真实 venv（省 1GB+ 依赖安装）。
