@@ -179,6 +179,7 @@ permission:
 | `nextjs-analysis.md` | 识别到 Next.js 框架（特别是 App Router）。RSC/flight data 分析、middleware 审计、node_modules 源码阅读、框架内部不一致性探测 |
 | `spa-frontend-analysis.md` | 识别到 SvelteKit/SPA/纯前端应用（localStorage 认证、无后端数据库）。SvelteKit 路由分析、Notebook 导入攻击面、Bot localStorage 变体 + 异步 flag 时间差利用 |
 | `attack-orchestration.md` | 需要多步骤/多窗口攻击编排时。控制器页面模式、postMessage 攻击、popup 存活机制、SSO/OAuth 回调安全审计 |
+| `bot-patterns.md` | Bot 类目标（源码可见或黑盒可观察：自动审核/提交后自动访问/机器人预览页/提交 URL 后回传截图或渲染结果），或需分析 bot 浏览器 cookie/存储可达性时。Bot 代码通用结构、单页/双页模式快速分类、安全决策分析（URL 验证、httpOnly、cookie 播种与 jar 驱逐、Docker Chromium 特性）、渲染/截图类 bot 的自带会话检测与宿主形态矩阵（§3.5）、攻击链决策树 |
 | `js-obfuscation-patterns.md` | 分析 JS 逆向题/混淆代码时。不可见 Unicode 字符、tagged template 隐式调用、Function.call 空函数、原型链劫持、debug condition 副作用 |
 | `browser-automation.md` | 需要打开网页/登录/浏览器自动化/远程调试/操作结果确认时。启动铁律与 browser_cdp.py 用法、三级探测链、登录决策树、人机验证判别、硬信号、CDP 核心 API、debug() API、常见陷阱、操作后确认方法论（持久信号优先） |
 | `client-side-attacks.md` | 有 admin bot + flag 在 bot 端。bfcache 污染、CSS trigram exfil、xsleak、iframe reparenting、connection pool |
