@@ -282,5 +282,14 @@ TypedDict 化，列为未完事项）。
     计 ok/缺失名/空输入/顺序契约/总计对账）;
   - 配套: `computeReadiness` 从 useReadiness 抽为纯函数（hook 薄包装）;
     vitest@3（vite5 配套——vitest5 需 vite≥6 的 peer 冲突已绕）。
-- **待用户**: commit + push 后 GitHub 首跑双 job（预期全绿——
-  本地已完整预演）。
+- **GitHub 首跑与复跑（闭环）**:
+  - 首跑（e5a2818）: pyright **success 2m21s**（双门禁 CI 首次绿）;
+    windows-ipc **success**（Windows 真机裁决）; frontend **failure**——
+    根因: `package.json`/`package-lock.json` 从未入库（.opencode/.gitignore
+    全局忽略且该 gitignore 自身未跟踪）→ setup-node 缓存解析硬错。
+  - 修复（b0b42b2）: force-add 两个前端清单（ignore 对已跟踪文件无效）+
+    workflow node 22→24（与本地一致）。
+  - **复跑 36702102645 全绿**: pyright 2m06s（缓存生效）＋ frontend 22s
+    （npm ci + tsc + vitest 30/30 实跑确认）。
+  - 教训候选（未沉淀）: 前端清单长期游离于版本控制之外——"CI 首次运行
+    即是最强审计"，暴露了人眼从未发现的仓库完整性缺口。
