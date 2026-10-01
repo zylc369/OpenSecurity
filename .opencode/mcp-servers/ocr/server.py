@@ -55,7 +55,8 @@ mcp = FastMCP("ocr", lifespan=_lifespan)
         "适合：文档扫描页、UI 截图、照片里的中英文/代码/十六进制地址/表格/路径。"
         "PDF 文件先用 pymupdf 提文本层（get_text 非空直接用），空才转图走本工具。"
         "参数 prompt 可选，用于引导输出（如'保持表格结构''逐字符精确转写'）。"
-        "不支持：图表语义分析、图像内容对比、视频理解。"
+        "不支持：图表语义分析、图像内容对比、视频理解——前两类语义需求，对于无视觉能力模型"
+        "用 vision 这个 MCP 的 analyze_image。"
     ),
 )
 async def extract_text(

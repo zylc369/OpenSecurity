@@ -84,9 +84,10 @@ def create_app() -> FastAPI:
     # （校验错误处理器自身 500）；净化后回显，保持 422 契约。
     @app.exception_handler(RequestValidationError)
     async def _validation_error_handler(
-        _request: Request, exc: RequestValidationError
+            _request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        raw_errors = cast("object", jsonable_encoder(exc.errors()))  # pyright: ignore[reportAny] —— jsonable_encoder 返回 Any（FastAPI 边界）
+        raw_errors = cast("object", jsonable_encoder(
+            exc.errors()))  # pyright: ignore[reportAny] —— jsonable_encoder 返回 Any（FastAPI 边界）
         return JSONResponse(
             status_code=422,
             content={"detail": _json_safe(raw_errors)},
@@ -106,13 +107,15 @@ def create_app() -> FastAPI:
     app.add_middleware(ApiGuardMiddleware)
 
     # 路由
-    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, processes, knowledge, events, heartbeat, proxy, remote
+    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, \
+        processes, knowledge, events, heartbeat, proxy, remote, vision
     app.include_router(embed.router)
     app.include_router(health.router)
     app.include_router(heartbeat.router)
     app.include_router(config_route.router)
     app.include_router(deps.router)
     app.include_router(ocr.router)
+    app.include_router(vision.router)
     app.include_router(processes.router)
     app.include_router(docker.router)
     app.include_router(scan.router)
@@ -205,6 +208,7 @@ def _mount_frontend(app: FastAPI) -> None:
                 "hint": "前端开发模式（CONTROL_FRONTEND_DEV=1）。vite dev server 由控制台自动拉起",
                 "url": "http://localhost:5173",
             }
+
         return
 
     # 发布态：挂载 dist/（如果存在）

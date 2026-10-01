@@ -365,6 +365,59 @@ def test_ocr_mcp_roundtrip():
         img_path.unlink(missing_ok=True)
 
 
+@test("vision 全链: 真 PNG → 控制台 → DeepSeek 语义答案 + 壳 MCP 直调")
+def test_vision_roundtrip():
+    """DeepSeek 视觉识别真链路（真 key 真模型，成本≈1 次 flash 调用）。
+    真图必须可解码——上游校验图片有效性（魔数+填充的假图会被 400 拒绝）。"""
+    import base64
+    import io
+    import tempfile
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (128, 128), (200, 30, 30))
+    ImageDraw.Draw(img).text((40, 40), "A", fill=(0, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+
+    # 1) HTTP 直调（IPC → 控制台 → DeepSeek）: 语义答案 + 结构化字段
+    st, body = post_raw(
+        "/api/vision/analyze",
+        {"images": [b64], "question": "这张图片的背景是什么颜色？图中有什么字符？一句话回答。"},
+        timeout=120,
+    )
+    assert_true(st == 200, f"vision analyze 应 200: {st} {str(body)[:200]}")
+    text = str(body.get("text", ""))
+    assert_true("红" in text and "A" in text, f"语义答案异常: {text!r}")
+    assert_true(body.get("model") == "deepseek-flash" and int(body.get("total_tokens", 0)) > 0,
+                f"结构字段异常: {body}")
+
+    # 2) 生产实例契约抽样: 空列表 422 / 空白问题 422
+    st, _ = post_raw("/api/vision/analyze", {"images": [], "question": "q"})
+    assert_true(st == 422, f"空 images 应 422: {st}")
+    st, _ = post_raw("/api/vision/analyze", {"images": [b64], "question": "   "})
+    assert_true(st == 422, f"空白 question 应 422: {st}")
+
+    # 3) 壳 MCP 直调（临时文件，用后清理）
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        f.write(buf.getvalue())
+        tmp_path = f.name
+    try:
+        res = mcp_shell_tool("vision", "analyze_image",
+                             {"image_paths": [tmp_path], "question": "背景颜色和图中字符？一句话。"},
+                             timeout=180)
+        shell_text = str(res.get("text", "")) if isinstance(res, dict) else ""
+        assert_true("红" in shell_text, f"壳链路答案异常: {str(res)[:200]}")
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    # 4) 壳错误路径: 文件不存在 → 明确文案（不抛异常、不打上游）
+    res = mcp_shell_tool("vision", "analyze_image",
+                         {"image_paths": ["/nonexistent/vision-e2e.png"], "question": "q"},
+                         timeout=60)
+    assert_true("图片不存在" in str(res), f"文件不存在文案: {str(res)[:200]}")
+
+
 def main() -> int:
     print("=" * 60)
     print(f"真链路 E2E 套件 RUN_ID={RUN_ID}")

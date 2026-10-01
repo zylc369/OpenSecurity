@@ -3239,6 +3239,182 @@ def test_event_store_search_paths():
     asyncio.run(run())
     svc.stop(timeout=10)
 
+def _vision_contract_inner():
+    """vision 路由契约矩阵（子进程隔离执行; 沙箱无 key → PASS 路径确定性 503）。"""
+    import base64 as _b64
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routes.vision import router
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    png = _b64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64).decode()
+    jpeg = _b64.b64encode(b"\xff\xd8\xff\xe0" + b"\x00" * 64).decode()
+    # 超大图: PNG 魔数 + 10MB+1 填充（解码后超限——解码后才校验尺寸）
+    oversize = _b64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * (10 * 1024 * 1024 + 1)).decode()
+
+    bad = [
+        ({}, "缺全部字段"),
+        ({"question": "q"}, "缺 images"),
+        ({"images": [], "question": "q"}, "空 images"),
+        ({"images": [png] * 5, "question": "q"}, ">4 张"),
+        ({"images": [png, ""], "question": "q"}, "元素空串（解码后空数据）"),
+        ({"images": ["!!!not-b64!!!"], "question": "q"}, "坏 b64"),
+        ({"images": [123], "question": "q"}, "元素非字符串"),
+        ({"images": [_b64.b64encode(b"plain text bytes").decode()], "question": "q"}, "非图片字节（魔数嗅探失败）"),
+        ({"images": [oversize], "question": "q"}, "单张 >10MB"),
+        ({"images": "not-a-list", "question": "q"}, "images 非列表"),
+        ({"images": [png], "question": ""}, "空 question"),
+        ({"images": [png], "question": "   "}, "空白 question"),
+        ({"images": [png], "question": "x" * 8001}, "question 超长"),
+    ]
+    for payload, label in bad:
+        r = client.post("/api/vision/analyze", json=payload)
+        assert_true(r.status_code == 422, f"{label} 应 422，实际 {r.status_code}: {r.text[:200]}")
+
+    # 422 形状（与 events 契约一致: type/loc/msg）
+    r = client.post("/api/vision/analyze", json={"images": [], "question": "q"})
+    detail = r.json()["detail"][0]
+    assert_true(detail.get("type") == "too_short" and "loc" in detail and "msg" in detail,
+                f"422 形状异常: {r.text[:200]}")
+
+    # PASS 路径（沙箱无 key → 服务层 503; 证明 解码→定型→服务 全链贯通且零网络）
+    r = client.post("/api/vision/analyze",
+                    json={"images": [png, jpeg], "question": "两张图有什么区别？"})
+    assert_true(r.status_code == 503 and "DEEPSEEK_API_KEY 未配置" in r.text,
+                f"无 key 应 503: {r.status_code} {r.text[:200]}")
+
+
+@test("vision 输入契约: 422/PASS 矩阵（子进程隔离 + 无 key 沙箱 503）")
+def test_vision_input_contract():
+    """子进程隔离（TestClient 活锁规避，同 events 契约模式）。
+    沙箱 .ai_env 不含 DEEPSEEK_API_KEY → PASS 路径确定性 503（零网络依赖）。"""
+    import subprocess as _sp
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as td:
+        no_key_env = Path(td) / ".ai_env"
+        no_key_env.write_text("", encoding="utf-8")
+        # 注意顺序: tests.test_control import 时会把 OPENSECURITY_AI_ENV 重设为含 key
+        # 的沙箱副本（模块级第 77 行）——必须 import 之后再覆盖为无 key 文件并重置单例
+        code = (
+            "import sys, os; sys.path.insert(0, '.'); sys.path.insert(0, 'tests'); "
+            f"os.environ['OPENSECURITY_HOME'] = {str(TEST_OPENSECURITY_HOME)!r}; "
+            f"os.environ['OPENCODE_ROOT'] = {str(OPENCODE_ROOT)!r}; "
+            "os.environ.setdefault('CONTROL_TCP_PORT', os.environ.get('CONTROL_TCP_PORT', '0')); "
+            "from tests.test_control import _vision_contract_inner; "
+            f"os.environ['OPENSECURITY_AI_ENV'] = {str(no_key_env)!r}; "
+            "from services.config_manager import ConfigManager; "
+            "ConfigManager._reset_for_tests(); "
+            "_vision_contract_inner()"
+        )
+        r = _sp.run([sys.executable, '-c', code], timeout=180,
+                    capture_output=True, text=True, cwd=str(BACKEND_DIR))
+        if r.returncode != 0:
+            raise AssertionError(f"隔离执行失败: {r.stderr[-400:]}")
+
+
+@test("vision 服务: mock 上游全路径（payload 构造/解析/错误映射/边界）")
+def test_vision_service_mock_upstream():
+    """服务级直调 + httpx.MockTransport 注入（无网络; key 来自沙箱副本仅作占位）。"""
+    import asyncio
+    import httpx
+    from services.vision_service import (
+        VisionImage,
+        VisionService,
+        VisionUpstreamError,
+        _to_int,
+    )
+
+    png_img = VisionImage(data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, media_type="image/png")
+    seen: dict[str, object] = {}
+
+    def _handler(request: "httpx.Request") -> "httpx.Response":
+        seen["payload"] = __import__("json").loads(request.content)
+        seen["auth"] = request.headers.get("authorization", "")
+        body = seen.get("respond")
+        if isinstance(body, Exception):
+            raise body
+        assert isinstance(body, httpx.Response)
+        return body
+
+    transport = httpx.MockTransport(_handler)
+
+    def _ok_body(content: object = "红色背景，黑色字母 A") -> dict[str, object]:
+        return {
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "model": "deepseek-flash",
+        }
+
+    async def run() -> None:
+        # 1) 正常: 解析 + payload 构造断言
+        seen["respond"] = httpx.Response(200, json=_ok_body())
+        r = await VisionService.analyze([png_img], "图里有什么？", transport=transport)
+        assert_true(r.text == "红色背景，黑色字母 A", f"text 解析: {r.text!r}")
+        assert_true((r.prompt_tokens, r.completion_tokens, r.total_tokens) == (10, 5, 15),
+                    f"usage 解析: {r}")
+        assert_true(r.model == "deepseek-flash" and r.latency_ms >= 0, f"model/latency: {r}")
+        payload = cast("dict[str, object]", seen["payload"])
+        assert_true(payload.get("model") == "deepseek-flash", "payload.model 应写死 flash")
+        assert_true(payload.get("max_tokens") == VisionService.MAX_TOKENS, "payload.max_tokens")
+        messages = cast("list[dict[str, object]]", payload.get("messages", []))
+        content = cast("list[dict[str, object]]", messages[0].get("content", []))
+        assert_true(content[0].get("type") == "text" and content[0].get("text") == "图里有什么？",
+                    "首块应为 question 文本")
+        url = str(cast("dict[str, object]", content[1].get("image_url", {})).get("url", ""))
+        assert_true(isinstance(url, str) and url.startswith("data:image/png;base64,"),
+                    f"image_url data URL: {url[:40]!r}")
+        assert_true(str(seen["auth"]).startswith("Bearer "), "Authorization Bearer")
+        # 2) 多图: 每图一个 image_url 块
+        seen["respond"] = httpx.Response(200, json=_ok_body())
+        await VisionService.analyze([png_img, png_img], "对比", transport=transport)
+        payload = cast("dict[str, object]", seen["payload"])
+        messages = cast("list[dict[str, object]]", payload.get("messages", []))
+        content = cast("list[dict[str, object]]", messages[0].get("content", []))
+        assert_true(len(content) == 3, f"双图应 3 块（1 text + 2 image）: {len(content)}")
+        # 3) usage/model 缺失 → 零值/回退
+        seen["respond"] = httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        r = await VisionService.analyze([png_img], "q", transport=transport)
+        assert_true(r.prompt_tokens == 0 and r.model == VisionService.MODEL, f"缺省回退: {r}")
+        # 4) 空 content / content 非 str / 缺 choices / body 非 dict
+        for body, label in [
+            ({"choices": [{"message": {"content": "   "}}]}, "空白 content"),
+            ({"choices": [{"message": {"content": ["blocks"]}}]}, "content 为 list"),
+            ({"message": {"content": "x"}}, "缺 choices"),
+            ([1, 2, 3], "body 非 dict"),
+        ]:
+            seen["respond"] = httpx.Response(200, json=body)
+            try:
+                await VisionService.analyze([png_img], "q", transport=transport)
+                raise AssertionError(f"{label}: 应抛 VisionUpstreamError")
+            except VisionUpstreamError as e:
+                assert_true(e.status_code == 502, f"{label}: 502，实际 {e.status_code}")
+        # 5) 上游 401/429 → 502 且透传状态码
+        for status in (401, 429):
+            seen["respond"] = httpx.Response(status, text="upstream err")
+            try:
+                await VisionService.analyze([png_img], "q", transport=transport)
+                raise AssertionError(f"上游 {status}: 应抛")
+            except VisionUpstreamError as e:
+                assert_true(e.status_code == 502 and str(status) in str(e),
+                            f"上游 {status} 透传: {e}")
+        # 6) 超时 → 504
+        seen["respond"] = httpx.ReadTimeout("simulated")
+        try:
+            await VisionService.analyze([png_img], "q", transport=transport)
+            raise AssertionError("超时应抛")
+        except VisionUpstreamError as e:
+            assert_true(e.status_code == 504, f"超时 504，实际 {e.status_code}")
+
+    asyncio.run(run())
+    # 7) _to_int 边界（bool 排除; 非数值归零）
+    assert_true(_to_int(5) == 5 and _to_int(5.7) == 5, "_to_int 数值")
+    assert_true(_to_int(True) == 0 and _to_int("x") == 0 and _to_int(None) == 0,
+                "_to_int 非数值/bool 归零")
+
+
 if __name__ == "__main__":
     sys.exit(main())
 
