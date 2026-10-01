@@ -212,7 +212,7 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 | `verification-patterns.md` | 需要验证分析结果（license/key/password） |
 | `gui-automation.md` | GUI 自动化操作（视觉驱动方案） |
 | `web-rendering.md` | webfetch 失败后需要渲染 SPA 页面、获取页面截图 |
-| `forensics-methodology.md` | 取证题：拿到 pcap/内存镜像/磁盘镜像/.evtx 日志时 |
+| `forensics-methodology.md` | 取证题：拿到 pcap/内存镜像/磁盘镜像/VM 镜像（.ova/.vmdk）/.evtx 日志，或仅有题面截图需先获取素材时 |
 | `process-patch-reference.md` | 使用 process_patch.py 时的完整参数参考 |
 | `arm64-reverse-methodology.md` | arm64 无符号二进制中定位函数和数据（ADRP 搜索、调用约定） |
 | `frida-native-shell-tricks.md` | Frida 中 Java bridge 不可用时的 native 替代方案（popen/fgets） |
@@ -237,7 +237,7 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 | `steganography-forensics.md` | 隐写分析（图片/音频/文档载体/PNG·GIF 结构/QR/工具分诊表） |
 | `wordlists-guide.md` | 任何爆破/fuzz 需要字典时（$WORDLISTS_DIR 场景选型速查: 目录/密码/子域/payload） |
 | `network-forensics.md` | 网络流量取证（pcap 修复/TLS 解密/WiFi/DNS 隧道/协议重组/元数据信道） |
-| `disk-memory-forensics.md` | 磁盘与内存取证（文件系统恢复/RAID/加密容器/volatility 命令族/勒索处置） |
+| `disk-memory-forensics.md` | 磁盘与内存取证（文件系统恢复/RAID/加密容器/VM 镜像展开（OVA/VMDK）/volatility 命令族/勒索处置） |
 | `windows-forensics.md` | Windows 取证（事件日志/注册表/ADS/timestomping/反取证/内存凭证顺序） |
 | `hardware-signal-forensics.md` | 硬件信号取证（GPIO 协议重建/RF·SDR/声学侧信道/显示协议/外设信道） |
 | `internal-pentest-methodology.md` | 内网渗透（Linux·Windows 提权/横向移动/隧道矩阵/网络服务渗透速查/痕迹清除） |

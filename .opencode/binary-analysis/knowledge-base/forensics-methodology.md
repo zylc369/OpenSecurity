@@ -1,4 +1,4 @@
-# 数字取证 CTF 方法论
+# 数字取证方法论
 
 > 遇到内存镜像/pcap/磁盘镜像/日志取证题时读取。覆盖取证流程与各类取证工具命令。**命令行工具为主**（AI 可执行，避免 GUI 依赖）。不依赖主 prompt 上下文。
 
@@ -13,6 +13,7 @@
 | `.pcap`/`.pcapng` | 网络取证 | §2 |
 | 内存镜像（`.raw`/`.vmem`/`.dmp`，常无扩展名，`file` 显示 "Windows dump"/"data"） | 内存取证 | §3 |
 | 磁盘镜像（`.dd`/`.E01`/`.img`） | 磁盘取证 | §4 |
+| VM 镜像（`.ova`/`.vmdk`/`.vdi`） | 虚拟机镜像取证 | `disk-memory-forensics.md` §2（qemu-img 展开 + mmls/fls/icat） |
 | `.evtx`/`/var/log/*`/access.log | 日志分析 | §5 |
 | 图像/音频/视频/文档疑似藏数据 | 隐写分析 | `steganography-forensics.md`（专项文件） |
 | Office 宏文档（`.docm`/`.pptm`/`.xlsm`，含 VBA 宏） | Office 宏取证 | `malware-analysis.md` §8a（olevba/pcodedmp 提取宏） |
@@ -26,8 +27,11 @@
 **通用第一步（任何类型先做）**：
 ```bash
 file <素材>                                          # 确认真实类型
-strings -n 8 <素材> | grep -iE "flag|ctf|key|pass"   # 快速捞敏感串
+strings -n 8 <素材> | grep -iE "flag|key|pass"   # 快速捞敏感串
 ```
+
+**未持有原始素材（仅有描述/截图，无附件）**：以名称等线索检索公开来源获取原始文件，下载后先 `file` 校验类型（分享链接用对应下载工具，如 Google Drive 链接 `python -m gdown "<id>"`（随用随装）；直链用 `curl`）；大体积先确认总大小再下载。
+**被改名/伪装的标准 artifact**（配置文件/键盘布局/脚本被改 name 或文件名）：不要肉眼比对，与上游权威原件逐字节 `diff` 定身份（例见 `disk-memory-forensics.md` §6a）。
 
 ---
 

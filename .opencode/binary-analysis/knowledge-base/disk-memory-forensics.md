@@ -14,8 +14,9 @@
 ## §2 加密卷与 VM
 
 - **TrueCrypt/VeraCrypt 识别**: 无魔术/高熵/尺寸 512 倍数/上下文线索; VeraCrypt 容器密码爆破: `hashcat -m 13721 容器文件 字典`（--veracrypt-pim 指定 PIM） -t -p pw vol.tc /mnt`（keyfile 加 -k; 旧 TC 加 --truecrypt）; 隐藏卷=第二密码; cryptsetup `--type tcrypt` 等价
-- **OVA/VMDK**: OVA=TAR; **VMDK 7z 直读免挂载**（按路径抽 SAM/SYSTEM/NTUSER.DAT）; split sparse 需 grain directory→grain table→grain 手工遍历
-- **VMDK/镜像关键文件**: config/{SAM,SYSTEM,SOFTWARE}、Users/*/NTUSER.DAT、AppData
+- **OVA/VMDK 展开**: OVA=TAR（`tar xf` 得 .ovf+.vmdk）; 展开前先 `qemu-img info disk.vmdk` 判子格式——**streamOptimized**（OVA 导出常见）7z/7zz 打不开（报 `Cannot open the file as [VMDK] archive`），必须 `qemu-img convert -f vmdk -O raw disk.vmdk disk.raw` 转原始镜像; flat/monolithicSparse 可试 `7zz x disk.vmdk` 按路径抽文件（命令名随安装：7z/7zz/7za），split/extent 多文件形态仍走 qemu-img 展开
+- **raw 镜像取文件（Sleuth Kit 链）**: `mmls disk.raw` 读分区表（根分区 Start 列，单位=512B 扇区）→ `fls -o <start> -r -p disk.raw > filelist.txt` 全盘列目录+inode → `icat -o <start> disk.raw <inode> > out` 按 inode 提取。**镜像传绝对路径**（相对路径按 CWD 解析，路径不符报 `Error stat(ing) image file`）
+- **VMDK/镜像关键文件**: Windows 侧 config/{SAM,SYSTEM,SOFTWARE}、Users/*/NTUSER.DAT、AppData；Linux 侧 /etc、/home/*、/usr/share（桌面/服务配置）
 
 ## §3 文件系统恢复
 
@@ -68,6 +69,7 @@
 - **KeePass master key 内存恢复**（CVE-2023-32784，KeePass 2.x < 2.54）: 有内存镜像/KeePass 进程 dump 时**优先于爆破**——密码逐字符以单字节 key XOR 后残留内存（每字符后跟其反序拷贝的特征模式），可恢复**除首字符外的完整密码**。工具: vdohney/keepass-dump-masterkey（`python3 dump-masterkey.py <dump>` 直接吐候选串）; 首字符枚举可打印 ASCII 补全。失败判据: dump 里特征模式不全（密码分片太碎）→ 回退 hashcat -m 13400 爆破
 - **pyrasite**: 运行中进程源码恢复——pyrasite-shell <PID> 注入（ptrace_scope），globals() 直接读 secret，func_code 用 uncompyle6（≤3.8）/pycdc（3.9+，先 marshal.dump 落盘）; /proc/PID/fd 见 deleted 标记即此场景
 - **Linux 攻击链四源**: auth.log "session opened"+.bash_history+`find /usr/bin -newer auth.log`+tshark tftp; 恶意样本常见 AES-ECB+同 key XOR 存 .enc
+- **XKB 键盘布局识别**（VM 镜像问"机器主人用哪个布局"）: 布局文件在 `/usr/share/X11/xkb/symbols/<名字>`。文件名与 `name[Group1]` 可被改成通用名隐藏身份——**不按字母肉眼比对**，把文件与上游公开布局（社区布局仓库的 `Linux/xkb/*`）逐字节 `diff`：变体间常只差 2-3 个键（colstag/rowstag 是若干键位的循环换位），diff 一步定案。辅证：全盘 `grep -a` 布局名命中必须带上下文复核（压缩数据随机字节、`workman` 在 `NetworkManager` 中会假阳性）; 顺带排除其他布局来源（`/etc/conf.d/loadkmap`、`/etc/X11`、`setxkbmap` 痕迹）
 
 ## §7 域环境与密码
 
