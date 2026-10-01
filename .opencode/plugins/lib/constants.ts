@@ -68,7 +68,7 @@ export const AGENT_KNOWLEDGE_SCOUT = "knowledge-scout";
 
 // 成员 × 集合矩阵（✓ = 属于该集合；各集合的语义与消费点见其定义处注释）:
 //
-// | agent                    | GENERAL_SUB | SECURITY_ANALYSIS | SECURITY | INSTRUMENTED |
+// | agent                    | GENERAL_SUB | SECURITY_ANALYSIS | SECURITY | EVENT_MEMORY |
 // |--------------------------|-------------|-------------------|----------|-------------|
 // | searcher                 | ✓           |                   |          | ✓          |
 // | memorist                 | ✓           |                   |          | ✓          |
@@ -93,7 +93,8 @@ export const SECURITY_ANALYSIS_AGENTS = [
 ];
 
 // 承担可观测性职责的 agent。消费点：独立日志文件（logging.ts）、时间线记录、
-// requireSecurityAgent 门控（compacting / 分析持续性持久化）、父链回溯
+// requireSecurityAgent 门控（compacting / 分析持续性持久化）、根会话任务目录
+// 创建门控（session-manager：五分析 + evolve 的根会话建任务目录）、父链回溯
 //（searcher/memorist 据此加载 domain-sources 片段）、脚本目录映射。
 export const SECURITY_AGENTS = [
   ...SECURITY_ANALYSIS_AGENTS,
@@ -112,13 +113,14 @@ export const GENERAL_SUB_AGENTS = [
 // 消费点：占位符展开的"文件缺失即异常"判定（snippet.ts inspectAgentFile）。
 export const PROJECT_AGENTS = [...GENERAL_SUB_AGENTS, ...SECURITY_AGENTS];
 
-// 仪表化（instrumented）agent: 注册进 events/memory 采集与工具时间线的 agent（= PROJECT_AGENTS 去掉 evolve 与 knowledge-scout）。
-// 消费点：events/memory 写入（tool.execute.after / text.complete）、
-// tool.execute.before/after 时间线、根会话任务目录创建门控（session-manager）。
+// 事件/记忆库写入（event/memory writers）agent: 工具执行与 LLM 回复写事件库/记忆库、记录工具时间线（= PROJECT_AGENTS 去掉 evolve 与 knowledge-scout）。
+// 消费点：写库门控——不在此集合 = 不写事件库/记忆库（fireAndForgetEvent / fireAndForgetMemory 内部判据）、
+// tool.execute.before/after 的工具钩子处理与时间线记录、跳过日志（system.transform / shell.env）。
 // evolve 有意排除：开发工具，其工具执行与 LLM 回复不写入事件/记忆库。
 // knowledge-scout 有意排除：侦察的批量网页抓取内容对记忆库是噪音（用户决策 2026-09-25）。
-export const INSTRUMENTED_AGENTS = PROJECT_AGENTS.filter(
-  (agent) => agent !== AGENT_SECURITY_ANALYSIS_EVOLVE && agent !== AGENT_KNOWLEDGE_SCOUT,
+export const EVENT_MEMORY_AGENTS = PROJECT_AGENTS.filter(
+  (agent) =>
+    agent !== AGENT_SECURITY_ANALYSIS_EVOLVE && agent !== AGENT_KNOWLEDGE_SCOUT,
 );
 
 export const AGENT_SCRIPT_DIRS: Record<string, string> = {};
@@ -126,7 +128,10 @@ for (const name of SECURITY_AGENTS) {
   AGENT_SCRIPT_DIRS[name] = join(OPENCODE_ROOT, name);
 }
 // knowledge-scout 有专属知识库目录（sourcing-guide），注入 $AGENT_DIR; 其余通用辅助子 agent 无脚本目录，不注入。
-AGENT_SCRIPT_DIRS[AGENT_KNOWLEDGE_SCOUT] = join(OPENCODE_ROOT, AGENT_KNOWLEDGE_SCOUT);
+AGENT_SCRIPT_DIRS[AGENT_KNOWLEDGE_SCOUT] = join(
+  OPENCODE_ROOT,
+  AGENT_KNOWLEDGE_SCOUT,
+);
 
 export const SHARED_DIR = join(OPENCODE_ROOT, AGENT_BINARY_ANALYSIS);
 
@@ -209,7 +214,10 @@ export const CONTROL_SCRIPT = join(
 );
 
 /** 控制台 IPC：Unix Domain Socket 路径（macOS/Linux；与控制台 config.py 一致） */
-export const CONTROL_UNIX_SOCKET = join(OPENSECURITY_HOME, "opensecurity-control.sock");
+export const CONTROL_UNIX_SOCKET = join(
+  OPENSECURITY_HOME,
+  "opensecurity-control.sock",
+);
 
 /** 控制台 IPC：Windows 命名管道名（与控制台 config.py 一致；随机后缀防撞名） */
 export const CONTROL_WIN_PIPE = "\\\\.\\pipe\\opensecurity-control-482964";

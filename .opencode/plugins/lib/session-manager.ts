@@ -3,7 +3,7 @@ import type { OpencodeClient, Part, UserMessage } from "@opencode-ai/sdk";
 import {
   SECURITY_AGENTS,
   GENERAL_SUB_AGENTS,
-  INSTRUMENTED_AGENTS,
+  EVENT_MEMORY_AGENTS,
 } from "./constants";
 import type {
   CheckpointRenderData,
@@ -23,8 +23,8 @@ function localIsSecurityAgent(agentName: string): boolean {
   return SECURITY_AGENTS.includes(agentName);
 }
 
-function localIsInstrumentedAgent(agentName: string): boolean {
-  return INSTRUMENTED_AGENTS.includes(agentName);
+function localIsEventMemoryAgent(agentName: string): boolean {
+  return EVENT_MEMORY_AGENTS.includes(agentName);
 }
 
 export class SessionData
@@ -126,8 +126,8 @@ export class SessionData
     return GENERAL_SUB_AGENTS.includes(this.agentName);
   }
 
-  isInstrumentedAgent(): boolean {
-    return localIsInstrumentedAgent(this.agentName);
+  isEventMemoryAgent(): boolean {
+    return localIsEventMemoryAgent(this.agentName);
   }
 
   isPrimarySession() {
@@ -306,15 +306,15 @@ export class SessionDataManager {
     return session;
   }
 
-  /** 只返回 Security Agent 的 session。只查不创建。 */
-  requireInstrumentedAgent(
+  /** 只返回事件/记忆库写入 agent 的 session。只查不创建。 */
+  requireEventMemoryAgent(
     hookName: string,
     sessionID?: string,
   ): SessionData | null {
     return this.requireAgentWithMatchFunc(
       hookName,
       (session) => {
-        return session.isInstrumentedAgent();
+        return session.isEventMemoryAgent();
       },
       sessionID,
     );
@@ -352,7 +352,7 @@ export class SessionDataManager {
     }
     if (!matchFunc(session)) {
       debugLog(
-        `[${hookName}] 跳过 — 非 Security Agent agent=${session.agentName} sessionID=${sessionID}`,
+        `[${hookName}] 跳过 — 未通过门控 agent=${session.agentName} sessionID=${sessionID}`,
         sessionID,
       );
       return null;
@@ -536,9 +536,9 @@ export class SessionDataManager {
     let baseDir = parentSession?.rootTaskDir;
 
     if (isCurrentPrimaryAgent) {
-      if (!localIsInstrumentedAgent(agentName)) {
+      if (!localIsSecurityAgent(agentName)) {
         debugLog(
-          `根 session 且非仪表化 Agent，不创建 task_dir sessionID=${sessionID} agent=${agentName}`,
+          `根 session 且非安全体系 Agent，不创建 task_dir sessionID=${sessionID} agent=${agentName}`,
           sessionID,
         );
         return {
