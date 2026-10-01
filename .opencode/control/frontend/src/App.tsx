@@ -119,6 +119,14 @@ async function downloadModelAsync(modelId: string): Promise<string> {
 
 const App: React.FC = () => {
   const { message } = AntApp.useApp();
+
+  // 重启完成 toast（整页刷新后在新页面显示——reload 前写入标记，此处消费）
+  useEffect(() => {
+    if (sessionStorage.getItem("console:restarted") === "1") {
+      sessionStorage.removeItem("console:restarted");
+      message.success("重启完成，新代码已生效");
+    }
+  }, [message]);
   const scan = useScan();
   const models = useModels();
   const system = useSystem();
@@ -153,8 +161,12 @@ const App: React.FC = () => {
   const refreshAll = useCallback(() => {
     scan.refresh();
     models.refresh();
+    // system 必须重拉: code_stale（后端代码指纹 vs 启动冻结指纹）在重启后
+    // 才翻转为 false——不刷则顶部“后端代码已更新”提醒不会消失
+    system.refresh();
     required.refresh();
-  }, [scan, models, required]);
+    // hardware 不随控制台重启变化, 有意不刷（探测成本高且无收益）
+  }, [scan, models, system, required]);
 
   // ── 控制台自重启（页面按钮；execv 替换进程，前端轮询 boot_token 判定完成）──
   const [restarting, setRestarting] = useState(false);
@@ -192,15 +204,18 @@ const App: React.FC = () => {
       }
       const tok = await fetchHealthToken();
       if (tok != null && tok !== before) {
-        setRestarting(false);
-        message.success("重启完成，新代码已生效");
-        refreshAll();
+        // 整页刷新（而非逐 hook 枚举刷新）: 重启是低频重操作，页面级 reload
+        // 必然让所有数据源（含未来新增的）与新后端对齐——曾因逐 hook 刷新
+        // 清单漏 system 导致 code_stale 提醒不消失。完成后由初始化逻辑
+        // （sessionStorage 标记）在新页面显示完成 toast。
+        sessionStorage.setItem("console:restarted", "1");
+        window.location.reload();
         return;
       }
       setTimeout(() => void poll(), 2000);
     };
     setTimeout(() => void poll(), 3000); // 跳过 exec 延迟窗（1.5s exec + Python 启动）
-  }, [restarting, fetchHealthToken, message, refreshAll]);
+  }, [restarting, fetchHealthToken, message]);
 
   // ─── 缺失对象（安装编排用；计数展示一律走 readiness 单一源）───
   const toolsMissing = useMemo(

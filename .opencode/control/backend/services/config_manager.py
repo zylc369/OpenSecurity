@@ -295,18 +295,18 @@ class ConfigManager:
 
     @dataclass
     class ConfigField:
-        """配置字段元数据。"""
-        key: str  # .ai_env 中的 key
-        label: str  # 前端展示的中文名
-        type: str  # password / path / text / bool
-        hint: str = ""  # 字段说明 / 获取地址
-        required: bool = True  # 是否必要（缺失时 banner 提醒）
-        validator: Callable[[str], tuple[bool, str]] | None = None
-        default_value: str = ""  # 不配置时后端默认值（生效值合并来源）
-        category: ConfigCategory = ConfigCategory.TOOLS  # 分类（声明必填语义——见各清单）
-        surfaces: list[Surface] = field(  # 生效场景（页面归属声明; 一键可多场景）
-            default_factory=lambda: [Surface.CONFIG])
-        readonly: bool = False  # 只读（禁用渲染 + 写接口 422）
+        """配置字段元数据（全字段必填——声明必须显式，无隐式默认值: 每条
+        声明都是完整的可审计/review 对象，隐式默认 = 隐式行为）。"""
+        key: str                                # .ai_env 中的 key
+        label: str                              # 前端展示的中文名
+        type: str                               # password / path / text / bool
+        hint: str                               # 字段说明 / 获取地址
+        required: bool                          # 是否必要（缺失时 banner 提醒）
+        validator: Callable[[str], tuple[bool, str]] | None  # 值校验（构建层执行）
+        default_value: str                      # 不配置时的后端默认值（生效值合并来源）
+        category: ConfigCategory                # 分类（分组归属）
+        surfaces: list[Surface]                 # 生效场景（一键可多场景）
+        readonly: bool                          # 只读（禁用渲染 + 写接口 422）
 
     # ═══════════════ 实例状态与构造 ═══════════════
 
@@ -725,6 +725,8 @@ class ConfigManager:
             hint="获取地址：https://platform.deepseek.com/api-keys",
             validator=validate_api_key,
             category=ConfigCategory.MODELS,
+            required=True, default_value="",
+            surfaces=[Surface.CONFIG], readonly=False,
         ),
         ConfigField(
             key=Keys.IDA_PRO_HOME, label="IDA Pro 安装目录", type="path",
@@ -733,6 +735,8 @@ class ConfigManager:
                  "Linux: /opt/ida-9.0; Windows: C:\\Program Files\\IDA Pro 9.0",
             validator=validate_ida_pro_home,
             category=ConfigCategory.TOOLS,
+            required=True, default_value="",
+            surfaces=[Surface.CONFIG], readonly=False,
         ),
         # ── 常规可选 ──
         ConfigField(
@@ -740,72 +744,96 @@ class ConfigManager:
             hint="不配置默认 deepseek-flash（events MCP 提取模型；需要更强提取质量可改 deepseek-v4-pro）",
             required=False, default_value="deepseek-flash",
             category=ConfigCategory.MODELS,
+            validator=None, surfaces=[Surface.CONFIG],
+            readonly=False,
         ),
         ConfigField(
             key=Keys.DEEPSEEK_SMALL_MODEL, label="DeepSeek 轻量模型名", type="text",
             hint="时间戳推断模型; 不配置默认 deepseek-flash",
             required=False, default_value="deepseek-flash",
             category=ConfigCategory.MODELS,
+            validator=None, surfaces=[Surface.CONFIG],
+            readonly=False,
         ),
         ConfigField(
             key=Keys.HF_ENDPOINT, label="HuggingFace 端点", type="text",
             hint="国内直连不稳时配置镜像，如 https://hf-mirror.com",
             required=False,
             category=ConfigCategory.MODELS,
+            validator=None, default_value="",
+            surfaces=[Surface.CONFIG], readonly=False,
         ),
         ConfigField(
             key=Keys.GITHUB_TOKEN, label="GitHub API 令牌", type="password",
             hint="外部工具下载加速（防未认证 60 次/小时配额耗尽）；未配置时兜底 gh auth token",
             required=False,
             category=ConfigCategory.TOOLS,
+            validator=None, default_value="",
+            surfaces=[Surface.CONFIG], readonly=False,
         ),
         ConfigField(
             key=Keys.JULIANG_TRADE_NO, label="代理IP供应商订单号", type="text",
             hint="代理 IP 池用（juliangip.com 企业版套餐的业务编号，会员中心-业务管理获取）",
             required=False,
             category=ConfigCategory.PROXY,
+            validator=None, default_value="",
+            surfaces=[Surface.CONFIG], readonly=False,
         ),
         ConfigField(
             key=Keys.JULIANG_API_KEY, label="代理IP供应商 API 秘钥", type="password",
             hint="与订单号配套的 API Key（同页面获取）；两项都配置后 proxy MCP/代理池才可用",
             required=False,
             category=ConfigCategory.PROXY,
+            validator=None, default_value="",
+            surfaces=[Surface.CONFIG], readonly=False,
         ),
         ConfigField(
             key=Keys.RESUME_ANALYSIS_ENABLED, label="分析续传开关", type="bool",
             hint="默认开启，0=关闭——会话压缩后自动注入分析状态续传提示",
             required=False, default_value="1",
             category=ConfigCategory.BEHAVIOR,
+            validator=None, surfaces=[Surface.CONFIG],
+            readonly=False,
         ),
         ConfigField(
             key=Keys.REFLECT_NUDGE_ENABLED, label="反思提醒开关", type="bool",
             hint="反思纸条+反思唤醒两通道总开关; 默认开启，0=关闭",
             required=False, default_value="1",
             category=ConfigCategory.BEHAVIOR,
+            validator=None, surfaces=[Surface.CONFIG],
+            readonly=False,
         ),
         ConfigField(
             key=Keys.REFLECT_NUDGE_INTERVAL_MIN, label="反思提醒间隔（分钟）", type="text",
             hint="距上次反思超过该间隔即注入提醒; 默认 30 分钟，改后 30s 内生效",
             required=False, default_value="30",
             category=ConfigCategory.BEHAVIOR,
+            validator=None, surfaces=[Surface.CONFIG],
+            readonly=False,
         ),
         ConfigField(
             key=Keys.PERMISSION_ASK_TIMEOUT_SEC, label="权限询问超时（秒）", type="text",
-            hint="权限询问超过该秒数未处理则自动拒绝（附引导反馈）; 0=关闭; 默认 300 秒，改后 30s 内生效",
-            required=False, default_value="300",
+            hint="权限询问超过该秒数未处理则自动拒绝（附引导反馈）; 0=关闭; 默认 60 秒，改后 30s 内生效",
+            required=False, default_value="60",
             category=ConfigCategory.BEHAVIOR,
+            validator=None, surfaces=[Surface.CONFIG],
+            readonly=False,
         ),
         ConfigField(
             key=Keys.PERMISSION_ASK_TIMEOUT_TYPES, label="超时自动拒绝的权限类型", type="text",
             hint="逗号分隔的权限类型名; 默认仅 external_directory（目录权限），可加 edit/bash 等",
             required=False, default_value="external_directory",
             category=ConfigCategory.BEHAVIOR,
+            validator=None, surfaces=[Surface.CONFIG],
+            readonly=False,
         ),
         ConfigField(
             key=Keys.CONTROL_FRONTEND_DEV, label="前端开发模式", type="bool",
             hint="1=vite dev(5173)，0/删除=发布态(dist/)。改后需重启控制台生效",
             required=False,
             category=ConfigCategory.DEVELOPER,
+            validator=None, default_value="",
+            surfaces=[Surface.CONFIG], readonly=False,
         ),
         # ── 远程连接（REMOTE 页; ENABLED 只读——只能经「切换远程」按钮） ──
         ConfigField(
@@ -813,18 +841,23 @@ class ConfigManager:
             hint="远程节点（如 Mac Mini）控制台地址，如 http://192.168.1.20:9776",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="",
+            readonly=False,
         ),
         ConfigField(
             key=Keys.REMOTE_CONSOLE_TOKEN, label="远程控制台令牌", type="password",
             hint="与远程节点 CONTROL_API_KEY 相同的值（Bearer 鉴权）",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="",
+            readonly=False,
         ),
         ConfigField(
             key=Keys.REMOTE_CONSOLE_ENABLED, label="远程模型开关", type="bool",
             hint="只读——只能经「切换远程」按钮变更（先校验后置位）",
             required=False, readonly=True,
             category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="",
         ),
         # ── 节点侧（hidden——远程页节点管理卡片经专用端点管理;
         #    CONTROL_API_KEY 变更触发重绑 0.0.0.0 副作用，通用写接口不可达） ──
@@ -833,18 +866,24 @@ class ConfigManager:
             hint="配置后本控制台对局域网开放推理类 API（Bearer 校验）并绑 0.0.0.0；远程节点（Mac Mini）用",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.HIDDEN],
+            validator=None, default_value="",
+            readonly=False,
         ),
         ConfigField(
             key=Keys.CONTROL_RESIDENT, label="控制台常驻", type="bool",
             hint="1=禁用心跳自杀机制（无 opencode 连接也不退出）；远程节点用",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.HIDDEN],
+            validator=None, default_value="",
+            readonly=False,
         ),
         ConfigField(
             key=Keys.CONTROL_AUTOSTART, label="开机自动启动", type="bool",
             hint="1=安装 LaunchAgent 开机自启（macOS，需开启自动登录）；远程节点用",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.HIDDEN],
+            validator=None, default_value="",
+            readonly=False,
         ),
         # ── 代理调参（config 页代理分类，可改，消费方重读即生效;
         #    default_value 与 ProxyTunables 默认同源） ──
@@ -853,30 +892,40 @@ class ConfigManager:
             hint="单 IP 寿命（5 分钟档）",
             required=False, default_value=str(_PT_D.ip_ttl_sec),
             category=ConfigCategory.PROXY,
+            validator=None, surfaces=[Surface.CONFIG],
+            readonly=False,
         ),
         ConfigField(
             key=Keys.JULIANG_TTL_MARGIN_SEC, label="代理到期余量（秒）", type="text",
             hint="到期安全余量",
             required=False, default_value=str(_PT_D.ttl_margin_sec),
             category=ConfigCategory.PROXY,
+            validator=None, surfaces=[Surface.CONFIG],
+            readonly=False,
         ),
         ConfigField(
             key=Keys.PROXY_ROTATE_CONN_THRESHOLD, label="代理轮换连接阈值", type="text",
             hint="proxy 模式下新建连接数满此值自动轮换",
             required=False, default_value=str(_PT_D.rotate_conn_threshold),
             category=ConfigCategory.PROXY,
+            validator=None, surfaces=[Surface.CONFIG],
+            readonly=False,
         ),
         ConfigField(
             key=Keys.DOMAIN_COOLDOWN_SEC, label="域名限流冷却（秒）", type="text",
             hint="域名冷却 10 分钟档",
             required=False, default_value=str(_PT_D.domain_cooldown_sec),
             category=ConfigCategory.PROXY,
+            validator=None, surfaces=[Surface.CONFIG],
+            readonly=False,
         ),
         ConfigField(
             key=Keys.ROTATE_HISTORY_LIMIT, label="轮换历史上限", type="text",
             hint="rotate_history 条数上限",
             required=False, default_value=str(_PT_D.rotate_history_limit),
             category=ConfigCategory.PROXY,
+            validator=None, surfaces=[Surface.CONFIG],
+            readonly=False,
         ),
         # ── 远程调参（REMOTE 页只读展示; 写接口 422） ──
         ConfigField(
@@ -884,36 +933,42 @@ class ConfigManager:
             hint="远程节点健康探测周期; 修改后下个周期生效",
             required=False, default_value=str(_RT_D.heartbeat_interval_sec), readonly=True,
             category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
+            validator=None,
         ),
         ConfigField(
             key=Keys.REMOTE_FAIL_THRESHOLD, label="远程降级阈值（连续失败次数）", type="text",
             hint="连续失败达此次数 → 降级本地",
             required=False, default_value=str(_RT_D.fail_threshold), readonly=True,
             category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
+            validator=None,
         ),
         ConfigField(
             key=Keys.REMOTE_RECOVER_THRESHOLD, label="远程恢复阈值（连续成功次数）", type="text",
             hint="降级后连续成功达此次数 → 切回远程",
             required=False, default_value=str(_RT_D.recover_threshold), readonly=True,
             category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
+            validator=None,
         ),
         ConfigField(
             key=Keys.REMOTE_UNLOAD_DELAY_SEC, label="恢复后稳定期（秒）", type="text",
             hint="切回远程后稳定此时长才卸载本地模型（释放内存）",
             required=False, default_value=str(_RT_D.unload_delay_sec), readonly=True,
             category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
+            validator=None,
         ),
         ConfigField(
             key=Keys.REMOTE_INFER_TIMEOUT_SEC, label="远程推理超时（秒）", type="text",
             hint="远程 embed/rerank/ocr 请求超时",
             required=False, default_value=str(_RT_D.infer_timeout_sec), readonly=True,
             category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
+            validator=None,
         ),
         ConfigField(
             key=Keys.REMOTE_PROBE_TIMEOUT_SEC, label="远程探测超时（秒）", type="text",
             hint="健康探测请求超时（应远小于心跳间隔）",
             required=False, default_value=str(_RT_D.probe_timeout_sec), readonly=True,
             category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
+            validator=None,
         ),
         # ── 心跳调参（hidden——无页面; 手编 .ai_env，每轮 sweep 重读） ──
         ConfigField(
@@ -921,17 +976,21 @@ class ConfigManager:
             hint="opencode 超此时长未跳心跳 → 移除条目",
             required=False, default_value=str(_HT_D.timeout_sec),
             category=ConfigCategory.SYSTEM, surfaces=[Surface.HIDDEN],
+            validator=None, readonly=False,
         ),
         ConfigField(
             key=Keys.HEARTBEAT_SWEEP_INTERVAL_SEC, label="心跳 sweep 周期（秒）", type="text",
             hint="后台周期清理间隔",
             required=False, default_value=str(_HT_D.sweep_interval_sec),
             category=ConfigCategory.SYSTEM, surfaces=[Surface.HIDDEN],
+            validator=None, readonly=False,
         ),
         ConfigField(
             key=Keys.HEARTBEAT_GRACE_SEC, label="心跳启动宽限（秒）", type="text",
             hint="表空超过此时长才自杀（覆盖 spawn 就绪等待+首跳）",
             required=False, default_value=str(_HT_D.grace_sec),
             category=ConfigCategory.SYSTEM, surfaces=[Surface.HIDDEN],
+            validator=None, readonly=False,
         ),
     ]
+

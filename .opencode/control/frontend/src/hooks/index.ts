@@ -137,19 +137,25 @@ export function useSystem(): {
   data: SystemInfo | null;
   loading: boolean;
   error: string | null;
+  refresh: () => void;
 } {
   const [data, setData] = useState<SystemInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const refresh = useCallback(() => {
+    setLoading(true);
     api.getSystem()
       .then((d) => { setData(d); setError(null); })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
 
-  return { data, loading, error };
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  return { data, loading, error, refresh };
 }
 
 /** 模型资产（有下载中任务时自动轮询 2s） */
@@ -206,17 +212,23 @@ export function useConfigMeta(surface: ConfigSurface): {
   data: ConfigMetaResponse | null;
   loading: boolean;
   error: string | null;
+  refresh: () => void;
 } {
   const [data, setData] = useState<ConfigMetaResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const refresh = useCallback(() => {
+    setLoading(true);
     api.getConfigMeta(surface)
       .then((d) => { setData(d); setError(null); })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, [surface]);
 
-  return { data, loading, error };
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  return { data, loading, error, refresh };
 }

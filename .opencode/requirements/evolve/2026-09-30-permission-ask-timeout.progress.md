@@ -253,6 +253,31 @@ fail-safe 自禁用（带日志）; GET 不再返回空值键。
   前端 tsc 0 + 42/42; 插件加载 ✓
 - 行为变化记录: ① banner 不再展示 validator 细节（非法值→日志+回落，
   banner 只提醒缺失）② 值接口不返回跨场景全量/空值键
+- 重构: 重启完成改整页刷新（用户评审: 逐 hook 刷新是枚举式维护, 漏 system
+  即证; 重启低频重操作, reload 必然全量对齐）——doRestart 成功分支改为
+  sessionStorage 标记 + window.location.reload(); 新页面初始化消费标记显示
+  "重启完成"toast; 删除 console:restarted 事件广播与 ConfigPage/RemoteSection
+  监听（reload 后无意义）; refreshAll 保留服务手动刷新按钮（轻操作, 含
+  system.refresh）。tsc 0 + 44/44 + build ✓
+- 修复: 重启后“后端代码已更新”提醒不消失（用户实测发现）——codeStale 来自
+  useSystem（/api/system 的 code_stale = 启动冻结代码指纹 vs 当前指纹），
+  而 refreshAll 只刷 scan/models/required 且 useSystem 无 refresh 方法 →
+  自动刷新够不到，F5 全页重载才能清。修: useSystem 补 refresh（标准模式）
+  + refreshAll 纳入 system.refresh（hardware 不随重启变化有意不刷——注释
+  说明）; 同类排查: 运行状态页无此缺口（ProcessSection 10s 自轮询;
+  OpencodeSection 吃 system prop）。tsc 0 + 44/44 + build ✓
+- 控制台重启成功后前端全量刷新（用户驱动）: refreshAll 原本只覆盖 App 级
+  hooks（scan/models/required），配置页/远程页的数据 hooks 在子组件内
+  触达不到——doRestart 成功分支追加广播 CustomEvent("console:restarted")，
+  ConfigPage/RemoteSection 监听后刷新 meta+生效值（useConfigMeta 补 refresh
+  方法与 useAllConfig 对齐; 未保存表单编辑保留——刷新仅更新数据源）。
+  tsc 0 + 44/44 + build ✓
+- ConfigField 全字段必填（用户裁定: 声明不允许隐式默认值）: dataclass 删
+  全部字段默认值，_FIELDS 34 条声明逐条显式补全 10 个字段（脚本转换 +
+  字符串续行误补逗号修复; 完整性程序化抽查 34/34）——每条声明都是完整
+  的可审计/review 对象。终验: pyright 0/0 + 后端 9/9 + 93/93 + 前端
+  44/44 + 插件 17/17 + 2/2 + test-control 11/11（单飞用例沙箱残留复跑
+  过）+ 加载 ✓
 - 未声明键禁入（用户裁定: 声明是配置存在的前提）: get_entries 删手写键
   合成循环——.ai_env 中 _FIELDS 未声明的键不进领域模型/值接口/meta，首次
   发现记 WARNING（去重集合，可感知可审计）; 新增键必须先在 _FIELDS 添加
