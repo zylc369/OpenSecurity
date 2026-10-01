@@ -169,8 +169,9 @@ export const ENV_KEY_PERMISSION_TIMEOUT_SEC = "PERMISSION_ASK_TIMEOUT_SEC";
 export const ENV_KEY_PERMISSION_TIMEOUT_TYPES = "PERMISSION_ASK_TIMEOUT_TYPES";
 
 // 超时拒绝时携带的反馈文案（经拒绝接口的 message 字段随工具错误送达模型，不创建新消息）。
+// 前缀标识超时来源——模型据此区分「无人响应自动拒绝」与「用户主动拒绝」。
 export const PERMISSION_TIMEOUT_REJECT_MESSAGE =
-  "请先检查访问路径的合理性；如果确实需要访问，请将访问逻辑写进 shell/bat/Python 脚本并运行脚本（不要在命令行中直接写外部路径）。";
+  "（权限询问超时自动拒绝）请先检查访问路径的合理性；如果确实需要访问，请将访问逻辑写进 shell/bat/Python 脚本并运行脚本（不要在命令行中直接写外部路径）。";
 
 // ─── venv ──────────────────────────────────────────────────────
 

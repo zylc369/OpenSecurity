@@ -42,6 +42,24 @@ Covers five security domains + one self-evolution engine:
 
 Key design decision: **the LLM never operates GUIs directly**. All IDA operations go through `idat -A -S<script>` headless mode + IDAPython scripts, ensuring the analysis process is reproducible.
 
+## Version status: 2.0 (hardware requirements & availability)
+
+`master` currently carries 1.0. 2.0 is feature-complete and battle-tested (see the [2.0 field notes](docs/项目介绍/2.0-实战博文/01-无人值守完成CTF挑战.md), in Chinese), but **has not been merged into master yet** — because of its hardware requirements; it will be merged in due course.
+
+Hardware requirements (test machine: MacBook Pro / M4 Pro / 48GB):
+
+| Item | Usage |
+|---|---|
+| OS + base software | ~8GB |
+| Local models ×3 (BGE-M3 / Reranker / GLM-OCR) | reserve ~12GB when loading (~7.6GB in total) |
+| Docker + Neo4j | ~2GB |
+| Main service + console | ~3GB |
+| Headroom for analysis tasks | 8GB+ |
+
+**32GB RAM minimum, 48GB recommended**; add 25GB+ of disk for tool images and model caches. If your machine is light, the models can be offloaded to another machine on the LAN (remote inference node).
+
+Hardware OK → pull **Tag ≥ 2.0**; otherwise stay on master (1.0).
+
 ## Quick Start
 
 ### Prerequisites
@@ -118,6 +136,7 @@ The agent autonomously completes: information gathering → analysis planning �
 | Document | Content |
 |----------|---------|
 | [Project Deep Dive](docs/项目介绍/open-security-介绍.md) | Design philosophy, architecture details, counterintuitive decisions |
+| [2.0 Field Notes](docs/项目介绍/2.0-实战博文/01-无人值守完成CTF挑战.md) | Unattended CTF solving: the 2.0 field record (Chinese) |
 | [Adding a New Agent](docs/contributing/add-new-agent.md) | Extending the platform with new security domains |
 | [Roadmap](docs/ROADMAP.en.md) | Project roadmap and future directions |
 | [Plugin Development](https://github.com/zylc369/OpenSecurity/blob/main/.opencode/binary-analysis/knowledge-base/opencode-plugin-development-guide.md) | OpenCode Plugin engineering practices |

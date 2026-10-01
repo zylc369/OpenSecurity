@@ -735,7 +735,7 @@ class ConfigManager:
                  "Linux: /opt/ida-9.0; Windows: C:\\Program Files\\IDA Pro 9.0",
             validator=validate_ida_pro_home,
             category=ConfigCategory.TOOLS,
-            required=True, default_value="",
+            required=False, default_value="",
             surfaces=[Surface.CONFIG], readonly=False,
         ),
         # ── 常规可选 ──

@@ -203,6 +203,11 @@ await test("control-http: uds 真实往返（Bun.serve unix → controlFetch）"
   const { homedir } = await import("os");
   const opensecurityHome = process.env.OPENSECURITY_HOME ?? join(homedir(), "bw-security-analysis");
   const sockPath = join(opensecurityHome, "opensecurity-control.sock");
+  // 创建前清理残留 socket——防 EADDRINUSE 连锁：残留 → Bun.serve 抛错 →
+  // finally 不执行（server 未创建）→ 残留永存（重跑持续失败）
+  try {
+    if (existsSync(sockPath)) unlinkSync(sockPath);
+  } catch {}
   const server = Bun.serve({
     unix: sockPath,
     fetch: async (req) => {
@@ -248,6 +253,13 @@ const results = await Promise.all([
 ]);
 console.log("ALL_OK:", results.every((r) => r === true));
 `;
+  // 数日志 spawn 次数（基线差值：沙箱日志跨重跑累计，只断言本次新增 1 条）
+  const logPath = join(opensecurityHome, "logs", "plugin_debug.log");
+  const countSpawns = (): number =>
+    existsSync(logPath)
+      ? (readFileSync(logPath, "utf-8").match(/startControl: spawn pid=/g) || []).length
+      : 0;
+  const spawnsBefore = countSpawns();
   const r = spawnSync("bun", ["-e", script], {
     env: {
       ...process.env,
@@ -259,12 +271,8 @@ console.log("ALL_OK:", results.every((r) => r === true));
     encoding: "utf-8",
   });
   assert(r.stdout?.includes("ALL_OK: true"), `子进程 6 路并发应全部成功。stdout=${(r.stdout || "").slice(-200)} stderr=${(r.stderr || "").slice(-200)}`);
-  // 数日志中的 spawn 次数
-  const logPath = join(opensecurityHome, "logs", "plugin_debug.log");
-  if (existsSync(logPath)) {
-    const spawns = (readFileSync(logPath, "utf-8").match(/startControl: spawn pid=/g) || []).length;
-    assert(spawns === 1, `并发 6 路应只 spawn 1 次，实际 ${spawns}`);
-  }
+  const spawns = countSpawns() - spawnsBefore;
+  assert(spawns === 1, `并发 6 路应只 spawn 1 次，实际 ${spawns}`);
 });
 
 // ─── 边界条件补充测试 ─────────────────────────────────────
@@ -284,5 +292,13 @@ if (_failed > 0) {
   }
 }
 console.log("=".repeat(60));
+
+// ─── 沙箱清理兜底 ───────────────────────────────────────────
+// 防测试异常中断（进程被 kill / 未走到 uds 测试 finally）留下的 socket
+// 阻塞下次运行。进程退出前统一清理（失败退出路径同样覆盖）。
+try {
+  const sockPath = join(process.env.OPENSECURITY_HOME!, "opensecurity-control.sock");
+  if (existsSync(sockPath)) unlinkSync(sockPath);
+} catch {}
 
 if (_failed > 0) process.exit(1);

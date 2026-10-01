@@ -180,10 +180,24 @@ export class PermissionTimeoutManager {
 
   /** 事件入口: permission.replied / permission.v2.replied——请求已被处理，撤销布防 */
   onReplied(props: Record<string, unknown>): void {
-    if (!props || typeof props !== "object") return;
+    if (!props || typeof props !== "object") {
+      debugLog(`权限超时: replied 事件属性缺失，跳过 props=${String(props)}`);
+      return;
+    }
     const requestID =
       typeof props.requestID === "string" ? props.requestID : null;
-    if (requestID) this.clear(requestID);
+    if (!requestID) {
+      debugLog(
+        `权限超时: replied 事件无 requestID，跳过 props=${JSON.stringify(props).slice(0, 200)}`,
+      );
+      return;
+    }
+    const revoked = this.timers.has(requestID);
+    this.clear(requestID);
+    debugLog(
+      `权限超时: replied ${revoked ? "已撤销布防" : "无 pending（未布防或已超时处理）"} requestID=${requestID}`,
+      typeof props.sessionID === "string" ? props.sessionID : null,
+    );
   }
 
   /** 清空全部定时器（插件 dispose 时调用） */

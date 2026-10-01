@@ -23,7 +23,7 @@
   `postSessionIdPermissionsPermissionId`（body `{response}`）不支持 message。
 - v2 基建（`permission.v2.asked` 事件 / `/api/session/:sid/permission/:rid/reply`）
   已在 dev 代码中，但 v2 插件 API 尚无权限/事件能力（PluginContext 无 event/permission 域）。
-- bash 工具的 external_directory 检查只扫描命令行静态路径（脚本文件内部访问不扫描）
+- bash 工具的 external_directory 检查只对白名单命令（cd/rm/cp/mv/mkdir/touch/chmod/chown/cat）的参数路径触发（脚本文件内部访问不扫描）
   ——反馈文案引导"写 Python 脚本再运行"在机制上可走通。
 
 ### 用户裁定记录（多轮对话）

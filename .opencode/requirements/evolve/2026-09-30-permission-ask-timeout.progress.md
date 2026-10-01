@@ -328,3 +328,42 @@ fail-safe 自禁用（带日志）; GET 不再返回空值键。
   告警一次，value 变化自动重校; ②模块头/writableUpdates 过时注释改写;
   ③本文件后置轮恢复编年顺序。三个有意行为变更（插件 fail-safe 自禁用/
   get 返回合并值畸形静默回落/banner error 恒空）经逐一核对消费方确认无破坏
+
+- 后置轮（实测复盘改进，用户确认"都做"）:
+  1. onReplied 补日志——撤销布防/无 pending/防御分支全部留痕（用户手动处理路径可排查）
+  2. 拒绝反馈文案加"（权限询问超时自动拒绝）"前缀——模型区分自动/手动拒绝；
+     测试断言同步增强（超时标识 + 文案双断言）
+  3. 知识沉淀: opencode-plugin-api.md 新增"bash 工具 external_directory 触发范围"
+     （白名单命令 cd/rm/cp/mv/mkdir/touch/chmod/chown/cat + 工作区外 workdir + ls 不触发）;
+     opencode-references.md 修正"只扫描命令行静态路径"为白名单精确表述 + 新增
+     "插件日志路由（debugLog 三级）"节
+  4. 需求文档 §1 平台实证同步修正（白名单命令表述）
+  验证: permission 17/17（含新断言）+ reflection 2/2 + control 11/11（清沙箱后）+
+  不可见字节扫描 5 文件 CLEAN + 叙事词清零
+  发现（待定）: test-control 沙箱不自清理（socket 残留 → 重跑 EADDRINUSE/单飞假失败）——
+  需重跑前 rm -rf /tmp/control_test_ts
+
+- 生产实测（用户重启 opencode 后，用户亲自观测）: 两次 external_directory 触发
+  （cat Desktop 文件）均 10 秒自动拒绝（10.043s / 10.020s）——用户观测"弹框出现，
+  约 10 秒自动消失"与日志时间线吻合；新前缀文案"（权限询问超时自动拒绝）"送达模型、
+  onReplied 新日志（replied 无 pending）均生效；同目录重复触发正常（拒绝不写 always 记忆）;
+  连续两次独立 requestID 无状态残留
+
+- test-control 修复（用户确认"要修"）:
+  1. socket 清理: uds 测试创建前清残留 + 文件末尾兜底清理（防 EADDRINUSE 连锁:
+     残留 → Bun.serve 抛错 → finally 不执行 → 残留永存）
+  2. 附带发现并修复: 单飞测试断言数沙箱日志"累计" spawn 行数——重跑必然误报
+     （实际 N 递增），改为基线差值（只数本次新增）
+  验证: 不清沙箱连续 3 跑 11/11 + 假残留注入跑 11/11 + 跑后无 socket 残留
+
+- 知识沉淀: testing-blind-spot-patterns.md 新增模式 O（沙箱资源不自清理 + 累计量
+  断言——重跑假失败连锁；识别/防御/排查纪律三节）+ 防御资产对照表加 O 行 +
+  排查指引加第 10 条；字节扫描 CLEAN、叙事词零残留
+- 手动处理路径实测（用户操作）: 09:47 手动拒绝 → 模型收无 feedback 通用文案、
+  日志"replied 已撤销布防"、无自动拒绝（不补刀）; 09:55 允许一次（once，非始终允许——
+  不写 always 记忆）→ 命令正常执行、同样"已撤销布防"——拒绝/允许两路径均闭环
+
+- 记忆语义实测（用户操作）: 09:55 允许一次（once）→ 10:10 同路径再次弹窗（once 不写
+  记忆，验证成立）; 10:10 用户对再次询问选择"总是允许"（always，写 pattern 记忆
+  /Users/aserlili/.opencode/*）→ 10:11 同路径静默通过（无权限事件，记忆生效）——
+  四语义矩阵（自动拒绝/手动拒绝/允许一次/总是允许）全部闭环

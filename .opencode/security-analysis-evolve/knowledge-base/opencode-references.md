@@ -99,7 +99,7 @@ env: {
 | SDK | `postSessionIdPermissionsPermissionId`（无 message）；注入 client 无 `permission` 命名空间 | `client.permission.reply({requestID, reply, message})`（v2 SDK 面） |
 | 插件形态 | named export 函数返回 hooks 对象；`.opencode/plugins/*.ts` 自动发现 | `export default {id, effect/setup}`；v2 loader 只认此形态（v1 形态文件不会被 v2 runtime 加载） |
 
-**bash 工具的外部目录检查边界**：`external_directory` 权限只对命令行中静态可解析的路径触发（命令解析器扫描）；脚本文件内部的路径访问不被扫描——`python script.py` 命令行不含外部路径即不触发，脚本内 `open("/outside/file")` 正常执行。引导模型"通过脚本访问"时，须提示把脚本写到可写位置（项目内 / 已放行目录）再运行。
+**bash 工具的外部目录检查边界**：`external_directory` 权限只对**白名单命令**（`cd`/`rm`/`cp`/`mv`/`mkdir`/`touch`/`chmod`/`chown`/`cat`）的参数路径与**工作区外 workdir** 触发；`ls`/`find` 等其他命令访问外部路径不触发（完整触发规则见 `$SHARED_DIR/knowledge-base/opencode-plugin-api.md` 权限节）。脚本文件内部的路径访问不被扫描——`python script.py` 命令行不含外部路径即不触发，脚本内 `open("/outside/file")` 正常执行。引导模型"通过脚本访问"时，须提示把脚本写到可写位置（项目内 / 已放行目录）再运行。
 
 **CLI `opencode run` 权限行为**：非交互模式对权限询问自动回复——`--auto` 回复 "once"（自动允许）；未加 `--auto` 打印警告并回复 "reject"（不会挂起等待）。
 
@@ -119,3 +119,15 @@ env: {
 **诊断手法**:
 - 测试插件在 chat.params 打印 `Object.keys(output.options)` 直接看透传字段集
 - 本地重现: `opencode serve` + prompt 请求体带 `"agent": "<name>"`（注意: agent 必须放 prompt body，仅在 session 创建时传不生效——实际请求会回落到 build agent）
+
+### 插件日志路由（debugLog 三级）
+
+`lib/logging.ts` 的 `debugLog(msg, sessionID?)` 按会话映射状态路由日志（追加写，5MB 截断保留尾部）：
+
+| 条件 | 目标文件 |
+|------|---------|
+| 有 sessionID 且 `$OPENSECURITY_HOME/workspace/.task_sessions/<sessionID>.json` 存在 | `<task_dir>/logs/plugin.log` |
+| 有 sessionID 但无映射文件（非任务会话） | `$OPENSECURITY_HOME/logs/<agentName>.log`（SECURITY_AGENTS 名单内: binary-analysis / mobile-analysis / web-analysis / ai-security-analysis / crypto-analysis / security-analysis-evolve）或 `$OPENSECURITY_HOME/logs/plugin_debug.log`（名单外） |
+| 无 sessionID（事件属性缺失类防御日志） | `$OPENSECURITY_HOME/logs/plugin_debug.log` |
+
+**排查插件行为时**：先确认当前会话 sessionID 与映射文件是否存在（`cat $OPENSECURITY_HOME/workspace/.task_sessions/<sessionID>.json`），再定位日志文件；同一时段各会话的日志可能分散在不同文件（取决于各会话映射状态），按 sessionID 检索。

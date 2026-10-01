@@ -277,6 +277,10 @@ async function main(): Promise<void> {
     );
     const body = calls[0].body as { reply: string; message?: string };
     assertEq(body.reply, "reject", "reply=reject");
+    assert(
+      body.message?.includes("超时自动拒绝") === true,
+      "message 应含超时来源标识",
+    );
     assert(body.message?.includes("Python 脚本") === true, "message 应含反馈文案");
     mgr.dispose();
   });
@@ -374,6 +378,10 @@ async function main(): Promise<void> {
     await sleep(700);
     assertEq(rawCalls.length, 1, "通道①失败应走通道②");
     const body = rawCalls[0].body as { message?: string };
+    assert(
+      body.message?.includes("超时自动拒绝") === true,
+      "通道②仍带超时来源标识",
+    );
     assert(body.message?.includes("Python 脚本") === true, "通道②仍带反馈文案");
     mgr.dispose();
   });

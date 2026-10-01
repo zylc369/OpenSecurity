@@ -182,6 +182,14 @@ v1 SDK 注入 client 无 `permission` 命名空间，旧端点对应 SDK 方法 
 
 **⚠ `permission.ask` plugin hook 未接线**：`Hooks` 类型里有 `"permission.ask"` 定义，但运行时无触发点（1.18.32 与 dev 最新版均无）——权限拦截与自动回复必须走「事件 + reply 端点」路径，不要依赖该 hook。
 
+**bash 工具 external_directory 触发范围**：bash 命令的 `external_directory` 询问只检查 **workdir** 与**特定命令的参数路径**，其余命令（如 `ls`、`find`）访问外部路径不触发：
+
+- **workdir 在工作区外** → 触发（无论命令内容）。
+- **以下命令解析参数路径**（`realpath` 解析后在工作区外 → 触发）：`cd`、`rm`、`cp`、`mv`、`mkdir`、`touch`、`chmod`、`chown`、`cat`。
+- 触发时 pattern 为 `父目录/*`（`always` 同）——按目录粒度询问。
+- 命令解析器只扫描命令行静态路径，脚本文件内部访问不扫描（`python script.py` 命令行无外部路径即不触发，脚本内 `open("/outside/file")` 正常执行）。
+- 需要稳定触发询问做测试时：用 `cat <外部文件>` 或把 `workdir` 设为外部目录；`ls <外部目录>` 不触发。
+
 ---
 
 ### `chat.params`

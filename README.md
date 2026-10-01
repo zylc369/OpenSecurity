@@ -42,6 +42,24 @@ OpenSecurity 让 LLM 端到端地完成一次安全分析：拿到目标文件�
 
 关键决策：**LLM 不直接操作 GUI**。所有 IDA 操作走 `idat -A -S<script>` headless 模式 + IDAPython 脚本，确保分析过程可稳定复现。
 
+## 版本状态：2.0（硬件要求与获取）
+
+当前 `master` 为 1.0。2.0 已完成开发并经过实战验证（[无人值守完成 CTF 挑战——2.0 实战记录](docs/项目介绍/2.0-实战博文/01-无人值守完成CTF挑战.md)），但**尚未合并到 master**——因为 2.0 对硬件有要求；我们会在后续把它合并进 master。
+
+2.0 的硬件要求（测试机：MacBook Pro / M4 Pro / 48GB）：
+
+| 项 | 占用 |
+|---|---|
+| 操作系统与基础软件 | ~8GB |
+| 本地模型 ×3（BGE-M3 / Reranker / GLM-OCR） | 加载需预留 ~12GB（合计约 7.6GB） |
+| Docker + Neo4j | ~2GB |
+| 主服务 + 控制台 | ~3GB |
+| 分析任务余量 | 8GB+ |
+
+**建议内存 32GB 起步、48GB 更从容**；磁盘另需 25GB+（工具镜像与模型缓存）。硬件不足时，可把模型卸载到局域网内的另一台机器（远程推理节点）。
+
+硬件符合要求 → 拉取 **Tag ≥ 2.0** 的版本；否则请继续使用 master（1.0）。
+
 ## 快速上手
 
 ### 前置依赖
@@ -118,6 +136,7 @@ Agent 会自主完成：信息收集 → 分析规划 → 工具执行 → 结�
 | 文档 | 内容 |
 |------|------|
 | [项目深度介绍](docs/项目介绍/open-security-介绍.md) | 完整的设计理念、架构详解、反直觉决策 |
+| [2.0 实战博文](docs/项目介绍/2.0-实战博文/01-无人值守完成CTF挑战.md) | 无人值守完成 CTF 挑战：2.0 实战记录与 SiteCheck 拆解 |
 | [如何添加新 Agent](docs/contributing/add-new-agent.md) | 扩展平台支持新的安全分析领域 |
 | [Roadmap](docs/ROADMAP.md) | 项目路线图与待办方向 |
 | [Plugin 开发实战](https://github.com/zylc369/OpenSecurity/blob/main/.opencode/binary-analysis/knowledge-base/opencode-plugin-development-guide.md) | OpenCode Plugin 工程实践 |
