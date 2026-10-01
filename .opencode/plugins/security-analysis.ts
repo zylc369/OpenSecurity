@@ -15,6 +15,7 @@ import {
   LOGS_DIR,
   DEFAULT_LOG,
   ENV_INJECTION_FREQUENCY,
+  RECOVER_MODE_PREFIX,
   AGENT_BINARY_ANALYSIS,
   AGENT_MOBILE_ANALYSIS,
   AGENT_WEB_ANALYSIS,
@@ -861,7 +862,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
       let sessionData: SessionData | null = null;
       try {
         // ── RECOVER-MODE 逃生舱（零依赖，最先执行）──
-        // 消息文本以 `>>>RECOVER-MODE<<<` 开头 → 跳过本 hook 的一切拦截
+        // 消息文本以 RECOVER_MODE_PREFIX 开头（常量见 lib/constants.ts）→ 跳过本 hook 的一切拦截
         // （控制台可用性、环境检测、agent 检查等全部放行）。
         // 用途：插件自身 BUG 把消息入口拦死时，用户仍有通道让 agent 继续工作
         // （比如让 AI 修复插件代码）——该检查只依赖字符串前缀，不碰控制台/
@@ -870,7 +871,7 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
           .filter((p) => p?.type === "text")
           .map((p) => (p as { text?: string }).text ?? "")
           .join("\n");
-        if (firstText.trimStart().startsWith(">>>RECOVER-MODE<<<")) {
+        if (firstText.trimStart().startsWith(RECOVER_MODE_PREFIX)) {
           const s = ctx.sessionManager.get(sessionID);
           s?.clearPendingResume(); // 清冷却定时器（RECOVER 消息 = 用户介入）
           debugLog(

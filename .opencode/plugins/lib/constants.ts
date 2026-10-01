@@ -162,6 +162,13 @@ export const ENV_KEY_REFLECT_NUDGE = "REFLECT_NUDGE_ENABLED";
 // 生效值（含默认 30）由服务端经 /api/config 返回; 未取到 → 反思到期判定不生效。
 export const ENV_KEY_REFLECT_NUDGE_INTERVAL_MIN = "REFLECT_NUDGE_INTERVAL_MIN";
 
+// ─── 逃生舱（RECOVER-MODE）─────────────────────────────────────
+
+// 消息文本以此前缀开头 → chat.message hook 跳过一切拦截（控制台可用性 /
+// 环境检测 / agent 检查全放行）。用途：插件自身 BUG 把消息入口拦死时，
+// 用户仍有零依赖通道让 agent 继续工作（比如让 AI 修复插件代码）。
+export const RECOVER_MODE_PREFIX = ">>>RECOVER-MODE<<<";
+
 // ─── 权限询问超时自动拒绝 ──────────────────────────────────────
 
 // 控制台配置中控制"权限询问超时自动拒绝"的超时秒数（见 lib/permission-timeout.ts）。

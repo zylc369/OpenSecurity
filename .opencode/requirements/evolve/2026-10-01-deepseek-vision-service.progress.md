@@ -43,7 +43,15 @@
 - 控制台自重启: `POST /api/system/restart`（1.5s 后 execv，PID 保留）; MCP 壳对新实例自愈（_CONTROL 缓存清空重解析）。
 - opencode 重启后 vision MCP 自动注册（mcp-manager MCP_SERVERS）; 未重启前壳逻辑可经 mcp_shell_tool 直调验证。
 
+## 活体验证（15:50 opencode 重启后）
+
+- **MCP 注册**: plugin_debug.log `15:50:41 [McpManager] vision 注册成功`（新进程 5/5: knowledge/events/ocr/vision/proxy）。
+- **agent 实调**（全生产链: 本 agent 工具调用 → opencode MCP → 薄壳 → IPC → 控制台 → deepseek-flash）:
+  - 单图语义题（无文字标签柱状图——OCR 无法回答）: "三根柱子，最高蓝色，最矮红色" **全对**（412 tokens, 1.6s）。
+  - 双图对比: 黄/蓝背景正确识别 + 冷暖色调对比分析（841 tokens, 2.5s）。
+  - 返回结构化 JSON（text/model/usage/latency_ms）✓。
+
 ## 待办 / 生效条件
 
-- [ ] **用户重启 opencode** → vision 工具对 agent 生效（analyze_image 出现在工具列表）
+- [x] **用户重启 opencode** → vision 工具对 agent 生效（15:50 完成，agent 实调通过）
 - [ ] 提交（用户执行）
