@@ -50,6 +50,8 @@ class ConfigCategory(StrEnum):
     """配置分类（code=枚举值; desc 见 _DESC; 定义序=前端分组顺序）。
 
     分类描述由服务端权威下发（前端原样显示，不自行发挥）。
+    配置必须先在 _FIELDS 声明才能被感知/审计/review——不存在未声明键的
+    兜底分类。
     """
 
     TOOLS = "tools"
@@ -57,7 +59,6 @@ class ConfigCategory(StrEnum):
     PROXY = "proxy"
     BEHAVIOR = "behavior"
     DEVELOPER = "developer"
-    OTHER = "other"
     REMOTE = "remote"
     REMOTE_TUNING = "remote_tuning"
     SYSTEM = "system"
@@ -78,7 +79,6 @@ _CATEGORY_DESC: dict[ConfigCategory, str] = {
     ConfigCategory.PROXY: "代理",
     ConfigCategory.BEHAVIOR: "行为",
     ConfigCategory.DEVELOPER: "开发",
-    ConfigCategory.OTHER: "其他",
     ConfigCategory.REMOTE: "远程",
     ConfigCategory.REMOTE_TUNING: "远程调参",
     ConfigCategory.SYSTEM: "系统",
@@ -303,7 +303,7 @@ class ConfigManager:
         required: bool = True  # 是否必要（缺失时 banner 提醒）
         validator: Callable[[str], tuple[bool, str]] | None = None
         default_value: str = ""  # 不配置时后端默认值（生效值合并来源）
-        category: ConfigCategory = ConfigCategory.OTHER  # 分类（分组归属）
+        category: ConfigCategory = ConfigCategory.TOOLS  # 分类（声明必填语义——见各清单）
         surfaces: list[Surface] = field(  # 生效场景（页面归属声明; 一键可多场景）
             default_factory=lambda: [Surface.CONFIG])
         readonly: bool = False  # 只读（禁用渲染 + 写接口 422）
@@ -321,6 +321,8 @@ class ConfigManager:
         # 每 10s sweep 经 get()）不重复跑校验/打告警; 同组合只校验+告警一次，
         # value 变化自动重新校验
         self._validation_cache: dict[tuple[str, str], tuple[bool, str]] = {}
+        # 未声明键告警去重（同键只告警一次; 声明后自然不再触发）
+        self._undeclared_warned: set[str] = set()
 
     def _read_dev_mode_once(self) -> bool:
         """启动期一次性读取（.ai_env 优先——source=ai_env 键的文件是权威，
@@ -387,9 +389,8 @@ class ConfigManager:
         return None
 
     def _load_from_ai_env(self) -> dict[str, str]:
-        """解析 .ai_env 全量原始键值（含未声明手写键）; 对全部声明字段的
-        path 型值做读时归一化（expanduser + abspath; 写侧保留原文）——
-        消费方拿到的即绝对展开路径。"""
+        """解析 .ai_env 全量原始键值; 对全部声明字段的 path 型值做读时
+        归一化（expanduser + abspath; 写侧保留原文）。"""
         path = self.ai_env_path
         if not path.exists():
             return {}
@@ -408,61 +409,61 @@ class ConfigManager:
             return os.path.abspath(os.path.expanduser(decl.default_value))
         return decl.default_value
 
-    def get_entries(
-            self,
-            surfaces: "Surface | list[Surface] | tuple[Surface, ...] | None" = None,
-    ) -> list[ConfigEntry]:
-        """统一配置获取（单一事实来源）: _load_from_ai_env 与静态 _FIELDS
-        声明默认值合并 → 新建扁平配置领域模型列表。
+    def _resolve_value(self, decl: "ConfigManager.ConfigField", config_value: str) -> str:
+        """最终值: 非空配置值（经 validator 校验, 非法记日志回落默认）;
+        空/缺失 → 声明默认。"""
+        stripped = config_value.strip()
+        if not stripped:
+            return self._default_of(decl)
+        if decl.validator is not None:
+            cache_key = (decl.key, config_value)
+            verdict = self._validation_cache.get(cache_key)
+            if verdict is None:
+                verdict = decl.validator(config_value)
+                self._validation_cache[cache_key] = verdict
+                if not verdict[0]:
+                    logger.warning("配置 %s=%r 非法（%s），回落声明默认值 %r",
+                                   decl.key, config_value, verdict[1], self._default_of(decl))
+            if not verdict[0]:
+                return self._default_of(decl)
+        return stripped
 
-        入参 surfaces 按场景过滤（None=全量——内部消费（required_status 等）;
-        单值或序列——字段声明为多场景数组，任一交集即命中）; 未声明手写键
-        合成 OTHER 条目（仅 CONFIG 场景可见，等价既有兜底语义）。
+    def get_entries(self, surfaces: list[Surface] | None = None) -> list[ConfigEntry]:
+        """统一配置获取（单一事实来源）: .ai_env 实际配置值与 _FIELDS 声明
+        默认值合并 → 扁平配置领域模型列表。
+
+        surfaces 为 None 返回全量（内部消费，如单键 get）; 传场景列表时在
+        循环内按交集过滤（任一命中即保留）。
+
+        声明是配置存在的前提: _FIELDS 未声明的键不属于配置体系（不进
+        领域模型/值接口/meta），首次发现记 WARNING（可感知可审计）——
+        新增键必须先在 _FIELDS 添加声明，才能被感知、被审计、被 review。
         """
-        raw = self._load_from_ai_env()
+        configs = self._load_from_ai_env()
+        declared_keys = {f.key for f in self._FIELDS}
+        for key in configs:
+            if key not in declared_keys and key not in self._undeclared_warned:
+                logger.warning("配置 %s 存在于 .ai_env 但未在 _FIELDS 声明——"
+                               "不被配置体系管理（不进值接口/meta/写校验）; "
+                               "新增键请先在 _FIELDS 添加声明", key)
+                self._undeclared_warned.add(key)
+        wanted = set(surfaces) if surfaces is not None else None
         entries: list[ConfigEntry] = []
-        declared: set[str] = set()
         for decl in self._FIELDS:
-            declared.add(decl.key)
-            raw_value = raw.get(decl.key, "")
-            value = raw_value.strip() or self._default_of(decl)
-            if raw_value.strip() and decl.validator is not None:
-                cache_key = (decl.key, raw_value)
-                cached = self._validation_cache.get(cache_key)
-                if cached is None:
-                    cached = decl.validator(raw_value)
-                    self._validation_cache[cache_key] = cached
-                    if not cached[0]:
-                        logger.warning("配置 %s=%r 非法（%s），回落声明默认值 %r",
-                                       decl.key, raw_value, cached[1], self._default_of(decl))
-                if not cached[0]:
-                    value = self._default_of(decl)
+            if wanted is not None and not wanted.intersection(decl.surfaces):
+                continue
             entries.append(ConfigEntry(
                 key=decl.key, label=decl.label, type=decl.type, hint=decl.hint,
-                required=decl.required, value=value,
+                required=decl.required,
+                value=self._resolve_value(decl, configs.get(decl.key, "")),
                 category=decl.category, surfaces=decl.surfaces,
                 readonly=decl.readonly,
             ))
-        for key, raw_value in raw.items():
-            if key in declared or not raw_value.strip():
-                continue
-            entries.append(ConfigEntry(
-                key=key, label=key, type="text", hint="", required=False,
-                value=raw_value,
-                category=ConfigCategory.OTHER, surfaces=[Surface.CONFIG],
-                readonly=False,
-            ))
-        if surfaces is None:
-            return entries
-        wanted = {surfaces} if isinstance(surfaces, Surface) else set(surfaces)
-        return [e for e in entries if wanted.intersection(e.surfaces)]
+        return entries
 
-    def get_kv_list(
-            self,
-            surfaces: "Surface | list[Surface]",
-    ) -> dict[str, str]:
-        """对外标准 KV 结果: 指定场景内每个配置的生效值（来自 .ai_env 或
-        声明默认; 无默认且未配置的键不出现——消费方按 fail-safe 处理）。
+    def get_kv_list(self, surfaces: list[Surface]) -> dict[str, str]:
+        """对外标准 KV 结果: 指定场景列表内每个配置的生效值（来自 .ai_env
+        或声明默认; 无默认且未配置的键不出现——消费方按 fail-safe 处理）。
         场景必填——值获取以场景为轴，不再返回跨场景全量。"""
         return {e.key: e.value for e in self.get_entries(surfaces) if e.value}
 
@@ -505,35 +506,43 @@ class ConfigManager:
         configs.pop(key, None)
         return configs
 
-    _TEMPLATE = """\
-# bw-security-analysis 环境变量配置
-# 填完保存即可（控制台配置页读取；也可直接在控制台配置页设置，无需手编此文件）
+    def _build_template(self) -> str:
+        """从 _FIELDS 动态拼接 .ai_env 引导模板（单一来源——键与说明不再手写两套）。
 
-# IDA Pro 安装目录（该目录下需有 idat 可执行文件）
-# macOS: /Applications/IDA Professional 9.1.app/Contents/MacOS
-# Linux: /opt/ida-9.0
-# Windows: C:\\Program Files\\IDA Pro 9.0
-IDA_PRO_HOME=
-
-# DeepSeek API Key（events MCP 实体提取用，https://platform.deepseek.com 申请）
-DEEPSEEK_API_KEY=
-# events MCP 模型配置（可选，按需修改）
-# DEEPSEEK_MODEL=deepseek-flash      # 核心提取模型（需要更强提取质量改成 deepseek-v4-pro）
-# DEEPSEEK_SMALL_MODEL=deepseek-flash # 时间戳推断模型
-
-# GitHub API 令牌（可选，外部工具下载加速防 60 次/小时配额耗尽；未配置时兜底 gh auth token）
-# GITHUB_TOKEN=
-# HuggingFace 端点（可选，国内直连不稳时配置镜像，如 https://hf-mirror.com）
-# HF_ENDPOINT=
-"""
+        规则（范围: CONFIG 场景键）:
+          • 必要键 → hint 注释 + 显式 KEY= 待填
+          • 无默认可选键 → hint 注释 + 注释行提示（不配则无生效值）
+          • 有默认键省略——生效值自动来自声明默认，配置页可见
+        """
+        lines = [
+            "# bw-security-analysis 环境变量配置",
+            "# 填完保存即可（控制台配置页读取；也可直接在控制台配置页设置，无需手编此文件）",
+            "",
+        ]
+        for decl in self._FIELDS:
+            if Surface.CONFIG not in decl.surfaces:
+                continue
+            if decl.required:
+                if decl.hint:
+                    lines.append(f"# {decl.hint}")
+                lines.append(f"{decl.key}=")
+                lines.append("")
+            elif not decl.default_value and decl.hint:
+                lines.append(f"# {decl.hint}")
+                lines.append(f"# {decl.key}=")
+        return "\n".join(lines).rstrip() + "\n"
 
     def ensure_template(self) -> bool:
-        """首次运行创建带注释模板（幂等; 已存在不重写）。"""
+        """首次运行创建引导模板（幂等; 已存在不重写）。
+
+        模板内容经 _build_template 从 _FIELDS 动态生成——声明处改键/说明
+        自动反映，无需同步维护两套。
+        """
         path = self.ai_env_path
         if path.exists():
             return False
         try:
-            self._atomic_write(path, self._TEMPLATE)
+            self._atomic_write(path, self._build_template())
             return True
         except OSError:
             return False
@@ -630,16 +639,15 @@ DEEPSEEK_API_KEY=
                 return decl
         return None
 
-    def config_meta(self, surface: Surface) -> ConfigMetaView:
-        """单 surface 的配置元数据 + 生效值（页面组成权威; 分类序=枚举定义序）。
+    def config_meta(self, surfaces: list[Surface]) -> ConfigMetaView:
+        """指定场景列表的配置元数据 + 生效值（页面组成权威; 分类序=枚举定义序）。
 
-        从统一领域模型 get_entries(surfaces=surface) 组装——未声明手写键经
-        领域模型合成 OTHER 条目（仅 CONFIG 场景兜底; remote 面只渲染已声明
-        配置）。default_value 展示信息经声明表补充（field_of）。
+        从统一领域模型 get_entries(surfaces) 组装（多场景天然合并）。
+        default_value 展示信息经声明表补充（field_of）。
         """
         entries: dict[str, ConfigMetaEntry] = {}
         cats_with_entries: set[ConfigCategory] = set()
-        for entry in self.get_entries(surfaces=surface):
+        for entry in self.get_entries(surfaces):
             decl = self.field_of(entry.key)
             entries[entry.key] = ConfigMetaEntry(
                 label=entry.label, type=entry.type, hint=entry.hint,
@@ -664,10 +672,7 @@ DEEPSEEK_API_KEY=
         hint: str
         error: str
 
-    def required_status(
-            self,
-            surfaces: "Surface | list[Surface]",
-    ) -> list[ConfigStatusView]:
+    def required_status(self, surfaces: list[Surface]) -> list[ConfigStatusView]:
         """必要配置完整性（前端 banner 用; 按场景过滤）。
 
         值不合法已在领域模型构建层校验（记日志+回落默认）——此处只判
@@ -723,7 +728,9 @@ DEEPSEEK_API_KEY=
         ),
         ConfigField(
             key=Keys.IDA_PRO_HOME, label="IDA Pro 安装目录", type="path",
-            hint="该目录下需有 idat 可执行文件",
+            hint="该目录下需有 idat 可执行文件; "
+                 "macOS: /Applications/IDA Professional 9.1.app/Contents/MacOS; "
+                 "Linux: /opt/ida-9.0; Windows: C:\\Program Files\\IDA Pro 9.0",
             validator=validate_ida_pro_home,
             category=ConfigCategory.TOOLS,
         ),

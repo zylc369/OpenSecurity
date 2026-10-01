@@ -50,40 +50,40 @@ describe("URL 编码与请求形状", () => {
     expect(h.calls[0]).toMatchObject({ method: "get", url: "/api/hardware" });
   });
 
-  it("路径参数做 encodeURIComponent（含斜杠）+ surface 必填", async () => {
+  it("deleteConfig 走 POST /delete + 结构化 body（surfaces/keys 列表）", async () => {
     await api.deleteConfig("A/B C", "config");
     expect(h.calls[0]).toMatchObject({
-      method: "delete", url: "/api/config/A%2FB%20C",
-      params: { surface: "config" },
+      method: "post", url: "/api/config/delete",
+      data: { surfaces: ["config"], keys: ["A/B C"] },
     });
   });
 
-  it("updateConfig 载荷收进 configs 键 + surface 必填", async () => {
+  it("updateConfig 走 POST /update + 结构化 body", async () => {
     await api.updateConfig({ X: "1" }, "config");
     expect(h.calls[0]).toMatchObject({
-      method: "put", url: "/api/config",
-      data: { configs: { X: "1" } }, params: { surface: "config" },
+      method: "post", url: "/api/config/update",
+      data: { surfaces: ["config"], configs: { X: "1" } },
     });
   });
 
-  it("getConfigMeta 按 surface 请求（页面身份声明）", async () => {
+  it("getConfigMeta 走 POST + surfaces 列表", async () => {
     await api.getConfigMeta("remote");
     expect(h.calls[0]).toMatchObject({
-      method: "get", url: "/api/config/meta", params: { surface: "remote" },
+      method: "post", url: "/api/config/meta", data: { surfaces: ["remote"] },
     });
   });
 
-  it("getConfig 按 surface 请求（值获取以场景为轴）", async () => {
+  it("getConfig 走 POST /list + surfaces 列表", async () => {
     await api.getConfig("config");
     expect(h.calls[0]).toMatchObject({
-      method: "get", url: "/api/config", params: { surface: "config" },
+      method: "post", url: "/api/config/list", data: { surfaces: ["config"] },
     });
   });
 
-  it("getRequiredStatus 按 surface 请求", async () => {
+  it("getRequiredStatus 走 POST + surfaces 列表", async () => {
     await api.getRequiredStatus("config");
     expect(h.calls[0]).toMatchObject({
-      method: "get", url: "/api/config/required-status", params: { surface: "config" },
+      method: "post", url: "/api/config/required-status", data: { surfaces: ["config"] },
     });
   });
 

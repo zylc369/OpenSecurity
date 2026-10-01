@@ -253,6 +253,37 @@ fail-safe 自禁用（带日志）; GET 不再返回空值键。
   前端 tsc 0 + 42/42; 插件加载 ✓
 - 行为变化记录: ① banner 不再展示 validator 细节（非法值→日志+回落，
   banner 只提醒缺失）② 值接口不返回跨场景全量/空值键
+- 未声明键禁入（用户裁定: 声明是配置存在的前提）: get_entries 删手写键
+  合成循环——.ai_env 中 _FIELDS 未声明的键不进领域模型/值接口/meta，首次
+  发现记 WARNING（去重集合，可感知可审计）; 新增键必须先在 _FIELDS 添加
+  声明。ConfigCategory.OTHER 枚举与前端图标映射随之移除（8 分类）;
+  _guard_surface 未声明键一律 422（任何场景）; 写入用例改声明键
+  （GITHUB_TOKEN/HF_ENDPOINT）; 未声明键断言反转（不出现+告警登记）。
+  终验: pyright 0/0 + 后端 9/9 + E2E 93/93 + 前端 tsc 0 + 44/44 +
+  插件 17/17 + 加载 ✓
+- 配置接口全面 POST 化 + surfaces 列表贯穿全链路（用户指令）: 禁 GET，
+  请求结构化（pydantic 模型 ConfigQuery/ConfigUpdate/Delete，单字段也包装）;
+  路由 POST /api/config/{list,meta,required-status,update,delete}（单键 GET/PUT
+  接口删除）; config_meta 签名改 list[Surface]（多场景天然合并）; _guard_surface
+  改交集语义（与读一致）。消费方同步: 前端 client×5（POST+body）+ 契约断言、
+  插件 control-config（POST /api/config/list，surfaces:["config"]）、E2E 全量
+  转换。插件管道影响（用户问）: controlFetch 原生支持 POST+body 无影响;
+  版本窗口——控制台与 opencode 需同批重启（新路由 404 → 插件 fail-safe+日志）。
+  实施 note: control-config.ts 编辑残留重复段致语法错误（验证即时抓到修复）。
+  终验: pyright 0/0 + 后端 9/9 + E2E 93/93 + 前端 tsc 0 + 44/44 + 插件
+  17/17 + 2/2 + test-control 11/11 + 加载 ✓
+- 入参类型固定 + get_entries 收敛（用户指令）: surfaces 统一
+  list[Surface] | None（消灭 Surface|list|tuple 联合类型; get_kv_list/
+  required_status 必填 list）; get_entries 重写为循环内过滤（wanted 交集
+  continue）+ 值解析提取 _resolve_value（validator/缓存/回落收口单点）;
+  raw 命名改 configs（实际配置值）。调用方同步: routes×5/scanner/proxy_pool
+  ×2/tests。清理 3 处历史 __import__ 内联残渣（Any 逃过 pyright，裸单值
+  被 set() 拆字符集致手写键丢失——本轮 test_control 2 失败的根因）。
+  读数: pyright 0/0 + 9/9 + 93/93
+- _TEMPLATE 手写模板删除 → _build_template() 从 _FIELDS 动态拼接（单一来源:
+  必要键显式待填+hint 注释/无默认可选键注释提示/有默认键省略; 范围限
+  CONFIG 场景; IDA 平台示例并入 hint）; E2E 补动态特性断言（hint 进模板/
+  无默认可选注释/有默认省略）; test_env_rw 注释断言同步。读数 9/9 + 93/93
 - 配置全链路覆盖审计（用户交付前审视驱动）: 补 5 处缺口——后端单元
   +path 归一化与 validator 链（临时 HOME 验 ~/ 展开/通过/回落/手写键不归一）
   +validator 结果缓存不重跑 +get() 非法回落→None +required_status 三态与

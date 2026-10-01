@@ -113,7 +113,7 @@ class Scanner:
             # 并行扫描所有 agent + 全局
             agent_task = loop.run_in_executor(executor, detect_tools.ToolsScanner.get_instance().scan_all)
             docker_task = loop.run_in_executor(executor, docker_manager.DockerManager.scan_global)
-            config_task = loop.run_in_executor(executor, lambda: ConfigManager.get_instance().required_status(Surface.CONFIG))
+            config_task = loop.run_in_executor(executor, lambda: ConfigManager.get_instance().required_status([Surface.CONFIG]))
             pydeps_task = loop.run_in_executor(executor, lambda: detect_py_deps.PyDepsDetector.get_instance().scan())
 
             agents = await agent_task

@@ -427,7 +427,7 @@ def test_config_read_all():
     if not OPENCODE_ROOT.exists():
         raise AssertionError("OPENCODE_ROOT 未设置或不存在")
     from services.config_manager import ConfigManager
-    configs = ConfigManager.get_instance().get_kv_list(Surface.CONFIG)
+    configs = ConfigManager.get_instance().get_kv_list([Surface.CONFIG])
     assert_true("DEEPSEEK_API_KEY" in configs, "应该有 DEEPSEEK_API_KEY")
     assert_true("IDA_PRO_HOME" in configs, "应该有 IDA_PRO_HOME")
 
@@ -458,7 +458,7 @@ def test_config_write_preserve_comments():
 @test("ConfigManager.required_status: 必要配置状态")
 def test_required_status():
     from services.config_manager import ConfigManager
-    keys = {c.key for c in ConfigManager.get_instance().required_status(Surface.CONFIG)}
+    keys = {c.key for c in ConfigManager.get_instance().required_status([Surface.CONFIG])}
     assert_true("DEEPSEEK_API_KEY" in keys, "应有 DEEPSEEK_API_KEY")
     assert_true("IDA_PRO_HOME" in keys, "应有 IDA_PRO_HOME")
 
@@ -821,10 +821,10 @@ def test_e2e_get_config():
     cp = get_shared_server()
     import httpx
     # surface 必填: 缺省 422（与 meta 同契约——值获取以场景为轴）
-    r = cp.client.get("http://localhost/api/config", timeout=5)
+    r = cp.client.post("http://localhost/api/config/list", timeout=5)
     assert_eq(r.status_code, 422, "缺 surface 应 422")
-    r = cp.client.get("http://localhost/api/config",
-                      params={"surface": "config"}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/list",
+                      json={"surfaces": ["config"]}, timeout=5)
     assert_eq(r.status_code, 200)
     data = r.json()
     # 声明了默认值的键恒有生效值（配置值或默认——沙箱副本来自生产 .ai_env，
@@ -843,10 +843,10 @@ def test_e2e_required_status():
     cp = get_shared_server()
     import httpx
     # surface 必填: 缺省 422
-    r = cp.client.get("http://localhost/api/config/required-status", timeout=5)
+    r = cp.client.post("http://localhost/api/config/required-status", timeout=5)
     assert_eq(r.status_code, 422, "缺 surface 应 422")
-    r = cp.client.get("http://localhost/api/config/required-status",
-                      params={"surface": "config"}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/required-status",
+                      json={"surfaces": ["config"]}, timeout=5)
     assert_eq(r.status_code, 200)
     data = r.json()
     assert_true("DEEPSEEK_API_KEY" in data, "应有 DEEPSEEK_API_KEY 状态")
@@ -874,15 +874,15 @@ def test_e2e_config_meta():
     cp = get_shared_server()
     import httpx
     # surface 必填: 缺省 422; hidden 是存储态不是页面身份 → 422
-    r = cp.client.get("http://localhost/api/config/meta", timeout=5)
+    r = cp.client.post("http://localhost/api/config/meta", timeout=5)
     assert_eq(r.status_code, 422, "缺 surface 应 422")
-    r = cp.client.get("http://localhost/api/config/meta",
-                      params={"surface": "hidden"}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/meta",
+                      json={"surfaces": ["hidden"]}, timeout=5)
     assert_eq(r.status_code, 422, "surface=hidden 应 422")
 
     # config 面: categories 有序内嵌 + 条目新契约字段
-    r = cp.client.get("http://localhost/api/config/meta",
-                      params={"surface": "config"}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/meta",
+                      json={"surfaces": ["config"]}, timeout=5)
     assert_eq(r.status_code, 200)
     data = r.json()
     assert_true("categories" in data and "entries" in data, "ConfigMetaView 双键")
@@ -899,7 +899,7 @@ def test_e2e_config_meta():
             assert_true(prop in field, f"{key}.{prop} 缺失")
         assert_true("hidden" not in field, f"{key} 不应再有 hidden 字段")
     # value = 领域模型合并的生效值（与值接口 GET /api/config 同源一致）
-    r_vals = cp.client.get("http://localhost/api/config", params={"surface": "config"}, timeout=5)
+    r_vals = cp.client.post("http://localhost/api/config/list", json={"surfaces": ["config"]}, timeout=5)
     assert_eq(data["entries"]["PERMISSION_ASK_TIMEOUT_SEC"]["value"],
               r_vals.json().get("PERMISSION_ASK_TIMEOUT_SEC"),
               "meta.value 应与值接口同键一致（同一领域模型来源）")
@@ -912,8 +912,8 @@ def test_e2e_config_meta():
         assert_true(hidden_key not in data["entries"], f"{hidden_key} 不进 config 面")
 
     # remote 面: 连接三键 + 远程调参 readonly 语义
-    r = cp.client.get("http://localhost/api/config/meta",
-                      params={"surface": "remote"}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/meta",
+                      json={"surfaces": ["remote"]}, timeout=5)
     assert_eq(r.status_code, 200)
     rem = r.json()
     assert_eq([c["code"] for c in rem["categories"]], ["remote", "remote_tuning"],
@@ -931,32 +931,35 @@ def test_e2e_config_write_surface():
     hidden 键 422 / 未声明键仅 config 面放行语义; ENABLED 专用文案保留。"""
     cp = get_shared_server()
     # config 面写远程键 → 422
-    r = cp.client.put("http://localhost/api/config", params={"surface": "config"},
-                      json={"configs": {"REMOTE_CONSOLE_URL": "http://x"}}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/update",
+                      json={"surfaces": ["config"], "configs": {"REMOTE_CONSOLE_URL": "http://x"}}, timeout=5)
     assert_eq(r.status_code, 422, "config 面写远程键应 422")
     # remote 面写 readonly 调参 → 422
-    r = cp.client.put("http://localhost/api/config", params={"surface": "remote"},
-                      json={"configs": {"REMOTE_HEARTBEAT_INTERVAL_SEC": "1"}}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/update",
+                      json={"surfaces": ["remote"], "configs": {"REMOTE_HEARTBEAT_INTERVAL_SEC": "1"}}, timeout=5)
     assert_eq(r.status_code, 422, "readonly 调参写应 422")
     # remote 面写 hidden 节点键 → 422（堵 node-config 旁路）
-    r = cp.client.put("http://localhost/api/config", params={"surface": "remote"},
-                      json={"configs": {"CONTROL_API_KEY": "x"}}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/update",
+                      json={"surfaces": ["remote"], "configs": {"CONTROL_API_KEY": "x"}}, timeout=5)
     assert_eq(r.status_code, 422, "hidden 节点键写应 422")
-    # remote 面写未声明键 → 422
-    r = cp.client.put("http://localhost/api/config", params={"surface": "remote"},
-                      json={"configs": {"NOT_DECLARED_KEY": "x"}}, timeout=5)
+    # 写未声明键 → 422（声明是配置存在的前提——任何场景都不放行）
+    r = cp.client.post("http://localhost/api/config/update",
+                      json={"surfaces": ["config"], "configs": {"NOT_DECLARED_KEY": "x"}}, timeout=5)
+    assert_eq(r.status_code, 422, "config 面写未声明键应 422")
+    r = cp.client.post("http://localhost/api/config/update",
+                      json={"surfaces": ["remote"], "configs": {"NOT_DECLARED_KEY": "x"}}, timeout=5)
     assert_eq(r.status_code, 422, "remote 面写未声明键应 422")
     # ENABLED: 专用守卫文案（引导「切换远程」按钮）先于通用校验
-    r = cp.client.put("http://localhost/api/config", params={"surface": "remote"},
-                      json={"configs": {"REMOTE_CONSOLE_ENABLED": "1"}}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/update",
+                      json={"surfaces": ["remote"], "configs": {"REMOTE_CONSOLE_ENABLED": "1"}}, timeout=5)
     assert_eq(r.status_code, 422)
     assert_true("切换远程" in str(r.json().get("detail", "")), "ENABLED 报错引导按钮")
     # DELETE 同一守卫链: 跨面删除拒绝 + readonly 键删除拒绝
-    r = cp.client.delete("http://localhost/api/config/REMOTE_CONSOLE_URL",
-                         params={"surface": "config"}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/delete",
+                         json={"surfaces": ["config"], "keys": ["REMOTE_CONSOLE_URL"]}, timeout=5)
     assert_eq(r.status_code, 422, "config 面删远程键应 422")
-    r = cp.client.delete("http://localhost/api/config/REMOTE_HEARTBEAT_INTERVAL_SEC",
-                         params={"surface": "remote"}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/delete",
+                         json={"surfaces": ["remote"], "keys": ["REMOTE_HEARTBEAT_INTERVAL_SEC"]}, timeout=5)
     assert_eq(r.status_code, 422, "remote 面删 readonly 调参应 422")
 
 
@@ -1065,20 +1068,19 @@ def test_e2e_config_write():
     original = ai_env_path.read_text()
     cp = get_shared_server()
     import httpx
-    r = cp.client.put(
-        f"http://localhost/api/config",
-        params={"surface": "config"},
-        json={"configs": {"E2E_TEST_KEY": "e2e_value"}},
+    r = cp.client.post(
+        "http://localhost/api/config/update",
+        json={"surfaces": ["config"], "configs": {"GITHUB_TOKEN": "e2e_value"}},
         timeout=5,
     )
     assert_eq(r.status_code, 200)
-    # 响应为生效值全集（与 GET 同契约——保存方以响应为新基线，
+    # 响应为所请求场景生效值 KV（与 /list 同契约——保存方以响应为新基线，
     # 默认值支撑的表单状态不被原始值响应覆盖）
     assert_true(r.json().get("PERMISSION_ASK_TIMEOUT_SEC") is not None,
                 "PUT 响应应含未配置键的声明默认（生效值契约）")
     # 验证文件实际改变
     content = ai_env_path.read_text()
-    assert_true("E2E_TEST_KEY=e2e_value" in content, "文件应包含新 key")
+    assert_true("GITHUB_TOKEN=e2e_value" in content, "文件应包含新 key")
     # 清理 + 还原
     ai_env_path.write_text(original)
 
@@ -1880,10 +1882,10 @@ def test_config_overwrite():
     cm = ConfigManager.get_instance()
     original = cm.ai_env_path.read_text()
     try:
-        cm.set({"TEST_OV": "v1"})
-        assert_eq(cm.get_kv_list(__import__("services.config_manager", fromlist=["Surface"]).Surface.CONFIG).get("TEST_OV"), "v1")
-        cm.set({"TEST_OV": "v2"})
-        assert_eq(cm.get_kv_list(__import__("services.config_manager", fromlist=["Surface"]).Surface.CONFIG).get("TEST_OV"), "v2", "覆盖后应新值")
+        cm.set({cm.Keys.GITHUB_TOKEN: "v1"})
+        assert_eq(cm.get_kv_list([Surface.CONFIG]).get(cm.Keys.GITHUB_TOKEN), "v1")
+        cm.set({cm.Keys.GITHUB_TOKEN: "v2"})
+        assert_eq(cm.get_kv_list([Surface.CONFIG]).get(cm.Keys.GITHUB_TOKEN), "v2", "覆盖后应新值")
     finally:
         cm.ai_env_path.write_text(original)
 
@@ -1894,11 +1896,10 @@ def test_config_multi_keys():
     cm = ConfigManager.get_instance()
     original = cm.ai_env_path.read_text()
     try:
-        cm.set({"TEST_M1": "v1", "TEST_M2": "v2", "TEST_M3": "v3"})
-        cfg = cm.get_kv_list(__import__("services.config_manager", fromlist=["Surface"]).Surface.CONFIG)
-        assert_eq(cfg.get("TEST_M1"), "v1")
-        assert_eq(cfg.get("TEST_M2"), "v2")
-        assert_eq(cfg.get("TEST_M3"), "v3")
+        cm.set({cm.Keys.GITHUB_TOKEN: "v1", cm.Keys.HF_ENDPOINT: "v2"})
+        cfg = cm.get_kv_list([Surface.CONFIG])
+        assert_eq(cfg.get(cm.Keys.GITHUB_TOKEN), "v1")
+        assert_eq(cfg.get(cm.Keys.HF_ENDPOINT), "v2")
     finally:
         cm.ai_env_path.write_text(original)
 
@@ -2096,14 +2097,14 @@ def test_graphiti_adapter_real_chain():
 def test_e2e_config_delete():
     cp = get_shared_server()
     import httpx
-    cp.client.put("http://localhost/api/config/E2E_DEL",
-              params={"surface": "config"}, json={"value": "test"}, timeout=5)
-    r = cp.client.delete("http://localhost/api/config/E2E_DEL",
-                         params={"surface": "config"}, timeout=5)
+    cp.client.post("http://localhost/api/config/update",
+              json={"surfaces": ["config"], "configs": {"GITHUB_TOKEN": "test"}}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/delete",
+                         json={"surfaces": ["config"], "keys": ["GITHUB_TOKEN"]}, timeout=5)
     assert_eq(r.status_code, 200)
     # 删除后经场景值接口确认键回落（单键 GET 接口已随统一场景轴移除）
-    r = cp.client.get("http://localhost/api/config", params={"surface": "config"}, timeout=5)
-    assert_true("E2E_DEL" not in r.json(), "删后不应出现在场景 KV 中")
+    r = cp.client.post("http://localhost/api/config/list", json={"surfaces": ["config"]}, timeout=5)
+    assert_true(not r.json().get("GITHUB_TOKEN"), "删后不应出现在场景 KV 中")
 
 
 @test("E2E: /api/deps/{agent} 不存在 agent → 工具空 + summary 就绪")
@@ -2331,6 +2332,11 @@ def test_config_ensure_template():
             assert_true(fake.exists(), "模板文件应存在")
             content = fake.read_text(encoding="utf-8")
             assert "IDA_PRO_HOME=" in content and "DEEPSEEK_API_KEY=" in content
+            # 动态模板特性（经 _FIELDS 拼接）: 必要键 hint 注释随声明;
+            # 有默认键省略（生效值自动来自声明默认）; 无默认可选键注释提示
+            assert "该目录下需有 idat" in content, "必要键 hint 进模板注释"
+            assert "# GITHUB_TOKEN=" in content, "无默认可选键注释提示"
+            assert "PERMISSION_ASK_TIMEOUT_SEC" not in content, "有默认键不进模板"
             fake.write_text("USER_CUSTOM=value\n", encoding="utf-8")
             assert_false(ConfigManager.get_instance().ensure_template(), "已存在应返回 False")
             assert fake.read_text(encoding="utf-8") == "USER_CUSTOM=value\n", "用户内容不得被覆盖"

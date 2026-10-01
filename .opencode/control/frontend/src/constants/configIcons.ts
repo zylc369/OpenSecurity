@@ -17,7 +17,6 @@ export const CONFIG_CATEGORY_ICONS: Record<string, ComponentType> = {
   proxy: GlobalOutlined,
   behavior: ThunderboltOutlined,
   developer: CodeOutlined,
-  other: AppstoreOutlined,
   remote: CloudServerOutlined,
   remote_tuning: SyncOutlined,
   system: DashboardOutlined,

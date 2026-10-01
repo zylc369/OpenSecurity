@@ -60,7 +60,7 @@ def test_env_rw():
             cm.Keys.CONTROL_RESIDENT: "1"})
     assert_eq(cm.get(cm.Keys.CONTROL_RESIDENT), "1")
     raw = cm.ai_env_path.read_text()
-    assert_true("# IDA Pro 安装目录" in raw, "注释保留")
+    assert_true(cm.Keys.IDA_PRO_HOME + "=" in raw, "注释保留（模板经 _FIELDS 动态生成）")
     cm.delete(cm.Keys.CONTROL_RESIDENT)
     assert_true(cm.get(cm.Keys.CONTROL_RESIDENT) is None, "删除生效")
 
@@ -69,7 +69,7 @@ def test_env_rw():
 def test_get_kv_list():
     cm = _fresh()
     # 未配置声明键 → 声明默认值
-    eff = cm.get_kv_list(Surface.CONFIG)
+    eff = cm.get_kv_list([Surface.CONFIG])
     assert_eq(eff.get(cm.Keys.PERMISSION_ASK_TIMEOUT_SEC), "300", "未配置回退默认")
     assert_eq(eff.get(cm.Keys.REFLECT_NUDGE_ENABLED), "1", "开关键默认开启")
     assert_eq(eff.get(cm.Keys.RESUME_ANALYSIS_ENABLED), "1", "续传开关默认开启")
@@ -81,34 +81,33 @@ def test_get_kv_list():
     assert_true(cm.Keys.REMOTE_CONSOLE_URL not in eff, "config 场景不含 remote 键")
     assert_true(cm.Keys.HEARTBEAT_TIMEOUT_SEC not in eff, "config 场景不含 hidden 键")
     # remote 场景 KV: 不含 config 键; 有默认的远程键融合、用户配置的远程键出现
-    rem = cm.get_kv_list(Surface.REMOTE)
+    rem = cm.get_kv_list([Surface.REMOTE])
     assert_true(cm.Keys.DEEPSEEK_API_KEY not in rem, "remote 场景不含 config 键")
     assert_eq(rem.get(cm.Keys.REMOTE_HEARTBEAT_INTERVAL_SEC), "5.0",
               "remote tunables 默认融合（在其声明场景内）")
     cm.set({cm.Keys.REMOTE_CONSOLE_URL: "http://x"})
-    assert_true(cm.Keys.REMOTE_CONSOLE_URL in cm.get_kv_list(Surface.REMOTE),
+    assert_true(cm.Keys.REMOTE_CONSOLE_URL in cm.get_kv_list([Surface.REMOTE]),
                 "配置后远程键进入 remote 场景 KV")
     # 配置值优先于默认
     cm.set({cm.Keys.PERMISSION_ASK_TIMEOUT_SEC: "60"})
-    assert_eq(cm.get_kv_list(Surface.CONFIG)[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC], "60", "配置值优先")
+    assert_eq(cm.get_kv_list([Surface.CONFIG])[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC], "60", "配置值优先")
     # 空串配置 → 回退默认（清空=回到默认的语义）
     cm.set({cm.Keys.PERMISSION_ASK_TIMEOUT_SEC: ""})
-    assert_eq(cm.get_kv_list(Surface.CONFIG)[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC], "300", "空串回退默认")
-    # 未声明的手写键非空 → 保留
-    cm.set({"SOME handwritten_KEY": "v"})
-    assert_eq(cm.get_kv_list(Surface.CONFIG).get("SOME handwritten_KEY"), "v", "手写键保留")
-    # 手写键空串 → 不出现
-    cm.set({"EMPTY_HANDWRITTEN": ""})
-    assert_true("EMPTY_HANDWRITTEN" not in cm.get_kv_list(Surface.CONFIG), "空手写键不出现")
+    assert_eq(cm.get_kv_list([Surface.CONFIG])[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC], "300", "空串回退默认")
+    # 未声明键不属于配置体系（不进 KV; 首次发现记 WARNING 可感知可审计）
+    cm.set({"SOME_UNDECLARED_KEY": "v"})
+    assert_true("SOME_UNDECLARED_KEY" not in cm.get_kv_list([Surface.CONFIG]),
+                "未声明键不进值接口（声明是配置存在的前提）")
+    assert_true("SOME_UNDECLARED_KEY" in cm._undeclared_warned, "未声明键告警去重集合已登记")
     # 非法配置值在构建层校验回落（validator 失败→日志+声明默认; 无默认→空）
     cm.set({cm.Keys.DEEPSEEK_API_KEY: "short"})
-    assert_true(cm.get_kv_list(Surface.CONFIG).get(cm.Keys.DEEPSEEK_API_KEY, "") == "",
+    assert_true(cm.get_kv_list([Surface.CONFIG]).get(cm.Keys.DEEPSEEK_API_KEY, "") == "",
                 "非法 required 值回落空（无声明默认; 记日志）")
     # validator 结果缓存: 同 (key, value) 二次读取不再重跑校验（缓存命中）
     assert_true((cm.Keys.DEEPSEEK_API_KEY, "short") in cm._validation_cache,
                 "非法结果进入校验缓存")
     cache_len = len(cm._validation_cache)
-    cm.get_kv_list(Surface.CONFIG)
+    cm.get_kv_list([Surface.CONFIG])
     cm.get_entries()  # 再读两遍
     assert_eq(len(cm._validation_cache), cache_len, "同 (key,value) 命中缓存不重跑")
     # get() 单键: 非法值回落默认后 → None（视同未配置）
@@ -129,7 +128,7 @@ def test_path_normalization():
         try:
             os.environ["HOME"] = td
             cm.set({cm.Keys.IDA_PRO_HOME: "~/ida"})
-            assert_eq(cm.get_kv_list(Surface.CONFIG).get(cm.Keys.IDA_PRO_HOME),
+            assert_eq(cm.get_kv_list([Surface.CONFIG]).get(cm.Keys.IDA_PRO_HOME),
                       str(ida_dir), "~/ 展开归一化且 validator 通过")
         finally:
             if old_home is not None:
@@ -138,31 +137,28 @@ def test_path_normalization():
                 os.environ.pop("HOME", None)
     # 负向链: 目录不存在 → validator 失败回落默认（kv 不含, 原因在日志）
     cm.set({cm.Keys.IDA_PRO_HOME: "~/not_exist_dir_xyz"})
-    assert_true(cm.Keys.IDA_PRO_HOME not in cm.get_kv_list(Surface.CONFIG),
+    assert_true(cm.Keys.IDA_PRO_HOME not in cm.get_kv_list([Surface.CONFIG]),
                 "目录不存在→validator 失败回落空")
-    # 未声明手写键不做归一化（无类型元数据）
-    cm.set({"HANDWRITTEN_PATH_LIKE": "~/raw"})
-    assert_eq(cm.get_kv_list(Surface.CONFIG).get("HANDWRITTEN_PATH_LIKE"),
-              "~/raw", "手写键不归一化")
+    # 未声明键即使形似路径也不进入体系（无声明即无管理）
 
 
 @test("ConfigManager: required_status——三态 + 场景过滤")
 def test_required_status_states():
     cm = _fresh()
     # 未配置 → ok False
-    st = {c.key: c for c in cm.required_status(Surface.CONFIG)}
+    st = {c.key: c for c in cm.required_status([Surface.CONFIG])}
     assert_true(cm.Keys.DEEPSEEK_API_KEY in st, "必要键在列")
     assert_true(not st[cm.Keys.DEEPSEEK_API_KEY].ok, "未配置 ok=False")
     # 配置合法 → ok True
     cm.set({cm.Keys.DEEPSEEK_API_KEY: "sk-abc123def456"})
-    st = {c.key: c for c in cm.required_status(Surface.CONFIG)}
+    st = {c.key: c for c in cm.required_status([Surface.CONFIG])}
     assert_true(st[cm.Keys.DEEPSEEK_API_KEY].ok, "合法配置 ok=True")
     # 非法值（validator 失败回落空）→ ok False（等同缺失; 原因在日志）
     cm.set({cm.Keys.DEEPSEEK_API_KEY: "short"})
-    st = {c.key: c for c in cm.required_status(Surface.CONFIG)}
+    st = {c.key: c for c in cm.required_status([Surface.CONFIG])}
     assert_true(not st[cm.Keys.DEEPSEEK_API_KEY].ok, "非法回落空 ok=False")
     # 场景过滤: 必要键全在 config 场景 → remote 场景为空
-    assert_eq(len(cm.required_status(Surface.REMOTE)), 0, "remote 场景无必要键")
+    assert_eq(len(cm.required_status([Surface.REMOTE])), 0, "remote 场景无必要键")
 
 
 @test("ConfigManager: get_entries——序列场景参数（多场景并集）")
@@ -173,7 +169,7 @@ def test_get_entries_surface_sequence():
     assert_true(cm.Keys.DEEPSEEK_API_KEY in keys, "并集含 config 键")
     assert_true(cm.Keys.REMOTE_CONSOLE_URL in keys, "并集含 remote 键")
     assert_true(cm.Keys.HEARTBEAT_TIMEOUT_SEC not in keys, "并集不含 hidden 键")
-    single = cm.get_entries(surfaces=Surface.REMOTE)
+    single = cm.get_entries(surfaces=[Surface.REMOTE])
     assert_true(all(Surface.REMOTE in e.surfaces for e in single), "单值参数等价")
 
 
@@ -201,7 +197,7 @@ def test_meta():
     cm = _fresh()
 
     # config 面: 五分类有序，不含远程/系统面条目
-    cfg = cm.config_meta(Surface.CONFIG)
+    cfg = cm.config_meta([Surface.CONFIG])
     assert_eq([c.code for c in cfg.categories],
               ["tools", "models", "proxy", "behavior", "developer"], "config 面分类序")
     assert_true(cm.Keys.DEEPSEEK_API_KEY in cfg.entries, "常规键进 config 面")
@@ -229,7 +225,7 @@ def test_meta():
         assert_eq(cfg.entries[k].readonly, False, f"{k} 可写")
 
     # remote 面: 连接三键 + 远程 6 调参; ENABLED/调参 readonly
-    rem = cm.config_meta(Surface.REMOTE)
+    rem = cm.config_meta([Surface.REMOTE])
     assert_eq([c.code for c in rem.categories], ["remote", "remote_tuning"],
               "remote 面分类序")
     assert_eq(len(rem.entries), 9, "remote 面 9 条目")
@@ -241,7 +237,7 @@ def test_meta():
     assert_true(cm.Keys.CONTROL_API_KEY not in rem.entries, "节点侧键不进 remote 面")
 
     # hidden 场景: 心跳 3 项 + 节点侧 3 键（静态 _FIELDS 的 surfaces 数组归属）
-    hidden = cm.get_entries(surfaces=Surface.HIDDEN)
+    hidden = cm.get_entries(surfaces=[Surface.HIDDEN])
     assert_eq(len([e for e in hidden
                    if e.key in {cm.Keys.HEARTBEAT_TIMEOUT_SEC,
                                        cm.Keys.HEARTBEAT_SWEEP_INTERVAL_SEC,
@@ -256,19 +252,17 @@ def test_meta():
 
     # 分类枚举: 顺序 + desc 全覆盖
     ordered = ConfigCategory.ordered()
-    assert_eq(len(ordered), 9, "9 分类")
+    assert_eq(len(ordered), 8, "8 分类（OTHER 兜底已随未声明键禁入而移除）")
     assert_eq(ordered[0].value, "tools", "首分类 tools")
     for c in ordered:
         assert_true(c.desc, f"{c.value} 有描述")
 
-    # 未知键兜底: 仅 config 面 OTHER 分类; remote 面不兜底
+    # 未声明键不进任何场景 meta（声明是配置存在的前提——不存在兜底分类）
     cm.set({"SOME_UNKNOWN_KEY": "v"})
-    cfg2 = cm.config_meta(Surface.CONFIG)
-    assert_true("SOME_UNKNOWN_KEY" in cfg2.entries, "未知键 config 面兜底")
-    assert_eq(cfg2.entries["SOME_UNKNOWN_KEY"].category_code, "other", "未知键归其他")
-    assert_true("other" in [c.code for c in cfg2.categories], "其他分类出现")
-    assert_true("SOME_UNKNOWN_KEY" not in cm.config_meta(Surface.REMOTE).entries,
-                "未知键不进 remote 面")
+    assert_true("SOME_UNKNOWN_KEY" not in cm.config_meta([Surface.CONFIG]).entries,
+                "未声明键不进 config 面 meta")
+    assert_true("SOME_UNKNOWN_KEY" not in cm.config_meta([Surface.REMOTE]).entries,
+                "未声明键不进 remote 面 meta")
 
 
 @test("ConfigManager: 引导属性——dev_mode 优先级/is_windows/ipc_addr")

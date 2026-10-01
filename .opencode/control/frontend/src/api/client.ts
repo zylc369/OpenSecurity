@@ -59,28 +59,28 @@ export const api = {
     return r.data;
   },
 
-  // ─── /api/config ────────────────────────────────────────
+  // ─── /api/config（全 POST + 结构化 body; surfaces 列表贯穿全链路） ─────
   async getConfig(surface: ConfigSurface): Promise<ConfigMap> {
-    const r = await instance.get<ConfigMap>("/api/config",
-      { params: { surface } });
+    const r = await instance.post<ConfigMap>("/api/config/list",
+      { surfaces: [surface] });
     return r.data;
   },
 
   async getRequiredStatus(surface: ConfigSurface): Promise<RequiredStatusMap> {
-    const r = await instance.get<RequiredStatusMap>("/api/config/required-status",
-      { params: { surface } });
+    const r = await instance.post<RequiredStatusMap>("/api/config/required-status",
+      { surfaces: [surface] });
     return r.data;
   },
 
   async updateConfig(updates: ConfigMap, surface: ConfigSurface): Promise<ConfigMap> {
-    const r = await instance.put<ConfigMap>("/api/config", { configs: updates },
-      { params: { surface } });
+    const r = await instance.post<ConfigMap>("/api/config/update",
+      { surfaces: [surface], configs: updates });
     return r.data;
   },
 
   async deleteConfig(key: string, surface: ConfigSurface): Promise<ConfigMap> {
-    const r = await instance.delete<ConfigMap>(`/api/config/${encodeURIComponent(key)}`,
-      { params: { surface } });
+    const r = await instance.post<ConfigMap>("/api/config/delete",
+      { surfaces: [surface], keys: [key] });
     return r.data;
   },
 
@@ -136,8 +136,8 @@ export const api = {
 
   // ─── /api/config/meta ───────────────────────────────────
   async getConfigMeta(surface: ConfigSurface): Promise<ConfigMetaResponse> {
-    const r = await instance.get<ConfigMetaResponse>("/api/config/meta",
-      { params: { surface } });
+    const r = await instance.post<ConfigMetaResponse>("/api/config/meta",
+      { surfaces: [surface] });
     return r.data;
   },
 

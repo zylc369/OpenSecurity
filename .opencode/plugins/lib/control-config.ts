@@ -2,13 +2,15 @@
  * 控制台配置 API 客户端（Plugin 端）。
  *
  * 收口原则：Plugin 不直接读 .ai_env（控制台 config_store 是唯一读写方）。
- * 通过 HTTP GET /api/config?surface=config 拉配置生效值 + 内存缓存（TTL + SWR）。
- * （值接口以场景为轴必填 surface; 插件消费的键全部在 config 场景）
+ * 通过 HTTP POST /api/config/list（结构化 body，surfaces 列表贯穿链路）+
+ * 内存缓存（TTL + SWR）拉配置**生效值**（配置值或服务端声明默认——插件
+ * 零默认值副本，取不到生效值即 fail-safe 不启用并记日志）。
  *
  * 使用场景：
  *   • shell.env hook 注入 IDA_PRO_HOME 到 agent 子进程（同步走缓存）
  *   • persistence.ts 恢复校验读 RESUME_ANALYSIS_ENABLED（异步直读）
  *   • reflection.ts 反思开关/间隔判定（同步走缓存）
+ *   • permission-timeout.ts 超时/类型判定（同步走缓存）
  *
  * API 语义（正交两分）：
  *   • fetchConfig()  —— 无缓存直读：每次拉最新，成功顺带喂缓存，失败 throw
@@ -21,6 +23,8 @@
  * 无法区分"未配置"与"读不到"，RESUME_ANALYSIS_ENABLED fail-open 放行）：
  *   • fetchConfig 失败 throw——调用方显式 catch 降级或让异常终止流程
  *   • 后台刷新失败保留旧值（只 debugLog，不 throw——fire-and-forget）
+ *   • 控制台版本不匹配（路由 404/405）同样 throw——控制台与 opencode
+ *     需同批重启（新路由仅存在于新版控制台）
  */
 import { controlFetch } from "./control-http";
 import { debugLog } from "./logging";
@@ -34,15 +38,20 @@ let cachedAt = 0;
 let backgroundRefreshInFlight = false;
 
 /**
- * 无缓存直读控制台配置（总是最新）。
+ * 无缓存直读控制台配置生效值（总是最新）。
  * 成功: 更新 TTL 缓存并返回。
  * 失败: throw（旧缓存保留）。
  */
 export async function fetchConfig(): Promise<Record<string, string>> {
-  const resp = await controlFetch("/api/config?surface=config", { timeoutMs: 3000 });
+  const resp = await controlFetch("/api/config/list", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ surfaces: ["config"] }),
+    timeoutMs: 3000,
+  });
   if (!resp.ok) {
-    debugLog(`fetchConfig 失败: /api/config?surface=config HTTP ${resp.status}`);
-    throw new Error(`fetchConfig 失败: /api/config?surface=config HTTP ${resp.status}`);
+    debugLog(`fetchConfig 失败: POST /api/config/list HTTP ${resp.status}`);
+    throw new Error(`fetchConfig 失败: POST /api/config/list HTTP ${resp.status}`);
   }
   cachedConfig = await resp.json() as Record<string, string>;
   cachedAt = Date.now();
