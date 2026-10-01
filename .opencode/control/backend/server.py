@@ -15,10 +15,12 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 from pathlib import Path
 from types import FrameType
+from typing import cast
 
 # 避免 SentenceTransformer 加载时向 HuggingFace 发 HEAD 请求（网络不通会卡 120s+）
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -28,8 +30,11 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 BACKEND_DIR = Path(__file__).parent
 sys.path.insert(0, str(BACKEND_DIR))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from services.config_manager import ConfigManager
@@ -38,6 +43,23 @@ from services.model_loader import ModelInferenceService
 import asyncio  # noqa: E402 —— 供 _relay_supervise_task 注解解析（字符串注解引用）
 
 _relay_supervise_task: "asyncio.Task[None] | None" = None
+
+
+def _json_safe(obj: object) -> object:
+    """递归净化 JSON 不可序列化值：非有限浮点（NaN/±inf）转字符串。
+
+    Python json.loads 接受 NaN/Infinity 非标准字面量；若校验错误回显 input
+    原值，starlette 的 json.dumps(allow_nan=False) 会抛 ValueError——即校验
+    错误处理器自身崩溃（客户端拿到 500 而非 422）。净化后保持 422 契约可序列化。"""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else str(obj)
+    if isinstance(obj, dict):
+        mapping = cast("dict[object, object]", obj)
+        return {k: _json_safe(v) for k, v in mapping.items()}
+    if isinstance(obj, (list, tuple)):
+        seq = cast("list[object] | tuple[object, ...]", obj)
+        return [_json_safe(v) for v in seq]
+    return obj
 
 
 def create_app() -> FastAPI:
@@ -57,6 +79,18 @@ def create_app() -> FastAPI:
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
     )
+
+    # 校验错误响应加固：默认处理器在 input 含 NaN/Infinity 时序列化崩溃
+    # （校验错误处理器自身 500）；净化后回显，保持 422 契约。
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_handler(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        raw_errors = cast("object", jsonable_encoder(exc.errors()))  # pyright: ignore[reportAny] —— jsonable_encoder 返回 Any（FastAPI 边界）
+        return JSONResponse(
+            status_code=422,
+            content={"detail": _json_safe(raw_errors)},
+        )
 
     # CORS：开发态允许 Vite 5173 跨域访问；发布态同源不需要
     if ConfigManager.get_instance().is_dev_mode:

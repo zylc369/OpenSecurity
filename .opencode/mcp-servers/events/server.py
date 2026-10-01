@@ -98,9 +98,9 @@ async def entity_relationships_search(
     group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
     center_node_uuid: Annotated[str, Field(description="中心实体 UUID，从前序搜索结果获取。必填。")],
     max_depth: Annotated[int, Field(description="图遍历最大深度（默认 2，最大 3）。", ge=1, le=3)] = 2,
-    node_labels: Annotated[list[str] | None, Field(description=NODE_LABELS_DESCRIPTION)] = None,
-    edge_types: Annotated[list[str] | None, Field(description="按关系类型过滤。")] = None,
-    max_results: Annotated[int, Field(description="最大返回结果数。")] = 20,
+    node_labels: Annotated[list[str] | None, Field(description=NODE_LABELS_DESCRIPTION, min_length=1)] = None,
+    edge_types: Annotated[list[str] | None, Field(description="按关系类型过滤。", min_length=1)] = None,
+    max_results: Annotated[int, Field(description="最大返回结果数。", ge=1, le=100)] = 20,
     message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """BFS from a center node within max_depth."""
@@ -118,7 +118,7 @@ async def diverse_results_search(
     query: Annotated[str, Field(description="中文自然语言查询。")],
     group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
     diversity_level: Annotated[Literal["low", "medium", "high"], Field(description="多样性优先级。low=更相似，high=更多样。")] = "medium",
-    max_results: Annotated[int, Field(description="最大返回结果数。")] = 10,
+    max_results: Annotated[int, Field(description="最大返回结果数。", ge=1, le=100)] = 10,
     message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """MMR-ranked diverse search with cross-encoder reranking."""
@@ -134,7 +134,7 @@ async def diverse_results_search(
 async def episode_context_search(
     query: Annotated[str, Field(description="中文自然语言查询，关于过往 agent 的推理和工具输出。")],
     group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
-    max_results: Annotated[int, Field(description="最大返回结果数。")] = 10,
+    max_results: Annotated[int, Field(description="最大返回结果数。", ge=1, le=100)] = 10,
     message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """Episode-centric search."""
@@ -149,10 +149,10 @@ async def episode_context_search(
 async def entity_search(
     query: Annotated[str, Field(description="中文自然语言查询。")],
     group_id: Annotated[str, Field(description="当前任务的 Flow ID，从 $OPENSECURITY_FLOW_ID 获取。")],
-    node_labels: Annotated[list[str], Field(description=NODE_LABELS_DESCRIPTION)],
+    node_labels: Annotated[list[str], Field(description=NODE_LABELS_DESCRIPTION, min_length=1)],
     min_mentions: Annotated[int, Field(description="可选：实体被提及的最少次数。不传或传0则不过滤。搜成功工具时传2。", ge=0)] = 0,
-    edge_types: Annotated[list[str] | None, Field(description="可选：按关系类型过滤。")] = None,
-    max_results: Annotated[int, Field(description="最大返回结果数。")] = 25,
+    edge_types: Annotated[list[str] | None, Field(description="可选：按关系类型过滤。", min_length=1)] = None,
+    max_results: Annotated[int, Field(description="最大返回结果数。", ge=1, le=100)] = 25,
     message: Annotated[str, Field(description="操作日志，1-2 句中文描述你正在做什么")] = "",
 ) -> str:
     """Search entities filtered by labels, optionally by mention count."""

@@ -2853,6 +2853,116 @@ def _knowledge_events_routes_inner():
         es._reset_for_tests()
 
 
+def _events_input_contract_inner():
+    """[契约] 主体（经子进程隔离执行——TestClient + 全量前置线程存在进程内
+    竞态活锁; 隔离执行断言原样，同 _knowledge_events_routes_inner 模式）。"""
+    from fastapi.testclient import TestClient
+    from services.event_store import EventStoreService as es, GraphitiFactoryResult
+
+    class FakeGraphiti:
+        driver = object()
+        async def build_indices_and_constraints(self):
+            pass
+        async def add_episode(self, **kw):
+            pass
+        async def close(self):
+            pass
+
+    es._reset_for_tests()
+    es._force_instance(es._create_fresh(graphiti_factory=cast("Callable[[], GraphitiFactoryResult]", lambda: (FakeGraphiti(), None))))
+    try:
+        from server import create_app
+        with TestClient(create_app()) as client:
+            # ── 422：契约违规必须显式拒绝（按字段语义收紧） ──
+            bad = [
+                ("/api/events/entry", {"name": "n", "body": "b", "source": "s"}, "entry 缺 group_id"),
+                ("/api/events/entry", {"name": "", "body": "b", "source": "s", "group_id": "g"}, "entry name 空串"),
+                ("/api/events/entry", {"name": "n", "body": "  ", "source": "s", "group_id": "g"}, "entry body 纯空白"),
+                ("/api/events/entry", {"name": "n", "body": "b", "source": "", "group_id": "g"}, "entry source 空串"),
+                ("/api/events/entry", {"name": "n", "body": "b", "source": "s", "group_id": ""}, "entry group_id 空串"),
+                ("/api/events/entry", {"name": "n", "body": "b", "source": "s", "group_id": "g", "timestamp": 0}, "entry timestamp=0"),
+                ("/api/events/entry", {"name": "n", "body": "b", "source": "s", "group_id": "g", "timestamp": -1}, "entry timestamp=-1"),
+                ("/api/events/delete", {"group_id": "  "}, "delete group_id 纯空白"),
+                ("/api/events/time-search", {"query": "", "group_id": "g"}, "time query 空串"),
+                ("/api/events/time-search", {"query": "q", "group_id": " "}, "time group_id 纯空白"),
+                ("/api/events/time-search", {"query": "q", "group_id": "g", "time_start": "2026/10/01"}, "time_start 非法格式"),
+                ("/api/events/time-search", {"query": "q", "group_id": "g", "max_results": 0}, "time max_results=0"),
+                ("/api/events/time-search", {"query": "q", "group_id": "g", "max_results": 101}, "time max_results=101"),
+                ("/api/events/entity-relationships-search", {"query": "q", "group_id": "g", "center_node_uuid": ""}, "rel center 空串"),
+                ("/api/events/entity-relationships-search", {"query": "q", "group_id": "g", "center_node_uuid": "u", "node_labels": []}, "rel node_labels=[]"),
+                ("/api/events/entity-relationships-search", {"query": "q", "group_id": "g", "center_node_uuid": "u", "edge_types": [""]}, "rel edge_types=['']"),
+                ("/api/events/entity-relationships-search", {"query": "q", "group_id": "g", "center_node_uuid": "u", "max_results": 10**9}, "rel max_results=1e9"),
+                ("/api/events/diverse-results-search", {"query": "q", "group_id": "g", "diversity_level": "extreme"}, "diversity 非法值"),
+                ("/api/events/diverse-results-search", {"query": "q", "group_id": "g", "max_results": -5}, "diverse max_results=-5"),
+                ("/api/events/episode-context-search", {"query": "q", "group_id": "g", "max_results": 0}, "episode max_results=0"),
+                ("/api/events/entity-search", {"query": "q", "group_id": "g", "node_labels": []}, "entity node_labels=[]"),
+                ("/api/events/entity-search", {"query": "q", "group_id": "g", "node_labels": [""]}, "entity node_labels=['']"),
+                ("/api/events/entity-search", {"query": "q", "group_id": "g", "node_labels": ["Tool"], "edge_types": []}, "entity edge_types=[]"),
+                ("/api/events/entity-search", {"query": "q", "group_id": "g", "node_labels": ["Tool"], "max_results": 10**9}, "entity max_results=1e9"),
+                ("/api/events/entry", {"body": "b", "source": "s", "group_id": "g"}, "entry 缺 name"),
+                ("/api/events/entry", {"name": "n", "source": "s", "group_id": "g"}, "entry 缺 body"),
+                ("/api/events/entry", {"name": "n", "body": "b", "group_id": "g"}, "entry 缺 source"),
+                ("/api/events/delete", {}, "delete 缺 group_id"),
+                ("/api/events/time-search", {"group_id": "g"}, "time 缺 query"),
+                ("/api/events/time-search", {"query": "q", "group_id": "g", "time_start": "   "}, "time_start 纯空白"),
+                ("/api/events/entity-relationships-search", {"query": "q", "group_id": "g"}, "rel 缺 center_node_uuid"),
+                ("/api/events/diverse-results-search", {"query": "q", "group_id": "g", "diversity_level": "High"}, "diversity 大小写敏感"),
+                ("/api/events/entity-search", {"query": "q", "group_id": "g"}, "entity 缺 node_labels"),
+                ("/api/events/entity-search", {"query": "q", "group_id": "g", "node_labels": ["Tool"], "edge_types": [""]}, "entity edge_types=['']"),
+            ]
+            for path, payload, label in bad:
+                r = client.post(path, json=payload)
+                assert_true(r.status_code == 422, f"{label} 应 422，实际 {r.status_code}: {r.text[:200]}")
+
+            # NaN/Infinity 字面量（Python json.loads 默认接受）——数值契约必须同样受限。
+            # 同时回归自定义 422 处理器：默认处理器回显 NaN input 时序列化崩溃（曾 500）
+            for lit in ("NaN", "Infinity", "-Infinity"):
+                r = client.post(
+                    "/api/events/entry",
+                    content='{"name":"n","body":"b","source":"s","group_id":"g","timestamp":%s}' % lit,
+                    headers={"Content-Type": "application/json"},
+                )
+                assert_true(r.status_code == 422, f"timestamp {lit} 应 422，实际 {r.status_code}: {r.text[:200]}")
+
+            # 422 响应形状：与 FastAPI 默认结构一致（type/loc/msg/input 全保留）
+            r = client.post("/api/events/entry", json={"name": "", "body": "b", "source": "s", "group_id": "g"})
+            detail = r.json()["detail"][0]
+            assert_true(
+                r.status_code == 422 and detail.get("type") == "string_too_short" and "input" in detail and "loc" in detail,
+                f"422 形状异常: {r.status_code} {r.text[:200]}",
+            )
+
+            # ── PASS：合法请求不回归（搜索类经 fake graphiti 走降级空结构，同 [77]） ──
+            r = client.post("/api/events/entry", json={"name": "n", "body": "b", "source": "s", "group_id": "g", "timestamp": 1755432000000})
+            assert_true(r.status_code == 202 and r.json() == {"queued": True}, f"entry 合法: {r.status_code} {r.text[:200]}")
+            r = client.post("/api/events/entry", json={"name": "n", "body": "b", "source": "s", "group_id": "g"})
+            assert_true(r.status_code == 202, f"entry timestamp 缺省: {r.status_code}")
+            r = client.post("/api/events/delete", json={"group_id": "g"})
+            assert_true(r.status_code == 202, f"delete 合法: {r.status_code}")
+            r = client.post("/api/events/time-search", json={"query": "q", "group_id": "g"})
+            assert_true(r.status_code == 200 and r.json()["edges"] == [], f"time-search 合法: {r.status_code}")
+            r = client.post("/api/events/time-search", json={"query": "q", "group_id": "g", "time_start": "2026-01-01T00:00:00Z", "time_end": "2026-01-02T00:00:00+08:00"})
+            assert_true(r.status_code == 200, f"time-start ISO 合法: {r.status_code}")
+            r = client.post("/api/events/diverse-results-search", json={"query": "q", "group_id": "g", "diversity_level": "high"})
+            assert_true(r.status_code == 200, f"diverse high: {r.status_code}")
+            r = client.post("/api/events/entity-relationships-search", json={"query": "q", "group_id": "g", "center_node_uuid": "u", "node_labels": ["Tool"], "edge_types": ["USES"], "max_depth": 3})
+            assert_true(r.status_code == 200, f"rel 合法: {r.status_code}")
+            r = client.post("/api/events/entity-search", json={"query": "q", "group_id": "g", "node_labels": ["Tool"], "min_mentions": 0, "max_results": 100})
+            assert_true(r.status_code == 200, f"entity 合法: {r.status_code}")
+            r = client.post("/api/events/episode-context-search", json={"query": "q", "group_id": "g", "max_results": 10})
+            assert_true(r.status_code == 200, f"episode 合法: {r.status_code}")
+            r = client.post("/api/events/entry", json={"name": "n", "body": "b", "source": "s", "group_id": "g", "timestamp": 1})
+            assert_true(r.status_code == 202, f"entry timestamp=1（gt 边界正值）: {r.status_code}")
+            r = client.post("/api/events/entity-relationships-search", json={"query": "q", "group_id": "g", "center_node_uuid": "u"})
+            assert_true(r.status_code == 200, f"rel 最小合法（过滤器缺省）: {r.status_code}")
+            r = client.post("/api/events/diverse-results-search", json={"query": "q", "group_id": "g"})
+            assert_true(r.status_code == 200, f"diverse 最小合法（默认 medium）: {r.status_code}")
+            r = client.post("/api/events/entity-search", json={"query": "q", "group_id": "g", "node_labels": ["Tool"]})
+            assert_true(r.status_code == 200, f"entity 最小合法（min_mentions 缺省）: {r.status_code}")
+    finally:
+        es._reset_for_tests()
+
+
 
 @test("health: boot_token 存在且同进程内稳定")
 def test_health_boot_token():
@@ -2879,6 +2989,178 @@ def test_knowledge_events_routes():
                 capture_output=True, text=True, cwd=str(BACKEND_DIR))
     if r.returncode != 0:
         raise AssertionError(f"隔离执行失败: {r.stderr[-400:]}")
+
+
+@test("events 输入契约: 语义收紧 422/PASS 矩阵（子进程隔离 + TestClient）")
+def test_events_input_contract():
+    """子进程隔离执行（同 test_knowledge_events_routes 的活锁规避模式）。"""
+    import subprocess as _sp
+    code = (
+        "import sys, os; sys.path.insert(0, '.'); sys.path.insert(0, 'tests'); "
+        f"os.environ['OPENSECURITY_HOME'] = {str(TEST_OPENSECURITY_HOME)!r}; "
+        f"os.environ['OPENSECURITY_AI_ENV'] = {str(TEST_AI_ENV)!r}; "
+        f"os.environ['OPENCODE_ROOT'] = {str(OPENCODE_ROOT)!r}; "
+        "os.environ.setdefault('CONTROL_TCP_PORT', os.environ.get('CONTROL_TCP_PORT', '0')); "
+        "from tests.test_control import _events_input_contract_inner; "
+        "_events_input_contract_inner()"
+    )
+    r = _sp.run([sys.executable, '-c', code], timeout=180,
+                capture_output=True, text=True, cwd=str(BACKEND_DIR))
+    if r.returncode != 0:
+        raise AssertionError(f"隔离执行失败: {r.stderr[-400:]}")
+
+
+@test("events 输入契约: 模型级全字段穷举矩阵（正常/边界/非法）")
+def test_events_input_contract_model_matrix():
+    """字段级穷举（不经 HTTP）：缺失必填 / 空与纯空白 / 数值边界 / NaN·±inf /
+    时间格式与空值 / 枚举大小写。HTTP 契约测试负责真实通道抽样，本用例负责字段×类别全覆盖。"""
+    from pydantic import ValidationError
+    from routes.events import (EventEntryIn, EventDeleteIn, TimeSearchIn,
+                               EntityRelationsIn, DiverseIn, EpisodeContextIn, EntitySearchIn)
+
+    entry = {"name": "n", "body": "b", "source": "s", "group_id": "g"}
+    tq = {"query": "q", "group_id": "g"}
+    rel = {**tq, "center_node_uuid": "u"}
+    ent = {**tq, "node_labels": ["Tool"]}
+
+    cases = [
+        # ── EventEntryIn ──
+        (EventEntryIn, {**entry, "timestamp": 1755432000000}, True, "entry 全量"),
+        (EventEntryIn, entry, True, "entry 最小（timestamp 缺省）"),
+        (EventEntryIn, {**entry, "timestamp": None}, True, "entry timestamp=None"),
+        (EventEntryIn, {**entry, "timestamp": 1}, True, "entry timestamp=1 边界"),
+        (EventEntryIn, {**entry, "timestamp": 1e12}, True, "entry timestamp=1e12"),
+        (EventEntryIn, {"body": "b", "source": "s", "group_id": "g"}, False, "entry 缺 name"),
+        (EventEntryIn, {"name": "n", "source": "s", "group_id": "g"}, False, "entry 缺 body"),
+        (EventEntryIn, {"name": "n", "body": "b", "group_id": "g"}, False, "entry 缺 source"),
+        (EventEntryIn, {"name": "n", "body": "b", "source": "s"}, False, "entry 缺 group_id"),
+        (EventEntryIn, {**entry, "name": ""}, False, "entry name 空串"),
+        (EventEntryIn, {**entry, "name": "   "}, False, "entry name 纯空白"),
+        (EventEntryIn, {**entry, "body": ""}, False, "entry body 空串"),
+        (EventEntryIn, {**entry, "body": "   "}, False, "entry body 纯空白"),
+        (EventEntryIn, {**entry, "source": ""}, False, "entry source 空串"),
+        (EventEntryIn, {**entry, "source": "   "}, False, "entry source 纯空白"),
+        (EventEntryIn, {**entry, "group_id": ""}, False, "entry group_id 空串"),
+        (EventEntryIn, {**entry, "group_id": "   "}, False, "entry group_id 纯空白"),
+        (EventEntryIn, {**entry, "timestamp": 0}, False, "entry timestamp=0"),
+        (EventEntryIn, {**entry, "timestamp": -1}, False, "entry timestamp 负数"),
+        (EventEntryIn, {**entry, "timestamp": float("nan")}, False, "entry timestamp=NaN"),
+        (EventEntryIn, {**entry, "timestamp": float("inf")}, False, "entry timestamp=+inf"),
+        (EventEntryIn, {**entry, "timestamp": float("-inf")}, False, "entry timestamp=-inf"),
+        (EventEntryIn, {**entry, "timestamp": "abc"}, False, "entry timestamp 类型非法"),
+        # ── EventDeleteIn ──
+        (EventDeleteIn, {"group_id": "g"}, True, "delete 合法"),
+        (EventDeleteIn, {}, False, "delete 缺 group_id"),
+        (EventDeleteIn, {"group_id": ""}, False, "delete 空串"),
+        (EventDeleteIn, {"group_id": "   "}, False, "delete 纯空白"),
+        # ── TimeSearchIn ──
+        (TimeSearchIn, tq, True, "time 最小"),
+        (TimeSearchIn, {"group_id": "g"}, False, "time 缺 query"),
+        (TimeSearchIn, {"query": "q"}, False, "time 缺 group_id"),
+        (TimeSearchIn, {**tq, "query": ""}, False, "time query 空串"),
+        (TimeSearchIn, {**tq, "query": "   "}, False, "time query 纯空白"),
+        (TimeSearchIn, {**tq, "group_id": ""}, False, "time group_id 空串"),
+        (TimeSearchIn, {**tq, "group_id": "   "}, False, "time group_id 纯空白"),
+        (TimeSearchIn, {**tq, "time_start": ""}, True, "time_start 空=不限"),
+        (TimeSearchIn, {**tq, "time_start": "2026-10-01"}, True, "time_start 日期"),
+        (TimeSearchIn, {**tq, "time_start": "2026-01-01T00:00:00Z"}, True, "time_start 带Z"),
+        (TimeSearchIn, {**tq, "time_start": "2026-01-01T00:00:00+08:00"}, True, "time_start 带偏移"),
+        (TimeSearchIn, {**tq, "time_start": "2026-01-01T00:00:00"}, True, "time_start naive（现契约接受）"),
+        (TimeSearchIn, {**tq, "time_end": "2026-01-02"}, True, "time_end 单独给（start 空）"),
+        (TimeSearchIn, {**tq, "time_start": "2026/10/01"}, False, "time_start 非法分隔"),
+        (TimeSearchIn, {**tq, "time_start": "   "}, False, "time_start 纯空白"),
+        (TimeSearchIn, {**tq, "time_start": "abc"}, False, "time_start 非时间"),
+        (TimeSearchIn, {**tq, "time_end": "2026-13-45T00:00:00Z"}, False, "time_end 非法月日"),
+        (TimeSearchIn, {**tq, "max_results": 1}, True, "time max=1 边界"),
+        (TimeSearchIn, {**tq, "max_results": 100}, True, "time max=100 边界"),
+        (TimeSearchIn, {**tq, "max_results": 0}, False, "time max=0"),
+        (TimeSearchIn, {**tq, "max_results": 101}, False, "time max=101"),
+        (TimeSearchIn, {**tq, "max_results": -5}, False, "time max=-5"),
+        # ── EntityRelationsIn ──
+        (EntityRelationsIn, rel, True, "rel 最小（过滤器缺省）"),
+        (EntityRelationsIn, {"group_id": "g", "center_node_uuid": "u"}, False, "rel 缺 query"),
+        (EntityRelationsIn, {"query": "q", "center_node_uuid": "u"}, False, "rel 缺 group_id"),
+        (EntityRelationsIn, tq, False, "rel 缺 center_node_uuid"),
+        (EntityRelationsIn, {**rel, "center_node_uuid": ""}, False, "rel center 空串"),
+        (EntityRelationsIn, {**rel, "center_node_uuid": "   "}, False, "rel center 纯空白"),
+        (EntityRelationsIn, {**rel, "query": ""}, False, "rel query 空串"),
+        (EntityRelationsIn, {**rel, "group_id": "  "}, False, "rel group_id 纯空白"),
+        (EntityRelationsIn, {**rel, "node_labels": None}, True, "rel node_labels=None"),
+        (EntityRelationsIn, {**rel, "node_labels": ["Tool"]}, True, "rel node_labels 合法"),
+        (EntityRelationsIn, {**rel, "node_labels": []}, False, "rel node_labels 空列表"),
+        (EntityRelationsIn, {**rel, "node_labels": [""]}, False, "rel node_labels 元素空串"),
+        (EntityRelationsIn, {**rel, "node_labels": [" "]}, False, "rel node_labels 元素空白"),
+        (EntityRelationsIn, {**rel, "edge_types": ["USES"]}, True, "rel edge_types 合法"),
+        (EntityRelationsIn, {**rel, "edge_types": []}, False, "rel edge_types 空列表"),
+        (EntityRelationsIn, {**rel, "edge_types": [""]}, False, "rel edge_types 元素空串"),
+        (EntityRelationsIn, {**rel, "max_depth": 1}, True, "rel max_depth=1 边界"),
+        (EntityRelationsIn, {**rel, "max_depth": 3}, True, "rel max_depth=3 边界"),
+        (EntityRelationsIn, {**rel, "max_depth": 0}, False, "rel max_depth=0"),
+        (EntityRelationsIn, {**rel, "max_depth": 4}, False, "rel max_depth=4"),
+        (EntityRelationsIn, {**rel, "max_results": 1}, True, "rel max=1 边界"),
+        (EntityRelationsIn, {**rel, "max_results": 100}, True, "rel max=100 边界"),
+        (EntityRelationsIn, {**rel, "max_results": 0}, False, "rel max=0"),
+        (EntityRelationsIn, {**rel, "max_results": 101}, False, "rel max=101"),
+        # ── DiverseIn ──
+        (DiverseIn, tq, True, "diverse 最小（默认 medium）"),
+        (DiverseIn, {"group_id": "g"}, False, "diverse 缺 query"),
+        (DiverseIn, {"query": "q"}, False, "diverse 缺 group_id"),
+        (DiverseIn, {**tq, "query": ""}, False, "diverse query 空串"),
+        (DiverseIn, {**tq, "group_id": " "}, False, "diverse group_id 纯空白"),
+        (DiverseIn, {**tq, "diversity_level": "low"}, True, "diverse low"),
+        (DiverseIn, {**tq, "diversity_level": "medium"}, True, "diverse medium"),
+        (DiverseIn, {**tq, "diversity_level": "high"}, True, "diverse high"),
+        (DiverseIn, {**tq, "diversity_level": "extreme"}, False, "diverse 非法值"),
+        (DiverseIn, {**tq, "diversity_level": "High"}, False, "diverse 大小写敏感"),
+        (DiverseIn, {**tq, "diversity_level": ""}, False, "diverse 空串"),
+        (DiverseIn, {**tq, "max_results": 1}, True, "diverse max=1 边界"),
+        (DiverseIn, {**tq, "max_results": 100}, True, "diverse max=100 边界"),
+        (DiverseIn, {**tq, "max_results": 0}, False, "diverse max=0"),
+        (DiverseIn, {**tq, "max_results": 101}, False, "diverse max=101"),
+        # ── EpisodeContextIn ──
+        (EpisodeContextIn, tq, True, "episode 最小"),
+        (EpisodeContextIn, {"group_id": "g"}, False, "episode 缺 query"),
+        (EpisodeContextIn, {"query": "q"}, False, "episode 缺 group_id"),
+        (EpisodeContextIn, {"query": " ", "group_id": "g"}, False, "episode query 纯空白"),
+        (EpisodeContextIn, {"query": "q", "group_id": ""}, False, "episode group_id 空串"),
+        (EpisodeContextIn, {**tq, "max_results": 1}, True, "episode max=1 边界"),
+        (EpisodeContextIn, {**tq, "max_results": 100}, True, "episode max=100 边界"),
+        (EpisodeContextIn, {**tq, "max_results": 0}, False, "episode max=0"),
+        (EpisodeContextIn, {**tq, "max_results": 101}, False, "episode max=101"),
+        # ── EntitySearchIn ──
+        (EntitySearchIn, ent, True, "entity 最小"),
+        (EntitySearchIn, {"group_id": "g", "node_labels": ["Tool"]}, False, "entity 缺 query"),
+        (EntitySearchIn, {"query": "q", "node_labels": ["Tool"]}, False, "entity 缺 group_id"),
+        (EntitySearchIn, tq, False, "entity 缺 node_labels"),
+        (EntitySearchIn, {**ent, "query": " "}, False, "entity query 纯空白"),
+        (EntitySearchIn, {**ent, "group_id": ""}, False, "entity group_id 空串"),
+        (EntitySearchIn, {**tq, "node_labels": []}, False, "entity node_labels 空列表"),
+        (EntitySearchIn, {**tq, "node_labels": [""]}, False, "entity node_labels 元素空串"),
+        (EntitySearchIn, {**tq, "node_labels": [" "]}, False, "entity node_labels 元素空白"),
+        (EntitySearchIn, {**tq, "node_labels": ["Tool", "Host"]}, True, "entity 多标签"),
+        (EntitySearchIn, {**ent, "min_mentions": 0}, True, "entity min_mentions=0"),
+        (EntitySearchIn, {**ent, "min_mentions": 100}, True, "entity min_mentions=100（无上界）"),
+        (EntitySearchIn, {**ent, "min_mentions": -1}, False, "entity min_mentions=-1"),
+        (EntitySearchIn, {**ent, "edge_types": None}, True, "entity edge_types=None"),
+        (EntitySearchIn, {**ent, "edge_types": []}, False, "entity edge_types 空列表"),
+        (EntitySearchIn, {**ent, "edge_types": ["USES"]}, True, "entity edge_types 合法"),
+        (EntitySearchIn, {**ent, "edge_types": [""]}, False, "entity edge_types 元素空串"),
+        (EntitySearchIn, {**ent, "max_results": 1}, True, "entity max=1 边界"),
+        (EntitySearchIn, {**ent, "max_results": 100}, True, "entity max=100 边界"),
+        (EntitySearchIn, {**ent, "max_results": 0}, False, "entity max=0"),
+        (EntitySearchIn, {**ent, "max_results": 101}, False, "entity max=101"),
+    ]
+
+    mismatches = []
+    for model, payload, expect_ok, label in cases:
+        try:
+            model(**payload)
+            got_ok = True
+        except ValidationError:
+            got_ok = False
+        if got_ok != expect_ok:
+            mismatches.append(f"{label}(期望 {'过' if expect_ok else '拒'}, 实际 {'过' if got_ok else '拒'})")
+    assert_true(not mismatches, f"矩阵 {len(mismatches)}/{len(cases)} 条不符预期: {mismatches[:8]}")
 
 
 @test("knowledge_store 同步方法: store 脱敏 + search 命中 + memory flow 隔离（fake embedder）")
