@@ -144,7 +144,7 @@ def main() -> int:
 
         r = httpx.get(f"{node_base}/api/remote/health", timeout=5)
         assert r.status_code == 401, f"无 token 应 401，实际 {r.status_code}"
-        r = httpx.get(f"{node_base}/api/config", timeout=5)
+        r = httpx.post(f"{node_base}/api/config/list", timeout=5)
         assert r.status_code == 403, f"非本机管理面应 403，实际 {r.status_code}"
         print("   鉴权验证 OK（无 token 401 / 管理面 403）")
 

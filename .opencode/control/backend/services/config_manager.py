@@ -805,7 +805,7 @@ class ConfigManager:
         ),
         ConfigField(
             key=Keys.REFLECT_NUDGE_INTERVAL_MIN, label="反思提醒间隔（分钟）", type="text",
-            hint="距上次反思超过该间隔即注入提醒; 默认 30 分钟，改后 30s 内生效",
+            hint="净活跃时长（扣除会话空闲）超过该间隔即注入提醒; 默认 30 分钟，改后 30s 内生效",
             required=False, default_value="30",
             category=ConfigCategory.BEHAVIOR,
             validator=None, surfaces=[Surface.CONFIG],

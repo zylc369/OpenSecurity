@@ -175,7 +175,7 @@ def test_node_config_whitelist():
         _cmi.get = orig_read
 
 
-@test("routes/config: surface=remote 写 URL/TOKEN 触发热重载（旧专用端点已废除）")
+@test("routes/config: surfaces=[remote] 写 URL/TOKEN 触发热重载（POST 契约; 旧专用端点已废除）")
 def test_config_reload():
     import services.remote_link as rl_module
     import services.config_manager as cs
@@ -199,15 +199,17 @@ def test_config_reload():
         # 旧专用端点已废除
         r = c.put("/api/remote/config", json={"url": "http://new:2", "token": "newtok"})
         assert_eq(r.status_code, 404, "旧端点应 404")
-        # 通用接口 surface=remote 写 URL/TOKEN → 热重载
-        r = c.put("/api/config", params={"surface": "remote"},
-                  json={"configs": {"REMOTE_CONSOLE_URL": "http://new:2",
-                                    "REMOTE_CONSOLE_TOKEN": "newtok"}})
+        # 通用接口 POST /api/config/update（surfaces 列表）写 URL/TOKEN → 热重载
+        r = c.post("/api/config/update",
+                   json={"surfaces": ["remote"],
+                         "configs": {"REMOTE_CONSOLE_URL": "http://new:2",
+                                     "REMOTE_CONSOLE_TOKEN": "newtok"}})
         assert_eq(r.status_code, 200)
         assert_eq(calls, [1], "reload_config 被调用")
-        # config 面写远程键 → 422 且不触发重载
-        r = c.put("/api/config", params={"surface": "config"},
-                  json={"configs": {"REMOTE_CONSOLE_URL": "http://evil"}})
+        # config 面写远程键 → 422 且不触发重载（交集语义）
+        r = c.post("/api/config/update",
+                   json={"surfaces": ["config"],
+                         "configs": {"REMOTE_CONSOLE_URL": "http://evil"}})
         assert_eq(r.status_code, 422, "跨面写拒绝")
         assert_eq(calls, [1], "拒绝路径不触发重载")
     finally:

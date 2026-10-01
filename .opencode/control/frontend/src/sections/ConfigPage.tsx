@@ -5,7 +5,7 @@
  *   左: 分类导航（图标+desc; 点击平滑滚动到对应分类卡; 滚动联动高亮）
  *   右: 全部分类卡平铺（CSS 多列瀑布，一屏纵览全部配置; 窄屏自动单列）
  *      + 顶部 sticky 保存条（全局唯一保存入口，dirty 提示）
- * 页面组成零定制: 分类/顺序/描述全部来自 /api/config/meta?surface=config，
+ * 页面组成零定制: 分类/顺序/描述全部来自 /api/config/meta（surfaces=["config"]），
  * 前端不硬编码任何配置项判断（图标映射除外——纯视觉）。
  */
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";

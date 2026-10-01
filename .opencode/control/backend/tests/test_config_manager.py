@@ -70,7 +70,7 @@ def test_get_kv_list():
     cm = _fresh()
     # 未配置声明键 → 声明默认值
     eff = cm.get_kv_list([Surface.CONFIG])
-    assert_eq(eff.get(cm.Keys.PERMISSION_ASK_TIMEOUT_SEC), "300", "未配置回退默认")
+    assert_eq(eff.get(cm.Keys.PERMISSION_ASK_TIMEOUT_SEC), "60", "未配置回退默认")
     assert_eq(eff.get(cm.Keys.REFLECT_NUDGE_ENABLED), "1", "开关键默认开启")
     assert_eq(eff.get(cm.Keys.RESUME_ANALYSIS_ENABLED), "1", "续传开关默认开启")
     # tunables 声明默认同样融合（值接口输出面含未配置调参的默认值）
@@ -88,12 +88,12 @@ def test_get_kv_list():
     cm.set({cm.Keys.REMOTE_CONSOLE_URL: "http://x"})
     assert_true(cm.Keys.REMOTE_CONSOLE_URL in cm.get_kv_list([Surface.REMOTE]),
                 "配置后远程键进入 remote 场景 KV")
-    # 配置值优先于默认
-    cm.set({cm.Keys.PERMISSION_ASK_TIMEOUT_SEC: "60"})
-    assert_eq(cm.get_kv_list([Surface.CONFIG])[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC], "60", "配置值优先")
+    # 配置值优先于默认（用非默认值，避免与默认相同后断言失去区分度）
+    cm.set({cm.Keys.PERMISSION_ASK_TIMEOUT_SEC: "120"})
+    assert_eq(cm.get_kv_list([Surface.CONFIG])[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC], "120", "配置值优先")
     # 空串配置 → 回退默认（清空=回到默认的语义）
     cm.set({cm.Keys.PERMISSION_ASK_TIMEOUT_SEC: ""})
-    assert_eq(cm.get_kv_list([Surface.CONFIG])[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC], "300", "空串回退默认")
+    assert_eq(cm.get_kv_list([Surface.CONFIG])[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC], "60", "空串回退默认")
     # 未声明键不属于配置体系（不进 KV; 首次发现记 WARNING 可感知可审计）
     cm.set({"SOME_UNDECLARED_KEY": "v"})
     assert_true("SOME_UNDECLARED_KEY" not in cm.get_kv_list([Surface.CONFIG]),
@@ -207,8 +207,8 @@ def test_meta():
     assert_eq(cfg.entries[cm.Keys.REFLECT_NUDGE_ENABLED].category_desc, "行为",
               "分类描述服务端权威")
     assert_true(cm.Keys.PERMISSION_ASK_TIMEOUT_SEC in cfg.entries, "权限超时键已声明")
-    assert_eq(cfg.entries[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC].default_value, "300",
-              "权限超时默认 300 秒")
+    assert_eq(cfg.entries[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC].default_value, "60",
+              "权限超时默认 60 秒")
     assert_eq(cfg.entries[cm.Keys.PERMISSION_ASK_TIMEOUT_SEC].category_code, "behavior",
               "权限超时归行为分类")
     assert_eq(cfg.entries[cm.Keys.PERMISSION_ASK_TIMEOUT_TYPES].default_value,

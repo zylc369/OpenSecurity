@@ -459,8 +459,9 @@ def test_config_write_preserve_comments():
 def test_required_status():
     from services.config_manager import ConfigManager
     keys = {c.key for c in ConfigManager.get_instance().required_status([Surface.CONFIG])}
+    # 必要键判定依据 = ConfigField.required；IDA_PRO_HOME 为可选工具目录（值仍经 validator 校验）
     assert_true("DEEPSEEK_API_KEY" in keys, "应有 DEEPSEEK_API_KEY")
-    assert_true("IDA_PRO_HOME" in keys, "应有 IDA_PRO_HOME")
+    assert_true("IDA_PRO_HOME" not in keys, "IDA_PRO_HOME 为可选（不参与必要配置检查）")
 
 
 @test("ConfigManager.validate_ida_pro_home: 存在路径")
@@ -814,7 +815,7 @@ def test_e2e_singleton():
                 proc2.kill()
 
 
-@test("E2E: GET /api/config 返回生效值（默认值融合）")
+@test("E2E: POST /api/config/list 返回生效值（默认值融合）")
 def test_e2e_get_config():
     if not OPENCODE_ROOT.exists():
         raise AssertionError("OPENCODE_ROOT 未设置")
@@ -838,7 +839,7 @@ def test_e2e_get_config():
     assert_true("HEARTBEAT_TIMEOUT_SEC" not in data, "config 面不含 hidden 键")
 
 
-@test("E2E: GET /api/config/required-status")
+@test("E2E: POST /api/config/required-status")
 def test_e2e_required_status():
     cp = get_shared_server()
     import httpx
@@ -867,7 +868,7 @@ def test_cli_deps_scan_consumer():
               f"scan 应 exit 0（stderr 尾: {r.stderr[-200:] if r.stderr else '空'}）")
 
 
-@test("E2E: GET /api/config/meta 配置页元数据（surface 页面声明模型）")
+@test("E2E: POST /api/config/meta 配置页元数据（surfaces 页面声明模型）")
 def test_e2e_config_meta():
     """配置页/远程页渲染唯一数据源（曾因引用已删模块级常量 500——页面永久
     "加载中"无测试覆盖而溜进生产; 本用例锚定 surface 必填 + 页面过滤契约）。"""
@@ -898,7 +899,7 @@ def test_e2e_config_meta():
                      "readonly", "category_code", "category_desc"):
             assert_true(prop in field, f"{key}.{prop} 缺失")
         assert_true("hidden" not in field, f"{key} 不应再有 hidden 字段")
-    # value = 领域模型合并的生效值（与值接口 GET /api/config 同源一致）
+    # value = 领域模型合并的生效值（与值接口 /api/config/list 同源一致）
     r_vals = cp.client.post("http://localhost/api/config/list", json={"surfaces": ["config"]}, timeout=5)
     assert_eq(data["entries"]["PERMISSION_ASK_TIMEOUT_SEC"]["value"],
               r_vals.json().get("PERMISSION_ASK_TIMEOUT_SEC"),

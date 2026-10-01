@@ -16,6 +16,9 @@ import TaskSessionPersistenceUtils, {
   TaskRawData,
 } from "./task-session-persistence-utils";
 
+/** 空闲窗口结算日志阈值（毫秒）：≥ 该时长的窗口在结算时记一条日志，便于审计 */
+const IDLE_SETTLE_LOG_THRESHOLD_MS = 60_000;
+
 function localIsSecurityAgent(agentName: string): boolean {
   return SECURITY_AGENTS.includes(agentName);
 }
@@ -80,8 +83,18 @@ export class SessionData
   /** 其中 bash 命令调用次数 */
   commandCallCount = 0;
   /** 上次反思触发时间戳（毫秒）。反思纸条（忙时）与反思唤醒（空闲时）共同维护：任一通道触发即重置。
-   *  初值为会话创建时刻 → 首次反思在开场一个间隔之后；插件重启后内存态丢失 → 最多延迟一个间隔。 */
+   *  初值为会话创建时刻 → 首次反思在开场一个间隔之后；插件重启后内存态丢失 → 最多延迟一个间隔。
+   *  判定/展示的跨度经 activeMsSinceReflection 扣除空闲（idleSinceReflectionMs）。 */
   lastReflectionAt = Date.now();
+  /** 当前空闲窗口起点（毫秒）= session.idle 事件时刻；null = 无未结算窗口。
+   *  初值 = 构造时刻（出生即空闲：会话创建 → 首次使用的区间没有 idle 事件，靠首条消息结算覆盖）。
+   *  只由 markIdle 开启、settleIdle 关闭；窗口内时间不计入反思"净活跃时长"。 */
+  idleAt: number | null = Date.now();
+  /** 会话累计已结算空闲（毫秒）。会话指标（日志用），不随反思清零 */
+  totalIdleMs = 0;
+  /** 上次反思发射以来累计的空闲（毫秒）——反思到期判定与展示数字的"净活跃口径"累加器。
+   *  由 markReflectionFired 清零（不清 idleAt：发射时已开的窗口属于下一批次） */
+  idleSinceReflectionMs = 0;
   /** 反思累计触发次数（纸条 + 唤醒合计；日志与唤醒消息文案的运行数据用） */
   reflectionCount = 0;
   /** 上次反思触发时的工具调用计数（用于渲染"期间工具调用 N 次"） */
@@ -164,6 +177,46 @@ export class SessionData
   /** 会话已运行分钟数（CheckpointRenderData 的派生字段） */
   get elapsedMinutes(): number {
     return Math.round((Date.now() - this.createdAt) / 60000);
+  }
+
+  // ── 反思时钟（空闲扣除：判定与展示用"净活跃时长"）────────────────
+  //
+  // 不变量：
+  //   1. 窗口只能被 settleIdle 关闭；markIdle 不覆盖已开窗口（保留最早起点）
+  //   2. markReflectionFired 只清 idleSinceReflectionMs，不清 idleAt——
+  //      唤醒通道发射时窗口刚好打开，该窗口属于"本次反思之后"的新批次
+  //   3. settleIdle 幂等；触点单点收口在 chat.message 的 finally（覆盖全部早退/异常路径）
+
+  /** 标记空闲窗口开启（幂等；已开窗口保留最早起点，不覆盖） */
+  markIdle(now: number = Date.now()): void {
+    if (this.idleAt === null) {
+      this.idleAt = now;
+      debugLog("反思时钟: 空闲窗口开启", this.sessionID);
+    }
+  }
+
+  /** 结算空闲窗口（幂等）：时长同时累加会话总计与反思批次累加器后关闭窗口。
+   *  返回结算时长（毫秒）；未开窗返回 0。 */
+  settleIdle(now: number = Date.now()): number {
+    if (this.idleAt === null) return 0; // 未开窗（高频常态）：安静返回，不记日志防刷屏
+    const d = now - this.idleAt;
+    this.idleAt = null;
+    this.totalIdleMs += d;
+    this.idleSinceReflectionMs += d;
+    if (d >= IDLE_SETTLE_LOG_THRESHOLD_MS) {
+      debugLog(
+        `反思时钟: 空闲窗口结算 ${Math.round(d / 60000)}min（会话累计 ${Math.round(this.totalIdleMs / 60000)}min）`,
+        this.sessionID,
+      );
+    }
+    return d;
+  }
+
+  /** 距上次反思的"净活跃时长"（毫秒）= 墙钟跨度 − 已结算空闲（idleSinceReflectionMs）。
+   *  长空闲后不会立即到期；未结算的开放窗口不参与——窗口在消息入口整体结算，
+   *  评估点（消息/工具/空闲事件）处要么无开放窗口（回合内），要么刚开启（≈0）。 */
+  activeMsSinceReflection(now: number = Date.now()): number {
+    return now - this.lastReflectionAt - this.idleSinceReflectionMs;
   }
 
   setTaskDir(taskDir: string | null | undefined): void {

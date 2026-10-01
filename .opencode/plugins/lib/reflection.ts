@@ -88,26 +88,45 @@ export function getReflectIntervalMs(
   return min * 60_000;
 }
 
-/** 反思是否到期（两通道共用的时机判定） */
-export function isReflectionDue(session: SessionData): boolean {
-  return Date.now() - session.lastReflectionAt >= getReflectIntervalMs();
+/** 反思是否到期（两通道共用的时机判定；"净活跃时长"口径——空闲窗口不计入，
+ *  见 SessionData.activeMsSinceReflection）。
+ *  configReader 注入点供测试使用（生产默认 getCachedConfig）。 */
+export function isReflectionDue(
+  session: SessionData,
+  configReader: () => Record<string, string> = getCachedConfig,
+): boolean {
+  return session.activeMsSinceReflection() >= getReflectIntervalMs(configReader);
+}
+
+/** 净活跃分钟数（两位小数、四舍五入，下限 0.01）——反思文案与日志的统一展示口径。
+ *  与判定同源（activeMsSinceReflection），避免判定用活跃口径、展示用墙钟口径。 */
+export function activeMinutesSinceReflection(
+  session: SessionData,
+  now: number = Date.now(),
+): number {
+  return Math.max(
+    0.01,
+    Math.round(session.activeMsSinceReflection(now) / 600) / 100,
+  );
 }
 
 /**
- * 反思触发的状态更新：先计算差值再占位（顺序敏感——先占位会永远渲染出 0）。
- * 本函数是 lastReflectionAt / reflectionCount / lastReflectionToolCount 的唯一更新点。
+ * 反思触发的状态更新：先计算差值再占位（顺序敏感——先占位会永远渲染出 0：
+ * activeMsSinceReflection 依赖 lastReflectionAt / idleSinceReflectionMs）。
+ * 本函数是 lastReflectionAt / idleSinceReflectionMs / reflectionCount /
+ * lastReflectionToolCount 的唯一更新点；不关闭空闲窗口（idleAt）——唤醒通道
+ * 发射时窗口刚好打开，该窗口属于"本次反思之后"的新批次，由下次结算累加。
+ * sinceMin 为"净活跃分钟"（两位小数；仅扣除已结算空闲窗口）。
  */
 export function markReflectionFired(session: SessionData): {
   sinceMin: number;
   sinceTools: number;
 } {
   const now = Date.now();
-  const sinceMin = Math.max(
-    1,
-    Math.round((now - session.lastReflectionAt) / 60000),
-  );
+  const sinceMin = activeMinutesSinceReflection(session, now);
   const sinceTools = session.toolCallCount - session.lastReflectionToolCount;
   session.lastReflectionAt = now;
+  session.idleSinceReflectionMs = 0;
   session.lastReflectionToolCount = session.toolCallCount;
   session.reflectionCount++;
   return { sinceMin, sinceTools };

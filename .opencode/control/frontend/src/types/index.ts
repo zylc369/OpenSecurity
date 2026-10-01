@@ -261,7 +261,7 @@ export interface ConfigCategoryView {
   desc: string;
 }
 
-/** GET /api/config/meta?surface=… 响应（一页一请求拿全渲染所需） */
+/** POST /api/config/meta（surfaces 列表）响应（一页一请求拿全渲染所需） */
 export interface ConfigMetaResponse {
   /** 有序分类（顺序 = 服务端枚举定义序，前端不自行排序） */
   categories: ConfigCategoryView[];

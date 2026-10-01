@@ -16,6 +16,7 @@ import {
   sendReflection,
   isReflectEnabled,
   isReflectionDue,
+  activeMinutesSinceReflection,
   generateCompletionMarker,
 } from "./reflection";
 
@@ -311,7 +312,7 @@ export async function maybeResumeAnalysis(
     // ── 统一注入器：反思到期 → 发唤醒消息（优先于 resume；唤醒自带续接指令，本次不再发 resume） ──
     if (isReflectEnabled() && isReflectionDue(session)) {
       debugLog(
-        `session.idle: 反思到期（距上次 ${Math.round((Date.now() - session.lastReflectionAt) / 60000)}min ≥ 间隔），优先发反思唤醒 sessionID=${sessionID}`,
+        `session.idle: 反思到期（净活跃 ${activeMinutesSinceReflection(session)}min ≥ 间隔），优先发反思唤醒 sessionID=${sessionID}`,
         sessionID,
       );
       await sendReflection(session);

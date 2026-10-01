@@ -993,6 +993,11 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
         } catch {
           // reportErrorAndAbort 本身也失败了，只能靠日志
         }
+      } finally {
+        // 反思时钟: 消息 = 新回合开始——结算空闲窗口（幂等；单点收口在 finally：
+        // 覆盖全部早退/异常路径；会话若在本消息内首次创建（upsert 兜底/插件重启重建），
+        // 此时已存在，出生窗口（≈ 钩子处理时长）一并结算，防陈窗遗留）
+        ctx.sessionManager.get(sessionID)?.settleIdle();
       }
     },
 
@@ -1519,6 +1524,9 @@ export const SecurityAnalysisPlugin: Plugin = async (input) => {
 
           // ─── 分析持续性恢复 ────────────────────────────────────
           const session = ctx.sessionManager.get(sessionID);
+          // 反思时钟: 空闲窗口开启（幂等、保留最早；置于 activelyTerminated 分支之前——
+          // 一切"停止运行"转移都要记录，与后续走 resume 还是跳过无关）
+          session?.markIdle();
           if (session?.activelyTerminated) {
             debugLog(
               `session.idle: 主动终止（预装检查），跳过恢复，activelyTerminated=${session?.activelyTerminated}`,
