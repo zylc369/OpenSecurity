@@ -44,7 +44,7 @@ Key design decision: **the LLM never operates GUIs directly**. All IDA operation
 
 ## Version status: 2.0 (hardware requirements & availability)
 
-`master` currently carries 1.0. 2.0 is feature-complete and battle-tested (see the [2.0 field notes](docs/项目介绍/2.0-实战博文/01-无人值守完成CTF挑战.md), in Chinese), but **has not been merged into master yet** — because of its hardware requirements; it will be merged in due course.
+`master` currently carries 1.0. 2.0 is feature-complete and battle-tested (see the [2.0 field notes](docs/项目介绍/2.0-实战博文/01-无人值守完成CTF挑战.md), in Chinese), but **has not been merged into master yet**, because of its hardware requirements; it will be merged in due course.
 
 Hardware requirements (test machine: MacBook Pro / M4 Pro / 48GB):
 

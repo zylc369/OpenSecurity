@@ -2,7 +2,7 @@
 
 > **中文** | [English](README.en.md)
 
-> AI 驱动的多领域安全分析 Agent 平台 —— 让 LLM 真正像一个研究员团队那样工作。
+> AI 驱动的多领域安全分析 Agent 平台：让 LLM 真正像一个研究员团队那样工作。
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
@@ -44,7 +44,7 @@ OpenSecurity 让 LLM 端到端地完成一次安全分析：拿到目标文件�
 
 ## 版本状态：2.0（硬件要求与获取）
 
-当前 `master` 为 1.0。2.0 已完成开发并经过实战验证（[无人值守完成 CTF 挑战——2.0 实战记录](docs/项目介绍/2.0-实战博文/01-无人值守完成CTF挑战.md)），但**尚未合并到 master**——因为 2.0 对硬件有要求；我们会在后续把它合并进 master。
+当前 `master` 为 1.0。2.0 已完成开发并经过实战验证（[无人值守完成 CTF 挑战：2.0 实战记录](docs/项目介绍/2.0-实战博文/01-无人值守完成CTF挑战.md)），但**尚未合并到 master**，因为 2.0 对硬件有要求；我们会在后续把它合并进 master。
 
 2.0 的硬件要求（测试机：MacBook Pro / M4 Pro / 48GB）：
 

@@ -74,6 +74,12 @@ export class SessionData
   resumeCount = 0;
   /** 上次发送 resume prompt 的时间戳。用于冷却判断，防止 AI 空转快速烧配额。 */
   lastResumeAt = 0;
+  /** 本轮分析完成时刻（内存，不持久化）。完成标记命中时置为当前时刻，此后抑制唤醒/续跑，
+   *  直到收到真实用户消息（upsert 清空）。
+   *  必要性：完成检测基于"最后一条 assistant 文本"，而上下文压缩会把最后一条 assistant
+   *  消息替换为压缩摘要（不再含标记）→ 仅靠文本检测会 完成→压缩→续跑 死循环；
+   *  完成态必须固化在会话状态上，才能跨压缩保持。 */
+  resumeCompletedAt: number | null = null;
   /** 冷却中 pending 的 setTimeout handle。新 resume 前或用户手动发消息时清除。 */
   pendingResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -149,6 +155,16 @@ export class SessionData
       return true;
     }
     return false;
+  }
+
+  /** 本轮分析是否已完成（粘性完成态，跨上下文压缩保持）。
+   *  条件：已置完成时刻，且此后没有真实用户消息（真实消息会清空该状态）。
+   *  不依赖 lastText——压缩摘要覆盖最后一条 assistant 消息也仍成立。 */
+  isAnalysisCompleted(): boolean {
+    return (
+      this.resumeCompletedAt !== null &&
+      this.resumeCompletedAt > this.lastUserMessageAt
+    );
   }
 
   /**
@@ -283,6 +299,8 @@ export class SessionDataManager {
 
       // 用户手动发送的消息 = 新一轮对话，上一轮植入的 resumeMarker 不再相关，清空避免误判
       session.resumeMarker = null;
+      // 新一轮对话 = 上一轮的"完成态"作废，恢复正常唤醒/续跑判定
+      session.resumeCompletedAt = null;
 
       debugLog(
         `chat.message: 用户手动发送的消息 sessionID=${sessionID}`,

@@ -297,8 +297,21 @@ export async function maybeResumeAnalysis(
       lastText &&
       lastText.includes(session.resumeMarker)
     ) {
+      // 固化完成态：完成检测基于"最后一条 assistant 文本"，该文本会被后续上下文压缩的
+      // 摘要覆盖 → 仅靠文本检测会 完成→压缩→续跑 死循环。置粘性标记跨压缩保持。
+      session.resumeCompletedAt = Date.now();
       debugLog(
-        `session.idle: 跳过恢复 — 检测到完成标记 ${session.resumeMarker}, sessionID=${sessionID}`,
+        `session.idle: 跳过恢复 — 检测到完成标记 ${session.resumeMarker}（已固化完成态）, sessionID=${sessionID}`,
+        sessionID,
+      );
+      return;
+    }
+
+    // 粘性完成态（含"完成 → 上下文压缩摘要覆盖 lastText"的情形）：本轮已完成且此后无
+    // 真实用户消息 → 抑制唤醒/续跑，等待用户开启新一轮。压缩只改文本、不改本状态。
+    if (session.isAnalysisCompleted()) {
+      debugLog(
+        `session.idle: 跳过恢复 — 本轮分析已完成（等待用户新消息）, sessionID=${sessionID}`,
         sessionID,
       );
       return;
