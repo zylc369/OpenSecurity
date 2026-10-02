@@ -82,14 +82,15 @@ const DockerSection: React.FC<Props> = ({ docker, onRefresh }) => {
 
   const containerCols = [
     { title: "容器", dataIndex: "name", width: 160 },
-    { title: "镜像", dataIndex: "image" },
+    { title: "镜像", dataIndex: "image", width: 130,
+      render: (v: string) => <EllipsisCell text={v} type="default" /> },
     { title: "说明", dataIndex: "description", render: (v: string) => <EllipsisCell text={v} /> },
     {
-      title: "状态", dataIndex: "status", width: 100,
+      title: "状态", dataIndex: "status", width: 90,
       render: (s: string) => <Tag color={STATUS_COLOR[s]}>{STATUS_TEXT[s]}</Tag>,
     },
     {
-      title: "操作", width: 100,
+      title: "操作", width: 90,
       render: (_: unknown, r: KnownContainer) =>
         r.status === "running" ? (
           /* 停止是破坏性操作（图数据库下线）——二次确认防误点 */
@@ -112,15 +113,16 @@ const DockerSection: React.FC<Props> = ({ docker, onRefresh }) => {
   ];
 
   const imageCols = [
-    { title: "镜像", dataIndex: "name", width: 260 },
+    { title: "镜像", dataIndex: "name", width: 260,
+      render: (v: string) => <EllipsisCell text={v} type="default" /> },
     { title: "说明", dataIndex: "description", render: (v: string) => <EllipsisCell text={v} /> },
-    { title: "大小", dataIndex: "size_hint", width: 100 },
+    { title: "大小", dataIndex: "size_hint", width: 80 },
     {
-      title: "状态", dataIndex: "pulled", width: 90,
+      title: "状态", dataIndex: "pulled", width: 80,
       render: (v: boolean) => (v ? <Tag color="green">已拉取</Tag> : <Tag>未拉取</Tag>),
     },
     {
-      title: "操作", width: 100,
+      title: "操作", width: 90,
       render: (_: unknown, r: KnownImage) =>
         r.pulled ? (
           <Typography.Text type="secondary">—</Typography.Text>
@@ -149,7 +151,7 @@ const DockerSection: React.FC<Props> = ({ docker, onRefresh }) => {
       <div>
         <Typography.Title level={5}>容器</Typography.Title>
         <Table<KnownContainer>
-          size="small" rowKey="name" pagination={false}
+          size="small" rowKey="name" pagination={false} tableLayout="fixed"
           columns={containerCols} dataSource={docker.containers}
         />
       </div>
@@ -157,7 +159,7 @@ const DockerSection: React.FC<Props> = ({ docker, onRefresh }) => {
       <div>
         <Typography.Title level={5}>镜像（{docker.images.filter((i) => i.pulled).length}/{docker.images.length}）</Typography.Title>
         <Table<KnownImage>
-          size="small" rowKey="name" pagination={false}
+          size="small" rowKey="name" pagination={false} tableLayout="fixed"
           columns={imageCols} dataSource={docker.images}
         />
         {Object.keys(pulling).length > 0 && (

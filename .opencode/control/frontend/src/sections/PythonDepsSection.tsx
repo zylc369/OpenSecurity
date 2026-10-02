@@ -60,10 +60,11 @@ const PythonDepsSection: React.FC<Props> = ({ packages, venvPath, onRefresh }) =
   const okCount = packages.filter((p) => p.available).length;
 
   const columns = [
-    { title: "包名", dataIndex: "pip_name", width: 170,
+    { title: "包名", dataIndex: "pip_name", width: 200,
       render: (v: string, r: PyPackageStatus) => (
         <Space size={4}>
-          <span>{v}</span>
+          {/* 列宽 200（内容 ~184）：conda 标签占 ~53px，故名称上限 130；无标签 182 */}
+          <EllipsisCell text={v} type="default" maxWidth={r.installer === "conda" ? 130 : 182} />
           {r.installer === "conda" && (
             <Tooltip title="conda 安装（sagemath），不走 pip">
               <Tag style={{ marginInlineEnd: 0 }}>conda</Tag>
@@ -119,7 +120,7 @@ const PythonDepsSection: React.FC<Props> = ({ packages, venvPath, onRefresh }) =
         </Typography.Text>
       </Space>
       <Table<PyPackageStatus>
-        size="small" rowKey="pip_name"
+        size="small" rowKey="pip_name" tableLayout="fixed"
         columns={columns} dataSource={dataSource}
         pagination={{
           pageSize: 5,
