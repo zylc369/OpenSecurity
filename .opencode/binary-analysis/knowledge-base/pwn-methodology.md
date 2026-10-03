@@ -28,6 +28,7 @@ ldd <binary>                         # 本地 glibc 版本
 seccomp-tools dump ./<binary>        # 看是否 ORW 沙箱（禁了哪些 syscall）
 ```
 如果禁了 `execve` → 需要用 ORW（open→read→write）链读 flag，不能用 system("/bin/sh")。
+seccomp-tools 跑不了（macOS 主机无法执行 Linux ELF、容器内 gem 安装失败）→ filter 是运行时栈上构造时，用 `$SHARED_DIR/scripts/seccomp_bpf_decode.py` 从 idat 反汇编输出直接解码（用法见脚本 `--help`）; filter 是 .rodata 静态表时，用 idat `read_data` 按 8 字节步进读出后按 sock_filter{code u16, jt u8, jf u8, k u32} 手工解码。
 
 **seccomp 系统性评估**:
 ```bash
@@ -299,6 +300,8 @@ cat /proc/sys/kernel/randomize_va_space   # 0=关 1=部分 2=完全
 | **浮点程序且索引/上限由运算结果决定** | **fenv 检查顺序缺陷**: `fetestexcept` 在运算**之前**调用则检查的是上一次的标志位——本次上溢（`1e308 * 1e308` 向上舍入 = inf）漏检，inf 参与后续"扩大索引上限"类逻辑（`limit = product of usable sizes`）→ 巨大索引合法通过。识别: 审计所有浮点代码的 fetestexcept/clear 与实际运算的相对顺序; 利用: 两个大 double 相乘制造 inf 绕过上限检查 |
 | **seccomp 严苛但需确认输入是否正确（验证 oracle）** | **ENOSYS vs ERRNO 差异**: 未定义 syscall 正常路径返回 `-ENOSYS`(-38)，被 seccomp `SECCOMP_RET_ERRNO(1)` 拦截返回 `-1`——同一 syscall 号两种来源可区分。用于逆向输入校验器: 程序以"syscall 返回值满足约束"当验收（如自定义 syscall 0x1337-0x1344 的 `((arg^k1)+k2)&mask == target`），把每条 BPF 约束翻成 Z3 方程 + 末尾 checksum 联立求解唯一输入。配套: **间接跳转主导 + SIMD 直线代码**的二进制——提取 Unicorn 执行的基本块路径 + 内存写 + seccomp BPF（比重建静态控制流有效）; MBA 混淆函数逐指令翻译进 Z3（每条指令一个表达式），用运行时观测的中间状态对拍验证翻译正确性 |
 | **隐藏数据页地址随机（16GiB 范围内找一页）** | **`MAP_FIXED_NOREPLACE` 占用 oracle 二分**: 白名单允许 mmap/munmap 时，对候选区间 `mmap(addr, len, PROT_READ, MAP_FIXED_NOREPLACE|MAP_ANON|MAP_PRIVATE)` 返回 `-EEXIST` = 该区间已被隐藏页占用; 对半缩小 + 成功探测立即 munmap 复原——22 次探针从 16GiB 定位到 4KiB 页。**区间左闭右开** `[addr, addr+len)`——二分边界取 `hidden < addr+len` 判归属，端点相等不算覆盖。只许写固定页时，把页内容拷到可写出口逐 8 字节送出 |
+| **Apple Silicon Docker（qemu-user 模拟 amd64）中 gdb/strace 全部失真**（gdb 报 `linux_ptrace_test_ret_to_nx: PC (nil)`、strace 输出 syscall 号乱码不可读） | 这是 qemu-user 对 ptrace 仿真的固有限制，加 `--cap-add=SYS_PTRACE --security-opt seccomp=unconfined` 也救不了 gdb——立即放弃修工具，换观测手段: ① **标记输出二分定位**: 程序内找 `write(1, reg, imm)` 类片段（如 `mov edx,4; mov rsi,r12; mov edi,1; call _write`），ROP 链在不同位置插入该片段输出标记，按输出有无二分定位断链点; ② **ps 观察进程死活**: 父/子进程都活着但互相无响应 = 双边 read 阻塞死锁（如发送了对方解析不了的长度），一方消失 = 崩溃——两者的下一步排查方向完全不同。配套: **qemu-user 下 SROP（rt_sigreturn）仿真不可靠**——pop rax/rdi=15 + syscall 挂 sigreturnFrame 可能完全无效或行为异常，设计依赖 SROP 前先做一次最小验证（frame.rip 指向有可观察输出的指令），失败则优先换"函数片段复用"路线（见下"函数片段复用"小节） |
+| **fork 双进程 + socketpair 加密信道**（main 早期 `socketpair`+`fork`，父/子各 dup2 一端到 fd3，通信过 XOR 类函数、key 由 getpid LCG 派生存全局; 常见分工: 父进程交互命令行+seccomp 白名单，子进程持 flag fd+条目表无沙箱） | 审计四类攻击面: ① **窄类型截断溢出**——命令参数走 `strtol` 后截到 u8/u16 当 read 长度（截断值可能远大于意图上限）; ② **有符号索引检查**——`if (SLODWORD(idx) > N)` 放行负数，`基址 + 步长*idx` 回溯到条目表之前的敏感条目（flag fd 条目）: 用 `&pub_base + stride*(-k)` 反推目标 idx; ③ **单侧沙箱**——seccomp 只装在交互进程（受限侧 ROP 构造对无沙箱侧的合法协议请求即可越权）; ④ **正常接口发不出完整请求**——协议头里 len 字段被接口硬编码为 0 时，只能 ROP 直接 write(fd3, 完整包)。通信解密/构造见"自定义加密协议还原"小节，ROP 组件见下"函数片段复用"小节 |
 
 ### 自定义加密协议还原（流量全加密的 pwn 服务）
 
@@ -309,9 +312,29 @@ cat /proc/sys/kernel/randomize_va_space   # 0=关 1=部分 2=完全
 | 密钥派生（轮函数） | 典型形态: key32 = server_nonce \|\| client_nonce，N 轮混合 `out[j] = rol8(key32[3r+j] ^ sbox[out[j] ^ key32[(j+8r)&0x1F]], 3)`（out 就地反馈、初值全 0、每轮输入窗口滑动）; S-box 从 .rodata dump 后校验双射性（`len(set(sbox))==256`）——非双射说明定位错了（那是数据不是表） |
 | 自证包（challenge） | 校验值通常由派生 key 直推，一对 sbox/移位组合: `expect[j] = sbox[key[j]] ^ key[(j+5)&0xF]` 类——逆出公式后客户端完整重实现握手+加密，与正常客户端等价交互。握手一次通过=协议还原正确的强验证 |
 
+### 函数片段复用（gadget 枯竭时的调用点复用）
+
+> 触发条件: pwntools `ROP.find_gadget` 扫不出 `pop rdx`/`pop rcx` 等关键 setter（小二进制常见），又无法 SROP（qemu-user 仿真 rt_sigreturn 不可靠，见 §4 卡点表）。解法: 把程序内**现成的指令片段**（函数内部从中间某地址进入的序列）当"多参数 gadget"用。
+
+**副作用表范式**——复用任何片段前必须列四列，缺一列都会踩坑:
+
+| 片段类型 | 识别形态 | 前置寄存器 | 副作用与出口 |
+|---------|---------|-----------|------------|
+| 定长输出 | `mov edx,4; mov rsi,r12; mov edi,1; call _write` | r12=地址 | 泄漏固定 4 字节; 出口常接 `jmp` 回读循环（输出后程序可能失控，用于一次性泄漏足够） |
+| 读循环 | `xor edi,edi; mov edx,1; mov rsi,r15; call _read` + 回边 | r15=缓冲地址, rbx=终点, rbp=命令串指针 | 逐字节写任意长度; 发 `\n` 退出后走**命令解析**——解析指针若取自寄存器（`mov r15, rbp`）则可控，预铺命令串实现漏洞函数重入（无限次新溢出段） |
+| pivot 读 | `xor edi,edi; movzx edx,bl; mov rsi,rsp; call _read` | rbx 低字节=长度, rsp=写目标 | **原始 read 无字节限制**（可写 0x00/0x0A）; 出口 `add rsp,0x40; pop rbx; ret` 跳到读数据 +0x48 处续链; 配合 `pop rsp` 片段可写任意已知地址 |
+| 协议发送 | `mov rcx,rbp; mov rsi,r14; rep movsq; ... call _write`(fd3) | r14=源, rbp=len | **内置加密副作用: 缓冲区必须放明文**（对端再解密）; 拷贝目标取 rsp+X（栈/已 pivot 的 BSS）; 出口 epilogue `add rsp,0x410; pop×5; ret`——续链槽 = 入口时 rsp+0x438，跨约 1KB 需在同一段可写区预铺 |
+| 协议接收 | `mov edx,N; mov rsi,rbx; mov edi,3; call _read` + 紧跟解密+校验+输出 | rbx=缓冲, **rsp=缓冲-偏移**（后续用 `[rsp+X]` 相对寻址校验响应头） | read→解密→检查→write(1) 输出一条龙; 用 `pop rsp` 把 rsp 设为 buf-偏移 即满足其寻址假设 |
+| 加密原语 | `mov edx, key全局; ... call 加密函数`（入口在 mov edx 之后几条内） | rdi/rsi 已 pop 设好 | 只能加密特定地址（其内部 `lea` 决定），通用性差——优先选上面的完整片段而非裸加密函数 |
+
+**两个致命陷阱**:
+- **双重加密死锁**: 发送片段内置加密时，若缓冲区放了预加密数据，对端解密得乱码——len 字段巨大 → 对端 read body 永久阻塞，本端 read 响应也阻塞。症状: `ps` 里两个进程都活着但互相无输出（区别于崩溃）。修复: 缓冲区放明文。
+- **LCG/pid 型 key 的恒定字节**: key 低 24 位由 pid 低 24 位决定，fork 型服务 pid 序号小 → 每次连接 key 仅最高字节变化、低 3 字节恒定。若利用链依赖"密文避开特定字节（如 0x0A 终止符）"的重试策略，恒定字节命中该值时**重试无穷次必失败**——重试 2-3 次失败后立即 dump 观测值序列找恒定模式，改走无字节限制的通道（pivot 读）而非继续重试。
+
 ## §5 工具链
 
 > IDA（idat）既能静态分析也能动态调试，但它的调试器**只支持宿主机 CPU 架构**——arm64 Mac 上调不了 amd64 程序。动态调试统一用 `qemu-gdb`（自动适配 arm64/amd64，用法与普通 gdb 相同: `qemu-gdb ./pwn -ex "break main" -ex c`）; 需要堆插件时用 `gdb-pwndbg`（arm64）。
+> 注意区分两种 qemu 形态: `qemu-gdb ./binary`（宿主 qemu-user + gdbstub，调试**正常可用**）vs Docker `--platform linux/amd64` 容器**内部**跑 gdb/strace（对 qemu 模拟进程做 ptrace，失真不可用，替代手段见 §4 卡点表 qemu-user 条目）。需要完整 Linux 服务环境（多进程/socket 服务/glibc 特定行为）时用容器靶场（见下"本地靶场"），单进程调试优先宿主 qemu-gdb。
 
 | 工具 | 用途 | 关键用法 |
 |------|------|---------|
@@ -343,6 +366,17 @@ cat /proc/sys/kernel/randomize_va_space   # 0=关 1=部分 2=完全
 1. `qemu-gdb ./binary -ex "break main" -ex c` 单独调试二进制（确定偏移/验证利用逻辑）
 2. pwntools 用 `remote('目标', 端口)` 打远程服务执行真实利用
 （gdb.attach 需要本机 gdb + 本机进程，仅 Linux 宿主可用）
+
+**本地靶场（Docker amd64）**: 目标是**多进程/socket 服务/依赖完整 Linux 运行时**（fork 型服务、seccomp 行为验证、要 strace 抓系统调用序列）时，宿主 qemu-gdb 单进程形态不够用，起容器靶场（服务端模板: `$SHARED_DIR/scripts/pwn_lab_server.py`，先 cp 进靶标目录一起挂载）:
+```bash
+cp "$SHARED_DIR/scripts/pwn_lab_server.py" .   # 与靶标二进制同目录
+# 靶标目录挂载到 /w，端口映射后主机 pwntools 直接 remote('127.0.0.1', 9999)
+docker run -d --name pwnlab --platform linux/amd64 -v "$PWD:/w" -w /w -p 9999:9999 ubuntu:24.04 sleep infinity
+docker exec -i pwnlab bash -c "apt-get update -qq && apt-get install -y -qq python3 strace"   # 一次性装依赖
+# 起每连接 fork 的 TCP 服务端（模拟远程 nc 环境; --strace 开启则每连接落一份 /tmp/trace_N.log）
+docker exec -d pwnlab bash -c "python3 /w/pwn_lab_server.py --port 9999 --binary /w/service"
+```
+说明: 容器内 apt 装包约 20-30s（脚本/工具随装随用）; 需要容器内跑 gdb 时必须加 `--cap-add=SYS_PTRACE --security-opt seccomp=unconfined`，但 qemu-user 模拟下 gdb/strace 大概率仍失真（见 §4 卡点表），观测优先走标记输出而非修调试器。多端口靶场（本靶 + strace 靶并列）多映射一组 `-p` + 多起一个 server 实例即可。
 
 ## §6 关联文件
 
