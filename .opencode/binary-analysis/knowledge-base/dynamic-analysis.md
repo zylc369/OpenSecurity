@@ -48,6 +48,7 @@
 **XOR 场景操作化**（混淆器免疫）: 混淆器 bury 逐字节 XOR 循环（obfy 类不透明谓词墙）时不 unwind——断终点 `strcmp(expected, enc(input))`，GDB commands 块自动 dump RDI/RSI 双操作数; 喂已知明文 "AAAA..." 记录 computed_A[i]，则 `key[i]=computed_A[i]^'A'`、正确输入 `=expected[i]^key[i]`。独立性验证: 输入翻一字节确认 computed 只动一字节。混淆器再厚，终点必须等于固定串——一跑泄漏 keystream、二跑换算合法输入。
 
 **memcmp 计数 oracle**: LD_PRELOAD 把 memcmp 换成返回前缀匹配数的版本（`for i<n: if s1[i]==s2[i] cnt++ else break; return cnt`）——二值验证变逐字节计数 oracle; GDB 断 memcmp 后读返回值=前缀匹配数，逐位置换字符找计数+1 者。判定: 验证走 memcmp/strcmp 且前缀逐比较（返回非 0 语义不破坏）。与上文「XOR 场景操作化」互补——那边从双操作数泄漏期望值，这边利用程序自身的匹配计数反馈。
+**信号处理器级观测**: 程序把 sigaction handler 当 VM dispatcher（trap 驱动执行）时，LD_PRELOAD 包装 sigaction 捕获 handler、前后各 dump 一次 gregs——模板 `$SHARED_DIR/scripts/sigwrap_tracer.c`（gdb 无 ptrace / qemu-user 段错误环境下的唯一原生观测手段），完整方法论见 `$SHARED_DIR/knowledge-base/vm-bytecode-reversing.md` §1a。
 
 **Levenshtein 编辑距离 oracle**: oracle 返回编辑距离时三步恢复——①空串定长; ②逐字符发 `c*length`，distance=length-count 揪出存在字符及数量; ③一半存在/一半不存在二分定位。反馈越连续信息泄漏越多（存在性+数量+位置梯度）。通用: 任何 boolean 比较器（regex 匹配/时延/HTTP 状态码）经 2 的幂加减都坍缩为二分全值 oracle。
 

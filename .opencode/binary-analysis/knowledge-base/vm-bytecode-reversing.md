@@ -9,12 +9,35 @@
 - 题目数据段有大段"非指令"数据被逐字节消费
 - 方向输入 + 2D 网格（迷宫）
 - movfuscator（全 mov）/Tigress/VMProtect 保护目标
+- 导入表仅 `sigaction/sigaltstack/mmap` 等信号与内存 API（无 printf 族输入函数），主循环含 `int3/ud2/除零` trap——信号驱动 VM（§1a）
 
 ## §1 识别与五步方法论
 
-dispatcher 三形态: switch 型（自研 VM 常见）/ 表驱动 `handlers[op](&ctx)` / if 链。辅助信号: 高圈复杂度单函数、数据缓冲逐字节 xref。
+dispatcher 四形态: switch 型（自研 VM 常见）/ 表驱动 `handlers[op](&ctx)` / if 链 / **信号驱动型（§1a，trap 当 opcode 触发器）**。辅助信号: 高圈复杂度单函数、数据缓冲逐字节 xref。
 五步: 找 dispatcher → 映射 opcode 五属性（值/操作/操作数字节/类型/副作用）→ 提取 bytecode → 写反汇编器（`OPCODES={op:(mnemonic,operand_bytes)}` 字典循环）→ 分析 check 逻辑（通常 XOR/ADD 变换比对常量表）→ 手动逆或 Z3。
 输入空间小 → Unicorn 爆破; 嵌套 VM → 逐层提取或符号执行穿透。
+
+## §1a 信号驱动 VM（dispatcher 第四形态）
+
+**识别形态**: 导入表极简仅 `sigaction/sigaltstack/mmap/munmap/fgetc` 等（无 printf 族交互）+ 主循环按 mode 字段轮转触发 `int3`(SIGTRAP) / `ud2`(SIGILL) / `div 0`(SIGFPE) 三种 trap + RWX mmap 区 16 字节槽。handler 以 `SA_SIGINFO|SA_ONSTACK` 注册，作 VM dispatcher。
+
+**执行机制两型**:
+- **handler 解释型**: trap 后 handler 从 ucontext/信号帧取操作数执行 VM 语义，改写 `ucontext.gregs[REG_RIP]` 前进（反调试视角的对抗描述见 `anti-debugging-bypass.md` 信号分发节）
+- **TF 单步执行型**: handler 生成 3 字节真 x86 指令（如 `4d 8b fa`=mov r15,r10、`4d 21 c7`=and r15,r10）写入 RWX 槽，置 `EFLAGS.TF`（ucontext EFL `|= 0x100`）、RIP 指向槽——CPU 单步执行真指令，每条 trap 一次回 handler。寄存器文件 = ucontext gregs: R8-R12 作数据寄存器（输入分块加载）、R13 辅助、R14 常作 verdict 掩码
+- **verdict 掩码型校验**: `R14 |= imm64 ^ diff`——全过 ⟺ 每组 `diff == imm`；求解走 reverse-patterns §mod 素数线性哈希
+
+**观测环境判定矩阵**（先判环境再选手段）:
+
+| 环境 | gdb | qemu-user | LD_PRELOAD |
+|------|-----|-----------|------------|
+| 原生 Linux | ✓ | n/a | ✓ |
+| Docker Desktop qemu 模拟容器（x86 目标 on ARM Mac） | ✗ 无 ptrace | ✗ ucontext 改 RIP 段错误 | ✓ 原生执行 |
+
+**观测手段（首选）: LD_PRELOAD 信号处理器包装器**——模板 `$SHARED_DIR/scripts/sigwrap_tracer.c`。包装 `sigaction` 捕获目标注册的 handler，替换为 wrapper: 调真 handler 前后各 dump 一次（全 gregs + RIP 前后指令字节 + 可选全局指针结构），一次运行拿到全部 trap 序列、handler 改写 RIP/EFL 的效果（含 TF 置位）、槽内容演变。
+
+**状态化解密指令流**: 指令块（如 N×64B）解密密钥/种子随 vmctx（PC/hash16/expected/version）逐条演变时，静态批量解密不可行（单块成功其余全 integrity error）。解法组合: ①信号包装器 dump 每 trap 的 vmctx（环境变量 `SIGWRAP_GPTR` + `SIGWRAP_DSTATE`）②Unicorn **单函数调用**原解码函数逐条解码（喂真实 vmctx——解码函数本身无信号依赖，单函数模式无 SMC/TF 限制，见 `unicorn-templates.md` §模拟模式选择判据）③按 pc 去重得到逻辑指令序列，Python 重放并对照真机 gregs 快照校准。
+
+**求解链**（校验为线性哈希时）: 高斯消元解出混合后状态 → 逆推混合链（乘法奇常数用 `pow(imm,-1,1<<64)` 模逆）→ padding 匹配即输入。完整判据见 reverse-patterns §mod 素数线性哈希。
 
 ## §2 ISA 模式
 

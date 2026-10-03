@@ -229,7 +229,7 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 | `reverse-patterns.md` | 逆向通用解题模式（校验逻辑三原则/编码可视化/trace diffing/博弈论等 50+ 模式速查） |
 | `language-binary-reversing.md` | 识别语言运行时特征（Go/Rust/Kotlin/Swift/Python 字节码/PyArmor/NativeAOT/编译器指纹） |
 | `platform-reversing.md` | 平台/固件逆向（IoT 解包链/U-Boot/CAN·UDS/工控协议/WASM/冷门 ISA/macOS·iOS） |
-| `vm-bytecode-reversing.md` | 目标为自定义 VM/字节码解释器（dispatcher 识别/ISA 提取/VMProtect·Tigress/Sleigh） |
+| `vm-bytecode-reversing.md` | 目标为自定义 VM/字节码解释器（dispatcher 识别/ISA 提取/VMProtect·Tigress/Sleigh）; 导入表仅 sigaction/sigaltstack 等信号 API + int3/ud2/除零 trap 轮转（信号驱动 VM） |
 | `v8-browser-exploitation.md` | V8/浏览器引擎利用（addrof-fakeobj/WASM RWX/沙箱逃逸/Mojo/补丁 diff 法） |
 | `jsc-exploitation.md` | JSC（WebKit）引擎利用——目标为 jsc shell/出现 butterfly、haveABadTime、FTL、StringImpl 标识时 |
 | `windows-shellcode-loader.md` | Windows shellcode 加载与 evasion（回调执行族/编码存储/SEH+CFG 三件套/loader 组件） |

@@ -279,3 +279,26 @@ byte[] out = emu.readMemory(outputAddress, len);  // 5. 读输出
 | 自修改代码 | 某些壳/保护会修改自身代码。需要在写操作后重新读取 |
 | 未实现寄存器告警噪音 | 设环境变量 `UC_IGNORE_REG_BREAK=1` 静默未实现寄存器告警 |
 | 函数边界判断 | `emu_start` 的结束地址不一定是下一条指令。用 `emu_stop()` 在 hook 中手动停止更可靠 |
+
+## Unicorn 2.1.2 已知限制（x86-64，触发: 拟模拟含信号/自修改/单步的目标前必查）
+
+**限制 1: `EFLAGS.TF` 写入不产生单步 trap**。`reg_write(UC_X86_REG_EFLAGS, ...|0x100)` 后继续执行不会触发 INTR。TF 单步须手动模拟，三要素缺一不可:
+1. `UC_HOOK_INTR` 中对 intno=1 按 SIGTRAP 递送（构造 ucontext 后跳原 handler）
+2. 进入 handler 前清 CPU 的 TF 位（内核语义: handler 运行时无 TF），但 **INTR(1) 触发时 unicorn 报告的 EFLAGS 已无 TF**——写 ucontext.gregs[REG_EFL] 时必须显式 `|= 0x100` 回填（真实内核保留 TF 在信号帧）
+3. sigreturn 恢复时按 ucontext EFL 的 TF 位重新激活手动单步
+
+**限制 2: SMC 页 TB 执行后不自动续**。被 `UC_HOOK_MEM_WRITE` 监听的 RWX 页（JIT 槽/自修改代码）执行一个翻译块后 `emu_start` 即返回，即使远未到 until。`ctl_remove_cache` 只保证重翻译，不保证连续执行——须外层 `while not finished: emu_start(当前RIP, until)` 重启驱动。
+
+**限制 3: `until=0` 存在提前停止路径**。`emu_start(begin, 0)` 在部分场景执行单条/单块后返回。until 一律传具体哨兵地址（如 RET magic）。
+
+**综合判定: 信号递送（手动 ucontext/sigreturn）+ TF 单步 + SMC 三者叠加的全程序模拟不可行**——重构循环追三个限制的组合 bug 的成本远超收益。遇信号驱动 VM/信号混淆直接转 LD_PRELOAD 原生观测（见 `$SHARED_DIR/knowledge-base/vm-bytecode-reversing.md` §dispatcher 第四形态）。
+
+## 模拟模式选择判据（触发: 决定用 Unicorn 时先过此表）
+
+| 目标特征 | 模式 | 要点 |
+|---------|------|------|
+| 纯计算函数（无 libc 调用、无信号） | **单函数调用**（首选） | 映射 .text+栈+数据区; 设 rdi/rsi/rdx; RET 哨兵压栈作 until; 参见模板 2 |
+| 需要 libc（malloc/printf 族） | PLT hook 全程序 | 按地址范围 hook .plt 各项，Python 实现 libc 语义后 `do_ret` |
+| 含信号 handler（sigaction 当 dispatcher） | **放弃模拟** | 三限制叠加（见上）; 转 LD_PRELOAD 包装器原生观测 |
+| 含 TF 单步执行 / RWX 自修改槽 | **放弃模拟** | 限制 1/2 必踩; 转原生观测 |
+| 仅需跑"指令解码/哈希/解密"等独立函数 | **单函数调用** | 即便宿主程序是信号 VM，解码函数本身无信号——逐条喂参数调用，绕开全程序模拟 |
