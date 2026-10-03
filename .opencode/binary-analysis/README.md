@@ -14,7 +14,7 @@
 ├── _base.py         # 公共基础设施（日志、环境变量、headless 入口、JSON 输出）
 ├── _utils.py        # 共享业务工具（thunk 追踪、数据读取、地址解析）
 ├── _analysis.py     # 共享分析逻辑（段、入口点、导入、字符串、壳检测、场景分类）
-├── query.py         # 查询操作（13 种查询类型）
+├── query.py         # 查询操作（14 种查询类型）
 ├── update.py        # 更新操作（4 种操作类型）
 ├── README.md        # 本文件
 ├── scripts/         # 沉淀脚本 + 纯 Python 工具脚本
@@ -56,6 +56,7 @@ IDA_OPERATION=<操作> IDA_OUTPUT=<输出路径> [其他参数] \
 | `entry_points` | 枚举入口点（智能识别 exe/dll/so） | 无 |
 | `functions` | 按模式匹配函数 | `IDA_PATTERN` |
 | `decompile` | 反编译函数（返回 C 伪代码，自动追踪 thunk） | `IDA_FUNC_ADDR` |
+| `decompile_all` | 批量反编译全部函数到单文件（Read/Grep 离线检索，替代逐函数轮询） | `IDA_PATTERN` `IDA_SKIP_PLT` `IDA_MAX_FUNCS` |
 | `disassemble` | 反汇编函数（自动追踪 thunk） | `IDA_FUNC_ADDR` |
 | `func_info` | 函数详细信息（调用者/被调用者/字符串） | `IDA_FUNC_ADDR` |
 | `xrefs_to` | 交叉引用（谁引用了它） | `IDA_ADDR` 或 `IDA_FUNC_ADDR` |
@@ -71,9 +72,9 @@ IDA_OPERATION=<操作> IDA_OUTPUT=<输出路径> [其他参数] \
 
 | `IDA_READ_MODE` | 说明 | 额外参数 |
 |-----------------|------|---------|
-| `auto`（默认） | 自动判断数据类型 | `IDA_READ_SIZE`（默认 64） |
+| `auto`（默认） | 自动判断数据类型 | `IDA_READ_SIZE`（默认 64; 判定为原始字节时最多只读 64，传大无效） |
 | `string` | 读取 null-terminated 字符串 | 无 |
-| `bytes` | 读取原始字节（hex + ASCII） | `IDA_READ_SIZE`（默认 64） |
+| `bytes` | 读取原始字节（hex + ASCII） | `IDA_READ_SIZE`（默认 64; 此模式下可传任意大小，如 256/4096） |
 | `pointer` | 读取指针值 | `IDA_DEREF=1` 解引用 |
 
 ## update.py 操作类型

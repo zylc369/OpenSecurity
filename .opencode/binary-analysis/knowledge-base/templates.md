@@ -68,6 +68,19 @@ else:
 IDA_QUERY=<类型> IDA_OUTPUT="$TASK_DIR/result.json" [IDA_FUNC_ADDR=<地址>] [IDA_PATTERN=<模式>] \
   "$IDAT" -A -S"$SHARED_DIR/query.py" -L"$TASK_DIR/idat.log" "<目标文件>"
 
+# ── 调用陷阱 ──
+# 1. 地址参数必须带 0x 前缀: 脚本对纯数字串按 16 进制解析（int(x,16)）。shell 算术展开
+#    $(($base+$off)) 产出 10 进制串（如 8320）会被误当 0x8320 读到全 FF——拼接地址用
+#    printf '0x%x' $((0x2040+64)) 或直接手写 0x2080。
+# 2. IDA_PATTERN 是 glob 语义（fnmatch）不是正则: ".*" 只匹配以字面 '.' 开头的名字
+#    （.init_proc 等），匹配全部请留空。
+# 3. read_data 大块读原始字节须用 IDA_READ_MODE=bytes: bytes 模式下 IDA_READ_SIZE 可传
+#    任意大小（如 256/4096）; 默认 auto 模式当数据被判定为原始字节时（既非字符串也非
+#    指针的兜底分支），实际读取长度被压到最多 64 字节（实现为 min(size_hint,64)）——
+#    传 4096 也只返回 64，勿据返回的 length 字段推断该区域真实大小。
+# 4. 长跑/交互式 python 一律加 -u（$PYTHON_CMD -u script.py）: 管道/重定向下 print 是
+#    块缓冲，程序真挂起与"在跑但输出憋着"无法区分——-u 后超时才是真超时。
+
 # 更新操作（单操作）
 IDA_OPERATION=<操作> IDA_OUTPUT="$TASK_DIR/result.json" [其他参数] \
   "$IDAT" -A -S"$SHARED_DIR/update.py" -L"$TASK_DIR/idat.log" "<目标文件>"

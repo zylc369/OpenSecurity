@@ -24,7 +24,7 @@ $OPENCODE_ROOT/                              # 由插件注入，项目级 .open
 │   ├── _base.py                          # 层 1: 基础设施
 │   ├── _utils.py                         # 层 2: 共享业务工具
 │   ├── _analysis.py                      # 层 2.5: 共享分析逻辑
-│   ├── query.py                          # 层 3: 查询操作（13 种）
+│   ├── query.py                          # 层 3: 查询操作（14 种）
 │   ├── update.py                         # 层 3: 更新操作（4 种）
 │   ├── scripts/                          # 沉淀脚本 + 纯 Python 工具
 │   └── knowledge-base/                   # 知识库（按需加载）: opencode-plugin-api / hooks-lifecycle /

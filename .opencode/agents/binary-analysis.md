@@ -144,11 +144,14 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 
 ### query.py 查询类型
 
+> 逆向使用策略: 需要看多个函数时优先 `decompile_all` 一次拿全量（输出落盘后用 Read/Grep 检索函数源码，避免逐函数 idat 轮询——每次 idat 启动约 8s）; 仅跟进单个已知函数或需 `IDA_FORCE_CREATE` 时用 `decompile`。
+
 | IDA_QUERY | 说明 | 额外参数 |
 |-----------|------|---------|
 | `entry_points` | 枚举入口点 | 无 |
 | `functions` | 按模式匹配函数 | `IDA_PATTERN` |
 | `decompile` | 反编译函数 | `IDA_FUNC_ADDR` `IDA_FORCE_CREATE` |
+| `decompile_all` | 批量反编译全部函数到单文件（Read/Grep 离线检索，替代逐函数轮询） | `IDA_PATTERN` `IDA_SKIP_PLT` `IDA_MAX_FUNCS` |
 | `disassemble` | 反汇编函数 | `IDA_FUNC_ADDR` `IDA_FORCE_CREATE` |
 | `func_info` | 函数详情 | `IDA_FUNC_ADDR` `IDA_FORCE_CREATE` |
 | `xrefs_to` | 谁引用了它 | `IDA_ADDR` 或 `IDA_FUNC_ADDR` |

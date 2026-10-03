@@ -4,11 +4,14 @@
 description:
   查询 IDA 数据库信息，输出结构化 JSON 供 AI 解析。
   通过环境变量 IDA_QUERY 指定查询类型，IDA_OUTPUT 指定输出文件路径。
+  （共 14 种查询类型，见下方列表）
 
   支持的查询类型（IDA_QUERY）:
     entry_points  — 枚举所有入口点（根据文件类型智能识别）
     functions     — 按模式匹配函数列表
     decompile     — 反编译指定函数（自动追踪 thunk 链到真实函数）
+    decompile_all — 批量反编译全部函数到单文件 JSON（供 Read/Grep 离线检索，
+                    替代逐函数 idat 轮询）
     disassemble   — 反汇编指定函数（自动追踪 thunk 链）
     func_info     — 查询单个函数的详细信息（自动追踪 thunk 链）
     xrefs_to      — 查询指定地址/函数的交叉引用（谁引用了它）
@@ -62,6 +65,7 @@ import ida_funcs
 import ida_idaapi
 import ida_lines
 import ida_nalt
+import ida_segment
 import ida_xref
 import idautils
 
@@ -238,6 +242,109 @@ def _query_decompile():
     if force_created:
         result["force_created"] = True
     return result
+
+
+def _query_decompile_all():
+    """批量反编译全部函数，输出到单文件 JSON 供 Read/Grep 离线检索。
+
+    环境变量:
+      IDA_PATTERN   — glob 模式过滤函数名（与 functions 查询同语义，空 = 全部）
+      IDA_SKIP_PLT  — 跳过 PLT stub/thunk/导入占位（默认开启; 仅精确传 "0" 关闭）。
+                      判定: 函数名以 '.' 开头 / FUNC_THUNK flag / 函数位于
+                      .plt·.plt.sec·.plt.got·.init·.fini·extern 段（stripped 二进制的
+                      PLT 条目命名为 sub_XXXX、extern 导入符号呈 8 字节伪函数，
+                      仅靠名字与 flag 判不住，段名维度必需）
+      IDA_MAX_FUNCS — 输出函数数上限（默认 400）。达到上限即置 truncated=true
+                      （保守信号: 恰好等于上限也会置位），需更多时显式传更大值。
+    """
+    pattern = env_str("IDA_PATTERN", "")
+    skip_plt = env_str("IDA_SKIP_PLT", "1") != "0"
+    max_funcs = env_int("IDA_MAX_FUNCS", 400)
+    log(f"[*] 批量反编译: 模式 '{pattern or '(全部)'}'，跳过 PLT/thunk: {skip_plt}，上限 {max_funcs}\n")
+
+    hexrays_ready = False
+    if _HAS_DECOMPILER:
+        hexrays_ready = ida_hexrays.init_hexrays_plugin()
+        if not hexrays_ready:
+            log("[!] 反编译器初始化失败，全部回退到反汇编\n")
+
+    functions = []
+    decompiled_count = fallback_count = failed_count = 0
+    truncated = False
+
+    for ea in idautils.Functions():
+        name = get_func_name_safe(ea)
+        if pattern and not fnmatch.fnmatch(name, pattern):
+            continue
+        func = ida_funcs.get_func(ea)
+        if func is None:
+            continue
+        if skip_plt:
+            seg = ida_segment.getseg(ea)
+            seg_name = ida_segment.get_segm_name(seg) if seg else ""
+            if (name.startswith(".")
+                    or (func.flags & ida_funcs.FUNC_THUNK)
+                    or seg_name in (".plt", ".plt.sec", ".plt.got", ".init", ".fini", "extern")):
+                continue
+
+        entry = {
+            "name": name,
+            "addr": hex_addr(ea),
+            "size": func.size(),
+            "source": "",
+            "source_type": "disassembly",
+        }
+        source = ""
+        source_type = "disassembly"
+
+        if hexrays_ready:
+            try:
+                cfunc = ida_hexrays.decompile(ea)
+                if cfunc:
+                    source = str(cfunc)
+                    source_type = "decompiled"
+                else:
+                    log(f"[!] 反编译返回 None，回退反汇编: {name}\n")
+            except Exception as e:
+                log(f"[!] 反编译失败: {name}: {e}，回退反汇编\n")
+
+        if not source:
+            try:
+                source = _generate_disassembly(func)
+            except Exception as e:
+                log(f"[!] 反汇编也失败: {name}: {e}\n")
+                entry["failed"] = str(e)
+                failed_count += 1
+                functions.append(entry)
+                if len(functions) >= max_funcs:
+                    truncated = True
+                    break
+                continue
+
+        if source_type == "decompiled":
+            decompiled_count += 1
+        else:
+            fallback_count += 1
+
+        entry["source"] = source
+        entry["source_type"] = source_type
+        functions.append(entry)
+
+        if len(functions) >= max_funcs:
+            truncated = True
+            log(f"[!] 函数数达到上限 {max_funcs}，已截断\n")
+            break
+
+    log(f"[+] 批量反编译完成: 共 {len(functions)} 函数"
+        f"（反编译 {decompiled_count}，反汇编回退 {fallback_count}，失败 {failed_count}）\n")
+    return {
+        "functions": functions,
+        "total": len(functions),
+        "decompiled_count": decompiled_count,
+        "fallback_count": fallback_count,
+        "failed_count": failed_count,
+        "truncated": truncated,
+    }
 
 
 def _generate_disassembly(func):
@@ -587,6 +694,7 @@ _QUERY_HANDLERS = {
     "entry_points": _query_entry_points,
     "functions": _query_functions,
     "decompile": _query_decompile,
+    "decompile_all": _query_decompile_all,
     "disassemble": _query_disassemble,
     "func_info": _query_func_info,
     "xrefs_to": _query_xrefs_to,

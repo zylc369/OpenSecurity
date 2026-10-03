@@ -269,6 +269,10 @@ cat /proc/sys/kernel/randomize_va_space   # 0=关 1=部分 2=完全
 | **QEMU 设备/TEE/UEFI 特殊环境** | QEMU: PMIO 设 seek+MMIO OOB 写状态结构内函数指针（blocks→rand_r=system、r_seed="/bin/sh"）宿主逃逸——审计 mmio_write/pmio_write 的"基址+可控偏移"计算。OP-TEE: 通信层注入（HTTPd 替换空格但 RPC 认 \t）+TOCTOU+BGET 堆 UAF 跨信任边界; aarch64 almighty gadget。UEFI edk2: 改 chunk 的 EFI_MEMORY_TYPE 跨 freelist 类型混淆→UAF+FD/BK 任意写→启动项加 rdinit=/bin/sh |
 | **libc 版本完全未知+有 GOT 泄漏+任意读** | **JIT-ROP 扫 syscall 字节**: read/write 等是 syscall 薄封装函数体内必含 `0f 05`——泄漏 read@GOT 后读函数体 0x100B，index(b'\x0f\x05') 得 syscall gadget，覆写未用 GOT（如 srand）; read(0,bss,59) 返回值恰好设 rax=59=__NR_execve → 调被覆写 PLT 即 execve。比 DynELF 交互更少 |
 | **checksec 显示 No PIE 且 statically linked** | 静态链接把全部 libc 符号+字符串表拖进二进制固定地址——`nm binary \| grep ' T system'` + `strings -a binary \| grep /bin/sh` 确认后，溢出槽再小也够放 `system; exit; &/bin/sh` 三地址单链（12B），无需泄漏/gadget 搜寻 |
+| **free() 先于引用计数/判空执行的共享 slot**（KV/对象存储） | 释放处理器无条件 `free(ptr)`、之后才 `if (ref-- == 1) 清 slot`——配合浅拷贝共享（COPY 只 ref++ 复用指针）: DELETE 一次后所有共享 slot 均悬垂（ptr/len 原样保留）→ 悬垂 GET=读 freed chunk、悬垂 EDIT=写 freed chunk，且未清零的 slot 可再次 DELETE。审计信号: 任何"先 free 后查计数"的释放路径 + 指针共享原语并存 |
+| **tcache poisoning 差一次 count** | malloc 走 tcache 要求 `counts>0`——链里 N 块只支撑 N 次 malloc，poison 改链尾 next 后第 N+1 次 malloc 才返回目标但 count 已尽走正常路径。补法: 悬垂写清 freed chunk 的 key 字段（offset 8）后再 free 同一块——key≠tcache 跳过 double-free 遍历检查，合法二次入链（count+1）; 需要几段补几次（每对共享 slot 提供一次 EDIT 清 key + 一次 DELETE）。注意 glibc≥2.34 tcache key 是随机值（非 tcache 结构地址），不能当堆泄漏用——堆页号从单块链的 next 取: `next=(p>>12)^0=p>>12`，无需低 12 位 |
+| **命令处理器调 .bss 函数指针 / 回显全局区** | 菜单协议中"EXEC/回调"类命令调用全局函数指针且参数用户可控=天然 RCE 落点（改指针为 system 即 system(用户数据)）; "DUMP/状态"类命令回显 .bss/.data 起始区=免费泄漏原语（首 qword 常是初始化写入的函数指针→直接破 PIE）。逆完 dispatch 后优先标出这两类命令再设计链 |
+| **劫持后 system("sh") 卡住无回显** | system 阻塞主循环等 shell 退出——被劫持命令的正常响应永远不发，勿等 recv 判成败。exploit 发触发命令后直接往连接写 shell 命令（sh 继承 fd 0/1）; 判据: 发送后连接保持活跃且无程序层响应=shell 已起 |
 
 ### 格式串进阶速查
 
@@ -295,6 +299,15 @@ cat /proc/sys/kernel/randomize_va_space   # 0=关 1=部分 2=完全
 | **浮点程序且索引/上限由运算结果决定** | **fenv 检查顺序缺陷**: `fetestexcept` 在运算**之前**调用则检查的是上一次的标志位——本次上溢（`1e308 * 1e308` 向上舍入 = inf）漏检，inf 参与后续"扩大索引上限"类逻辑（`limit = product of usable sizes`）→ 巨大索引合法通过。识别: 审计所有浮点代码的 fetestexcept/clear 与实际运算的相对顺序; 利用: 两个大 double 相乘制造 inf 绕过上限检查 |
 | **seccomp 严苛但需确认输入是否正确（验证 oracle）** | **ENOSYS vs ERRNO 差异**: 未定义 syscall 正常路径返回 `-ENOSYS`(-38)，被 seccomp `SECCOMP_RET_ERRNO(1)` 拦截返回 `-1`——同一 syscall 号两种来源可区分。用于逆向输入校验器: 程序以"syscall 返回值满足约束"当验收（如自定义 syscall 0x1337-0x1344 的 `((arg^k1)+k2)&mask == target`），把每条 BPF 约束翻成 Z3 方程 + 末尾 checksum 联立求解唯一输入。配套: **间接跳转主导 + SIMD 直线代码**的二进制——提取 Unicorn 执行的基本块路径 + 内存写 + seccomp BPF（比重建静态控制流有效）; MBA 混淆函数逐指令翻译进 Z3（每条指令一个表达式），用运行时观测的中间状态对拍验证翻译正确性 |
 | **隐藏数据页地址随机（16GiB 范围内找一页）** | **`MAP_FIXED_NOREPLACE` 占用 oracle 二分**: 白名单允许 mmap/munmap 时，对候选区间 `mmap(addr, len, PROT_READ, MAP_FIXED_NOREPLACE|MAP_ANON|MAP_PRIVATE)` 返回 `-EEXIST` = 该区间已被隐藏页占用; 对半缩小 + 成功探测立即 munmap 复原——22 次探针从 16GiB 定位到 4KiB 页。**区间左闭右开** `[addr, addr+len)`——二分边界取 `hidden < addr+len` 判归属，端点相等不算覆盖。只许写固定页时，把页内容拷到可写出口逐 8 字节送出 |
+
+### 自定义加密协议还原（流量全加密的 pwn 服务）
+
+| 场景 | 方法 |
+|------|------|
+| 总体路线 | 逆握手而非逆全部: 服务端首包必含明文阶段（密钥尚未协商）——先发明文 nonce/challenge，客户端须回"自证"包（用已收 nonce 算校验值加密回传）。还原顺序: 明文包格式 → 密钥派生 → 加密原语 → 计数器语义; 全部可在本地离线对拍验证（实现客户端后先连本地实例过握手再打远程） |
+| 流密码形态识别 | 反编译里 `buf[i] ^= sbox[(key[i&0xF] + ctr + i) & 0xFF]` 是 counter 模式流密码——收发双向独立计数器（如 dword_rx/dword_tx 两个全局），每包累加**含 tag/命令字节的整包长**。"栈地址低字节自消"陷阱: index 计算常含 `-stack_low + cur_ptr_low`，两低字节相消后真实 index 只依赖 (key, ctr, i)——勿被表面地址运算迷惑 |
+| 密钥派生（轮函数） | 典型形态: key32 = server_nonce \|\| client_nonce，N 轮混合 `out[j] = rol8(key32[3r+j] ^ sbox[out[j] ^ key32[(j+8r)&0x1F]], 3)`（out 就地反馈、初值全 0、每轮输入窗口滑动）; S-box 从 .rodata dump 后校验双射性（`len(set(sbox))==256`）——非双射说明定位错了（那是数据不是表） |
+| 自证包（challenge） | 校验值通常由派生 key 直推，一对 sbox/移位组合: `expect[j] = sbox[key[j]] ^ key[(j+5)&0xF]` 类——逆出公式后客户端完整重实现握手+加密，与正常客户端等价交互。握手一次通过=协议还原正确的强验证 |
 
 ## §5 工具链
 
