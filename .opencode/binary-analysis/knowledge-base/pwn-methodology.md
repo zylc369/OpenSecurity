@@ -122,6 +122,32 @@ patchelf --set-interpreter <ld_path> --set-rpath <libc_dir> <binary>
 # 本地打通后打远程
 ```
 
+### 题型变体：信息枚举类（无利用原语）
+
+**识别信号**（满足前两条即按本节流程，替代 §1 利用向流程）：① 程序所有输出走固定字符串（无 printf/格式化串，无泄读变量的常规通道）；② 秘密数据（flag/密钥）在启动阶段被读入、打散或搬运进深栈帧后函数返回——成为**栈残留**；③ 存在打印单个变量的输出原语（如手写 print_int）。
+
+**未初始化输出槽原语（审计点）**：手写 parse/转换函数的失败路径常见缺陷——"输入非法时直接 return，不写输出指针"。若调用序列是 `parse(buf, &slot)` 之后紧跟 `print(slot)`，则让 parse 失败（输入非数字）即打印 slot 的**进入函数时栈残留** = 4 字节栈读原语。审计方法：反汇编中 grep 所有"parse 调用后跟打印"的路径，检查失败分支是否写输出槽。注意：前序交互若输入过数字会污染槽，触发打印的那次交互之前保持槽未被写过。
+
+**栈深导航**：菜单驱动程序若所有出口都是 `call <菜单函数>`（函数永不返回、栈只增不减），则每条菜单回路产生固定栈深增量（环）。泄漏槽对准目标数据的条件：**Σ(环增量) == 目标数据相对基准的偏移**。环增量必须实测——gdb 断点打印每次进入菜单函数的 rbp，相邻两次差值即环增量；禁止手算推导（帧距公式 `callee_rbp = caller_rbp - caller_sub - 0x10`，ret+push rbp 共 0x10）。三条易错规则：① 公式用 **caller** 的 sub 不是 callee 的；② 会返回的临时调用（帧被回收）不计入环增量；③ 16 进制累计必须用工具（`python -c` 或 stack_frame_calc.py），多级手算错误率高。
+
+**可达性分析**：所有函数 sub rsp 为 16 倍数且无 prologue 之外的 push 时，环增量半群 ≡ 0 (mod 16)——部分目标偏移**结构性不可达**（无论怎么组合菜单都到不了）。秘密数据的连续副本（read 直读进未清零区的那份）可提供补充读取窗口，但窗口偏移受同样的模约束。判定必须穷举（AI 心算不可靠）：`stack_frame_calc.py --reach`，输出组合方案或"不可达 + 模相位证据"。
+
+**枚举收集**：每连接泄漏一个窗口——无 fork 的服务重连即新进程、栈布局不变，N 个窗口用 N 个连接收集。程序若有全局延迟开关（某输入值置 nanosleep 参数为 0）优先在连接首行关闭，否则每步交互拖 2 秒级延迟。
+
+**缺口处理**：拿到 N-4 字节、剩余缺口经 `--reach` 判定数学不可达时，转入验证 oracle 流程（`$SHARED_DIR/knowledge-base/verification-patterns.md` 第零步），**禁止直接交付语义猜测**。
+
+**stack_frame_calc.py 调用模板**：
+```bash
+# 模式 1: 提取帧表（函数名 → sub rsp 值），供链式计算引用
+$PYTHON_CMD "$SHARED_DIR/scripts/stack_frame_calc.py" --elf ./target
+# 模式 2: 调用链帧距（输出每层 rbp 相对初始 rbp 的偏移，消除手算）
+$PYTHON_CMD "$SHARED_DIR/scripts/stack_frame_calc.py" --elf ./target --chain main,menu_a,menu_b
+#   或直接给 sub 值序列: --subs 0x110,0x110,0x170 --chain f1,f2,f3
+# 模式 3: 环组合可达性（能否由环增量的非负组合凑出目标偏移）
+$PYTHON_CMD "$SHARED_DIR/scripts/stack_frame_calc.py" --reach --loops 0x120,0x400 --target 0x5A0
+#   --fixed-step 0x440: 额外允许某固定步进的任意倍数（如每层递归的帧深）
+```
+
 ## §2 mitigations 应对速查表
 
 | 缓解 | 影响 | 应对策略 |
@@ -335,6 +361,36 @@ cat /proc/sys/kernel/randomize_va_space   # 0=关 1=部分 2=完全
 
 > IDA（idat）既能静态分析也能动态调试，但它的调试器**只支持宿主机 CPU 架构**——arm64 Mac 上调不了 amd64 程序。动态调试统一用 `qemu-gdb`（自动适配 arm64/amd64，用法与普通 gdb 相同: `qemu-gdb ./pwn -ex "break main" -ex c`）; 需要堆插件时用 `gdb-pwndbg`（arm64）。
 > 注意区分两种 qemu 形态: `qemu-gdb ./binary`（宿主 qemu-user + gdbstub，调试**正常可用**）vs Docker `--platform linux/amd64` 容器**内部**跑 gdb/strace（对 qemu 模拟进程做 ptrace，失真不可用，替代手段见 §4 卡点表 qemu-user 条目）。需要完整 Linux 服务环境（多进程/socket 服务/glibc 特定行为）时用容器靶场（见下"本地靶场"），单进程调试优先宿主 qemu-gdb。
+
+**容器形态的符号级调试通道——容器内 qemu gdbstub + gdb remote**: 必须用容器（目录挂载 + stdin 管道驱动交互流程的本地复现场景）时，容器内直接跑 gdb（ptrace qemu 进程）不可用，但换 **gdbstub remote 协议**绕开 ptrace 即恢复正常:
+```bash
+# 容器内: qemu 自带 gdbstub 后台起目标（断在第一条指令前等待连接）
+qemu-x86_64 -g 1234 ./binary < input.txt > /dev/null 2>&1 &
+# 容器内另起 gdb，remote 协议连接（不走 ptrace，断点/读寄存器/finish 全部正常）
+gdb -q -batch -x dbg.gdb   # dbg.gdb 内含: file ./binary → target remote :1234 → 断点/commands
+```
+注意: 此通道**不需要** `--cap-add=SYS_PTRACE`（该参数救的是 ptrace 形态，对 gdbstub 无关）。
+**dbg 模板**（多函数断点静默打印 rbp，实测菜单环增量 / 校验栈布局）:
+```gdb
+set pagination off
+set confirm off
+file ./binary
+target remote :1234
+break <func1>
+commands 1
+silent
+printf "FUNC1 rbp=%p\n", $rbp
+c
+end
+break <func2>
+commands 2
+silent
+printf "FUNC2 rbp=%p\n", $rbp
+c
+end
+c
+quit
+```
 
 | 工具 | 用途 | 关键用法 |
 |------|------|---------|
