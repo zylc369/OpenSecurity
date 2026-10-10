@@ -752,8 +752,10 @@ def _main() -> int:
 
     if command == "install":
         tags_raw = cast("list[str] | None", args.tags)
+        backend = cast("str", args.venv_backend)
         _run_install(dry_run=dry_run,
-                     tags=[DepTag(t) for t in tags_raw] if tags_raw else None)
+                     tags=[DepTag(t) for t in tags_raw] if tags_raw else None,
+                     venv_backend=backend)
         return 0
 
     if command == "fix-libomp":
