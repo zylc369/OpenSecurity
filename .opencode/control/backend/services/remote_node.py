@@ -266,7 +266,8 @@ class RemoteNodeBootstrapper:
             if time.monotonic() > deadline:
                 _log(f"[ERROR] 模型下载超时（>{MODEL_WAIT_TIMEOUT_SEC}s）: {pending}")
                 sys.exit(1)
-            _log(f"[*] 等待下载: {pending}")
+            parts = [f"{mid} {snapshot[mid].download.progress * 100:.0f}%" for mid in pending]
+            _log(f"[*] 等待下载: {', '.join(parts)}")
 
     # ---- 步骤 5: 启动控制台 -------------------------------------------------
     def launch(self) -> None:
