@@ -265,6 +265,8 @@ class RemoteNodeBootstrapper:
                 return
             if time.monotonic() > deadline:
                 _log(f"[ERROR] 模型下载超时（>{MODEL_WAIT_TIMEOUT_SEC}s）: {pending}")
+                _log("[!] 后台下载子进程仍在继续（数据保留，断点续传）——"
+                     "慢速网络可配置 .ai_env: HF_ENDPOINT=https://hf-mirror.com 后重跑")
                 sys.exit(1)
             parts = [f"{mid} {snapshot[mid].download.progress * 100:.0f}%" for mid in pending]
             _log(f"[*] 等待下载: {', '.join(parts)}")
