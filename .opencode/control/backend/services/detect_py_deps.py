@@ -550,8 +550,8 @@ def _bootstrap_venv(venv_backend: str = "conda"):
     """
     venv_python = _get_venv_python()
 
-    # 已在 venv 内
-    if os.path.abspath(sys.executable) == os.path.abspath(venv_python):
+    # 已在 venv 内（sys.prefix 身份判定——abspath 受 macOS /var symlink 前缀差异误判）
+    if os.path.realpath(sys.prefix) == os.path.realpath(VENV_DIR):
         return
 
     # 防死循环：venv 重启标记

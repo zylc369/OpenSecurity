@@ -121,3 +121,20 @@
   1. 禁止 python str.replace 改存量文件——一律用 Edit 工具（不命中会明确报错）
   2. 验证必须从文件本身提取/执行（source/grep 文件），不接受手写副本验证
   3. CLI/接线类改动必须端到端验证（sys.argv 真解析 → spy 分发目标）
+
+## 2026-10-10 迭代: remote_node.py 一等公民入口（用户确认方案实施）
+### 改动
+- 新增 services/remote_node.py（引导器: venv 自举/依赖幂等/配置初始化/模型 ensure/exec 启动; --check 预检; 全 OO+dataclass）
+- start-remote-node.sh 缩为 3 行薄壳（定位+exec remote_node.py）
+- detect_py_deps._bootstrap_venv 修复潜伏 bug: abspath 路径比较 → sys.prefix 身份判定（macOS /var→/private/var symlink 误判; MacMini /Users 非 symlink 未暴露, tmp 路径实测暴露）
+### 关键设计
+- 鸡生蛋解法: 顶层仅 import stdlib+detect_py_deps（轻量）; ConfigManager/model_assets 延迟到方法内（TYPE_CHECKING 保静态类型完整）——系统 python 无三方包也能跑 venv 自举
+- 远程模式键组: RELAY 四键 + P2P_GATEWAY_ENABLE=1 + CONTROL_RESIDENT=1（心跳自杀禁用——server 侧 heartbeat.py 既有机制, 零改动）
+- 模型 ensure: 三必需+kokoro 默认; --skip-tts/--skip-models; 轮询快照 cached, 超时 1800s
+### 验证（全实证）
+- pyright 0 / pytest 53+46 通过 / bash -n / 不可见字节 0
+- --check 两场景（配置完整/不完整）输出正确
+- 干净 env 系统 python → tmp venv 创建 → exec 重启 → venv 内进入依赖安装（timeout 截断取证, tmp 清理）
+### 待办
+- TTS 模型选型讨论（kokoro 中文试听 vs sherpa-onnx vits-zh）——链路已通, 换模型=换注册条目
+- MacMini 真机全链验收（交互补 RELAY 四键 → 模型下载 → gateway 启动）
