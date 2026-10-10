@@ -115,7 +115,7 @@ class RemoteNodeBootstrapper:
     def ensure_venv(self) -> str:
         """确保在 RuntimePaths 目标 venv 内运行; 不在则建 venv 并 exec 重启自身。
 
-        Returns: venv python 路径（已在 venv 内时即 sys.executable）。
+        Returns: venv python 路径（_get_venv_python 拼接值，两种分支一致）。
         """
         venv_python = _get_venv_python()
         # venv 身份判定: sys.prefix 是解释器自认的 venv 根——不受路径拼接差异影响
@@ -154,19 +154,23 @@ class RemoteNodeBootstrapper:
         return True
 
     # ---- 步骤 3: 配置初始化 -------------------------------------------------
+    def _collect_relay(self, cm: "ConfigManager") -> RelayConfig:
+        """收集 RELAY 四键（CLI 参数优先，回退 .ai_env 现值）——ensure_config/build_plan 共用。"""
+        k = cm.Keys
+        return RelayConfig(
+            host=self._args.relay_host or (cm.get(k.RELAY_HOST) or "").strip(),
+            port=self._args.relay_port or (cm.get(k.RELAY_PORT) or "").strip(),
+            psk=self._args.relay_psk or (cm.get(k.RELAY_PSK) or "").strip(),
+            node_id=self._args.node_id or (cm.get(k.REMOTE_NODE_ID) or "").strip(),
+        )
+
     def ensure_config(self) -> tuple[RelayConfig, dict[str, str]]:
         """读 .ai_env 四键; 缺则参数/交互补齐; 返回（最终配置, 待落盘键组）。
 
         已完整且远程模式键已就位 → updates 为空（幂等零写入）。
         """
         cm = _cm().get_instance()
-        k = cm.Keys
-        relay = RelayConfig(
-            host=self._args.relay_host or (cm.get(k.RELAY_HOST) or "").strip(),
-            port=self._args.relay_port or (cm.get(k.RELAY_PORT) or "").strip(),
-            psk=self._args.relay_psk or (cm.get(k.RELAY_PSK) or "").strip(),
-            node_id=self._args.node_id or (cm.get(k.REMOTE_NODE_ID) or "").strip(),
-        )
+        relay = self._collect_relay(cm)
         if not relay.complete() and sys.stdin.isatty():
             relay = self._prompt_missing(relay)
         if not relay.complete():
@@ -237,11 +241,17 @@ class RemoteNodeBootstrapper:
         return pending
 
     def _wait_models(self, reg: ModelAssetRegistry, pending: list[str]) -> None:
-        """轮询快照直到全部 cached 或超时。"""
+        """轮询快照直到全部 cached、任一下载 error（立即失败）或超时。"""
         deadline = time.monotonic() + MODEL_WAIT_TIMEOUT_SEC
         while True:
             time.sleep(5)
             snapshot = {m.id: m for m in reg.get_model_assets()}
+            failed = {mid: snapshot[mid].download.error
+                      for mid in pending if snapshot[mid].download.status == "error"}
+            if failed:
+                for mid, err in failed.items():
+                    _log(f"[ERROR] {mid} 下载失败: {err}")
+                sys.exit(1)
             waiting = [mid for mid in pending if not snapshot[mid].cached]
             done = [mid for mid in pending if snapshot[mid].cached]
             for mid in done:
@@ -266,23 +276,23 @@ class RemoteNodeBootstrapper:
     def build_plan(self) -> BootstrapPlan:
         """构建引导计划（--check 展示用; 不落盘不下载不启动）。"""
         venv_python = _get_venv_python()
-        probe = subprocess.run([sys.executable, "-c", "import fastapi"],
+        # 依赖探测用目标 venv python（存在时）——与 ensure_deps 真实执行视角一致;
+        # venv 未建时用当前解释器（此时真实运行也必然先走安装）
+        probe_py = venv_python if os.path.isfile(venv_python) else sys.executable
+        probe = subprocess.run([probe_py, "-c", "import fastapi"],
                                capture_output=True)
         cm = _cm().get_instance()
-        k = cm.Keys
-        relay = RelayConfig(
-            host=self._args.relay_host or (cm.get(k.RELAY_HOST) or "").strip(),
-            port=self._args.relay_port or (cm.get(k.RELAY_PORT) or "").strip(),
-            psk=self._args.relay_psk or (cm.get(k.RELAY_PSK) or "").strip(),
-            node_id=self._args.node_id or (cm.get(k.REMOTE_NODE_ID) or "").strip(),
-        )
+        relay = self._collect_relay(cm)
         ids = [] if self._args.skip_models else (
             list(REQUIRED_MODEL_IDS) + ([] if self._args.skip_tts else [TTS_MODEL_ID]))
         return BootstrapPlan(
             venv_python=venv_python,
             deps_install_needed=probe.returncode != 0,
             relay=relay,
-            config_updates=(relay.to_env_updates() if relay.complete() else {}),
+            # 与 ensure_config 的 diff 语义一致（现值已等于目标值的键不列——真实运行零写入）
+            config_updates=({key: val for key, val in relay.to_env_updates().items()
+                             if (cm.get(key) or "").strip() != val}
+                            if relay.complete() else {}),
             model_ids=ids,
             launch_cmd=[venv_python, "server.py"],
         )

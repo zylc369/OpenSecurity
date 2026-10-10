@@ -138,3 +138,11 @@
 ### 待办
 - TTS 模型选型讨论（kokoro 中文试听 vs sherpa-onnx vits-zh）——链路已通, 换模型=换注册条目
 - MacMini 真机全链验收（交互补 RELAY 四键 → 模型下载 → gateway 启动）
+
+## 2026-10-10 迭代续: review 修复轮（4 项全修 + 薄壳版本守卫）
+- [Medium] _wait_models 补下载错误态检查（download.status=="error" → 立即打印 download.error 并 exit; 修复前失败空转 1800s 误报超时）
+- [Low] --check 依赖探测改用目标 venv python（存在时）——预检视角与 ensure_deps 真实执行一致; config_updates 对齐 diff 语义
+- [Low] 两处文档失准修正（ensure_venv docstring / detect_py_deps 调用方注释）
+- [Low] RelayConfig 收集收口 _collect_relay（ensure_config/build_plan 单一来源）
+- 薄壳加 Python>=3.11 版本守卫（PATH python3 过老时回退找 3.14-3.11; 仍无 → 明确报错）——防 Xcode 3.9 等环境下 typing.Never import 崩溃难诊断
+- 验证: pyright 0 / pytest 49 通过 / 薄壳三场景（正常/回退/无 3.11+ 报错）实证 / 不可见字节 0

@@ -3,4 +3,22 @@
 # 用法: ./start-remote-node.sh [--check 预检 | --relay-host ... 等参数注入 | --skip-tts ...]
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-exec python3 "${HERE}/.opencode/control/backend/services/remote_node.py" "$@"
+
+# 定位 Python ≥3.11（remote_node 顶层依赖 typing.Never 等 3.11+ 特性）:
+# PATH 的 python3 优先; 过老/缺失则依次尝试常见新版本名; 仍无 → 明确报错
+py_ok() { "${1}" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; }
+PY="$(command -v python3 || true)"
+if [ -z "${PY}" ] || ! py_ok "${PY}"; then
+  PY=""
+  for c in python3.14 python3.13 python3.12 python3.11; do
+    if command -v "${c}" >/dev/null 2>&1 && py_ok "$(command -v "${c}")"; then
+      PY="$(command -v "${c}")"; break
+    fi
+  done
+fi
+if [ -z "${PY}" ]; then
+  echo "[ERROR] 未找到 Python >= 3.11（PATH 的 python3 过老或缺失）。请安装后重试:" >&2
+  echo "  https://www.python.org/downloads/ （或 conda 系任意 3.11+）" >&2
+  exit 1
+fi
+exec "${PY}" "${HERE}/.opencode/control/backend/services/remote_node.py" "$@"

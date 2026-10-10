@@ -541,8 +541,8 @@ def _bootstrap_venv(venv_backend: str = "conda"):
       "conda"  默认。前提: 系统 Python 3.10+ + conda（miniforge/miniconda）。
                无 conda → 打印指引 + exit(1)（主环境行为——不静默改变）。
       "stdlib" 显式回退。python -m venv 创建（远程节点最小集场景:
-               console_runtime 全为 pip 包; 由调用方（start-remote-node.sh）
-               明确传入，安装器自身不自动降级）。
+               console_runtime 全为 pip 包; 由调用方明确传入——CLI
+               --venv-backend stdlib 或 remote_node.ensure_deps，安装器不自动降级）。
     流程：
       1. sys.executable == venv Python → 已在 venv 内，直接返回
       2. 不在 venv → 按 backend 创建 → 校验 venv Python 存在
