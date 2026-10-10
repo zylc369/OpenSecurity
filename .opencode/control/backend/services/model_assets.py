@@ -147,6 +147,15 @@ class ModelAssetRegistry:
             disk_gb=1.2,
             ollama_model="glm-ocr",
         ),
+        ModelAsset(
+            id="kokoro-tts",
+            repo_id="onnx-community/Kokoro-82M-v1.0-ONNX",
+            type="tts",
+            display="Kokoro TTS (82M)",
+            purpose="远程朗读语音合成（remote-p2p TTS; legado 经 P2P 调用）",
+            min_free_gb=1.0,
+            disk_gb=0.5,
+        ),
     ]
 
 
@@ -280,6 +289,12 @@ class ModelAssetRegistry:
             elif m.type == "reranker":
                 cache = self._is_cached(m.repo_id)
                 loaded = ModelInferenceService.get_instance().is_reranker_loaded()  # 懒加载真实态
+                idle_sec, idle_timeout = None, None
+            elif m.type == "tts":
+                # TTS（懒加载真实态——不触发加载; 首次合成时才载引擎）
+                cache = self._is_cached(m.repo_id)
+                from services.tts_service import TtsService
+                loaded = TtsService.get_instance().engine_loaded
                 idle_sec, idle_timeout = None, None
             else:
                 cache = self._is_cached(m.repo_id)

@@ -1,9 +1,13 @@
-"""远程控制台推理客户端（模型远程化一期）。
+"""远程控制台推理客户端（模型远程化; P2P 传输扩展 P13）。
 
 职责: 主控侧对远程节点（如 Mac Mini 上运行的同款控制台）的推理类
 API 调用——embed / rerank / ocr / 健康探测 / 节点配置转发。
 
-调用域: 同步 httpx（调用点均在 worker 线程 / to_thread 池线程）;
+传输: 默认 HTTP（httpx 直连 base_url）; 传入 p2p 配置 dict 时启用
+P2P 传输（remote_transport——直连 UDP 优先/中继兜底，见 protocol.md §7），
+所有 _post/_get/_put 与健康探测自动切换，对外接口与失败语义不变。
+
+调用域: 同步（调用点均在 worker 线程 / to_thread 池线程）;
 async 消费方经 asyncio.to_thread 包装。
 
 失败语义: 连接失败 / 超时 / 401 / 5xx / 响应畸形统一抛 RemoteUnavailable
@@ -52,15 +56,22 @@ class RemoteHealthInfo:
 
 
 class RemoteConsoleClient:
-    """远程控制台 HTTP 客户端（线程安全: httpx.Client 连接池可并发）。"""
+    """远程控制台客户端（HTTP 直连 / P2P 传输双模式; 线程安全）。
+
+    p2p 参数: TransportConfig 强类型对象（remote_link 构造注入——不再传 dict，
+    字段可 review/可静态检查; 依赖方向: client → transport → crypto）。
+    """
 
     def __init__(self, base_url: str, token: str = "",
-                 infer_timeout: float = 30.0, probe_timeout: float = 3.0) -> None:
+                 infer_timeout: float = 30.0, probe_timeout: float = 3.0,
+                 p2p: "object | None" = None) -> None:  # TransportConfig（避免循环 import 用 object 边界）
         self._base = base_url.rstrip("/")
         self._token = token
         self._infer_timeout = infer_timeout
         self._probe_timeout = probe_timeout
         self._http = httpx.Client(timeout=infer_timeout)
+        self._p2p_cfg = p2p
+        self._transport: "object | None" = None  # RemoteTransport（延迟构建）
 
     # ─── 内部 ─────────────────────────────────────────────
 
@@ -72,6 +83,8 @@ class RemoteConsoleClient:
 
     def _post_json(self, path: str, payload: dict[str, Any], timeout: float | None = None):
         """POST 并解析 JSON; 任何失败统一 RemoteUnavailable。"""
+        if self._p2p_cfg is not None:
+            return self._p2p_call("POST", path, payload)
         url = f"{self._base}{path}"
         try:
             r = self._http.post(url, json=payload, headers=self._headers(),
@@ -81,6 +94,8 @@ class RemoteConsoleClient:
         return self._parse(r, url)
 
     def _get_json(self, path: str, timeout: float | None = None):
+        if self._p2p_cfg is not None:
+            return self._p2p_call("GET", path, None)
         url = f"{self._base}{path}"
         try:
             r = self._http.get(url, headers=self._headers(),
@@ -91,6 +106,8 @@ class RemoteConsoleClient:
 
     def _put_json(self, path: str, payload: dict[str, Any], timeout: float | None = None):
         """PUT 并解析 JSON; 任何失败统一 RemoteUnavailable。"""
+        if self._p2p_cfg is not None:
+            return self._p2p_call("PUT", path, payload)
         url = f"{self._base}{path}"
         try:
             r = self._http.put(url, json=payload, headers=self._headers(),
@@ -98,6 +115,53 @@ class RemoteConsoleClient:
         except httpx.HTTPError as e:
             raise RemoteUnavailable(f"连接远程失败: {e}") from e
         return self._parse(r, url)
+
+    # ─── P2P 传输分支（protocol.md §4.3 api.req 语义）────
+
+    @staticmethod
+    def _cfg_f(cfg: "dict[str, object]", key: str, default: float) -> float:
+        """p2p dict 的 float 键收口（非法/缺失 → 默认值）。"""
+        value = cfg.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        return default
+
+    def _get_transport(self) -> "object":
+        """延迟启动 RemoteTransport（首次 P2P 调用时; 配置已强类型化）。"""
+        if self._transport is None:
+            from services.remote_transport import RemoteTransport, TransportConfig
+            cfg = cast("TransportConfig", self._p2p_cfg)
+            if not cfg.psk or not cfg.relay_host or not cfg.node_id:
+                raise RemoteUnavailable("P2P 配置不完整（relay_host/node_id/psk）")
+            transport = RemoteTransport(cfg)
+            transport.start()
+            self._transport = transport
+        return self._transport
+
+    def _p2p_call(self, method: str, path: str,
+                  payload: "dict[str, Any] | None") -> dict[str, Any]:
+        """经 transport 的 api.req 调用; 失败语义与 _parse 对齐。
+
+        返回与 _parse 同模式: cast 收口为 dict（embed 等 list 响应的形状
+        校验由调用方的 isinstance 兜底——运行时 cast 无约束）。
+        """
+        from services.remote_transport import TransportError
+        transport = self._get_transport()
+        try:
+            resp = cast("dict[str, object]",
+                        transport.request(method, path, payload, self._token))  # type: ignore[attr-defined]
+        except TransportError as e:
+            raise RemoteUnavailable(f"远程 P2P 调用失败: {e}") from e
+        status_raw = resp.get("status", 0)
+        status = status_raw if isinstance(status_raw, int) else 0
+        body = resp.get("body")
+        if status == 401:
+            raise RemoteUnavailable(f"远程拒绝令牌（401）: {path}")
+        if status >= 500:
+            raise RemoteUnavailable(f"远程服务端错误（{status}）: {path}")
+        if status >= 400:
+            raise RemoteUnavailable(f"远程客户端错误（{status}）: {str(body)[:200]}")
+        return cast("dict[str, Any]", body)
 
     @staticmethod
     def _parse(r: httpx.Response, url: str) -> dict[str, Any]:
@@ -142,9 +206,14 @@ class RemoteConsoleClient:
         """轻量健康探测（GET /api/remote/health，短超时）。
 
         供心跳周期调用——延迟纳入返回值（前端健康度展示）。
+        P2P 模式: 先经 transport ping（快速失败），再走 api.resp。
         """
         t0 = time.monotonic()
-        data = cast("_RemoteHealthJson", self._get_json("/api/remote/health", timeout=self._probe_timeout))
+        raw = self._get_json("/api/remote/health", timeout=self._probe_timeout)
+        if not isinstance(raw, dict):
+            raise RemoteUnavailable(
+                f"远程 /api/remote/health 响应畸形: {str(raw)[:120]}")
+        data = cast("_RemoteHealthJson", raw)
         latency = round((time.monotonic() - t0) * 1000, 1)
         models = [
             ModelFingerprint(
@@ -184,3 +253,10 @@ class RemoteConsoleClient:
 
     def close(self) -> None:
         self._http.close()
+        if self._transport is not None:
+            try:
+                self._transport.stop()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 —— 关闭异常不阻断
+                pass
+            self._transport = None
+

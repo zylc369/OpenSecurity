@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from typing import cast, Never, TYPE_CHECKING
 
 from services.runtime_paths import RuntimePaths
@@ -42,6 +43,21 @@ if TYPE_CHECKING:
 VENV_DIR = RuntimePaths.VENV_DIR
 
 
+class DepTag(str, Enum):
+    """依赖场景标签（安装清单的场景定制维度）。
+
+    CONSOLE_RUNTIME: 控制台后端进程启动+核心功能（远程节点部署的最小集）——
+      含模型服务（embed/rerank/OCR/TTS）与 remote-p2p 依赖;
+      不含 agent 专用工具（逆向/漏洞利用/界面自动化——这些属于本机分析场景）。
+    AGENT_TOOLS: 安全分析 agent 专用（z3/unicorn/frida/sqlmap 等）。
+    DESKTOP_AUTOMATION: 桌面自动化（pyautogui/playwright——本机 GUI 场景）。
+    """
+
+    CONSOLE_RUNTIME = "console_runtime"
+    AGENT_TOOLS = "agent_tools"
+    DESKTOP_AUTOMATION = "desktop_automation"
+
+
 @dataclass(frozen=True)
 class PyPkgField:
     """Python 包元数据。"""
@@ -50,6 +66,7 @@ class PyPkgField:
     agents: list[str]             # 使用方（["all"] = 全部）
     description: str = ""
     required: bool = True         # install 子命令装全部 required（与检测端判定一致）
+    tags: tuple[DepTag, ...] = ()  # 场景标签（空=未分类; install --tags 按此过滤）
     platforms: tuple[str, ...] = ()   # 空=全平台
     installer: str = "pip"        # pip / conda（conda 的不走 pip 白名单）
     conda_name: str = ""          # installer=conda 时的包名（空则用 pip_name）
@@ -97,37 +114,50 @@ class PyDepsDetector:
     PYTHON_PACKAGES: list[PyPkgField] = [
         # ── 控制台 + 基础设施（agents=all） ──
         PyPkgField(name="fastapi", pip_name="fastapi", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="控制台 Web 框架"),
         PyPkgField(name="uvicorn", pip_name="uvicorn", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="控制台 ASGI 服务器（fastapi 不自带，必须显式安装）"),
         PyPkgField(name="psutil", pip_name="psutil", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="进程/内存监控库，控制台资源管理依赖"),
-        PyPkgField(name="pywin32", pip_name="pywin32", agents=["all"], platforms=("win32",),
+        PyPkgField(name="pywin32", pip_name="pywin32", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,), platforms=("win32",),
                    description="Windows 命名管道（控制台 IPC 监听 + MCP 管道代理）"),
         PyPkgField(name="mlx-vlm", pip_name="mlx-vlm", agents=["all"], platforms=("darwin",),
                    description="MLX 视觉模型库（OCR 进程内推理；Apple Silicon 专属）"),
         PyPkgField(name="numpy", pip_name="numpy", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="数值计算库，embed 接口返回值"),
         PyPkgField(name="httpx", pip_name="httpx", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="HTTP 客户端库，MCP→控制台通信"),
-        PyPkgField(name="anthropic", pip_name="anthropic", agents=["all"], version_spec="<1",
+        PyPkgField(name="anthropic", pip_name="anthropic", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,), version_spec="<1",
                    description="控制台 events 提取 LLM 客户端（llm_client 顶层 import，"
                                "DeepSeek anthropic 兼容端点；曾靠旧依赖树巧合带入，"
                                "venv 重建后缺失导致 events 提取崩——2026/9/15 重建测试发现。"
                                "钉 <1：1.x 移除 create 的 temperature 参数导致提取全崩，"
                                "graphiti/llm_client 按 0.x API 编写——2026/9/22 定位）"),
         PyPkgField(name="huggingface_hub", pip_name="huggingface_hub", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="模型缓存扫描与下载（控制台模型资产页）"),
-        PyPkgField(name="mcp", pip_name="mcp", agents=["all"], version_spec="<2",
+        PyPkgField(name="mcp", pip_name="mcp", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,), version_spec="<2",
                    description="MCP 协议库，knowledge/events/ocr server 依赖"
                                "（钉 <2: 2.x 将 FastMCP 改名 MCPServer，server 均用 v1 API）"),
         PyPkgField(name="sentence_transformers", pip_name="sentence-transformers", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="嵌入模型库，加载 BGE-M3 模型依赖"),
         PyPkgField(name="sse_starlette", pip_name="sse-starlette", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="控制台 SSE 推送（docker pull 进度）"),
         PyPkgField(name="sqlite_vec", pip_name="sqlite-vec", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="SQLite 向量扩展，knowledge MCP 向量存储依赖"),
         PyPkgField(name="graphiti_core", pip_name="graphiti-core", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="Graphiti 时序知识图谱库，events MCP server 依赖"),
         PyPkgField(name="pyautogui", pip_name="pyautogui", agents=["all"],
                    description="GUI 自动化（鼠标/键盘模拟）"),
@@ -136,12 +166,16 @@ class PyDepsDetector:
         PyPkgField(name="playwright", pip_name="playwright", agents=["all"],
                    description="无头浏览器自动化框架"),
         PyPkgField(name="markdownify", pip_name="markdownify", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="HTML 转 Markdown"),
         PyPkgField(name="requests", pip_name="requests", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="HTTP 客户端库"),
         PyPkgField(name="bs4", pip_name="beautifulsoup4", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="HTML/XML 解析库（BeautifulSoup4）"),
         PyPkgField(name="lxml", pip_name="lxml", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="高性能 XML/HTML 解析器"),
         PyPkgField(name="sympy", pip_name="sympy", agents=["all"],
                    description="符号数学库（CRT/数论构造）"),
@@ -172,6 +206,7 @@ class PyDepsDetector:
                    description="图像处理库（GUI 截图）"),
         # ── OCR 链路 ──
         PyPkgField(name="pymupdf", pip_name="pymupdf", agents=["all"],
+            tags=(DepTag.CONSOLE_RUNTIME,),
                    description="PDF 文本层提取与页面渲染（OCR 前置分流）"),
         # ── 知识库引用的分析依赖（knowledge-base 正文直接 import；随项目走） ──
         PyPkgField(name="pwn", pip_name="pwntools", agents=["binary-analysis"],
@@ -300,9 +335,17 @@ class PyDepsDetector:
 
     @staticmethod
 
-    def required_packages() -> list[PyPkgField]:
-        """必需包集（install 子命令的安装清单：required 且当前平台适用）。"""
-        return [p for p in PyDepsDetector.PYTHON_PACKAGES if p.required and PyDepsDetector._platform_matches(p)]
+    def required_packages(tags: "list[DepTag] | None" = None) -> list[PyPkgField]:
+        """必需包集（install 子命令的安装清单：required 且当前平台适用）。
+
+        tags 过滤: 仅装含任一指定标签的包（如远程节点只装 CONSOLE_RUNTIME）;
+        None = 全量（与检测端语义对齐）。
+        """
+        pkgs = [p for p in PyDepsDetector.PYTHON_PACKAGES
+                if p.required and PyDepsDetector._platform_matches(p)]
+        if tags:
+            pkgs = [p for p in pkgs if any(t in p.tags for t in tags)]
+        return pkgs
 
     def scan(self, agent: str = "all", python_exe: str | None = None) -> list[PyPkgStatus]:
         """检测 Python 包安装状态。
@@ -555,16 +598,18 @@ def _bootstrap_venv():
         os.execv(venv_python, [venv_python, os.path.abspath(__file__)] + sys.argv[1:])
 
 
-def _run_install(dry_run: bool):
-    """安装全部必需依赖（install 子命令入口）。
+def _run_install(dry_run: bool, tags: "list[DepTag] | None" = None):
+    """安装必需依赖（install 子命令入口; --tags 按场景过滤）。
 
     dry_run → 只打印将安装的清单，不执行（可在 venv 外跑，不进 venv）。
+    tags → None 全量; [DepTag.CONSOLE_RUNTIME] 只装控制台运行集（远程节点部署用）。
     """
     if dry_run:
-        pkgs = PyDepsDetector.required_packages()
-        _log(f"[*] dry-run: 将安装 {len(pkgs)} 个包（全部必需依赖）")
+        pkgs = PyDepsDetector.required_packages(tags)
+        scope = "全部必需依赖" if tags is None else f"tags={tags}"
+        _log(f"[*] dry-run: 将安装 {len(pkgs)} 个包（{scope}）")
         for p in pkgs:
-            _log(f"    {p.pip_name}")
+            _log(f"    {p.pip_name}{p.version_spec}")
         return
 
     # 确保在目标 venv 内运行
@@ -576,8 +621,10 @@ def _run_install(dry_run: bool):
         print("安装中断。请修复上述错误后重新运行此脚本。", file=sys.stderr)
         sys.exit(1)
 
-    packages = PyDepsDetector.required_packages()
-    _log("[*] 模式: 全部必需依赖（与检测端 /api/deps 的 required 判定一致）")
+    packages = PyDepsDetector.required_packages(tags)
+    scope = "全部必需依赖（与检测端 /api/deps 的 required 判定一致）" if tags is None \
+        else f"场景过滤 {tags}（远程节点最小集等定制安装）"
+    _log(f"[*] 模式: {scope}")
 
     # 1. Python 包
     _log("[*] === 安装 Python 依赖包 ===")
@@ -641,7 +688,10 @@ def _main() -> int:
     chk.add_argument("--python", default=None, help="目标解释器路径（默认当前）")
     chk.add_argument("--json", action="store_true", help="JSON 输出到 stdout")
 
-    inst = sub.add_parser("install", help="安装全部必需依赖")
+    inst = sub.add_parser("install", help="安装必需依赖（默认全量; --tags 按场景过滤）")
+    inst.add_argument("--tags", nargs="+", default=None,
+                      choices=[t.value for t in DepTag],
+                      help="场景标签过滤（console_runtime=远程节点最小集; 缺省全量）")
     inst.add_argument("--dry-run", action="store_true",
                       help="只打印将安装的清单，不执行")
 
@@ -658,7 +708,9 @@ def _main() -> int:
     as_json = cast("bool", getattr(args, "json", False))
 
     if command == "install":
-        _run_install(dry_run=dry_run)
+        tags_raw = cast("list[str] | None", args.tags)
+        _run_install(dry_run=dry_run,
+                     tags=[DepTag(t) for t in tags_raw] if tags_raw else None)
         return 0
 
     if command == "fix-libomp":

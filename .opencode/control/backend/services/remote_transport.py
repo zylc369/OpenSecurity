@@ -1,0 +1,516 @@
+"""remote transport（主控角色——控制台 backend 侧，protocol.md §7 路径状态机）。
+
+分段交付:
+- P11: 直连路径——信令 lookup、客户端打洞（Puncher）、UDP 会话（UdpClientSession）
+- P12: 中继 fallback、会话管理、后台 loop 线程 + 同步 request() facade
+
+线程模型: start() 起后台 asyncio loop 线程; request()/probe() 跨线程提交
+（remote_client 的调用点在 worker 线程——remote_link 体系语义不变）。
+"""
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+import json
+import logging
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, cast
+
+from services.remote_crypto import (
+    CryptoError,
+    Fragmenter,
+    FrameCodec,
+    NoiseHandshake,
+    PunchAuth,
+    Reassembler,
+    SessionCrypto,
+    TcpFrameReader,
+    decode_msg,
+    encode_msg,
+)
+from services.remote_signal import SignalClient
+
+logger = logging.getLogger(__name__)
+
+
+class TransportError(RuntimeError):
+    """transport 层统一失败面（remote_client 映射为 RemoteUnavailable）。"""
+
+
+class UdpClientSession:
+    """客户端侧直连 UDP 会话（与 gateway UdpSession 协议对称）。"""
+
+    def __init__(self, session: SessionCrypto,
+                 send_fn: "Callable[[bytes, tuple[str, int]], None]",
+                 peer: "tuple[str, int]",
+                 msg_handler: "Callable[[dict[str, object]], Any]") -> None:
+        self._session = session
+        self._send_fn = send_fn
+        self._peer = peer
+        self._handler = msg_handler
+        self._reasm: "Reassembler | None" = None
+        self._fragmenter = Fragmenter()
+        self._codec = FrameCodec()
+
+    async def handle_datagram(self, data: bytes) -> None:
+        try:
+            counter, ciphertext = self._codec.unpack_udp(data)
+            plaintext = self._session.decrypt(ciphertext, counter)
+        except CryptoError:
+            return
+        msg = decode_msg(plaintext)
+        if str(msg.get("t")) == "_frag":
+            if self._reasm is None:
+                self._reasm = Reassembler(msg)
+            assembled = self._reasm.feed(msg)
+            if assembled is not None:
+                self._reasm = None
+                await self._handler(decode_msg(assembled))
+            else:
+                nack = self._reasm.due_nack()
+                if nack is not None:
+                    await self.send_msg(nack)
+            return
+        await self._handler(msg)
+
+    async def send_msg(self, msg: dict[str, object]) -> None:
+        plaintext = encode_msg(msg)
+        if Fragmenter.need_split(plaintext):
+            for frag in self._fragmenter.split(plaintext):
+                await self._send_plain(encode_msg(frag))
+        else:
+            await self._send_plain(plaintext)
+
+    async def _send_plain(self, plaintext: bytes) -> None:
+        ciphertext, counter = self._session.encrypt(plaintext)
+        self._send_fn(self._codec.pack_udp(counter, ciphertext), self._peer)
+
+
+class _ClientUdpProtocol(asyncio.DatagramProtocol):
+    """客户端固定 UDP socket: punch 回包 + 握手 msg2 + 会话帧统一入 inbox。"""
+
+    def __init__(self) -> None:
+        self.transport: "asyncio.DatagramTransport | None" = None
+        self.inbox: "asyncio.Queue[tuple[bytes, tuple[str, int]]]" = asyncio.Queue()
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:  # type: ignore[override]
+        import typing
+        self.transport = typing.cast("asyncio.DatagramTransport", transport)
+
+    def datagram_received(self, data: bytes, addr: "tuple[str, int]") -> None:  # type: ignore[override]
+        self.inbox.put_nowait((data, addr))
+
+    def local_addr(self) -> "tuple[str, int]":
+        import typing
+        assert self.transport is not None
+        return typing.cast("tuple[str, int]", self.transport.get_extra_info("sockname"))
+
+
+class DirectConnector:
+    """直连建立器: lookup → 打洞互射 → Noise 握手（protocol.md §6 客户端侧）。"""
+
+    def __init__(self, psk: bytes, relay_host: str, relay_port: int,
+                 punch_timeout: float = 1.5, punch_burst: int = 3) -> None:
+        self._psk = psk
+        self._codec = FrameCodec()
+        self._punch_auth = PunchAuth(psk)
+        self._relay_host = relay_host
+        self._relay_port = relay_port
+        self._punch_timeout = punch_timeout
+        self._punch_burst = punch_burst
+
+    async def connect(self, node_id: str,
+                      msg_handler: "Callable[[dict[str, object]], Any]"
+                      ) -> "tuple[UdpClientSession, _ClientUdpProtocol]":
+        """完整直连建立流程; 失败抛 TransportError（调用方 fallback 中继）。"""
+        loop = asyncio.get_running_loop()
+        transport, proto = await loop.create_datagram_endpoint(
+            _ClientUdpProtocol, local_addr=("0.0.0.0", 0))
+        try:
+            # ① 信令 lookup（携带自身 UDP 映射——回环/锥形 NAT 下即本地址）
+            local = proto.local_addr()
+            sig = await SignalClient.connect(self._relay_host, self._relay_port,
+                                             self._psk)
+            try:
+                await sig.send({"t": "lookup", "node": node_id,
+                                "udp_ep": [local[0], local[1]]})
+                resp = await sig.recv(timeout=5.0)
+            finally:
+                await sig.close()
+            if not resp.get("ok"):
+                raise TransportError(f"节点不可达: {resp.get('error')}")
+            gw = resp.get("gw")
+            sid = resp.get("sid")
+            gw_items = cast("list[object]", gw) if isinstance(gw, list) else []
+            if (len(gw_items) != 2
+                    or not isinstance(gw_items[0], str)
+                    or not isinstance(gw_items[1], int)
+                    or not isinstance(sid, str)):
+                raise TransportError(f"endpoints 响应畸形: {resp}")
+            gw_ep = (gw_items[0], gw_items[1])
+
+            # ② 打洞互射 + Noise 握手（并行等待 msg2）
+            punch_pkt = (json.dumps({"t": "punch", "sid": sid,
+                                     "mac": self._punch_auth.mac(sid)}) + "\n").encode()
+            initiator = NoiseHandshake(initiator=True, psk=self._psk)
+            msg1 = initiator.write_message()
+            assert proto.transport is not None
+            for _ in range(self._punch_burst):
+                proto.transport.sendto(punch_pkt, gw_ep)
+            proto.transport.sendto(msg1, gw_ep)
+            deadline = time.monotonic() + self._punch_timeout
+            got_msg2 = False
+            while time.monotonic() < deadline:
+                try:
+                    data, _ = await asyncio.wait_for(
+                        proto.inbox.get(), timeout=max(0.05, deadline - time.monotonic()))
+                except asyncio.TimeoutError:
+                    break
+                if data.startswith(b"{"):
+                    continue  # gateway 的 punch 回包（洞通旁证）
+                if len(data) == 48:
+                    initiator.read_message(data)
+                    got_msg2 = True
+                    break
+            if not got_msg2:
+                raise TransportError(f"打洞超时（{self._punch_timeout}s）")
+            i_send, i_recv = initiator.split()
+            session = UdpClientSession(SessionCrypto(i_send, i_recv),
+                                       lambda d, a: proto.transport.sendto(d, a)  # type: ignore[union-attr]
+                                       if proto.transport else None, gw_ep, msg_handler)
+            # 排空互射期间的残留 punch 包（避免喂给会话分发循环）
+            DirectConnection._drain_inbox(proto.inbox)
+            return session, proto  # 调用方包装为 DirectConnection 并 start_pump
+        except (OSError, CryptoError, ConnectionError, TransportError) as e:
+            transport.close()  # TransportError（打洞超时/节点离线）也须回收——常规路径必经
+            if isinstance(e, TransportError):
+                raise
+            raise TransportError(f"直连建立失败: {e}") from e
+
+
+
+
+
+class DirectConnection:
+    """已建立的直连（会话 + UDP socket + 入站分发泵; aclose 收口生命周期）。"""
+
+    def __init__(self, session: UdpClientSession,
+                 proto: _ClientUdpProtocol) -> None:
+        self._session = session
+        self._proto = proto
+        self._pump: "asyncio.Task[None] | None" = None
+
+    @staticmethod
+    def _drain_inbox(inbox: "asyncio.Queue[tuple[bytes, tuple[str, int]]]") -> None:
+        """排空残留 punch 包（互射期遗留——避免污染会话分发）。"""
+        while not inbox.empty():
+            try:
+                inbox.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+    def start_pump(self) -> None:
+        """启动入站分发（inbox → session.handle_datagram）。"""
+        if self._pump is None or self._pump.done():
+            self._pump = asyncio.get_running_loop().create_task(self._pump_loop())
+
+    async def _pump_loop(self) -> None:
+        inbox = self._proto.inbox
+        while True:
+            data, _addr = await inbox.get()
+            if data is None:  # close 哨兵
+                break
+            await self._session.handle_datagram(data)
+
+    @property
+    def session(self) -> UdpClientSession:
+        return self._session
+
+    async def send_msg(self, msg: dict[str, object]) -> None:
+        await self._session.send_msg(msg)
+
+    @property
+    def broken(self) -> bool:
+        return self._pump is not None and self._pump.done()
+
+    async def aclose(self) -> None:
+        if self._pump is not None:
+            self._pump.cancel()
+            try:
+                await self._pump
+            except asyncio.CancelledError:
+                pass
+            self._pump = None
+        if self._proto.transport is not None:
+            self._proto.transport.close()
+
+
+class RelayConnection:
+    """中继路径连接（protocol.md §4.2 客户端侧全流程 + 端到端会话泵）。"""
+
+    def __init__(self, sig: SignalClient, data: SignalClient,
+                 session: SessionCrypto,
+                 msg_handler: "Callable[[dict[str, object]], Any]") -> None:
+        self._codec = FrameCodec()
+        self._sig = sig
+        self._data = data
+        self._session = session
+        self._handler = msg_handler
+        self._pump: "asyncio.Task[None] | None" = None
+        self._frames = TcpFrameReader()
+
+    @classmethod
+    async def establish(cls, psk: bytes, relay_host: str, relay_port: int,
+                        node_id: str,
+                        msg_handler: "Callable[[dict[str, object]], Any]"
+                        ) -> "RelayConnection":
+        # ① lookup + relay_open（同一信令短连接）
+        sig = await SignalClient.connect(relay_host, relay_port, psk)
+        try:
+            await sig.send({"t": "lookup", "node": node_id})
+            resp = await sig.recv(timeout=5.0)
+            sid = resp.get("sid")
+            if not resp.get("ok") or not isinstance(sid, str):
+                raise TransportError(f"节点不可达: {resp.get('error')}")
+            await sig.send({"t": "relay_open", "node": node_id, "sid": sid})
+            ready = await sig.recv(timeout=5.0)
+            if str(ready.get("t")) != "relay_ready":
+                raise TransportError(f"relay_open 失败: {ready}")
+        except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+            await sig.close()
+            raise TransportError(f"中继信令失败: {e}") from e
+        # ② 数据连接 attach → relay_start
+        data = await SignalClient.connect(relay_host, relay_port, psk)
+        try:
+            await data.send({"t": "relay_attach", "sid": sid})
+            ack = await data.recv(timeout=10.0)
+            if str(ack.get("t")) != "relay_start":
+                raise TransportError(f"relay_attach 失败: {ack.get('t')}")
+            # ③ 端到端握手（initiator）
+            initiator = NoiseHandshake(initiator=True, psk=psk)
+            data._writer.write(FrameCodec().pack_tcp(initiator.write_message()))  # noqa: SLF001
+            await data._writer.drain()  # noqa: SLF001
+            frames = data._frames.feed(b"")  # noqa: SLF001
+            reader = data._reader  # noqa: SLF001
+            while not frames:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+                if not chunk:
+                    raise ConnectionError("端到端握手期间管道断开")
+                frames = data._frames.feed(chunk)  # noqa: SLF001
+            initiator.read_message(frames[0])
+            i_send, i_recv = initiator.split()
+            session = SessionCrypto(i_send, i_recv)
+        except (ConnectionError, OSError, asyncio.TimeoutError, CryptoError,
+                ValueError) as e:
+            await data.close()
+            await sig.close()
+            raise TransportError(f"中继建立失败: {e}") from e
+        return cls(sig, data, session, msg_handler)
+
+    def start_pump(self) -> None:
+        if self._pump is None or self._pump.done():
+            self._pump = asyncio.get_running_loop().create_task(self._pump_loop())
+
+    async def _pump_loop(self) -> None:
+        reader = self._data._reader  # noqa: SLF001
+        try:
+            while True:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    break
+                for payload in self._frames.feed(chunk):
+                    msg = decode_msg(self._session.decrypt_seq(payload))
+                    await self._handler(msg)
+        except (ConnectionError, OSError, CryptoError, asyncio.IncompleteReadError):
+            pass  # 对端断开——会话失效（上层下次重建）
+
+    async def send_msg(self, msg: dict[str, object]) -> None:
+        self._data._writer.write(self._codec.pack_tcp(  # noqa: SLF001
+            self._session.encrypt_seq(encode_msg(msg))))
+        await self._data._writer.drain()  # noqa: SLF001
+
+    @property
+    def broken(self) -> bool:
+        return self._pump is not None and self._pump.done()
+
+    async def aclose(self) -> None:
+        if self._pump is not None:
+            self._pump.cancel()
+            try:
+                await self._pump
+            except asyncio.CancelledError:
+                pass
+            self._pump = None
+        await self._data.close()
+        await self._sig.close()
+
+
+@dataclass
+class TransportConfig:
+    """transport 配置（P2PSettings 的 client 侧投影; protocol.md §9 默认值）。"""
+
+    relay_host: str
+    relay_port: int
+    psk: bytes
+    node_id: str
+    # review#3(dict 禁令): remote_client/remote_link 间传强类型对象，不再传 dict
+    punch_timeout_sec: float = 1.5
+    relay_timeout_sec: float = 5.0
+    api_timeout_sec: float = 30.0
+    idle_close_sec: float = 60.0
+
+
+class RemoteTransport:
+    """同步 facade: 后台 asyncio loop 线程 + request()/probe() 跨线程提交。
+
+    路径状态机（protocol.md §7）: 无会话 → 直连尝试（超时 punch_timeout）
+    → 失败落中继 → 全失败 TransportError（remote_link 现有降级链路接管）。
+    """
+
+    def __init__(self, cfg: TransportConfig) -> None:
+        self._cfg = cfg
+        self._codec = FrameCodec()
+        self._loop: "asyncio.AbstractEventLoop | None" = None
+        self._thread: "threading.Thread | None" = None
+        self._conn: "DirectConnection | RelayConnection | None" = None
+        self._pending: "dict[int, asyncio.Future[dict[str, object]]]" = {}
+        self._next_id = 1
+        self._last_active = 0.0
+
+    # ── 生命周期 ──────────────────────────────────────
+
+    def start(self) -> None:
+        if self._loop is not None:
+            return
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True,
+                                        name="remote-transport")
+        self._thread.start()
+
+    def _run_loop(self) -> None:
+        assert self._loop is not None
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    async def aclose(self) -> None:
+        if self._conn is not None:
+            await self._conn.aclose()
+            self._conn = None
+
+    def stop(self) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._thread is not None:
+                self._thread.join(timeout=5.0)
+            self._loop.close()
+            self._loop = None
+            self._thread = None
+
+    # ── 同步 API（worker 线程调用）────────────────────
+
+    def request(self, method: str, path: str,
+                body: "dict[str, object] | None" = None,
+                token: str = "") -> "dict[str, object]":
+        """api.req → api.resp（status/mime/body）; 失败抛 TransportError。"""
+        return self._submit(("api", method, path, body, token))
+
+    def probe(self) -> bool:
+        """ping/pong 健康探测（remote_link 心跳语义复用）。"""
+        try:
+            self._submit(("ping",))
+            return True
+        except TransportError:
+            return False
+
+    def _submit(self, job: tuple["object", ...]) -> "dict[str, object]":
+        if self._loop is None:
+            raise TransportError("transport 未启动")
+        async_task = asyncio.run_coroutine_threadsafe(
+            self._handle_job(job), self._loop)
+        try:
+            return async_task.result(
+                timeout=self._cfg.api_timeout_sec + 15.0)
+        except concurrent.futures.TimeoutError as e:
+            async_task.cancel()
+            raise TransportError("请求超时（transport 线程）") from e
+        except TransportError:
+            raise
+
+    # ── loop 内实现 ───────────────────────────────────
+
+    async def _handle_job(self, job: tuple["object", ...]) -> "dict[str, object]":
+        kind = job[0]
+        conn = await self._ensure_session()
+        self._last_active = time.monotonic()
+        msg_id = self._next_id
+        self._next_id += 1
+        fut: "asyncio.Future[dict[str, object]]" = \
+            asyncio.get_running_loop().create_future()
+        self._pending[msg_id] = fut
+        try:
+            if kind == "api":
+                _k, method, path, body, token = job
+                await conn.send_msg({"t": "api.req", "id": msg_id,
+                                     "method": method, "path": path,
+                                     "body": body, "token": token or None})
+                logger.debug("api.req %s %s（id=%s 路径=%s）", method, path, msg_id,
+                             "直连" if isinstance(conn, DirectConnection) else "中继")
+            else:  # ping
+                await conn.send_msg({"t": "ping", "id": msg_id})
+            return await asyncio.wait_for(fut, timeout=self._cfg.api_timeout_sec)
+        except (ConnectionError, OSError, asyncio.TimeoutError, CryptoError,
+                ValueError) as e:
+            await self._drop_session()
+            raise TransportError(f"请求失败: {e}") from e
+        finally:
+            self._pending.pop(msg_id, None)
+
+    async def _ensure_session(self) -> "DirectConnection | RelayConnection":
+        """会话复用/重建（直连优先、中继兜底）。"""
+        if self._conn is not None and not self._conn.broken:
+            return self._conn
+        await self._drop_session()
+        handler = self._on_msg
+        # ① 直连
+        try:
+            connector = DirectConnector(
+                self._cfg.psk, self._cfg.relay_host, self._cfg.relay_port,
+                punch_timeout=self._cfg.punch_timeout_sec)
+            session, proto = await connector.connect(self._cfg.node_id, handler)
+            conn = DirectConnection(session, proto)
+            conn.start_pump()
+            self._conn = conn
+            logger.info("transport 会话建立: 直连")
+            return conn
+        except TransportError as e:
+            logger.info("直连失败（落中继）: %s", e)
+        # ② 中继
+        conn = await RelayConnection.establish(
+            self._cfg.psk, self._cfg.relay_host, self._cfg.relay_port,
+            self._cfg.node_id, handler)
+        conn.start_pump()
+        self._conn = conn
+        logger.info("transport 会话建立: 中继")
+        return conn
+
+    async def _drop_session(self) -> None:
+        if self._conn is not None:
+            try:
+                await self._conn.aclose()
+            except (ConnectionError, OSError):
+                pass
+            self._conn = None
+
+    async def _on_msg(self, msg: dict[str, object]) -> None:
+        """会话入站分发: api.resp/pong → future; 其他忽略。"""
+        t = str(msg.get("t", ""))
+        if t in ("api.resp", "pong"):
+            msg_id = msg.get("id")
+            if isinstance(msg_id, int):
+                fut = self._pending.get(msg_id)
+                if fut is not None and not fut.done():
+                    fut.set_result(msg)
+                    return
+        logger.debug("transport 未匹配消息: %s", t)

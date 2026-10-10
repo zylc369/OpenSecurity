@@ -168,6 +168,19 @@ export const api = {
     return r.data;
   },
 
+  /** 远程节点「更新并重启」: git pull + restart; 返回旧 boot_token（轮询新 token 判定重启完成） */
+  async updateRestartRemote(): Promise<{ ok: boolean; old_boot_token: string; pull_output?: string }> {
+    const r = await instance.post<{ ok: boolean; old_boot_token: string; pull_output?: string }>("/api/remote/update-restart");
+    return r.data;
+  },
+
+  /** 远程节点 boot_token 探测（经主控转发——远程 health 的进程身份信号） */
+  async remoteBootToken(): Promise<string | null> {
+    const r = await instance.get<Record<string, unknown>>("/api/remote/health-forward");
+    const t = r.data?.boot_token;
+    return typeof t === "string" ? t : null;
+  },
+
   /** 节点三 KEY（node=remote 经本控制台转发到远程节点） */
   async getNodeConfig(node: "local" | "remote" = "remote"): Promise<NodeConfigView> {
     const r = await instance.get<NodeConfigView>("/api/remote/node-config", {

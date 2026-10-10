@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
 from dataclasses import dataclass
 
@@ -60,6 +61,28 @@ async def get_system_info() -> SystemInfo:
         # backend 代码陈旧检测（指纹函数与 /api/health 同源——启动时冻结 vs 当前比对）
         code_stale=_code_fingerprint() != _BOOT_FINGERPRINT,
     )
+
+
+@router.post("/git-pull")
+async def git_pull_repo() -> "JSONResponse":
+    """git pull 仓库根（远程节点更新代码用; 成功返回最新 commit）。
+
+    与 /restart 分离: 主控的「更新并重启」= 先 pull 后 restart（两步显式编排）。
+    """
+    import subprocess
+    from pathlib import Path
+    from typing import cast
+    # 仓库根推导: backend → .opencode/control/backend → 仓库根
+    repo = str(Path(__file__).resolve().parents[3])
+    try:
+        r = subprocess.run(["git", "pull", "--ff-only"], cwd=repo,
+                           capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+    if r.returncode != 0:
+        return JSONResponse(status_code=500,
+                            content={"ok": False, "error": r.stderr.strip()[:500]})
+    return JSONResponse(content={"ok": True, "output": r.stdout.strip()[:500]})
 
 
 @router.post("/restart")

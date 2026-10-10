@@ -143,6 +143,19 @@ class ConfigMetaEntry:
     readonly: bool  # true = 任何页面禁用态渲染 + 写接口 422
 
 
+@dataclass(frozen=True)
+class P2PSettings:
+    """P2P 传输配置快照（services/remote_relayd/protocol.md 对应 .ai_env 键）。"""
+
+    relay_host: str
+    relay_port: int
+    psk: bytes
+    psk_valid: bool
+    node_id: str
+    gateway_enable: bool
+    client_enable: bool
+
+
 class ConfigManager:
     """全项目配置唯一权威（get_instance() 获取; 全进程单例）。"""
 
@@ -216,6 +229,13 @@ class ConfigManager:
         CONTROL_API_KEY = "CONTROL_API_KEY"
         CONTROL_RESIDENT = "CONTROL_RESIDENT"
         CONTROL_AUTOSTART = "CONTROL_AUTOSTART"
+        # remote-p2p 传输（protocol.md; RELAY_* 双侧共用）
+        RELAY_HOST = "RELAY_HOST"
+        RELAY_PORT = "RELAY_PORT"
+        RELAY_PSK = "RELAY_PSK"                # base64(32B)，relayd genkey 生成
+        REMOTE_NODE_ID = "REMOTE_NODE_ID"      # gateway 注册名 / client lookup 目标
+        P2P_GATEWAY_ENABLE = "P2P_GATEWAY_ENABLE"  # 节点角色开关（Mac Mini=1）
+        P2P_CLIENT_ENABLE = "P2P_CLIENT_ENABLE"    # 主控角色开关（remote_client 走 transport）
         # 远程链接可调参数
         REMOTE_HEARTBEAT_INTERVAL_SEC = "REMOTE_HEARTBEAT_INTERVAL_SEC"
         REMOTE_FAIL_THRESHOLD = "REMOTE_FAIL_THRESHOLD"
@@ -274,6 +294,9 @@ class ConfigManager:
         unload_delay_sec: float = 300.0  # 恢复后稳定期
         infer_timeout_sec: float = 30.0  # 推理请求超时
         probe_timeout_sec: float = 3.0  # 健康探测超时
+        punch_timeout_sec: float = 1.5  # P2P 打洞窗口（protocol.md §9）
+        relay_connect_timeout_sec: float = 5.0  # 中继建立超时
+        p2p_api_timeout_sec: float = 30.0  # P2P api 调用超时
 
     @dataclass(frozen=True)
     class HeartbeatTunables:
@@ -606,6 +629,30 @@ class ConfigManager:
             unload_delay_sec=self._read_num(vals, k.REMOTE_UNLOAD_DELAY_SEC, d.unload_delay_sec, False),
             infer_timeout_sec=self._read_num(vals, k.REMOTE_INFER_TIMEOUT_SEC, d.infer_timeout_sec, False),
             probe_timeout_sec=self._read_num(vals, k.REMOTE_PROBE_TIMEOUT_SEC, d.probe_timeout_sec, False),
+            punch_timeout_sec=self._read_num(vals, "P2P_PUNCH_TIMEOUT_SEC", d.punch_timeout_sec, False),
+            relay_connect_timeout_sec=self._read_num(
+                vals, "P2P_RELAY_CONNECT_TIMEOUT_SEC", d.relay_connect_timeout_sec, False),
+            p2p_api_timeout_sec=self._read_num(vals, "P2P_API_TIMEOUT_SEC", d.p2p_api_timeout_sec, False),
+        )
+
+    def p2p_settings(self) -> "P2PSettings":
+        """P2P 传输配置快照（gateway/client 两侧共用; 每次调用重读）。"""
+        vals = self._load_from_ai_env()
+        k = self.Keys
+        psk_raw = (vals.get(k.RELAY_PSK) or "").strip()
+        import base64 as _b64
+        try:
+            psk = _b64.b64decode(psk_raw, validate=True) if psk_raw else b""
+        except ValueError:
+            psk = b""
+        return P2PSettings(
+            relay_host=(vals.get(k.RELAY_HOST) or "").strip(),
+            relay_port=int(self._read_num(vals, k.RELAY_PORT, 41000, True)),  # type: ignore[arg-type]
+            psk=psk,
+            psk_valid=len(psk) == 32,
+            node_id=(vals.get(k.REMOTE_NODE_ID) or "").strip(),
+            gateway_enable=(vals.get(k.P2P_GATEWAY_ENABLE) or "").strip().lower() in ("1", "true"),
+            client_enable=(vals.get(k.P2P_CLIENT_ENABLE) or "").strip().lower() in ("1", "true"),
         )
 
     def heartbeat_tunables(self) -> HeartbeatTunables:
@@ -836,6 +883,54 @@ class ConfigManager:
             surfaces=[Surface.CONFIG], readonly=False,
         ),
         # ── 远程连接（REMOTE 页; ENABLED 只读——只能经「切换远程」按钮） ──
+        ConfigField(
+            key=Keys.RELAY_HOST, label="P2P 中继服务器地址", type="text",
+            hint="remote-p2p 的 relayd VPS 地址（IP）; 打洞直连优先、此处兜底中继",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="",
+            readonly=False,
+        ),
+        ConfigField(
+            key=Keys.RELAY_PORT, label="P2P 中继端口", type="number",
+            hint="relayd 监听端口（默认 41000; 与 VPS 侧 REMOTE_RELAY_PORT 一致）",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="41000",
+            readonly=False,
+        ),
+        ConfigField(
+            key=Keys.RELAY_PSK, label="P2P 预共享密钥", type="password",
+            hint="base64(32B)，relayd 上 genkey 生成（Noise NNpsk2 认证+加密）",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="",
+            readonly=False,
+        ),
+        ConfigField(
+            key=Keys.REMOTE_NODE_ID, label="P2P 节点 ID", type="text",
+            hint="gateway 注册名（必须显式配置; 节点侧=本机注册名，主控侧=目标节点名）",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="",
+            readonly=False,
+        ),
+        ConfigField(
+            key=Keys.P2P_CLIENT_ENABLE, label="P2P 客户端开关", type="bool",
+            hint="1=remote_client 走 P2P 传输（直连/中继），0=HTTP 直连（现状）",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="0",
+            readonly=False,
+        ),
+        ConfigField(
+            key=Keys.P2P_GATEWAY_ENABLE, label="P2P 网关开关", type="bool",
+            hint="1=本进程作为节点角色（Mac Mini 上开启），注册到 relayd 接受连接",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="0",
+            readonly=False,
+        ),
         ConfigField(
             key=Keys.REMOTE_CONSOLE_URL, label="远程控制台链接", type="text",
             hint="远程节点（如 Mac Mini）控制台地址，如 http://192.168.1.20:9776",

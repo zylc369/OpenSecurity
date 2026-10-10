@@ -31,6 +31,8 @@ BACKEND_DIR = Path(__file__).parent
 sys.path.insert(0, str(BACKEND_DIR))
 
 from fastapi import FastAPI, Request
+
+_BACKEND_PORT = 0  # main() 绑定 socket 后回填（gateway api 转发目标）
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -109,6 +111,8 @@ def create_app() -> FastAPI:
     # 路由
     from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, \
         processes, knowledge, events, heartbeat, proxy, remote, vision
+    from routes import tts as tts_route
+    app.include_router(tts_route.router)
     app.include_router(embed.router)
     app.include_router(health.router)
     app.include_router(heartbeat.router)
@@ -155,6 +159,29 @@ def create_app() -> FastAPI:
         # 远程链接心跳（模型远程化: 探测/降级/恢复编排）
         from services.remote_link import RemoteLinkService
         RemoteLinkService.get_instance().start()
+
+    @app.on_event("startup")
+    async def _start_remote_gateway() -> None:
+        # remote-p2p 节点角色（P2P_GATEWAY_ENABLE=1 时注册到 relayd;
+        # api.req 经本进程端口转发——backend_port 取 lifespan 实际监听端口）
+        import logging
+        from services.config_manager import ConfigManager
+        from services.remote_gateway import RemoteGateway
+        log = logging.getLogger("remote_gateway")
+        p2p = ConfigManager.get_instance().p2p_settings()
+        if not (p2p.gateway_enable and p2p.psk_valid and p2p.relay_host
+                and p2p.node_id):
+            if p2p.gateway_enable:
+                log.warning("P2P_GATEWAY_ENABLE=1 但配置不完整（RELAY_HOST/"
+                            "RELAY_PSK/REMOTE_NODE_ID），gateway 未启动")
+            return
+        gateway = RemoteGateway(
+            psk=p2p.psk, relay_host=p2p.relay_host, relay_port=p2p.relay_port,
+            node_id=p2p.node_id, backend_port=_BACKEND_PORT)
+        app.state.remote_gateway = gateway
+        gateway.start()
+        log.info("remote gateway 已启动（node=%s → %s:%s）",
+                 p2p.node_id, p2p.relay_host, p2p.relay_port)
 
     @app.on_event("startup")
     async def _start_proxy_relay() -> None:
@@ -262,8 +289,10 @@ def main() -> None:
     log.info("IPC 监听已启动：%s", ConfigManager.get_instance().ipc_addr())
 
     # 步骤 3: bind 浏览器 TCP 候选段（顺延）+ 注册真实端口（/api/console-url 对外）
+    global _BACKEND_PORT
     try:
         sock = FrontendPortRegistry.get_instance().bind_and_register_tcp()
+        _BACKEND_PORT = int(cast("tuple[int, ...]", sock.getsockname())[1])
     except RuntimeError as e:
         log.error("%s", e)
         IpcListener.get_instance().cleanup()

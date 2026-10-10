@@ -370,9 +370,30 @@ class RemoteLinkService:
                 self._state = self.STATE_OFF
                 self._cancel_unload_locked()
 
+    def _p2p_config_locked(self) -> "object | None":
+        """P2P 传输配置（client 侧开关开启且配置完整才注入）。
+
+        强类型 TransportConfig（review#3 dict 禁令）; 构造经延迟 import——
+        本模块不顶层依赖 transport（依赖方向经 remote_client 间接）。
+        """
+        from services.config_manager import ConfigManager
+        from services.remote_transport import TransportConfig
+        p2p = ConfigManager.get_instance().p2p_settings()
+        if not (p2p.client_enable and p2p.psk_valid and p2p.relay_host
+                and p2p.node_id):
+            return None
+        t = _tunables()
+        return TransportConfig(
+            relay_host=p2p.relay_host, relay_port=p2p.relay_port,
+            psk=p2p.psk, node_id=p2p.node_id,
+            punch_timeout_sec=t.punch_timeout_sec,
+            api_timeout_sec=t.p2p_api_timeout_sec)
+
     def _sync_client_locked(self, url: str, token: str) -> None:
-        """URL/token 变化时重建 client（持锁调用）。"""
-        if self._client is not None and url == self._client_url and token == self._client_token:
+        """URL/token/P2P 配置变化时重建 client（持锁调用）。"""
+        p2p = self._p2p_config_locked()
+        if (self._client is not None and url == self._client_url
+                and token == self._client_token and p2p == self._client_p2p):
             return
         if self._client is not None:
             try:
@@ -383,11 +404,13 @@ class RemoteLinkService:
         self._client = RemoteConsoleClient(
             url, token=token,
             infer_timeout=t.infer_timeout_sec,
-            probe_timeout=t.probe_timeout_sec) if url else None
+            probe_timeout=t.probe_timeout_sec, p2p=p2p) if url else None
         self._client_url = url
         self._client_token = token
+        self._client_p2p = p2p
         if url:
-            logger.info("远程 client 已（重）建: %s", url)
+            logger.info("远程 client 已（重）建: %s（P2P=%s）", url,
+                        "on" if p2p else "off")
 
     # ── 状态快照 ─────────────────────────────────────────
 

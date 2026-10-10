@@ -19,8 +19,7 @@ import {
 import {
   ApiOutlined, CheckCircleOutlined, CloudServerOutlined,
   DesktopOutlined, LinkOutlined, ReloadOutlined, SaveOutlined,
-  SettingOutlined, SyncOutlined, WarningOutlined,
-} from "@ant-design/icons";
+  SettingOutlined, SyncOutlined, WarningOutlined, CloudDownloadOutlined } from "@ant-design/icons";
 import { api } from "../api/client";
 import { useAllConfig, useConfigMeta } from "../hooks";
 import ConfigFieldRow from "../components/ConfigFieldRow";
@@ -130,6 +129,36 @@ const RemoteSection: React.FC = () => {
       setSaving(false);
     }
   }, [remoteUrl, rvalues, rmeta.data, saveRemote, message]);
+
+  // ── 更新并重启（git pull + restart; 轮询远程 boot_token 变化判定完成——
+  //     exec 重启 PID 不变、boot_token 必变，是进程身份的唯一可靠信号）──
+  const [updating, setUpdating] = React.useState(false);
+  const doUpdateRestart = async () => {
+    setUpdating(true);
+    const hide = message.loading("远程节点: 拉取新代码并重启中…", 0);
+    try {
+      const r = await api.updateRestartRemote();
+      const oldToken = r.old_boot_token;
+      const deadline = Date.now() + 30_000;
+      let newToken: string | null = null;
+      while (Date.now() < deadline) {
+        await new Promise((res) => setTimeout(res, 2000));
+        newToken = await api.remoteBootToken().catch(() => null);
+        if (newToken && newToken !== oldToken) break;
+      }
+      hide();
+      if (newToken && newToken !== oldToken) {
+        message.success(`远程节点已更新并重启完成${r.pull_output ? "（代码已更新）" : ""}`);
+      } else {
+        message.warning("重启已触发，但 30 秒内远程未恢复健康——请检查远程日志");
+      }
+    } catch (e) {
+      hide();
+      message.error(`更新失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setUpdating(false);
+    }
+  };
 
   const doSwitch = useCallback(async (target: "remote" | "local") => {
     setSwitching(true);
@@ -255,7 +284,20 @@ const RemoteSection: React.FC = () => {
           </Space>
         }
         extra={
-          enabled ? (
+          <Space>
+          <Popconfirm
+            title="更新并重启远程节点？"
+            description="远程 git pull 最新代码后自动重启; 完成前按钮保持转圈（最长 30s）"
+            okText="更新并重启"
+            cancelText="取消"
+            onConfirm={() => void doUpdateRestart()}
+            disabled={updating || !enabled}
+          >
+            <Button loading={updating} icon={<CloudDownloadOutlined />} disabled={!enabled}>
+              更新并重启
+            </Button>
+          </Popconfirm>
+          {enabled ? (
             <Popconfirm
               title="切换本地？"
               description="模型推理改回本地; 本地资源保持可用"
@@ -276,7 +318,8 @@ const RemoteSection: React.FC = () => {
             >
               切换远程
             </Button>
-          )
+          )}
+          </Space>
         }
       >
         <Space direction="vertical" size={10} style={{ width: "100%" }}>

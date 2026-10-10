@@ -179,6 +179,44 @@ async def put_node_config(req: NodeConfigUpdate, node: str = Query(default="loca
                                   "hint": "CONTROL_API_KEY 变更后需重启控制台生效（绑定地址与鉴权）" if changed_binding else ""})
 
 
+@router.post("/update-restart")
+async def update_and_restart_remote() -> JSONResponse:
+    """远程节点: git pull + 自重启（主控「更新并重启」按钮后端）。
+
+    返回旧 boot_token——前端轮询远程 /api/health 直到 boot_token 变化
+    （exec 重启 PID 不变、boot_token 必变——进程身份判定的唯一可靠信号）。
+    """
+    import asyncio
+    from typing import cast
+    from services.remote_link import RemoteLinkService
+    client = RemoteLinkService.get_instance().get_client()
+    pull = cast("dict[str, object]", await asyncio.to_thread(
+        client._post_json, "/api/system/git-pull", {}))  # noqa: SLF001 —— 转发层
+    if pull.get("ok") is not True:
+        return JSONResponse(status_code=502,
+                            content={"ok": False, "stage": "git-pull",
+                                     "error": str(pull.get("error", "未知"))})
+    health_before = cast("dict[str, object]", await asyncio.to_thread(
+        client._get_json, "/api/health"))  # noqa: SLF001
+    await asyncio.to_thread(
+        client._post_json, "/api/system/restart", {})  # noqa: SLF001
+    return JSONResponse(content={
+        "ok": True, "old_boot_token": str(health_before.get("boot_token", "")),
+        "pull_output": str(pull.get("output", ""))[:200]})
+
+
+@router.get("/health-forward")
+async def remote_health_forward() -> JSONResponse:
+    """远程节点 /api/health 透传（前端轮询 boot_token 判定重启完成）。"""
+    import asyncio
+    from typing import cast
+    from services.remote_link import RemoteLinkService
+    client = RemoteLinkService.get_instance().get_client()
+    data = cast("dict[str, object]", await asyncio.to_thread(
+        client._get_json, "/api/health"))  # noqa: SLF001 —— 转发层
+    return JSONResponse(content=data)
+
+
 @router.get("/autostart")
 async def get_autostart(node: str = Query(default="local")) -> JSONResponse:
     """LaunchAgent 安装状态。transit 端点。"""
