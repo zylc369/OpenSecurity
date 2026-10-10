@@ -94,3 +94,22 @@
 3. dict 禁令清理: remote_client p2p dict → TransportConfig 强类型（remote_link._p2p_config_locked 构造注入; _cfg_f 删除）
 4. 远程更新重启: POST /api/system/git-pull（远程侧 git pull --ff-only）+ POST /api/remote/update-restart（主控编排: pull→取旧 boot_token→restart）+ GET /api/remote/health-forward（轮询透传）+ RemoteSection「更新并重启」按钮（Popconfirm→loading 转圈→2s 轮询 boot_token 变化→30s 超时 warning toast/成功 success toast）; 4a 测试远程连通=现有「切换远程」按钮的校验探测
 - 终验: 49 tests + pyright 0 + frontend tsc/build ✓ + dry-run 17 包
+
+
+## Review 第 2 轮修复（2026-10-10，commit 4345596 审查 16 项）
+
+**重要事实**: 上轮的 tags/依赖注册改动未进入用户提交（HEAD 无 DepTag/新包条目）——本轮在干净基线重做并以实跑输出验证（教训: 修复后必须验证【文件内容+运行时行为】，git 状态与工作记忆都可能失真）
+- 高#1 ✅: DepTag+tags 重做（类外声明式打标——console 集 frozenset 按 pip_name 匹配）; cryptography/msgpack 补注册（console 21 包）; kokoro-onnx 注册为 required=False（可选语义正确——模型页/README 已注明单独 pip）
+- 中#2 ✅: ApiGuard LAN 白名单补 /api/system/git-pull、/api/system/restart、/api/health（HTTP 远程模式下「更新并重启」从 403 修复为可用）
+- 中#3 ✅: RemoteTransport._ensure_session 加 asyncio.Lock（并发 job 重复建立→连接泄漏修复）
+- 中#4 ✅: git_pull_repo 改 asyncio.to_thread（阻塞 300s 冻结事件循环修复）
+- 低#7 ✅ LRU 字节预算 256MiB; 低#11 ✅ ep 遮蔽; 低#13 ✅ 客户端泵错误隔离
+- 低#5 核实: finally sig.close() 已存在（review 误报）; 其余低危（#6/8/9/10/12/14/15/16/SSRF 加固/文案）记录待办——低频/边缘场景，不阻塞交付
+- 终验: 53 tests passed + pyright 0 + console_runtime dry-run 21 包
+
+
+## 双机制重复修复（2026-10-10 用户指出）
+
+- 问题: 并存两套打标（条目内联 tags + _CONSOLE_RUNTIME_PIPS frozenset 类外重写循环）——用机制复杂度换编辑便利，违背清单唯一数据源原则
+- 修复: 删除 frozenset + 类外重写; 全部 23 个 console 包直接内联 tags=(DepTag.CONSOLE_RUNTIME,)（含中断后补齐的 Pillow/mlx-vlm/cryptography/msgpack/kokoro-onnx 5 个）
+- 终验: tagged=23 / installable(此平台)=21 / pyright 0 / 53 tests / dry-run 输出 21 包

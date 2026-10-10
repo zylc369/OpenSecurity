@@ -260,9 +260,9 @@ class RemoteGateway:
             if self._sessions:
                 idle_eps = [a for a, s2 in self._sessions.items()
                             if now - s2.last_active > SESSION_IDLE_CLOSE_SEC]
-                for ep in idle_eps:
-                    logger.info("会话空闲超时清理: %s", ep)
-                    self._sessions.pop(ep, None)
+                for stale_ep in idle_eps:  # 独立变量名——不遮蔽下方 STUN 的 ep（review#11）
+                    logger.info("会话空闲超时清理: %s", stale_ep)
+                    self._sessions.pop(stale_ep, None)
             if now - last_stun >= STUN_REFRESH_SEC:
                 new_ep = await self._stun_probe()
                 if new_ep is not None and new_ep != ep:

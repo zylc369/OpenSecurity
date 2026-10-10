@@ -222,7 +222,10 @@ class DirectConnection:
             data, _addr = await inbox.get()
             if data is None:  # close 哨兵
                 break
-            await self._session.handle_datagram(data)
+            try:
+                await self._session.handle_datagram(data)
+            except Exception:  # noqa: BLE001 —— 单帧畸形不杀泵（review#13——与 gateway _safe_handle 对称）
+                logger.exception("直连泵单帧处理异常（会话继续）")
 
     @property
     def session(self) -> UdpClientSession:
@@ -375,6 +378,7 @@ class RemoteTransport:
         self._loop: "asyncio.AbstractEventLoop | None" = None
         self._thread: "threading.Thread | None" = None
         self._conn: "DirectConnection | RelayConnection | None" = None
+        self._session_lock = asyncio.Lock()  # review#3: 并发 job 重复建立→连接泄漏
         self._pending: "dict[int, asyncio.Future[dict[str, object]]]" = {}
         self._next_id = 1
         self._last_active = 0.0
@@ -468,11 +472,14 @@ class RemoteTransport:
             self._pending.pop(msg_id, None)
 
     async def _ensure_session(self) -> "DirectConnection | RelayConnection":
-        """会话复用/重建（直连优先、中继兜底）。"""
+        """会话复用/重建（直连优先、中继兜底; Lock 串行化——并发 job 不重复建立）。"""
         if self._conn is not None and not self._conn.broken:
             return self._conn
-        await self._drop_session()
-        handler = self._on_msg
+        async with self._session_lock:
+            if self._conn is not None and not self._conn.broken:
+                return self._conn  # 等锁期间他人已建好
+            await self._drop_session()
+            handler = self._on_msg
         # ① 直连
         try:
             connector = DirectConnector(

@@ -58,6 +58,10 @@ class DepTag(str, Enum):
     DESKTOP_AUTOMATION = "desktop_automation"
 
 
+
+
+
+
 @dataclass(frozen=True)
 class PyPkgField:
     """Python 包元数据。"""
@@ -126,7 +130,8 @@ class PyDepsDetector:
             tags=(DepTag.CONSOLE_RUNTIME,), platforms=("win32",),
                    description="Windows 命名管道（控制台 IPC 监听 + MCP 管道代理）"),
         PyPkgField(name="mlx-vlm", pip_name="mlx-vlm", agents=["all"], platforms=("darwin",),
-                   description="MLX 视觉模型库（OCR 进程内推理；Apple Silicon 专属）"),
+                   description="MLX 视觉模型库（OCR 进程内推理；Apple Silicon 专属）",
+                   tags=(DepTag.CONSOLE_RUNTIME,)),
         PyPkgField(name="numpy", pip_name="numpy", agents=["all"],
             tags=(DepTag.CONSOLE_RUNTIME,),
                    description="数值计算库，embed 接口返回值"),
@@ -143,6 +148,15 @@ class PyDepsDetector:
         PyPkgField(name="huggingface_hub", pip_name="huggingface_hub", agents=["all"],
             tags=(DepTag.CONSOLE_RUNTIME,),
                    description="模型缓存扫描与下载（控制台模型资产页）"),
+        PyPkgField(name="cryptography", pip_name="cryptography", agents=["all"],
+                   description="remote-p2p Noise 加密原语（X25519/ChaChaPoly）",
+                   tags=(DepTag.CONSOLE_RUNTIME,)),
+        PyPkgField(name="msgpack", pip_name="msgpack", agents=["all"],
+                   description="remote-p2p 消息序列化（wire protocol）",
+                   tags=(DepTag.CONSOLE_RUNTIME,)),
+        PyPkgField(name="kokoro_onnx", pip_name="kokoro-onnx", agents=["all"], required=False,
+                   description="远程 TTS 引擎（kokoro-82M ONNX; 仅朗读场景需要）",
+                   tags=(DepTag.CONSOLE_RUNTIME,)),
         PyPkgField(name="mcp", pip_name="mcp", agents=["all"],
             tags=(DepTag.CONSOLE_RUNTIME,), version_spec="<2",
                    description="MCP 协议库，knowledge/events/ocr server 依赖"
@@ -203,7 +217,8 @@ class PyDepsDetector:
                    description="动态插桩工具包（Hook/内存读写）"),
         PyPkgField(name="PIL", pip_name="Pillow",
                    agents=["binary-analysis", "mobile-analysis"],
-                   description="图像处理库（GUI 截图）"),
+                   description="图像处理库（GUI 截图 / OCR 图像预处理）",
+                   tags=(DepTag.CONSOLE_RUNTIME,)),
         # ── OCR 链路 ──
         PyPkgField(name="pymupdf", pip_name="pymupdf", agents=["all"],
             tags=(DepTag.CONSOLE_RUNTIME,),
@@ -737,3 +752,5 @@ def _main() -> int:
 
 if __name__ == "__main__":
     sys.exit(_main())
+
+

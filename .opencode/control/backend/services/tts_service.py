@@ -26,6 +26,7 @@ DEFAULT_VOICE = "zf_xiaobei"
 DEFAULT_SPEED = 1.0
 SAMPLE_RATE = 24000
 CACHE_LIMIT = 2048
+CACHE_BYTES_LIMIT = 256 * 1024 * 1024  # 256MiB 字节预算（review#7——条目数上限之外防大 WAV 撑爆内存）
 MAX_TEXT_LEN = 2000
 
 
@@ -154,7 +155,8 @@ class TtsService:
         with self._lock:
             self._cache[key] = wav
             self._cache.move_to_end(key)
-            while len(self._cache) > CACHE_LIMIT:
+            while (len(self._cache) > CACHE_LIMIT
+                   or sum(len(v) for v in self._cache.values()) > CACHE_BYTES_LIMIT):
                 self._cache.popitem(last=False)
         return TtsResult(wav=wav, cached=False, gen_ms=gen_ms,
                          voice=voice, speed=speed)

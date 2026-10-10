@@ -37,6 +37,11 @@ class ApiGuardMiddleware(BaseHTTPMiddleware):
         "/api/remote/health",
         "/api/remote/node-config",
         "/api/remote/autostart",
+        # 远程更新重启链路（主控「更新并重启」按钮经 LAN 转发; review#2——
+        # 无白名单时 HTTP 模式下三调用全 403，功能只在 P2P 模式可用）
+        "/api/system/git-pull",
+        "/api/system/restart",
+        "/api/health",
     })
 
     LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "testclient", "localhost"})

@@ -74,15 +74,19 @@ async def git_pull_repo() -> "JSONResponse":
     from typing import cast
     # 仓库根推导: backend → .opencode/control/backend → 仓库根
     repo = str(Path(__file__).resolve().parents[3])
-    try:
-        r = subprocess.run(["git", "pull", "--ff-only"], cwd=repo,
-                           capture_output=True, text=True, timeout=300)
+    import asyncio
+    from typing import cast as _cast
+    try:  # to_thread——协程内阻塞 subprocess 会冻结整个事件循环（review#4）
+        r = await asyncio.to_thread(
+            subprocess.run, ["git", "pull", "--ff-only"], cwd=repo,
+            capture_output=True, text=True, timeout=300)
     except (OSError, subprocess.TimeoutExpired) as e:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
-    if r.returncode != 0:
+    proc = _cast("subprocess.CompletedProcess[str]", r)
+    if proc.returncode != 0:
         return JSONResponse(status_code=500,
-                            content={"ok": False, "error": r.stderr.strip()[:500]})
-    return JSONResponse(content={"ok": True, "output": r.stdout.strip()[:500]})
+                            content={"ok": False, "error": proc.stderr.strip()[:500]})
+    return JSONResponse(content={"ok": True, "output": proc.stdout.strip()[:500]})
 
 
 @router.post("/restart")
