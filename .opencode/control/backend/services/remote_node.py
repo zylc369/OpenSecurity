@@ -31,6 +31,10 @@ if TYPE_CHECKING:  # 静态分析用（运行时不导入——见下方延迟�
 # 允许 `python services/remote_node.py` 直跑（backend 目录为包根）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# .ai_env 位置锚定仓库根下的 .opencode/（与主环境一致: 插件注入的 OPENCODE_ROOT
+# 即 .opencode 目录; 无 env 的手动启动（远程节点薄壳）由 runtime_paths 兜底回退
+# 到同一路径——两端统一, 无需此处干预）
+
 from services.detect_py_deps import (  # noqa: E402
     VENV_DIR,
     _get_venv_python,

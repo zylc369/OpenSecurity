@@ -238,6 +238,21 @@ class ModelAssetRegistry:
                 logger.warning("缓存状态读取异常: %s", e)
         return ModelCacheState(False, None, 0.0)
 
+    def _cache_size_gb(self, repo_id: str) -> float:
+        """该 repo 在 HF 缓存的磁盘占用（含 blobs/*.incomplete 进行中文件）。
+
+        仅供进度估算——不能用 _is_cached（其返回值是"完整性判定"语义，
+        不完整时 size 归零，会抹掉进度信息）。
+        """
+        try:
+            from huggingface_hub import scan_cache_dir
+            for repo in scan_cache_dir().repos:
+                if repo.repo_id == repo_id:
+                    return round(repo.size_on_disk / 1024**3, 2)
+        except Exception:
+            pass
+        return 0.0
+
     def _required_files_for(self, repo_id: str) -> tuple[str, ...]:
         """该 repo 的缓存完整性候选文件集（required_files 任一存在即完整）。"""
         for m in self.MODELS:
@@ -513,7 +528,7 @@ class ModelAssetRegistry:
             with self._lock:
                 if self._states[model.id].status != "downloading":
                     return
-            size_gb = self._is_cached(model.repo_id).size_gb
+            size_gb = self._cache_size_gb(model.repo_id)
             with self._lock:
                 self._states[model.id].progress = min(round(size_gb / model.disk_gb, 2), 0.99)
             time.sleep(2)
