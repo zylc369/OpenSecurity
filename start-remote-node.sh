@@ -21,9 +21,10 @@ resolve_py() {
 PY="$(resolve_py)"
 
 do_install() {
-  echo "==> 安装控制台运行依赖 tags=console_runtime"
-  (cd "${BACKEND}" && PYTHONPATH="${BACKEND}" "${PY}" services/detect_py_deps.py install --tags console_runtime)
-  PY="$(resolve_py)"  # install 可能自举了 venv——重解析解释器路径
+  echo "==> 安装控制台运行依赖 tags=console_runtime（stdlib venv——远程节点显式选择）"
+  (cd "${BACKEND}" && PYTHONPATH="${BACKEND}" "${PY}" services/detect_py_deps.py \
+      install --tags console_runtime --venv-backend stdlib)
+  PY="$(resolve_py)"  # install 自举了 venv——重解析解释器路径
 }
 
 if [[ "${1:-}" == "--install" ]]; then

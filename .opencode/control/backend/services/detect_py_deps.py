@@ -534,15 +534,19 @@ def _get_venv_python():
     return os.path.join(VENV_DIR, "bin", "python")
 
 
-def _bootstrap_venv():
+def _bootstrap_venv(venv_backend: str = "conda"):
     """检查当前是否在目标 venv 内，不在则创建并重启自己。
 
-    前提：系统里有任意 Python 3.10+ + conda（miniforge/miniconda）。
+    venv_backend（显式选择，不静默回退——两种 venv 的发行版/包生态不同）:
+      "conda"  默认。前提: 系统 Python 3.10+ + conda（miniforge/miniconda）。
+               无 conda → 打印指引 + exit(1)（主环境行为——不静默改变）。
+      "stdlib" 显式回退。python -m venv 创建（远程节点最小集场景:
+               console_runtime 全为 pip 包; 由调用方（start-remote-node.sh）
+               明确传入，安装器自身不自动降级）。
     流程：
       1. sys.executable == venv Python → 已在 venv 内，直接返回
-      2. 不在 venv → 搜 conda → 不存在 → 打印指引 + exit(1)
-      3. conda 存在 → conda create → 校验 venv Python 存在
-      4. 重启自己：Unix os.execv / Windows subprocess + sys.exit
+      2. 不在 venv → 按 backend 创建 → 校验 venv Python 存在
+      3. 重启自己：Unix os.execv / Windows subprocess + sys.exit
     """
     venv_python = _get_venv_python()
 
@@ -559,11 +563,28 @@ def _bootstrap_venv():
     _log(f"[*] 目标 venv Python: {venv_python}")
     _log("[*] 不在目标 venv 内，创建 venv 并重启自身...")
 
-    # 搜 conda
+    # stdlib 显式回退分支（--venv-backend stdlib; 不做无 conda 自动降级——
+    # 两种 venv 发行版/包生态不同，静默切换会让环境不可预测）
+    if venv_backend == "stdlib":
+        if os.path.isfile(venv_python):
+            _log("[+] venv 已存在，跳过创建")
+        else:
+            _log(f"[*] python -m venv {VENV_DIR} ...")
+            result = subprocess.run([sys.executable, "-m", "venv", VENV_DIR])
+            if result.returncode != 0:
+                print(f"\n[ERROR] stdlib venv 创建失败（退出码 {result.returncode}）。",
+                      file=sys.stderr)
+                sys.exit(1)
+            _log("[+] venv 创建成功（stdlib）")
+        _restart_self(venv_python)
+        return
+
+    # 默认: conda 路径（无 conda → 明确报错指引，不静默回退）
     conda = _find_conda()
     if not conda:
         print("\n[ERROR] 未找到 conda（miniforge/miniconda）。", file=sys.stderr)
-        print("请先安装 Miniforge：", file=sys.stderr)
+        print("请先安装 Miniforge，或显式指定 stdlib 回退: --venv-backend stdlib",
+              file=sys.stderr)
         system = platform.system()
         if system == "Darwin":
             arch = os.uname().machine
@@ -602,18 +623,21 @@ def _bootstrap_venv():
         sys.exit(1)
 
     # 重启自己
+    _restart_self(venv_python)
+
+
+def _restart_self(venv_python: str) -> None:
+    """重启安装器自身到 venv Python（Unix execv / Windows subprocess）。"""
     _log(f"[*] 重启到 venv Python: {venv_python}")
     os.environ["_INSTALL_PY_DEPS_BOOTSTRAPPED"] = "1"
     if os.name == "nt":
-        # Windows: os.execv 不可靠，用 subprocess + sys.exit
         result = subprocess.run([venv_python, os.path.abspath(__file__)] + sys.argv[1:])
         sys.exit(result.returncode)
-    else:
-        # Unix: 进程替换
-        os.execv(venv_python, [venv_python, os.path.abspath(__file__)] + sys.argv[1:])
+    os.execv(venv_python, [venv_python, os.path.abspath(__file__)] + sys.argv[1:])
 
 
-def _run_install(dry_run: bool, tags: "list[DepTag] | None" = None):
+def _run_install(dry_run: bool, tags: "list[DepTag] | None" = None,
+                 venv_backend: str = "conda"):
     """安装必需依赖（install 子命令入口; --tags 按场景过滤）。
 
     dry_run → 只打印将安装的清单，不执行（可在 venv 外跑，不进 venv）。
@@ -628,7 +652,7 @@ def _run_install(dry_run: bool, tags: "list[DepTag] | None" = None):
         return
 
     # 确保在目标 venv 内运行
-    _bootstrap_venv()
+    _bootstrap_venv(venv_backend=venv_backend)
 
     def _install_fail(msg: str) -> Never:
         """安装失败 → 打印错误 → 立即中断。"""
@@ -707,6 +731,10 @@ def _main() -> int:
     inst.add_argument("--tags", nargs="+", default=None,
                       choices=[t.value for t in DepTag],
                       help="场景标签过滤（console_runtime=远程节点最小集; 缺省全量）")
+    inst.add_argument("--venv-backend", default="conda",
+                      choices=["conda", "stdlib"],
+                      help="venv 创建后端（默认 conda; stdlib=无 conda 环境的显式回退——"
+                           "不自动降级，须部署方明确选择）")
     inst.add_argument("--dry-run", action="store_true",
                       help="只打印将安装的清单，不执行")
 
