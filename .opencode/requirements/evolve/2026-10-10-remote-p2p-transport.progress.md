@@ -152,3 +152,11 @@
 - 新增根目录薄壳 deploy-relayd.sh（Python>=3.11 守卫 + exec deploy.py，与 start-remote-node.sh 同构）
 - 删除 setup.sh（零墓碑）; README 用法 + 需求文档 3 处引用同步更新
 - 验证: pyright 0 / --dry-run 6 步全打印 / 薄壳链路 / 参数缺失报错 / 不可见字节 0
+
+## 2026-10-10 迭代续: deploy.py 三轮实跑修复 + --ssh-port/--restart
+- --ssh-port（ssh -p / scp -P; ensure_psk 手写 subprocess 收口 _ssh(check=False)）
+- ControlMaster 连接复用（密码一次; ControlPath 短目录+%C 防 104B sun_path 超限）
+- Python>=3.9 检测失败 → python-build-standalone 3.12.7 静态构建兜底（CentOS 7 EOL 场景, glibc 2.17 兼容; /opt/python312 不碰系统）; 检测 exit 1 是正常语义 → check=False（dry-run 假码曾掩盖此分支——补 mock 真分支验证）
+- firewalld 装而未跑（exit 252）→ --state 先行探测, 未跑=本机无包过滤走提示分支
+- --restart: 部署完 systemctl restart（代码更新场景; enable --now 对已运行服务 no-op 不会加载新代码）
+- 实跑验证: VPS 部署成功（relayd active + TCP/UDP 41000 双监听 + PSK 生成）

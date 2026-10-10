@@ -2,7 +2,7 @@
 
 用法（项目根目录）:
   ./deploy-relayd.sh <VPS_IP> [SSH_USER=root]
-  python3 tools/relay-deploy/deploy.py <VPS_IP> [SSH_USER=root] [--dry-run]
+  python3 tools/relay-deploy/deploy.py <VPS_IP> [SSH_USER=root] [--dry-run] [--restart]
 
 6 步:
   1. 同步代码（services/remote_crypto.py + remote_signal.py + remote_relayd/*.py → /opt/remote-relayd）
@@ -18,12 +18,24 @@
 from __future__ import annotations
 
 import argparse
+import atexit
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 DEST = "/opt/remote-relayd"
+# python-build-standalone 静态构建（install_only 变体解压即用; glibc>=2.17 兼容 CentOS 7）
+# 用于系统无 Python>=3.9 且包管理器不可用（EOL 源下架）的兜底——不碰系统 Python
+STANDALONE_PY_DIR = "/opt/python312"
+STANDALONE_TAG = "20241016"
+STANDALONE_VER = "3.12.7"
+STANDALONE_ASSET = (f"cpython-{STANDALONE_VER}+{STANDALONE_TAG}"
+                    "-x86_64-unknown-linux-gnu-install_only.tar.gz")
+STANDALONE_URL = (f"https://github.com/astral-sh/python-build-standalone/releases/download/"
+                  f"{STANDALONE_TAG}/{STANDALONE_ASSET}")
 ENVFILE = "/etc/remote-relayd/relay.env"
 SERVICE_FILE = "remote-relayd.service"
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent  # tools/relay-deploy → backend
@@ -32,12 +44,14 @@ for c in python3.12 python3.11 python3.10 python3.9 python3; do
   command -v $c >/dev/null 2>&1 && $c -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)" 2>/dev/null && { echo $c; exit 0; }
 done; exit 1"""
 FIREWALL_SCRIPT = """
-if command -v firewall-cmd >/dev/null 2>&1; then
+# 只在防火墙服务真正运行时操作（firewalld 装而未跑 = 本机无包过滤, 无需放行;
+# firewall-cmd 对未运行服务返回 252/非零——不是部署失败）
+if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
   firewall-cmd --add-port=41000/tcp --add-port=41000/udp --permanent && firewall-cmd --reload
-elif command -v ufw >/dev/null 2>&1; then
+elif command -v ufw >/dev/null 2>&1 && ufw status >/dev/null 2>&1; then
   ufw allow 41000/tcp && ufw allow 41000/udp
 else
-  echo "    （无 firewalld/ufw——确认云安全组放行 41000 TCP+UDP）"
+  echo "    （firewalld/ufw 未运行——本机无包过滤; 若云厂商有安全组需放行 41000 TCP+UDP）"
 fi"""
 
 
@@ -47,6 +61,7 @@ class DeployTarget:
 
     host: str
     ssh_user: str = "root"
+    ssh_port: int = 22
     dest: str = DEST
     envfile: str = ENVFILE
 
@@ -67,33 +82,47 @@ class DeployReport:
 class RelaydDeployer:
     """relayd 部署编排器（6 步链; 每步失败立即中止）。"""
 
-    def __init__(self, target: DeployTarget, dry_run: bool = False) -> None:
+    def __init__(self, target: DeployTarget, dry_run: bool = False,
+                 restart_service: bool = False) -> None:
         self._t = target
         self._dry = dry_run
+        self._restart = restart_service  # 代码更新场景: 部署完重启服务加载新代码
         self._report = DeployReport()
+        # SSH 连接复用: 多路复用 master 连接，整个部署只认证一次（密码只输一遍）。
+        # ControlPath 必须 < 104B（sun_path 上限，macOS 更严且 ssh 会追加随机后缀）——
+        # 短目录 + %C（host/port/user 组合的定长 hash token）
+        self._ctl_dir = tempfile.mkdtemp(prefix="rly-", dir="/tmp")
+        atexit.register(lambda: shutil.rmtree(self._ctl_dir, ignore_errors=True))
+        self._ssh_opts = [
+            "-o", "ControlMaster=auto",
+            "-o", f"ControlPath={self._ctl_dir}/%C",
+            "-o", "ControlPersist=120",
+            "-o", "BatchMode=no",
+        ]
 
     # ---- 基础封装 -----------------------------------------------------------
-    def _ssh(self, step: str, remote_cmd: str,
-             capture: bool = False) -> "subprocess.CompletedProcess[str]":
-        """执行远端命令; 非零退出即失败中止（dry_run 只打印）。"""
-        argv = ["ssh", self._t.ssh_dest, remote_cmd]
-        return self._run(step, argv, capture)
+    def _ssh(self, step: str, remote_cmd: str, capture: bool = False,
+             check: bool = True) -> "subprocess.CompletedProcess[str]":
+        """执行远端命令; check=True 时非零退出即失败中止（dry_run 只打印）。"""
+        argv = ["ssh", *self._ssh_opts, "-p", str(self._t.ssh_port),
+                self._t.ssh_dest, remote_cmd]
+        return self._run(step, argv, capture, check=check)
 
     def _scp(self, step: str, sources: list[str], dest: str) -> None:
         """上传文件到远端。"""
-        argv = ["scp", *sources, dest]
+        argv = ["scp", *self._ssh_opts, "-P", str(self._t.ssh_port), *sources, dest]
         self._run(step, argv)
 
-    def _run(self, step: str, argv: list[str],
-             capture: bool = False) -> "subprocess.CompletedProcess[str]":
+    def _run(self, step: str, argv: list[str], capture: bool = False,
+             check: bool = True) -> "subprocess.CompletedProcess[str]":
         printable = " ".join(argv)
         if self._dry:
             print(f"[dry] {printable}")
-            # dry-run 返回假完成对象（调用方约定: dry 模式不消费输出，除 _ensure_psk 走沿用分支）
+            # dry-run 返回假完成对象（调用方约定: dry 模式不消费输出）
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         print(f"==> {step}")
         result = subprocess.run(argv, capture_output=capture, text=True)
-        if result.returncode != 0:
+        if result.returncode != 0 and check:
             print(f"[ERROR] 步骤失败（退出码 {result.returncode}）: {printable}", file=sys.stderr)
             if capture and result.stderr:
                 print(f"       stderr: {result.stderr.strip()[:400]}", file=sys.stderr)
@@ -116,19 +145,44 @@ class RelaydDeployer:
 
     def ensure_python(self) -> str:
         """步骤 2: 远端 Python >= 3.9 探测。Returns: 远端 python 命令名。"""
-        if self._dry:
-            print(f"[dry] ssh {self._t.ssh_dest} '{REMOTE_PY_DETECT.strip()}'")
-            return "python3(待探测)"
-        result = self._ssh("2/6 检测 Python >= 3.9", REMOTE_PY_DETECT, capture=True)
+        # check=False: 远端 exit 1 = 没找到（正常分支语义，走兜底）而非部署失败
+        result = self._ssh("2/6 检测 Python >= 3.9", REMOTE_PY_DETECT,
+                           capture=True, check=False)
         py = (result.stdout or "").strip()
-        if not py:
-            print("!! 未找到 Python>=3.9——请先安装"
-                  "（CentOS: dnf install python3.11; Ubuntu: apt install python3.10-venv）",
-                  file=sys.stderr)
-            sys.exit(1)
-        print(f"    Python: {py}")
-        self._report.steps_done.append(f"ensure_python({py})")
+        if py:
+            print(f"    Python: {py}")
+            self._report.steps_done.append(f"ensure_python({py})")
+            return py
+        # 系统无 >=3.9 → python-build-standalone 兜底（EOL 系统包管理器不可靠）
+        print("    系统无 Python>=3.9——安装独立构建（python-build-standalone，不影响系统 Python）")
+        py = self._install_standalone_python()
+        print(f"    Python: {py}（standalone）")
+        self._report.steps_done.append(f"ensure_python({py}, standalone)")
         return py
+
+    def _install_standalone_python(self) -> str:
+        """远端安装 python-build-standalone（幂等: 已存在直接用）。Returns: python 完整路径。"""
+        t = self._t
+        if self._dry:
+            print(f"[dry] ssh {t.ssh_dest} 'test -x {STANDALONE_PY_DIR}/bin/python3（有则跳过安装）'")
+            print(f"[dry] ssh {t.ssh_dest} 'curl -fL {STANDALONE_URL} | tar -xz -C /opt && 重命名 python → {STANDALONE_PY_DIR}'")
+            return f"{STANDALONE_PY_DIR}/bin/python3"
+        found = self._ssh("2/6 检查已有 standalone Python",
+                          f"test -x {STANDALONE_PY_DIR}/bin/python3", check=False)
+        if found.returncode == 0:
+            print(f"    已存在 {STANDALONE_PY_DIR}，跳过下载")
+            return f"{STANDALONE_PY_DIR}/bin/python3"
+        install_script = f"""
+set -e
+curl -fL "{STANDALONE_URL}" -o /tmp/relayd-py.tar.gz
+rm -rf /tmp/relayd-py-extract && mkdir -p /tmp/relayd-py-extract
+tar -xzf /tmp/relayd-py.tar.gz -C /tmp/relayd-py-extract
+rm -rf {STANDALONE_PY_DIR} && mv /tmp/relayd-py-extract/python {STANDALONE_PY_DIR}
+rm -rf /tmp/relayd-py.tar.gz /tmp/relayd-py-extract
+{STANDALONE_PY_DIR}/bin/python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)"
+"""
+        self._ssh(f"2/6 下载并安装 Python {STANDALONE_VER}（standalone, ~40MB）", install_script)
+        return f"{STANDALONE_PY_DIR}/bin/python3"
 
     def setup_venv(self, py: str) -> None:
         """步骤 3: 远端 venv + 依赖。"""
@@ -147,9 +201,8 @@ class RelaydDeployer:
             print(f"[dry] ssh {t.ssh_dest} 'cd {t.dest} && venv python -m services.remote_relayd genkey'")
             self._report.steps_done.append("ensure_psk(dry)")
             return
-        # 注意: test -s 失败（文件缺失/空）不能走 _ssh 的失败中止路径——单独 run
-        check = subprocess.run(["ssh", t.ssh_dest, f"test -s {t.envfile}"])
-        if check.returncode == 0:
+        # test -s 非零 = 文件缺失/空（正常分支）——check=False 不中止
+        if self._ssh("4/6 检查已有 PSK", f"test -s {t.envfile}", check=False).returncode == 0:
             print(f"    沿用已有 {t.envfile}")
             self._report.psk_reused = True
             self._report.steps_done.append("ensure_psk(reused)")
@@ -187,6 +240,11 @@ class RelaydDeployer:
         self.ensure_psk()
         self.install_systemd()
         self.firewall()
+        if self._restart:
+            # enable --now 对已运行服务是 no-op——代码更新场景需显式 restart 加载新代码
+            # （服务中断 <1s; gateway 指数退避自动重连、client 下次请求重建路径，三端自愈）
+            self._ssh("重启服务（加载新代码）", "systemctl restart remote-relayd")
+            self._report.steps_done.append("restart")
         return self._report
 
     def print_summary(self) -> None:
@@ -205,23 +263,28 @@ class RelaydDeployer:
             print(f"\n    PSK: 沿用远端 {t.envfile}（查看: ssh {t.ssh_dest} cat {t.envfile}）")
 
 
-def _parse_args(argv: list[str]) -> tuple[DeployTarget, bool]:
+def _parse_args(argv: list[str]) -> tuple[DeployTarget, bool, bool]:
     from typing import cast
     parser = argparse.ArgumentParser(
         prog="deploy.py",
         description="relayd VPS 部署器（薄壳 deploy-relayd.sh 的实际入口）")
     parser.add_argument("host", help="VPS IP 或 hostname")
     parser.add_argument("ssh_user", nargs="?", default="root", help="SSH 用户（默认 root）")
+    parser.add_argument("--ssh-port", type=int, default=22, help="SSH 端口（默认 22; 搬瓦工等常自定义）")
     parser.add_argument("--dry-run", action="store_true",
                         help="只打印将执行的 ssh/scp 命令，不执行")
+    parser.add_argument("--restart", action="store_true",
+                        help="部署完成后重启 remote-relayd（代码更新场景加载新代码; "
+                             "服务中断<1s，三端自愈）")
     ns = parser.parse_args(argv)
-    return DeployTarget(host=cast("str", ns.host), ssh_user=cast("str", ns.ssh_user)), \
-        cast("bool", ns.dry_run)
+    return (DeployTarget(host=cast("str", ns.host), ssh_user=cast("str", ns.ssh_user),
+                         ssh_port=cast("int", ns.ssh_port)),
+            cast("bool", ns.dry_run), cast("bool", ns.restart))
 
 
 def main() -> int:
-    target, dry_run = _parse_args(sys.argv[1:])
-    deployer = RelaydDeployer(target, dry_run=dry_run)
+    target, dry_run, restart = _parse_args(sys.argv[1:])
+    deployer = RelaydDeployer(target, dry_run=dry_run, restart_service=restart)
     report = deployer.run()
     deployer.print_summary()
     if report.psk_generated:
