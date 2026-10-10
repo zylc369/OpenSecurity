@@ -18,8 +18,8 @@ MacMini backend(同款代码) ─────┘──────┘（gateway 
 ## 一、VPS（relayd）
 
 ```bash
-# 一次性部署（backend 目录执行; 自动生成 PSK 并打印）
-bash tools/relay-deploy/setup.sh <VPS_IP>
+# 一次性部署（项目根目录执行; 自动生成 PSK 并打印; --dry-run 预检只打印命令）
+./deploy-relayd.sh <VPS_IP> [SSH_USER=root]
 # 输出的 PSK 记录下来 → 三端配置用
 
 # 运维

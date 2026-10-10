@@ -106,7 +106,7 @@ gateway 内部: httpx 转发 127.0.0.1:<backend_port> + path（业务零耦合�
 | `services/config_manager.py`（改） | 共用 | 新键 + remote_tunables 扩展 + UI 项 | +80 |
 | `server.py`（改） | Mac Mini | lifespan 启动 gateway（`P2P_GATEWAY_ENABLE=1` 时） | +15 |
 | `tests/test_remote_crypto.py` `test_remote_relayd.py` `test_remote_e2e.py` | — | 向量/单元/本机三组件全链路 | ~500 |
-| `tools/relay-deploy/setup.sh` `remote-relayd.service` | VPS | venv+pip+systemd+防火墙 一键部署 | ~100 |
+| `tools/relay-deploy/deploy.py`（根薄壳 `deploy-relayd.sh`）`remote-relayd.service` | VPS | venv+pip+systemd+防火墙 一键部署 | ~230 |
 | `services/remote_relayd/protocol.md` | 共用 | wire protocol 规范 + 测试向量（三端对齐唯一权威） | ~300 |
 
 **Kotlin（legado `modules/remote-link/`，Android library，稳定后抽 `sdk/Android/remote-link/`）**:
@@ -250,7 +250,7 @@ P2P_CLIENT_ENABLE=0      # main 角色开关（控制台=1 → remote_client 走
 - 依赖: P12, P15
 
 **P17. relay-deploy 部署物**
-- 文件: `tools/relay-deploy/{setup.sh,remote-relayd.service,README.md}`
+- 文件: `tools/relay-deploy/{deploy.py,remote-relayd.service,README.md}` + 根薄壳 `deploy-relayd.sh`
 - 内容: venv + pip（cryptography/msgpack）+ systemd unit（PSK 经 EnvironmentFile=/etc/remote-relayd/relay.env 注入，含 RELAY_PSK/RELAY_PORT）+ firewalld 规则 + Python≥3.9 检测/安装分支（CentOS dnf / 兜底提示手动装）+ 升级/日志说明
 - 验证: `bash -n` 语法 + 文档自包含审读
 - 依赖: P7
@@ -303,7 +303,7 @@ P2P_CLIENT_ENABLE=0      # main 角色开关（控制台=1 → remote_client 走
 3. relayd 拒绝无 PSK / 错 PSK 连接（Noise 握手失败即断）; 同 IP 高频握手失败触发封禁
 4. 中继会话上 relayd 只见密文（VPS 零知识）——抓包/代码路径双重验证
 5. legado: 配置 RemoteLink TTS 引擎（127.0.0.1 网关 URL）后朗读出声（真机）
-6. `python -m services.remote_relayd genkey` 输出合法 base64(32B); `tools/relay-deploy/setup.sh` 在干净 VPS 上一键部署成功
+6. `python -m services.remote_relayd genkey` 输出合法 base64(32B); `./deploy-relayd.sh` 在干净 VPS 上一键部署成功
 7. TTS LRU 缓存命中（同文本二次合成 <50ms）
 
 **回归验收**:

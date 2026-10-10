@@ -146,3 +146,9 @@
 - [Low] RelayConfig 收集收口 _collect_relay（ensure_config/build_plan 单一来源）
 - 薄壳加 Python>=3.11 版本守卫（PATH python3 过老时回退找 3.14-3.11; 仍无 → 明确报错）——防 Xcode 3.9 等环境下 typing.Never import 崩溃难诊断
 - 验证: pyright 0 / pytest 49 通过 / 薄壳三场景（正常/回退/无 3.11+ 报错）实证 / 不可见字节 0
+
+## 2026-10-10 迭代续: setup.sh → deploy.py Python 化（用户要求）
+- 新增 tools/relay-deploy/deploy.py（6 步部署编排器: 同步代码/Python 检测/venv/PSK/systemd/防火墙; OO+dataclass; --dry-run 预检; 纯 stdlib 零 services 依赖）
+- 新增根目录薄壳 deploy-relayd.sh（Python>=3.11 守卫 + exec deploy.py，与 start-remote-node.sh 同构）
+- 删除 setup.sh（零墓碑）; README 用法 + 需求文档 3 处引用同步更新
+- 验证: pyright 0 / --dry-run 6 步全打印 / 薄壳链路 / 参数缺失报错 / 不可见字节 0
