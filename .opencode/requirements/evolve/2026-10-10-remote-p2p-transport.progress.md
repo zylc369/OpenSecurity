@@ -160,3 +160,9 @@
 - firewalld 装而未跑（exit 252）→ --state 先行探测, 未跑=本机无包过滤走提示分支
 - --restart: 部署完 systemctl restart（代码更新场景; enable --now 对已运行服务 no-op 不会加载新代码）
 - 实跑验证: VPS 部署成功（relayd active + TCP/UDP 41000 双监听 + PSK 生成）
+
+## 2026-10-10 迭代续: 模型假完成根治（MacMini 实跑暴露）
+- 根因: _is_cached 用 scan_cache_dir 目录存在性判缓存——snapshot_download 启动即建 repo 目录 → remote_node._wait_models 5s 首轮轮询全误判"下载完成"（GB 级文件秒完为铁证）→ 加载时缺 pytorch_model.bin 报错（BAAI/bge-m3 无 safetensors 只有 bin）
+- 修复: ①ModelAsset.required_files（权重候选集, 任一存在=完整; 四条目补全）②_is_cached 完整性校验（部分快照=未缓存, 重下成本低——断点续传）③Cache directory not found 静默（首次环境正常态, 消除警告轰炸）④_wait_models 完成判定改 download.status=="done"（worker returncode=0 才 done）
+- 验证: 本机完整缓存 True / 模拟缺权重 False / 四条目候选集正确; pyright 0; 49 tests
+- MacMini 里程碑实绩: gateway 已注册（node=OpenSecurityServer → 74.120.173.111:41000）; CONTROL_RESIDENT 常驻生效

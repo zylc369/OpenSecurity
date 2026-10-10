@@ -252,8 +252,12 @@ class RemoteNodeBootstrapper:
                 for mid, err in failed.items():
                     _log(f"[ERROR] {mid} 下载失败: {err}")
                 sys.exit(1)
-            waiting = [mid for mid in pending if not snapshot[mid].cached]
-            done = [mid for mid in pending if snapshot[mid].cached]
+            # 完成判定用下载状态（worker returncode=0 才 done）而非 cached
+            # （目录存在性——snapshot_download 启动即建目录, 会假完成）
+            waiting = [mid for mid in pending
+                       if snapshot[mid].download.status != "done"]
+            done = [mid for mid in pending
+                    if snapshot[mid].download.status == "done"]
             for mid in done:
                 _log(f"[+] {mid} 下载完成")
             pending = waiting

@@ -99,6 +99,10 @@ class ModelAsset:
     # ocr 平台差异：mac(apple silicon)=MLX/HF；win/linux=Ollama。
     # 空 = 全平台 HF 下载（embedder/reranker）
     ollama_model: str = ""
+    # 缓存完整性: 快照目录中**至少存在其中一个**文件才算完整（权重文件候选集）。
+    # 防"部分下载=已缓存"假完成（snapshot_download 启动即建 repo 目录，
+    # scan_cache_dir 只看目录存在会误判; 大权重文件才是下载主体）
+    required_files: tuple[str, ...] = ()
 
 
 
@@ -123,6 +127,7 @@ class ModelAssetRegistry:
             id="bge-m3",
             repo_id="BAAI/bge-m3",
             type="embedder",
+            required_files=("pytorch_model.bin", "model.safetensors"),
             display="BGE-M3",
             purpose="向量化（知识库 / 事件图谱 embedding）",
             min_free_gb=4.0,
@@ -132,6 +137,7 @@ class ModelAssetRegistry:
             id="bge-reranker-v2-m3",
             repo_id="BAAI/bge-reranker-v2-m3",
             type="reranker",
+            required_files=("pytorch_model.bin", "model.safetensors"),
             display="BGE Reranker v2 m3",
             purpose="重排序（事件检索 rerank）",
             min_free_gb=4.0,
@@ -141,6 +147,7 @@ class ModelAssetRegistry:
             id="glm-ocr",
             repo_id="mlx-community/GLM-OCR-4bit",
             type="ocr",
+            required_files=("model.safetensors", "pytorch_model.bin"),
             display="GLM-OCR (0.9B)",
             purpose="本地图像文字识别（ocr MCP 后端；mac=MLX / 其他=Ollama）",
             min_free_gb=4.0,
@@ -151,6 +158,7 @@ class ModelAssetRegistry:
             id="kokoro-tts",
             repo_id="onnx-community/Kokoro-82M-v1.0-ONNX",
             type="tts",
+            required_files=("model.onnx", "model.int8.onnx", "onnx/model.onnx"),
             display="Kokoro TTS (82M)",
             purpose="远程朗读语音合成（remote-p2p TTS; legado 经 P2P 调用）",
             min_free_gb=1.0,
@@ -205,17 +213,48 @@ class ModelAssetRegistry:
 
 
     def _is_cached(self, repo_id: str) -> ModelCacheState:
-        """查询 HF 缓存状态。"""
+        """查询 HF 缓存状态（含完整性: required_files 至少一个存在才算缓存完整）。
+
+        部分（中断/进行中）快照视为未缓存——snapshot_download 对已下文件
+        秒过/断点续传，触发重下成本低; 误判"已缓存"会让加载时缺权重文件。
+        """
         try:
             from huggingface_hub import scan_cache_dir
             info = scan_cache_dir()
             for repo in info.repos:
                 if repo.repo_id == repo_id:
-                    return ModelCacheState(True, str(repo.repo_path),
-                                           round(repo.size_on_disk / 1024**3, 2))
+                    size_gb = round(repo.size_on_disk / 1024**3, 2)
+                    required = self._required_files_for(repo_id)
+                    if not required:
+                        return ModelCacheState(True, str(repo.repo_path), size_gb)
+                    if self._snapshot_has_any_file(str(repo.repo_path), required):
+                        return ModelCacheState(True, str(repo.repo_path), size_gb)
+                    logger.info("[models] %s 缓存不完整（缺 %s）——视为未缓存", repo_id, required)
+                    return ModelCacheState(False, None, 0.0)
         except Exception as e:
-            logger.warning("缓存状态读取异常: %s", e)
+            if "Cache directory not found" in str(e):
+                pass  # 首次环境正常态（从没下载过）——静默
+            else:
+                logger.warning("缓存状态读取异常: %s", e)
         return ModelCacheState(False, None, 0.0)
+
+    def _required_files_for(self, repo_id: str) -> tuple[str, ...]:
+        """该 repo 的缓存完整性候选文件集（required_files 任一存在即完整）。"""
+        for m in self.MODELS:
+            if m.repo_id == repo_id:
+                return m.required_files
+        return ()
+
+    @staticmethod
+    def _snapshot_has_any_file(repo_path: str, required: tuple[str, ...]) -> bool:
+        """快照目录（repo_path/snapshots/<rev>/）中是否存在任一必需文件。"""
+        import glob as _glob
+        snaps = _glob.glob(os.path.join(repo_path, "snapshots", "*"))
+        for snap in snaps:
+            for name in required:
+                if os.path.exists(os.path.join(snap, name)):
+                    return True
+        return False
 
 
     def _ocr_cache_state(self, model: ModelAsset) -> ModelCacheState:
