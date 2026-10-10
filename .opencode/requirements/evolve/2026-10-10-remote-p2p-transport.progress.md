@@ -113,3 +113,11 @@
 - 问题: 并存两套打标（条目内联 tags + _CONSOLE_RUNTIME_PIPS frozenset 类外重写循环）——用机制复杂度换编辑便利，违背清单唯一数据源原则
 - 修复: 删除 frozenset + 类外重写; 全部 23 个 console 包直接内联 tags=(DepTag.CONSOLE_RUNTIME,)（含中断后补齐的 Pillow/mlx-vlm/cryptography/msgpack/kokoro-onnx 5 个）
 - 终验: tagged=23 / installable(此平台)=21 / pyright 0 / 53 tests / dry-run 输出 21 包
+
+## 过程缺陷记录（连续 4 次 patch 静默失败——用户连续抓到）
+- 事故链: 模型注册 → tags 接线 → venv_backend CLI 接线 → resolve_py 路径修复
+- 共同根因: 用 python str.replace 改文件，oldString 不匹配时静默无操作; 验证用了逻辑副本而非文件本身
+- 整改纪律（即刻生效）:
+  1. 禁止 python str.replace 改存量文件——一律用 Edit 工具（不命中会明确报错）
+  2. 验证必须从文件本身提取/执行（source/grep 文件），不接受手写副本验证
+  3. CLI/接线类改动必须端到端验证（sys.argv 真解析 → spy 分发目标）

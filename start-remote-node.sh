@@ -11,9 +11,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 BACKEND="${HERE}/.opencode/control/backend"
 
 # 定位 Python: 优先项目 venv（install 自举创建）; 回退系统 python3
+# venv 落点探测——与 backend services/runtime_paths.py 的 OPENSECURITY_HOME 解析一致
+# （env 优先，缺省 ~/bw-security-analysis; 两处逻辑改动须同步）
 resolve_py() {
-  if [ -x "${BACKEND}/.venv/bin/python" ]; then
-    echo "${BACKEND}/.venv/bin/python"
+  local os_home="${OPENSECURITY_HOME:-${HOME}/bw-security-analysis}"
+  if [ -x "${os_home}/.venv/bin/python" ]; then
+    echo "${os_home}/.venv/bin/python"
   else
     command -v python3
   fi
