@@ -121,7 +121,7 @@ class DirectConnector:
     """直连建立器: lookup → 打洞互射 → Noise 握手（protocol.md §6 客户端侧）。"""
 
     def __init__(self, psk: bytes, relay_host: str, relay_port: int,
-                 punch_timeout: float = 1.5, punch_burst: int = 3) -> None:
+                 punch_timeout: float = 5.0, punch_burst: int = 3) -> None:
         self._psk = psk
         self._codec = FrameCodec()
         self._punch_auth = PunchAuth(psk)
@@ -389,7 +389,7 @@ class TransportConfig:
     psk: bytes
     node_id: str
     # review#3(dict 禁令): remote_client/remote_link 间传强类型对象，不再传 dict
-    punch_timeout_sec: float = 1.5
+    punch_timeout_sec: float = 5.0
     relay_timeout_sec: float = 5.0
     api_timeout_sec: float = 30.0
     idle_close_sec: float = 60.0

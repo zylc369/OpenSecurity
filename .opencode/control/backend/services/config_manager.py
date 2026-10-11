@@ -327,7 +327,7 @@ class ConfigManager:
         unload_delay_sec: float = 300.0  # 恢复后稳定期
         infer_timeout_sec: float = 30.0  # 推理请求超时
         probe_timeout_sec: float = 3.0  # 健康探测超时
-        punch_timeout_sec: float = 1.5  # P2P 打洞窗口（protocol.md §9）
+        punch_timeout_sec: float = 5.0  # P2P 打洞窗口（弱网 NAT 映射建立慢;protocol.md §9）
         relay_connect_timeout_sec: float = 5.0  # 中继建立超时
         p2p_api_timeout_sec: float = 30.0  # P2P api 调用超时
 
