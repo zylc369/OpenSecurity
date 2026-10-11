@@ -126,6 +126,9 @@ def test(name: str):
     return decorator
 
 
+test.__test__ = False  # pytest 收集免疫（import 到消费方模块也不被收集）
+
+
 def assert_eq(actual, expected, msg=""):
     if actual != expected:
         raise AssertionError(f"{msg}: actual={actual!r}, expected={expected!r}")

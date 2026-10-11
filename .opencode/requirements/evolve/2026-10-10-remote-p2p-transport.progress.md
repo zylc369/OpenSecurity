@@ -400,3 +400,11 @@
 - 数据归属修正: 节奏数据 100% 后端决定与返回（probe_interval_sec=后端 tunable heartbeat_interval_sec）; 前端残留 `?? 5` 兜底=前端私藏节奏数字（后端改间隔而字段缺失时前端显示错值）→ 删除，字段缺失时不渲染节奏部分（不猜数字）
 
 - 倒计时跳变修正（用户观察: 3→2→1 间隔非 1 秒）: 后端值仅随 5s 轮询刷新，ceil 后跳变不规律 → useSmoothCountdown（后端值=锚点每 5s 校准 + 本地每秒递减渲染平滑; 值仍后端拥有，本地零数据产生）; 两处 Alert 接入
+
+### 2026-10-11 迭代续 32: MacMini node_offline 根因破案与修复（ecb2857 已推送）
+- 铁证（remote-node.log 末尾）: execv 重启后 `Fatal Python error: init_sys_streams ... OSError: [Errno 9] Bad file descriptor` → 进程秒死 → node_offline
+- 根因链: remote_node.launch() 的 Popen 未重定向 stdin（继承启动终端 tty）→ 终端关闭后 fd0 成坏 fd → 节点平时无感存活 8+h → "更新并重启" execv 原样继承 fd0 → 新 Python init_sys_streams 遇 EBADF Fatal。与 Py3.14/依赖/git 全部无关
+- 修复（双保险）: ①restart.py _sanitize_std_fds()（execv 前 lseek 探测 EBADF → dup2 /dev/null; 修所有存量坏 fd 进程）②remote_node.launch() Popen 加 stdin=DEVNULL（新节点源头免疫）
+- 验证: 真实复现（子进程 os.close(0) → 自愈 → execv 存活输出 EXEC_OK）; pyright 0/0/0; 相关测试套件全绿
+- 顺手修存量: test_windows_ipc.py 模块级 sys.exit(0) → pytest.skip(allow_module_level=True)（sys.exit 炸全量收集 INTERNALERROR）; test_control.py 的 def test(name) 与 pytest 收集规则冲突致伪 ERROR（该文件为自包含直跑脚本，IPC 测试需控制台未运行环境）
+- MacMini 侧待办: git pull ecb2857 → ./start-remote-node.sh 重新拉起节点
