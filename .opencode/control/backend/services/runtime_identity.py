@@ -22,7 +22,9 @@ def _code_fingerprint() -> tuple[int, str]:
     files = sorted(glob.glob(os.path.join(backend_dir, "**", "*.py"), recursive=True))
     h = hashlib.sha256()
     for f in files:
-        h.update(f.encode("utf-8"))
+        # 相对路径参与哈希——绝对路径含用户名/家目录，跨机必不同（对齐失效）
+        rel = os.path.relpath(f, backend_dir)
+        h.update(rel.encode("utf-8"))
         h.update(b"\0")
         with open(f, "rb") as fh:
             h.update(fh.read())
