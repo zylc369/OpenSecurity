@@ -38,11 +38,12 @@ class _RemoteHealthJson(TypedDict, total=False):
 
 @dataclass(frozen=True)
 class ModelFingerprint:
-    """单模型版本指纹（repo + HF snapshot hash + 加载态）。"""
+    """单模型版本指纹（repo + 显示名 + snapshot hash + 加载态）。"""
 
     repo_id: str
-    snapshot: str
-    loaded: bool
+    display: str = ""
+    snapshot: str = ""
+    loaded: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class RemoteHealthInfo:
     version: str
     models: list[ModelFingerprint] = field(default_factory=list)
     latency_ms: float = 0.0
+    code_fingerprint: str = ""
 
 
 class RemoteConsoleClient:
@@ -218,6 +220,7 @@ class RemoteConsoleClient:
         models = [
             ModelFingerprint(
                 repo_id=str(m.get("repo_id", "")),
+                display=str(m.get("display", "")),
                 snapshot=str(m.get("snapshot", "")),
                 loaded=bool(m.get("loaded", False)),
             )
@@ -228,6 +231,7 @@ class RemoteConsoleClient:
             version=str(data.get("version", "")),
             models=models,
             latency_ms=latency,
+            code_fingerprint=str(data.get("code_fingerprint", "")),
         )
 
     # ─── 节点管理转发（主控代理调远程节点，routes/remote.py 用）───

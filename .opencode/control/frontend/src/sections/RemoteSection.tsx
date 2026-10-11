@@ -264,6 +264,7 @@ const RemoteSection: React.FC = () => {
   );
 
   const health = status?.remote_health ?? null;
+  const localCodeFp = status?.local_code_fingerprint ?? "";
   const enabled = status?.enabled ?? false;
   const degraded = status?.state === "degraded";
   // 守卫后捕获（JSX 回调内属性窄化会丢失）
@@ -369,11 +370,13 @@ const RemoteSection: React.FC = () => {
     setApiKeyInput(key);
   }, []);
 
-  const modelState = (name: string): { label: string; color: string } => {
-    const st = status?.local_models?.[name] ?? "unknown";
+  /** 单模型状态展示（state → 徽标; 注册表驱动——与环境总览同源） */
+  const stateBadge = (st: string): { label: string; color: string } => {
     if (status?.state === "remote") return { label: "远程托管", color: "blue" };
     if (st === "ready") return { label: "已加载", color: "success" };
     if (st === "starting") return { label: "加载中", color: "processing" };
+    if (st === "error") return { label: "状态异常", color: "error" };
+    if (st === "unknown") return { label: "状态未知", color: "warning" };
     return { label: "未加载", color: "default" };
   };
 
@@ -547,19 +550,27 @@ const RemoteSection: React.FC = () => {
               {health.models.map((m) => (
                 <Tooltip
                   key={m.repo_id}
-                  title={`snapshot: ${m.snapshot || "未知"}`}
+                  title={`${m.repo_id}\nsnapshot: ${m.snapshot || "未知"}`}
                 >
                   <Tag
                     icon={m.loaded ? <CheckCircleOutlined /> : undefined}
                     color={m.loaded ? "success" : "default"}
                     style={{ marginInlineEnd: 0 }}
                   >
-                    {m.repo_id.split("/").pop()} {m.loaded ? "" : "(未加载)"}
+                    {m.display || m.repo_id}
+                    {m.loaded ? "" : "（未加载）"}
                   </Tag>
                 </Tooltip>
               ))}
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                远程版本 {health.version}
+                远程 {health.version}
+                {health.code_fingerprint
+                  ? ` · 代码 ${health.code_fingerprint}${
+                      localCodeFp && localCodeFp !== health.code_fingerprint
+                        ? "（与本地不一致——远程节点可能需要更新）"
+                        : "（与本地一致）"
+                    }`
+                  : ""}
               </Typography.Text>
             </Space>
           )}
@@ -652,15 +663,11 @@ const RemoteSection: React.FC = () => {
             </Space>
           </div>
           <Space size={8} wrap>
-            {[
-              { key: "embedder", name: "BGE-M3" },
-              { key: "reranker", name: "Reranker v2 m3" },
-              { key: "ocr", name: "GLM-OCR" },
-            ].map(({ key, name }) => {
-              const st = modelState(key);
+            {(status?.local_models ?? []).map((m) => {
+              const st = stateBadge(m.state);
               return (
-                <Tag key={key} color={st.color} style={{ marginInlineEnd: 0 }}>
-                  {name}: {st.label}
+                <Tag key={m.id} color={st.color} style={{ marginInlineEnd: 0 }}>
+                  {m.display}: {st.label}
                 </Tag>
               );
             })}

@@ -79,7 +79,7 @@ def _fake_p2p_http():
 def _ok_info(latency=12.5):
     return RemoteHealthInfo(
         service="opencode-control", version="t",
-        models=[ModelFingerprint("BAAI/bge-m3", "snap-abc", True)], latency_ms=latency)
+        models=[ModelFingerprint(repo_id="BAAI/bge-m3", snapshot="snap-abc", loaded=True)], latency_ms=latency)
 
 
 def _set_probe(svc, results):

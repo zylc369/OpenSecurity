@@ -257,3 +257,36 @@
 - 违纪: mode_override: "object | None" + has_override: bool 画蛇添足哨兵——RemoteTransportMode 就在顶层 import，无任何循环依赖; 根因是照抄文件内返回值 "object | None" 的历史偷懒模式
 - 修正: mode_override: RemoteTransportMode | None（None=读存量配置，具体枚举=校验目标管道——语义完备，has_override 整个删除）; 返回值 -> "TransportConfig | None"（TYPE_CHECKING import 强类型，__future__ annotations 惰性求值零运行时依赖）
 - 教训固化: 新参数类型的判定不参考"同文件既有写法"（存量模式可能是错的），只按值域判定: 枚举值域→枚举类; 结构化→dataclass; 都不是且确需顶层通用→才考虑 object（本例根本轮不到）
+
+### 2026-10-11 迭代续 11: 切换 30s 超时修复（心跳/校验竞态——用户责令自测）
+- 用户报: 点切换 30s 超时; "你要不先自己测试一下"——此前全部 fake 测试，零真实端到端
+- 自测过程: 独立脚本 4.4s 成功 → async 环境 4.3s 成功 → 完整 switch_transport 4.5s 成功 → 复现缺并发维度!
+- 根因（日志+代码实证）: 竞态——switch 校验探测不持锁期间，心跳 _probe_once 以「存量配置视角」（mode 未写）并发 sync → 判定需重建 → close 校验用 client → transport.stop 关 loop → 在途探测协程挂死（traceback "Event loop is closed" + 45s TimeoutError 双证）
+- 修复双层: ①_validating 标志——校验期间 _sync_client_locked 跳过（try/finally 全路径清） ②transport.stop 先取消全部在途 pending future（任何 close 场景等待方立即失败而非挂死 api_timeout+15）
+- 竞态回归测试: 并发假心跳（1s 周期 sync）+ switch → 5.1s 成功 ✓; 15 passed; pyright 0/0/0
+- 顺带: 清理 .ai_env 遗留 REMOTE_CONSOLE_ENABLED=1（老键值会误导）
+- 教训: 并发路径的验证必须含并发——单线程复现"成功"不等于无竞态
+
+### 2026-10-11 迭代续 12: 显示收口（用户指出模型显示混乱）
+- 问题: ①"远程版本 Darwin/BAAI/bge-m3"词不达意（version=platform/EMBED_MODEL 的历史偷懒组装） ②同一模型两套显示名（本地 BGE-M3/远程 bge-m3; Reranker v2 m3/bge-reranker-v2-m3） ③local_models 采集 except:pass 静默缺键（"采集失败"与"未加载"混淆）
+- 收口: ①version=platform/machine（平台标识）; 新增 code_fingerprint（routes/health.code_fingerprint_str 唯一格式源）——本地/远程对齐检测（"与本地一致/不一致——远程节点可能需要更新"） ②前端 MODEL_DISPLAY 统一映射（本地键+远程 repo_id → 同一显示名; 原始标识进 tooltip） ③采集异常显式 error 态+日志（前端"状态异常"红标; unknown→"状态未知"黄标——四态语义分离）
+- 踩坑: dataclass 带默认字段须在无默认字段后（local_code_fingerprint 位置）
+- 验证: pyright 0/0/0; 15 passed; tsc/build ✓; 真实 P2P probe 返回新 health 字段
+
+- 追加: _validating 自锁 bug（检查挡了 switch 自己的 override 构建——真实 probe 复发"未初始化"暴露）——修正语义: 校验中仅挡外部（无 override）拆已有 client，放行 override 构建; 竞态回归重验真绿（0.5s 心跳周期）
+- 远程节点（MacMini）旧代码返回旧 health 格式（无 code_fingerprint）——前端兼容空值; 同步 MacMini 后新字段生效
+
+### 2026-10-11 迭代续 13: 模型体系单一注册表贯穿（用户三轮纠偏）
+- 用户批评链: ①前端 MODEL_DISPLAY 第二套定义（环境总览已有显示链）②if-else type 分发只是把问题搬到后端③dict[str,str]→list[dict] 假消除——"不要让我一个一个找"
+- 终版架构: ModelAsset 子类多态（EmbedderAsset/RerankerAsset/OcrAsset/TtsAsset 各自实现 local_state/local_snapshot/cache_state/idle_info/loaded）——新增模型（已有类型）=注册表一条声明零逻辑; 新增类型=新子类
+- 双消费链统一: get_model_assets（环境总览 /api/models）四分支 if-else → 多态遍历; remote_link.local_models（远程页）同源注册表; remote health models 遍历下发（含 display）
+- dict 彻底清零（remote_link/model_assets 业务面）: LocalModelState/RemoteModelView/RemoteHealthSummary dataclass; _local_fingerprints dict 连同消费方消灭（版本对比直接遍历注册表，warning 用 display 人话）
+- 语义纠偏: TTS local_state 用 engine_loaded（引擎懒加载真实态）非 engine_ready（仅文件就绪）——与环境总览口径一致
+- 过程缺陷: ①patch 连续 MISS（转义/时机）——python heredoc 补丁命中率下降，切换 Edit 工具 ②基类字段被 patch 截断（required_files/ollama_model 丢失）——patch 后必须全量编译+pyright
+- 验证: pyright 0/0/0; 24 passed; tsc/build ✓; 真实 P2P 四模型端到端（本地四模型含 Kokoro; 远程三模型旧格式兼容）
+
+### 2026-10-11 迭代续 14: 控制台白屏事故（契约半生效）
+- 事故: 用户前端打不开（白屏）——local_models 结构变更（dict→数组）后: 前端 dist 即时生效（StaticFiles 每请求读盘），后端是常驻老进程（detached+unref 周三启动，代码不重载）→ 新前端在老后端 dict 数据上 .map() 崩溃
+- 修复: kill 老进程 + 手动等价拉起（OPENCODE_ROOT/OPENSECURITY_HOME env + venv python server.py + 日志重定向）→ local_models=list 验证 ✓
+- 教训（部署事实，此前未认知）: ①控制台后端常驻（重启 opencode ≠ 重启控制台）②**改前后端共享契约必须同步重启后端进程**——只 build 前端=半生效 ③kill 后插件 spawn 依赖下一条消息触发——紧急恢复=手动等价拉起
+- 手动拉起命令（复用）: cd .opencode && OPENCODE_ROOT="$(pwd)" OPENSECURITY_HOME="$HOME/bw-security-analysis" nohup ~/.venv/bin/python control/backend/server.py >> logs/control-stdout.log 2>> logs/control-stderr.log & disown

@@ -61,6 +61,33 @@ class SwitchResult:
     warnings: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class LocalModelState:
+    """本地单模型状态（注册表驱动——与环境总览同源）。"""
+    id: str
+    display: str
+    state: str
+
+
+@dataclass(frozen=True)
+class RemoteModelView:
+    """远程单模型指纹视图（节点 health 下发）。"""
+    repo_id: str
+    display: str
+    snapshot: str
+    loaded: bool
+
+
+@dataclass(frozen=True)
+class RemoteHealthSummary:
+    """远程节点健康摘要（status 组装、单一序列化源）。"""
+    service: str
+    version: str
+    code_fingerprint: str
+    latency_ms: float
+    models: list[RemoteModelView]
+
+
 @dataclass
 class RemoteLinkStatus:
     """状态机快照（前端远程 TAB 单一事实源）。"""
@@ -75,9 +102,10 @@ class RemoteLinkStatus:
     recover_streak: int
     last_ok_at: float | None           # wall clock 秒
     last_fail_reason: str | None
-    remote_health: "dict[str, object] | None"  # service/version/models/latency_ms
-    local_models: "dict[str, str]"  # 三模型本地加载态
+    remote_health: "RemoteHealthSummary | None"  # 远程节点健康摘要
+    local_models: "list[LocalModelState]"  # 各模型本地加载态（注册表驱动）
     unload_countdown_sec: float | None # 恢复稳定期倒计时（未安排 → None）
+    local_code_fingerprint: str = ""  # 本机代码指纹（与 remote_health.code_fingerprint 对齐检测）
 
 
 
@@ -131,8 +159,12 @@ class RemoteLinkService:
         self._last_fail_reason: str | None = None
         self._last_health: "RemoteHealthInfo | None" = None
         self._unload_timer: "threading.Timer | None" = None
-        self._unload_due_at: float | None = None
+        self._unload_due_at: "float | None" = None
         self._task: "asyncio.Task[None] | None" = None
+        # 校验进行中标志: switch_transport 探测期间（不持锁），心跳/reload 的
+        # _sync_client_locked 不得重建 client——存量配置视角（mode 未写）会误判
+        # 需要重建并 close 掉校验用 client → 在途探测挂死在已关闭的 transport loop
+        self._validating: bool = False
 
     def _read_config(self) -> tuple[str, bool, str]:
         """读远程三要素（ConfigManager 唯一读写方）。
@@ -144,25 +176,6 @@ class RemoteLinkService:
         enabled = (ConfigManager.get_instance().p2p_settings().transport_mode is not None)
         token = (ConfigManager.get_instance().get(ConfigManager.Keys.REMOTE_CONSOLE_TOKEN) or "").strip()
         return url, enabled, token
-
-    def _local_fingerprints(self) -> dict[str, str]:
-        """本地模型指纹（repo_id → snapshot hash; HF 缓存目录名，不加载模型）。"""
-        from pathlib import Path
-        
-        hub = Path.home() / ".cache" / "huggingface" / "hub"
-        result: dict[str, str] = {}
-        for repo in (ConfigManager.Protocol.EMBED_MODEL, ConfigManager.Protocol.RERANKER_MODEL):
-            repo_dir = repo.replace("/", "--")
-            snaps = list(hub.glob(f"models--{repo_dir}/snapshots/*"))
-            result[repo] = snaps[0].name if snaps else ""
-        try:
-        
-            from pathlib import PurePath
-            p = MlxEngine.find_mlx_model()
-            result["glm-ocr"] = PurePath(p).parent.name if p else ""
-        except Exception:  # noqa: BLE001 —— OCR 指纹缺失不阻断
-            result["glm-ocr"] = ""
-        return result
 
     @staticmethod
     def _model_inference():
@@ -347,23 +360,34 @@ class RemoteLinkService:
             if missing:
                 return SwitchResult(ok=False, error=(
                     f"P2P 管道配置不全，缺: {'、'.join(missing)}"))
+        # 校验阶段按「目标管道」构建 client（mode 即开关——点击时存量 mode
+        # 为空，成功后才写入; 不传 override 会读到 None → 纯 P2P 场景 client 缺失）。
+        # _validating 防心跳并发重建（探测不持锁期间，心跳以存量配置视角
+        # close 校验用 client → 在途探测挂死在已关闭的 transport loop）。
         with self._lock:
-            # 校验阶段按「目标管道」构建 client（mode 即开关——点击时存量 mode
-            # 为空，成功后才写入; 不传 override 会读到 None → 纯 P2P 场景 client 缺失）
+            self._validating = True
             self._sync_client_locked(url, token, mode_override=mode)
-        ok, reason, info = await self._probe_raw()
+        try:
+            ok, reason, info = await self._probe_raw()
+        finally:
+            with self._lock:
+                self._validating = False
         if not ok:
             return SwitchResult(ok=False, error=f"远程校验失败: {reason}")
 
-        # 版本指纹对比（不一致警告不阻断）
+        # 版本指纹对比（不一致警告不阻断; 注册表遍历——多态 snapshot 直比）
+        from services.model_assets import ModelAssetRegistry
         warnings: list[str] = []
         assert info is not None
-        local = self._local_fingerprints()
-        for m in info.models:
-            if m.repo_id in local and local[m.repo_id] and m.snapshot \
-                    and local[m.repo_id] != m.snapshot:
-                warnings.append(f"模型 {m.repo_id} 版本不一致（本地 {local[m.repo_id][:8]}… / "
-                                f"远程 {m.snapshot[:8]}…）——向量空间可能漂移")
+        for asset in ModelAssetRegistry.MODELS:
+            remote_m = next(
+                (x for x in info.models if x.repo_id == asset.repo_id), None)
+            local_snap = asset.local_snapshot()
+            if (remote_m is not None and local_snap and remote_m.snapshot
+                    and local_snap != remote_m.snapshot):
+                warnings.append(
+                    f"模型 {asset.display} 版本不一致（本地 {local_snap[:8]}… / "
+                    f"远程 {remote_m.snapshot[:8]}…）——向量空间可能漂移")
 
         ConfigManager.get_instance().set_one(
             ConfigManager.Keys.REMOTE_TRANSPORT_MODE, mode.value)
@@ -434,8 +458,18 @@ class RemoteLinkService:
         """URL/token/P2P 配置变化时重建 client（持锁调用）。
 
         mode_override: 校验阶段传目标管道（详见 _p2p_config_locked）。
+        校验进行中（_validating）挡**外部重建**（心跳/reload 以存量配置
+        视角 close 校验用 client → 在途探测挂死）——但放行校验自身的
+        override 构建（mode_override 路径）。
         """
         p2p = self._p2p_config_locked(mode_override)
+        if (self._client is not None and url == self._client_url
+                and token == self._client_token and p2p == self._client_p2p):
+            return
+        # 防拆: 校验中 + 外部调用（无 override）+ 已有 client → 跳过重建
+        if (self._validating and self._client is not None
+                and mode_override is None):
+            return
         if (self._client is not None and url == self._client_url
                 and token == self._client_token and p2p == self._client_p2p):
             return
@@ -459,20 +493,15 @@ class RemoteLinkService:
     # ── 状态快照 ─────────────────────────────────────────
 
     def status(self) -> RemoteLinkStatus:
+        from routes.health import code_fingerprint_str
         url, enabled, token = self._read_config()
         mode = ConfigManager.get_instance().p2p_settings().transport_mode
         with self._lock:
-            local_models: "dict[str, str]" = {}
-            try:
-                local_models["embedder"] = self._model_inference().embedder_status().state
-                local_models["reranker"] = self._model_inference().reranker_status().state
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                from services.ocr_service import OcrService
-                local_models["ocr"] = OcrService.get_instance().status().state
-            except Exception as e:  # noqa: BLE001
-                logger.warning("OCR 状态采集异常: %s", e)
+            from services.model_assets import ModelAssetRegistry
+            local_models = [
+                LocalModelState(id=m.id, display=m.display, state=m.local_state())
+                for m in ModelAssetRegistry.MODELS
+            ]
             countdown: float | None = None
             if self._unload_due_at is not None:
                 countdown = max(0.0, self._unload_due_at - time.monotonic())
@@ -483,17 +512,20 @@ class RemoteLinkService:
                 token_prefix=token[:6] if token else "",
                 state=self._state,
                 transport=mode,
+                local_code_fingerprint=code_fingerprint_str(),
                 fail_streak=self._fail_streak,
                 recover_streak=self._recover_streak,
                 last_ok_at=self._last_ok_at,
                 last_fail_reason=self._last_fail_reason,
-                remote_health={
-                    "service": self._last_health.service,
-                    "version": self._last_health.version,
-                    "latency_ms": self._last_health.latency_ms,
-                    "models": [{"repo_id": m.repo_id, "snapshot": m.snapshot,
-                                "loaded": m.loaded} for m in self._last_health.models],
-                } if self._last_health else None,
+                remote_health=RemoteHealthSummary(
+                    service=self._last_health.service,
+                    version=self._last_health.version,
+                    code_fingerprint=self._last_health.code_fingerprint,
+                    latency_ms=self._last_health.latency_ms,
+                    models=[RemoteModelView(repo_id=m.repo_id, display=m.display,
+                                            snapshot=m.snapshot, loaded=m.loaded)
+                            for m in self._last_health.models],
+                ) if self._last_health else None,
                 local_models=local_models,
                 unload_countdown_sec=countdown,
             )

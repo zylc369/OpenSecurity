@@ -58,7 +58,10 @@ class UdpClientSession:
         try:
             counter, ciphertext = self._codec.unpack_udp(data)
             plaintext = self._session.decrypt(ciphertext, counter)
-        except CryptoError:
+        except CryptoError as e:
+            # 安全可见性: 解密失败的 UDP 包（伪造/损坏/重放）——debug 级
+            # （攻击场景可能高频，避免刷屏但排查可见）
+            logger.debug("UDP 包解密失败（丢弃）: %s", e)
             return
         msg = decode_msg(plaintext)
         if str(msg.get("t")) == "_frag":
@@ -326,8 +329,9 @@ class RelayConnection:
                 for payload in self._frames.feed(chunk):
                     msg = decode_msg(self._session.decrypt_seq(payload))
                     await self._handler(msg)
-        except (ConnectionError, OSError, CryptoError, asyncio.IncompleteReadError):
-            pass  # 对端断开——会话失效（上层下次重建）
+        except (ConnectionError, OSError, CryptoError, asyncio.IncompleteReadError) as e:
+            # 对端断开——会话失效（上层下次重建）; 断开原因留痕（排查打洞/中继稳定性）
+            logger.debug("会话读取失败（对端断开，待重建）: %s", e)
 
     async def send_msg(self, msg: dict[str, object]) -> None:
         self._data._writer.write(self._codec.pack_tcp(  # noqa: SLF001
@@ -405,6 +409,19 @@ class RemoteTransport:
 
     def stop(self) -> None:
         if self._loop is not None:
+            # 先取消全部在途请求（future 置异常 → _handle_job 立即失败返回，
+            # 而非挂死到 api_timeout+15 兜底——任何 close 场景的等待方立即感知）
+            def _fail_pending() -> None:
+                for fut in self._pending.values():
+                    if not fut.done():
+                        fut.set_exception(TransportError("transport 已停止"))
+                self._pending.clear()
+            try:
+                self._loop.call_soon_threadsafe(_fail_pending)
+            except RuntimeError as e:
+                # loop 已关闭（异常退出/重复关闭）——在途取消不可达，
+                # 记录以可排查（等待方将由 api_timeout+15 兜底超时）
+                logger.warning("transport.stop 取消在途请求失败（loop 已关闭）: %s", e)
             self._loop.call_soon_threadsafe(self._loop.stop)
             if self._thread is not None:
                 self._thread.join(timeout=5.0)
@@ -506,8 +523,8 @@ class RemoteTransport:
         if self._conn is not None:
             try:
                 await self._conn.aclose()
-            except (ConnectionError, OSError):
-                pass
+            except (ConnectionError, OSError) as e:
+                logger.debug("会话 close 异常（忽略）: %s", e)
             self._conn = None
 
     async def _on_msg(self, msg: dict[str, object]) -> None:

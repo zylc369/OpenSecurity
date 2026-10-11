@@ -89,13 +89,108 @@ class ModelAssetStatus:
 
 @dataclass(frozen=True)
 class ModelAsset:
+    """模型资产基类——多态扩展点: local_state/local_snapshot 由各类型子类
+    实现（新增模型=注册表一条声明零逻辑改动; 新增类型=新子类）。
+    服务依赖一律方法内延迟 import（循环依赖防护——与 model_loader 链隔离）。
+    """
     id: str
     repo_id: str
-    type: str            # embedder / reranker / ocr
+    type: str            # embedder / reranker / ocr / tts
     display: str
     purpose: str
     min_free_gb: float
     disk_gb: float
+    required_files: tuple[str, ...] = ()  # 缓存完整性: 快照目录至少存在其一
+    ollama_model: str = ""  # ocr 平台差异（win/linux=Ollama; 空=全平台 HF）
+
+    def local_state(self) -> str:
+        """本地加载态（ready/starting/idle/error; 基类默认 unknown）。"""
+        return "unknown"
+
+    def loaded(self) -> bool:
+        """已加载便捷判定（环境总览/远程页共用口径）。"""
+        return self.local_state() == "ready"
+
+    def cache_state(self) -> "ModelCacheState":
+        """缓存检测（HF 快照完整性; OcrAsset 覆写平台差异）。"""
+        return ModelAssetRegistry.get_instance()._is_cached(self.repo_id)  # noqa: SLF001
+
+    def idle_info(self) -> "tuple[float | None, int | None]":
+        """（已空闲秒, 自动卸载阈值）——OCR 专用，其余 (None, None)。"""
+        return (None, None)
+
+    def local_snapshot(self) -> str:
+        """本地版本指纹（模型自知其指纹来源: HF snapshot / 目录指纹）。"""
+        return ""
+
+    def _hub_snapshot(self) -> str:
+        """HF hub snapshot 目录名（embedder/reranker/ocr 共用）。"""
+        from pathlib import Path
+        hub = Path.home() / ".cache" / "huggingface" / "hub"
+        snaps = list(hub.glob(f"models--{self.repo_id.replace('/', '--')}/snapshots/*"))
+        return snaps[0].name if snaps else ""
+
+
+@dataclass(frozen=True)
+class EmbedderAsset(ModelAsset):
+    def local_state(self) -> str:
+        from services.model_loader import ModelInferenceService
+        return ModelInferenceService.get_instance().embedder_status().state
+
+    def local_snapshot(self) -> str:
+        return self._hub_snapshot()
+
+
+@dataclass(frozen=True)
+class RerankerAsset(ModelAsset):
+    def local_state(self) -> str:
+        from services.model_loader import ModelInferenceService
+        return ModelInferenceService.get_instance().reranker_status().state
+
+    def local_snapshot(self) -> str:
+        return self._hub_snapshot()
+
+
+@dataclass(frozen=True)
+class OcrAsset(ModelAsset):
+    def local_state(self) -> str:
+        from services.ocr_service import OcrService
+        return OcrService.get_instance().status().state
+
+    def cache_state(self) -> "ModelCacheState":
+        return ModelAssetRegistry.get_instance()._ocr_cache_state(self)  # noqa: SLF001
+
+    def idle_info(self) -> "tuple[float | None, int | None]":
+        from services.ocr_service import OcrService
+        st = OcrService.get_instance().status()
+        return (OcrService.get_instance().idle_sec(), st.idle_release_sec)
+
+    def local_snapshot(self) -> str:
+        try:
+            from pathlib import PurePath
+            from services.ocr_engines import MlxEngine
+            p = MlxEngine.find_mlx_model()
+            return PurePath(p).parent.name if p else ""
+        except Exception:  # noqa: BLE001 —— OCR 指纹缺失不阻断
+            return ""
+
+
+@dataclass(frozen=True)
+class TtsAsset(ModelAsset):
+    def local_state(self) -> str:
+        # engine_loaded = 引擎懒加载真实态（首次合成才载）; 文件就绪是 cached 维度
+        from services.tts_service import TtsService
+        return "ready" if TtsService.get_instance().engine_loaded else "idle"
+
+    def local_snapshot(self) -> str:
+        """TTS 模型不在 HF hub——目录 size+mtime 短指纹（变更可检测）。"""
+        from pathlib import Path
+        d = Path.home() / ".cache" / "opensecurity" / "tts"
+        if not d.is_dir():
+            return ""
+        st = max((f.stat() for f in d.rglob("*") if f.is_file()),
+                 key=lambda s: s.st_mtime, default=None)
+        return f"tts-{int(st.st_size)}-{int(st.st_mtime)}" if st else ""
     # ocr 平台差异：mac(apple silicon)=MLX/HF；win/linux=Ollama。
     # 空 = 全平台 HF 下载（embedder/reranker）
     ollama_model: str = ""
@@ -123,7 +218,7 @@ class ModelAssetRegistry:
     _instance_lock = threading.Lock()
 
     MODELS: list[ModelAsset] = [
-        ModelAsset(
+        EmbedderAsset(
             id="bge-m3",
             repo_id="BAAI/bge-m3",
             type="embedder",
@@ -133,7 +228,7 @@ class ModelAssetRegistry:
             min_free_gb=4.0,
             disk_gb=4.3,
         ),
-        ModelAsset(
+        RerankerAsset(
             id="bge-reranker-v2-m3",
             repo_id="BAAI/bge-reranker-v2-m3",
             type="reranker",
@@ -143,7 +238,7 @@ class ModelAssetRegistry:
             min_free_gb=4.0,
             disk_gb=2.2,
         ),
-        ModelAsset(
+        OcrAsset(
             id="glm-ocr",
             repo_id="mlx-community/GLM-OCR-4bit",
             type="ocr",
@@ -154,7 +249,7 @@ class ModelAssetRegistry:
             disk_gb=1.2,
             ollama_model="glm-ocr",
         ),
-        ModelAsset(
+        TtsAsset(
             id="kokoro-tts",
             repo_id="onnx-community/Kokoro-82M-v1.0-ONNX",
             type="tts",
@@ -330,31 +425,12 @@ class ModelAssetRegistry:
 
     def get_model_assets(self) -> list[ModelAssetStatus]:
         """全部模型资产状态（/api/models 与 deps 快照的数据源）。"""
-        from services.model_loader import ModelInferenceService
-        from services.ocr_service import OcrService
-
         result: list[ModelAssetStatus] = []
         for m in self.MODELS:
-            if m.type == "ocr":
-                cache = self._ocr_cache_state(m)
-                loaded = self._ocr_loaded_state()
-                idle_sec = OcrService.get_instance().idle_sec()
-                idle_timeout: int | None = OcrService.get_instance().status().idle_release_sec
-            elif m.type == "reranker":
-                cache = self._is_cached(m.repo_id)
-                loaded = ModelInferenceService.get_instance().is_reranker_loaded()  # 懒加载真实态
-                idle_sec, idle_timeout = None, None
-            elif m.type == "tts":
-                # TTS（懒加载真实态——不触发加载; 首次合成时才载引擎）
-                cache = self._is_cached(m.repo_id)
-                from services.tts_service import TtsService
-                loaded = TtsService.get_instance().engine_loaded
-                idle_sec, idle_timeout = None, None
-            else:
-                cache = self._is_cached(m.repo_id)
-                # 本地真实加载态（远程托管时本地未加载是事实; 远程路由口径由远程 TAB 呈现）
-                loaded = ModelInferenceService.get_instance().embedder_status().state == "ready"
-                idle_sec, idle_timeout = None, None
+            # 多态委托（新增模型/类型零分发逻辑——各类型子类自知其状态源）
+            cache = m.cache_state()
+            loaded = m.loaded()
+            idle_sec, idle_timeout = m.idle_info()
             with self._lock:
                 st = self._states[m.id]
                 download = DownloadView(status=st.status, progress=st.progress, error=st.error)

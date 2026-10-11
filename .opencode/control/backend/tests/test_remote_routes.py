@@ -48,9 +48,9 @@ def _fake_remote_link(ok_probe=True):
     rl_module.RemoteLinkService.get_instance()._read_config = lambda: ("http://fake:1", True, "tok12345")  # noqa: F811
     info = RemoteHealthInfo(
         service="opencode-control", version="t",
-        models=[ModelFingerprint("BAAI/bge-m3", "snap-x", True),
-                ModelFingerprint("BAAI/bge-reranker-v2-m3", "snap-y", False),
-                ModelFingerprint("glm-ocr", "snap-z", True)],
+        models=[ModelFingerprint(repo_id="BAAI/bge-m3", snapshot="snap-x", loaded=True),
+                ModelFingerprint(repo_id="BAAI/bge-reranker-v2-m3", snapshot="snap-y", loaded=False),
+                ModelFingerprint(repo_id="glm-ocr", snapshot="snap-z", loaded=True)],
         latency_ms=8.0)
 
     async def fake_probe():

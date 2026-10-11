@@ -282,6 +282,7 @@ export type RemoteLinkState = "off" | "remote" | "degraded";
 
 export interface RemoteModelFingerprint {
   repo_id: string;
+  display: string;
   snapshot: string;
   loaded: boolean;
 }
@@ -289,8 +290,16 @@ export interface RemoteModelFingerprint {
 export interface RemoteHealthSummary {
   service: string;
   version: string;
+  code_fingerprint: string;
   latency_ms: number;
   models: RemoteModelFingerprint[];
+}
+
+/** 本地单模型状态（后端注册表驱动——与环境总览同源） */
+export interface LocalModelState {
+  id: string;
+  display: string;
+  state: string;
 }
 
 export interface RemoteLinkStatusView {
@@ -301,12 +310,14 @@ export interface RemoteLinkStatusView {
   state: RemoteLinkState;
   /** 管道枚举（与后端 RemoteTransportMode 一致; null = 未配置/非法——fail-closed 不开任何管道） */
   transport: null | "p2p" | "http";
+  /** 本机代码指纹（与 remote_health.code_fingerprint 对齐检测） */
+  local_code_fingerprint: string;
   fail_streak: number;
   recover_streak: number;
   last_ok_at: number | null;
   last_fail_reason: string | null;
   remote_health: RemoteHealthSummary | null;
-  local_models: Record<string, string>;
+  local_models: LocalModelState[];
   unload_countdown_sec: number | null;
 }
 

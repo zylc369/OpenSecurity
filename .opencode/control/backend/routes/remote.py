@@ -52,7 +52,8 @@ class SwitchOutcome:
 @dataclass
 class FingerprintPayload:
     service: str
-    version: str
+    version: str  # 平台标识（"Darwin/arm64"）——供人读
+    code_fingerprint: str  # 代码指纹（health._code_fingerprint 格式）——本地/远程版本对齐检测
     models: "list[ModelFingerprint]"
 
 
@@ -96,21 +97,15 @@ def _fingerprint_payload() -> FingerprintPayload:
     
     from services.model_loader import ModelInferenceService
     from services.ocr_service import OcrService
-    fps = RemoteLinkService.get_instance()._local_fingerprints()
+    from routes.health import code_fingerprint_str
+    from services.model_assets import ModelAssetRegistry
     return FingerprintPayload(
         service="opencode-control",
-        version=f"{platform.system()}/{ConfigManager.Protocol.EMBED_MODEL}",
-        models=[
-            ModelFingerprint(repo_id=ConfigManager.Protocol.EMBED_MODEL,
-                             snapshot=fps.get(ConfigManager.Protocol.EMBED_MODEL, ""),
-                             loaded=ModelInferenceService.get_instance().embedder_status().state == "ready"),
-            ModelFingerprint(repo_id=ConfigManager.Protocol.RERANKER_MODEL,
-                             snapshot=fps.get(ConfigManager.Protocol.RERANKER_MODEL, ""),
-                             loaded=ModelInferenceService.get_instance().reranker_status().state == "ready"),
-            ModelFingerprint(repo_id="glm-ocr",
-                             snapshot=fps.get("glm-ocr", ""),
-                             loaded=OcrService.get_instance().status().state == "ready"),
-        ],
+        version=f"{platform.system()}/{platform.machine()}",
+        code_fingerprint=code_fingerprint_str(),
+        models=[ModelFingerprint(repo_id=m.repo_id, display=m.display,
+                                 snapshot=m.local_snapshot(), loaded=m.loaded())
+                for m in ModelAssetRegistry.MODELS],
     )
 
 
