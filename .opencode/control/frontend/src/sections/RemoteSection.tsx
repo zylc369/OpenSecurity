@@ -245,7 +245,7 @@ const RemoteSection: React.FC = () => {
           }
         } else {
           message.error({
-            content: `切换失败: ${r.error || r.detail || "未知原因"}`,
+            content: `切换失败: ${r.error || "未知原因"}`,
             duration: 10,
           });
         }

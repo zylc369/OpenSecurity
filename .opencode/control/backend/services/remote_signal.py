@@ -5,6 +5,7 @@ import asyncio
 import collections
 from typing import TypeVar
 
+from services import remote_wire
 from services.remote_crypto import (
     FrameCodec,
     NoiseHandshake,
@@ -57,11 +58,19 @@ class SignalClient:
         i_send, i_recv = initiator.split()
         return cls(reader, writer, SessionCrypto(i_send, i_recv))
 
-    async def send(self, msg: dict[str, object]) -> None:
-        self._writer.write(self._codec.pack_tcp(self._session.encrypt_seq(encode_msg(msg))))
+    async def send(self, msg: "remote_wire.WireMsg") -> None:
+        self._writer.write(self._codec.pack_tcp(
+            self._session.encrypt_seq(remote_wire.encode(msg))))
+        await self._writer.drain()  # 背压 + 发送失败快速显形（传输错误在此抛出）
+
+    async def send_raw(self, raw: "dict[str, object]") -> None:
+        """原始消息直发（wire 对象体系之外——协议测试/前向兼容专用）。"""
+        from services.remote_crypto import encode_msg
+        self._writer.write(self._codec.pack_tcp(
+            self._session.encrypt_seq(encode_msg(raw))))
         await self._writer.drain()
 
-    async def recv(self, timeout: float = 30.0) -> dict[str, object]:
+    async def recv(self, timeout: float = 30.0) -> "remote_wire.WireMsg":
         """取下一条消息。
 
         一次 read 可能携带多帧——必须全部入 inbox 逐条交付
@@ -72,7 +81,7 @@ class SignalClient:
             if not chunk:
                 raise ConnectionError("对端已断开")
             self._inbox.extend(self._frames.feed(chunk))
-        return decode_msg(self._session.decrypt_seq(self._inbox.popleft()))
+        return remote_wire.decode(self._session.decrypt_seq(self._inbox.popleft()))
 
     @property
     def session(self) -> SessionCrypto:

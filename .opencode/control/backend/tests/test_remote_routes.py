@@ -119,7 +119,7 @@ def test_switch_paths():
         r = c.post("/api/remote/switch", json={"transport": "http"})
         d = r.json()
         assert_true(not d["ok"], "校验失败 ok=False")
-        assert_true("boom" in d.get("detail", ""), f"detail 含原因: {d.get('detail')}")
+        assert_true("boom" in d.get("error", ""), f"error 含原因: {d.get('error')}")
         assert_eq(written, {}, "失败不写 MODE")
 
         # 成功路径

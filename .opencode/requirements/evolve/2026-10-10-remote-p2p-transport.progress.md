@@ -292,3 +292,22 @@
 - 手动拉起命令（复用）: cd .opencode && OPENCODE_ROOT="$(pwd)" OPENSECURITY_HOME="$HOME/bw-security-analysis" nohup ~/.venv/bin/python control/backend/server.py >> logs/control-stdout.log 2>> logs/control-stderr.log & disown
 
 - 补丁: pydantic 运行时解析 RemoteLinkStatus 需 ModelLoadState 运行时可见（TYPE_CHECKING 不够）——顶层真 import（model_assets 无反向依赖安全）; 重启后 status 接口 ✓（state='ready' 枚举序列化）
+
+### 2026-10-11 迭代续 16: review 三遗留项全量落地（用户令"都改"）
+- ①SwitchOutcome 删除（detail 是 error 的纯镜像）; routes 返回 SwitchResult 直传; 前端 detail 消费清理; 测试断言 error 键
+- ②wire 层新建（services/remote_wire.py）: 业务消息 dataclass 全集（ApiReq/ApiResp/Ping/Pong/SignalRegister/SignalHeartbeat/SignalUpdateEp/LookupMsg/LookupResp/RelayOpen/RelayAttach/RelayJoin/RelayReady/RelayStart/Registered/HeartbeatAck/PunchHint/RelayPeer/WireError/UnknownMsg）+ encode/decode 唯二单点; wire 字节流与 relayd 兼容（协议 tag 对照协议测试校准——lookup 应答 tag 实为 "endpoints" 非 lookup_ack）
+- 消费端全改: transport（send_msg 收对象/分片信封独立通道/_on_msg isinstance/request 返回 ApiResp+窄化） signal（send/recv/加 send_raw 前向兼容口） gateway（register/heartbeat/update_ep/lookup/relay 族/ping-pong/api 转发全对象化; _forward_api 收 ApiReq 返 ApiResp） remote_client（Any 消灭→dict[str, object] JSON 边界; _p2p_call 消费 ApiResp 字段）
+- 分片信封（_frag/_frag_nack）保持 crypto 层内部 dict（无业务语义——判定记录于 wire docstring）; stun.resp 保持裸 JSON（信封级）
+- ③前端 types 收口: UpdateRestartView/HealthForwardView 移入 types（client.ts 内联清零）
+- 协议测试同步 wire 化（72 处 pyright + 5 运行时失败修复）; 修出 3 个真 bug: encode 漏 ApiResp 出站分支/decode 漏 ping 入站/窄化误置 _handle_job 致 probe 恒败
+- 过程教训（第 4 次确认）: python heredoc patch 的 MISS 整体回退在长会话中反复坑——本轮后彻底改用 Edit 工具+逐处 grep 现状
+- 验证: pyright 0/0/0; 84 passed（5 基线 fixture）; 真实 P2P 端到端（wire 字节兼容实证: 切换+probe+health models）; tsc/build ✓; 控制台重启（半生效纪律）
+
+### 2026-10-11 迭代续 17: wire review 三问题 + 四次要修复
+- ①SignalClient.send 恢复 drain()（改造时误落到 send_raw 尾——生产路径背压丢失）
+- ②WireError 解码读 msg 键（relayd 实际字段; error 前向兼容）; 抛出点带错误详情
+- ③ping decode 死条件清除; pong ts 落地 decode
+- 次要: _as_int 排除 bool; LookupMsg.udp_ep 可选 None→省略（恢复 relayd TCP 对端回退设计——中继回退路径不再发占位符触发无效打洞）; ApiResp 冗余重包装删除（直传）; gateway 分片发送统一走 _send_frag_envelope
+- 验证: pyright 0/0/0; 43 passed; 真实 P2P 链路 ✓
+
+- 真实链路复验: 首次打洞失手→中继回退失败（"中继建立失败: "空原因——端到端握手段）——**存量问题非本轮引入**: VPS 旧 relayd ↔ MacMini 旧 gateway 的中继组合从未真实运行过（日常直连成功掩盖）; 本机协议测试新版组合中继全链通过。处置: MacMini+VPS 同步新代码后重验中继（待办）; 直连主路径 ✓（复验第 1 次成功）

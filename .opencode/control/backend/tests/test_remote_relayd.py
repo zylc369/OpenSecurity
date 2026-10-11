@@ -7,6 +7,7 @@ from typing import cast
 import pytest
 from cryptography.exceptions import InvalidTag
 
+from services import remote_wire
 from services.remote_relayd.failban import BAN_SEC, FAIL_LIMIT, FailBan
 from services.remote_relayd.registry import NODE_OFFLINE_SEC, Registry
 from services.remote_relayd.server import RelayServer
@@ -90,24 +91,23 @@ def test_server_register_lookup_and_punch_hint() -> None:
         port = await server.serve("127.0.0.1", 0)
         try:
             gw = await SignalClient.connect("127.0.0.1", port, psk)
-            await gw.send({"t": "register", "node": "macmini", "ver": 1})
-            assert str((await gw.recv())["t"]) == "registered"
-            await gw.send({"t": "update_ep", "ep": ["203.0.113.7", 41001]})
+            await gw.send(remote_wire.SignalRegister(msg_id=0, node="macmini", ver=1))
+            assert isinstance(await gw.recv(), remote_wire.Registered)
+            await gw.send(remote_wire.SignalUpdateEp(msg_id=0, ep=("203.0.113.7", 41001)))
             await asyncio.sleep(0.05)         # 等 server 处理
 
             client = await SignalClient.connect("127.0.0.1", port, psk)
-            await client.send({"t": "lookup", "node": "macmini",
-                               "udp_ep": ["198.51.100.9", 41002]})
+            await client.send(remote_wire.LookupMsg(msg_id=0, node="macmini", udp_ep=("198.51.100.9", 41002)))
             resp = await client.recv()
-            assert str(resp["t"]) == "endpoints" and resp["ok"] is True
-            assert list(resp["gw"]) == ["203.0.113.7", 41001]  # type: ignore[arg-type]
-            sid = str(resp["sid"])
+            assert isinstance(resp, remote_wire.LookupResp) and resp.ok is True
+            assert resp.gw == ("203.0.113.7", 41001)
+            sid = resp.sid
             assert len(sid) == 32
 
             hint = await gw.recv()            # gateway 收到打洞提示
-            assert str(hint["t"]) == "punch_hint"
-            assert str(hint["sid"]) == sid
-            assert list(hint["client"]) == ["198.51.100.9", 41002]  # type: ignore[arg-type]
+            assert isinstance(hint, remote_wire.PunchHint)
+            assert hint.sid == sid
+            assert hint.client == ("198.51.100.9", 41002)
 
             await client.close()
             await gw.close()
@@ -124,9 +124,10 @@ def test_server_lookup_node_offline() -> None:
         port = await server.serve("127.0.0.1", 0)
         try:
             client = await SignalClient.connect("127.0.0.1", port, psk)
-            await client.send({"t": "lookup", "node": "nobody"})
+            await client.send(remote_wire.LookupMsg(msg_id=0, node="nobody", udp_ep=("0.0.0.0", 0)))
             resp = await client.recv()
-            assert resp["ok"] is False and str(resp["error"]) == "node_offline"
+            assert isinstance(resp, remote_wire.LookupResp)
+            assert not resp.ok and resp.error == "node_offline"
             await client.close()
         finally:
             await server.close()
@@ -155,12 +156,12 @@ def test_server_heartbeat_and_unknown_msg() -> None:
         port = await server.serve("127.0.0.1", 0)
         try:
             gw = await SignalClient.connect("127.0.0.1", port, psk)
-            await gw.send({"t": "register", "node": "n1", "ver": 1})
+            await gw.send(remote_wire.SignalRegister(msg_id=0, node="n1", ver=1))
             await gw.recv()
-            await gw.send({"t": "heartbeat"})
-            assert str((await gw.recv())["t"]) == "heartbeat_ack"
-            await gw.send({"t": "wat"})
-            assert str((await gw.recv())["t"]) == "error"
+            await gw.send(remote_wire.SignalHeartbeat(msg_id=0))
+            assert isinstance(await gw.recv(), remote_wire.HeartbeatAck)
+            await gw.send_raw({"t": "wat"})  # 未知消息容错（raw 逃生口）
+            assert isinstance(await gw.recv(), remote_wire.WireError)
             await gw.close()
         finally:
             await server.close()
@@ -180,29 +181,29 @@ def test_relay_full_pipe() -> None:
         try:
             # gateway 注册
             gw = await SignalClient.connect("127.0.0.1", port, psk)
-            await gw.send({"t": "register", "node": "macmini", "ver": 1})
+            await gw.send(remote_wire.SignalRegister(msg_id=0, node="macmini", ver=1))
             await gw.recv()
 
             # client lookup 拿 sid（gw 同时收到 punch_hint，忽略）
             client = await SignalClient.connect("127.0.0.1", port, psk)
-            await client.send({"t": "lookup", "node": "macmini"})
+            await client.send(remote_wire.LookupMsg(msg_id=0, node="macmini", udp_ep=("0.0.0.0", 0)))
             resp = await client.recv()
-            sid = str(resp["sid"])
+            sid = resp.sid if isinstance(resp, remote_wire.LookupResp) else ""
             await gw.recv()  # punch_hint
 
             # relay_open → gw 收 relay_peer → 双方开数据连接
-            await client.send({"t": "relay_open", "node": "macmini", "sid": sid})
+            await client.send(remote_wire.RelayOpen(msg_id=0, node="macmini", sid=sid))
             ready = await client.recv()
-            assert str(ready["t"]) == "relay_ready"
+            assert isinstance(ready, remote_wire.RelayReady)
             peer = await gw.recv()
-            assert str(peer["t"]) == "relay_peer" and str(peer["sid"]) == sid
+            assert isinstance(peer, remote_wire.RelayPeer) and peer.sid == sid
 
             c_data = await RelayPipeClient.connect("127.0.0.1", port, psk)
-            await c_data.send({"t": "relay_attach", "sid": sid})
+            await c_data.send(remote_wire.RelayAttach(msg_id=0, sid=sid))
             g_data = await RelayPipeClient.connect("127.0.0.1", port, psk)
-            await g_data.send({"t": "relay_join", "sid": sid})
-            assert str((await c_data.recv())["t"]) == "relay_start"
-            assert str((await g_data.recv())["t"]) == "relay_start"
+            await g_data.send(remote_wire.RelayJoin(msg_id=0, sid=sid))
+            assert isinstance(await c_data.recv(), remote_wire.RelayStart)
+            assert isinstance(await g_data.recv(), remote_wire.RelayStart)
 
             # 管道互通: 双向明文字节（模拟端到端加密帧的转发）
             await c_data.send_raw(b"ping-from-client")
@@ -227,9 +228,9 @@ def test_relay_bad_sid_rejected() -> None:
         port = await server.serve("127.0.0.1", 0)
         try:
             data = await SignalClient.connect("127.0.0.1", port, psk)
-            await data.send({"t": "relay_attach", "sid": "ff" * 16})
+            await data.send(remote_wire.RelayAttach(msg_id=0, sid="ff" * 16))
             resp = await data.recv()
-            assert str(resp["t"]) == "error" and str(resp["code"]) == "bad_sid"
+            assert isinstance(resp, remote_wire.WireError) and resp.code == "bad_sid"
             await data.close()
         finally:
             await server.close()
@@ -244,26 +245,27 @@ def test_relay_sid_one_shot_after_pair() -> None:
         port = await server.serve("127.0.0.1", 0)
         try:
             gw = await SignalClient.connect("127.0.0.1", port, psk)
-            await gw.send({"t": "register", "node": "n", "ver": 1})
+            await gw.send(remote_wire.SignalRegister(msg_id=0, node="n", ver=1))
             await gw.recv()
             client = await SignalClient.connect("127.0.0.1", port, psk)
-            await client.send({"t": "lookup", "node": "n"})
-            sid = str((await client.recv())["sid"])
+            await client.send(remote_wire.LookupMsg(msg_id=0, node="n", udp_ep=("0.0.0.0", 0)))
+            r0 = await client.recv()
+            sid = r0.sid if isinstance(r0, remote_wire.LookupResp) else ""
             await gw.recv()
-            await client.send({"t": "relay_open", "node": "n", "sid": sid})
+            await client.send(remote_wire.RelayOpen(msg_id=0, node="n", sid=sid))
             await client.recv()
             await gw.recv()  # relay_peer
             c1 = await RelayPipeClient.connect("127.0.0.1", port, psk)
-            await c1.send({"t": "relay_attach", "sid": sid})
+            await c1.send(remote_wire.RelayAttach(msg_id=0, sid=sid))
             g1 = await RelayPipeClient.connect("127.0.0.1", port, psk)
-            await g1.send({"t": "relay_join", "sid": sid})
+            await g1.send(remote_wire.RelayJoin(msg_id=0, sid=sid))
             await c1.recv(); await g1.recv()  # relay_start ×2
             await c1.close(); await g1.close()
 
             # sid 已消费: 再 relay_open → bad_sid
-            await client.send({"t": "relay_open", "node": "n", "sid": sid})
+            await client.send(remote_wire.RelayOpen(msg_id=0, node="n", sid=sid))
             resp = await client.recv()
-            assert str(resp["code"]) == "bad_sid"
+            assert isinstance(resp, remote_wire.WireError) and resp.code == "bad_sid"
             await client.close()
             await gw.close()
         finally:
@@ -433,9 +435,9 @@ def test_transport_direct_connector() -> None:
                 await asyncio.sleep(0.1)
                 if server.registry.get("macmini") is not None:
                     break
-            got: "list[dict[str, object]]" = []
+            got: "list[remote_wire.WireMsg]" = []
 
-            async def handler(msg: dict[str, object]) -> None:
+            async def handler(msg: "remote_wire.WireMsg") -> None:
                 got.append(msg)
 
             from services.remote_transport import DirectConnection
@@ -443,12 +445,13 @@ def test_transport_direct_connector() -> None:
             session, udp = await connector.connect("macmini", handler)
             conn_obj = DirectConnection(session, udp)
             conn_obj.start_pump()
-            await session.send_msg({"t": "ping"})
+            from services.remote_wire import PingMsg
+            await session.send_msg(PingMsg(msg_id=0))
             for _ in range(40):  # 等会话分发
                 await asyncio.sleep(0.05)
                 if got:
                     break
-            assert got and str(got[0].get("t")) == "pong"
+            assert got and isinstance(got[0], remote_wire.PongMsg)
             await conn_obj.aclose()
         finally:
             await gw.stop()
@@ -467,7 +470,7 @@ def test_transport_direct_node_offline() -> None:
         try:
             connector = DirectConnector(psk, "127.0.0.1", port)
 
-            async def handler(msg: dict[str, object]) -> None:
+            async def handler(msg: "remote_wire.WireMsg") -> None:
                 return None
 
             try:
@@ -543,26 +546,26 @@ def test_gateway_relay_api_forward() -> None:
                 if server.registry.get("macmini") is not None:
                     break
             client = await SignalClient.connect("127.0.0.1", port, psk)
-            await client.send({"t": "lookup", "node": "macmini"})
+            await client.send(remote_wire.LookupMsg(msg_id=0, node="macmini", udp_ep=("0.0.0.0", 0)))
             resp = await client.recv()
-            sid = str(resp["sid"])
+            sid = resp.sid if isinstance(resp, remote_wire.LookupResp) else ""
             # gw 信令连接会收到 punch_hint——gateway 内部已忽略（P10 无需消费）
 
-            await client.send({"t": "relay_open", "node": "macmini", "sid": sid})
-            assert str((await client.recv())["t"]) == "relay_ready"
+            await client.send(remote_wire.RelayOpen(msg_id=0, node="macmini", sid=sid))
+            assert isinstance(await client.recv(), remote_wire.RelayReady)
 
             c_data = await RelayE2eClient.connect("127.0.0.1", port, psk)
-            await c_data.send({"t": "relay_attach", "sid": sid})
-            assert str((await c_data.recv())["t"]) == "relay_start"
+            await c_data.send(remote_wire.RelayAttach(msg_id=0, sid=sid))
+            assert isinstance(await c_data.recv(), remote_wire.RelayStart)
             await c_data.e2e_handshake(psk)
             # gw 侧 join 由 relay_peer 触发（异步）; 端到端握手需要 gw join 完成——
             # e2e_handshake 的 msg1 会经 relayd 缓冲直到 gw join 后配对转发
             await c_data.send_e2e({"t": "api.req", "id": 7, "method": "POST",
                                    "path": "/embed", "body": {"inputs": ["hi"]}})
             api_resp = await c_data.recv_e2e(timeout=10.0)
-            assert str(api_resp["t"]) == "api.resp"
-            assert api_resp["status"] == 200  # type: ignore[comparison-overlap]
-            assert api_resp["body"] == {"ok": True, "echo": "stub"}  # type: ignore[index]
+            assert isinstance(api_resp, remote_wire.ApiResp)
+            assert api_resp.status == 200
+            assert api_resp.body == {"ok": True, "echo": "stub"}
             await c_data.close()
             await client.close()
         finally:
@@ -598,10 +601,10 @@ def test_gateway_udp_direct_ping_pong() -> None:
             client = await SignalClient.connect("127.0.0.1", port, psk)
             udp_local = await p2p._ensure_udp()
             p2p.set_gw_ep(gw_ep)
-            await client.send({"t": "lookup", "node": "macmini",
-                               "udp_ep": [udp_local[0], udp_local[1]]})
+            await client.send(remote_wire.LookupMsg(
+                msg_id=0, node="macmini", udp_ep=udp_local))
             resp = await client.recv()
-            sid = str(resp["sid"])
+            sid = resp.sid if isinstance(resp, remote_wire.LookupResp) else ""
             await client.close()  # 信令断开（lookup 一次性; punch_hint 已在服务端下发）
 
             await p2p.punch_and_handshake(sid, gw_ep)
@@ -651,7 +654,7 @@ def test_transport_request_direct_and_relay() -> None:
             # ① 直连路径 request
             resp = await loop.run_in_executor(
                 None, lambda: transport.request("POST", "/embed", {"inputs": ["x"]}))
-            assert resp["status"] == 200 and resp["body"] == {"ok": True, "echo": "stub"}  # type: ignore[index]
+            assert resp.status == 200 and resp.body == {"ok": True, "echo": "stub"}
             # ② probe
             assert await loop.run_in_executor(None, transport.probe)
 
@@ -666,7 +669,7 @@ def test_transport_request_direct_and_relay() -> None:
                 transport._loop).result(timeout=5.0)
             resp2 = await loop.run_in_executor(
                 None, lambda: transport.request("GET", "/api/remote/health"))
-            assert resp2["status"] == 200  # type: ignore[index]
+            assert resp2.status == 200
             assert isinstance(transport._conn, object) and type(transport._conn).__name__ == "RelayConnection"  # noqa: SLF001
         finally:
             transport.stop()
@@ -731,12 +734,13 @@ def test_remote_client_p2p_branch() -> None:
         def stop(self) -> None: ...
         def request(self, method: str, path: str,
                     body: "dict[str, object] | None" = None,
-                    token: str = "") -> "dict[str, object]":
+                    token: str = "") -> "remote_wire.ApiResp":
             calls.append((method, path, body, token))
             if self.status == -1:  # 模拟传输失败
                 raise TransportError("boom")
-            return {"t": "api.resp", "status": self.status,
-                    "mime": "application/json", "body": self.body}
+            from services.remote_wire import ApiResp
+            return ApiResp(msg_id=0, status=self.status,
+                           mime="application/json", body=self.body)
 
     # ① 正常 P2P 调用（cast: StubTransport 同形鸭嘴替身——测试注入）
     from typing import cast as _cast

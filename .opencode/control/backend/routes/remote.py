@@ -25,7 +25,7 @@ from services.config_manager import ConfigManager
 from services.remote_client import (
     ModelFingerprint, RemoteConsoleClient, RemoteHealthInfo,
 )
-from services.remote_link import RemoteLinkService, RemoteLinkStatus
+from services.remote_link import RemoteLinkService, SwitchResult, RemoteLinkStatus
 
 router = APIRouter(prefix="/api/remote", tags=["remote"])
 
@@ -42,20 +42,12 @@ class SwitchRequest(BaseModel):
     transport: str  # "p2p" | "http"（切换到对应管道）| ""（关闭——清空模式）
 
 
-@dataclass
-class SwitchOutcome:
-    ok: bool
-    error: str = ""
-    warnings: "list[str]" = field(default_factory=list)
-    detail: "str | None" = None   # 仅失败时（前端 axios 拦截器读 detail 展示）
-
-
 # 节点 health 载荷与主控 RemoteHealthInfo 是同一 wire 契约——共享单一定义
 FingerprintPayload = RemoteHealthInfo
 
 
 @router.post("/switch")
-async def switch(req: SwitchRequest) -> SwitchOutcome:
+async def switch(req: SwitchRequest) -> SwitchResult:
     """切换远程管道（先校验——失败返回原因不置位）/ 关闭（清空模式）。"""
     from services.config_manager import RemoteTransportMode
     svc = RemoteLinkService.get_instance()
@@ -67,8 +59,7 @@ async def switch(req: SwitchRequest) -> SwitchOutcome:
         result = svc.switch_off()
     else:
         raise HTTPException(status_code=422, detail="transport 须是 p2p、http 或空串（关闭）")
-    return SwitchOutcome(ok=result.ok, error=result.error, warnings=result.warnings,
-                         detail=result.error if not result.ok else None)
+    return result  # SwitchResult 直传（ok/error/warnings——单一类型，无镜像字段）
 
 
 # ─── 节点端点（本机直连 = 操作本机; node=remote = 主控转发）────

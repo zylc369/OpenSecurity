@@ -31,6 +31,7 @@ from services.remote_crypto import (
     encode_msg,
 )
 from services.remote_signal import SignalClient
+from services import remote_wire
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class UdpClientSession:
     def __init__(self, session: SessionCrypto,
                  send_fn: "Callable[[bytes, tuple[str, int]], None]",
                  peer: "tuple[str, int]",
-                 msg_handler: "Callable[[dict[str, object]], Any]") -> None:
+                 msg_handler: "Callable[[remote_wire.WireMsg], Any]") -> None:
         self._session = session
         self._send_fn = send_fn
         self._peer = peer
@@ -63,28 +64,33 @@ class UdpClientSession:
             # （攻击场景可能高频，避免刷屏但排查可见）
             logger.debug("UDP 包解密失败（丢弃）: %s", e)
             return
-        msg = decode_msg(plaintext)
-        if str(msg.get("t")) == "_frag":
+        msg = remote_wire.decode(plaintext)
+        if isinstance(msg, remote_wire.UnknownMsg) and str(msg.raw.get("t")) == "_frag":
             if self._reasm is None:
-                self._reasm = Reassembler(msg)
-            assembled = self._reasm.feed(msg)
+                self._reasm = Reassembler(msg.raw)
+            assembled = self._reasm.feed(msg.raw)
             if assembled is not None:
                 self._reasm = None
-                await self._handler(decode_msg(assembled))
+                await self._handler(remote_wire.decode(assembled))
             else:
                 nack = self._reasm.due_nack()
                 if nack is not None:
-                    await self.send_msg(nack)
+                    await self._send_frag_envelope(nack)
             return
         await self._handler(msg)
 
-    async def send_msg(self, msg: dict[str, object]) -> None:
-        plaintext = encode_msg(msg)
+    async def send_msg(self, msg: remote_wire.WireMsg) -> None:
+        """业务消息发送（wire.encode 单点; 超限自动分片）。"""
+        plaintext = remote_wire.encode(msg)
         if Fragmenter.need_split(plaintext):
             for frag in self._fragmenter.split(plaintext):
-                await self._send_plain(encode_msg(frag))
+                await self._send_frag_envelope(frag)
         else:
             await self._send_plain(plaintext)
+
+    async def _send_frag_envelope(self, frag: "dict[str, object]") -> None:
+        """分片信封直发（crypto 层机制信封——不经业务消息对象）。"""
+        await self._send_plain(encode_msg(frag))
 
     async def _send_plain(self, plaintext: bytes) -> None:
         ciphertext, counter = self._session.encrypt(plaintext)
@@ -125,7 +131,7 @@ class DirectConnector:
         self._punch_burst = punch_burst
 
     async def connect(self, node_id: str,
-                      msg_handler: "Callable[[dict[str, object]], Any]"
+                      msg_handler: "Callable[[remote_wire.WireMsg], Any]"
                       ) -> "tuple[UdpClientSession, _ClientUdpProtocol]":
         """完整直连建立流程; 失败抛 TransportError（调用方 fallback 中继）。"""
         loop = asyncio.get_running_loop()
@@ -137,22 +143,19 @@ class DirectConnector:
             sig = await SignalClient.connect(self._relay_host, self._relay_port,
                                              self._psk)
             try:
-                await sig.send({"t": "lookup", "node": node_id,
-                                "udp_ep": [local[0], local[1]]})
+                await sig.send(remote_wire.LookupMsg(
+                    msg_id=0, node=node_id, udp_ep=local))
                 resp = await sig.recv(timeout=5.0)
             finally:
                 await sig.close()
-            if not resp.get("ok"):
-                raise TransportError(f"节点不可达: {resp.get('error')}")
-            gw = resp.get("gw")
-            sid = resp.get("sid")
-            gw_items = cast("list[object]", gw) if isinstance(gw, list) else []
-            if (len(gw_items) != 2
-                    or not isinstance(gw_items[0], str)
-                    or not isinstance(gw_items[1], int)
-                    or not isinstance(sid, str)):
-                raise TransportError(f"endpoints 响应畸形: {resp}")
-            gw_ep = (gw_items[0], gw_items[1])
+            if not isinstance(resp, remote_wire.LookupResp):
+                raise TransportError(f"lookup 应答异常: {type(resp).__name__}")
+            if not resp.ok:
+                raise TransportError(f"节点不可达: {resp.error}")
+            if not (resp.gw[0] and resp.gw[1] > 0 and resp.sid):
+                raise TransportError("endpoints 响应畸形")
+            gw_ep = resp.gw
+            sid = resp.sid
 
             # ② 打洞互射 + Noise 握手（并行等待 msg2）
             punch_pkt = (json.dumps({"t": "punch", "sid": sid,
@@ -234,7 +237,7 @@ class DirectConnection:
     def session(self) -> UdpClientSession:
         return self._session
 
-    async def send_msg(self, msg: dict[str, object]) -> None:
+    async def send_msg(self, msg: remote_wire.WireMsg) -> None:
         await self._session.send_msg(msg)
 
     @property
@@ -258,7 +261,7 @@ class RelayConnection:
 
     def __init__(self, sig: SignalClient, data: SignalClient,
                  session: SessionCrypto,
-                 msg_handler: "Callable[[dict[str, object]], Any]") -> None:
+                 msg_handler: "Callable[[remote_wire.WireMsg], Any]") -> None:
         self._codec = FrameCodec()
         self._sig = sig
         self._data = data
@@ -270,30 +273,35 @@ class RelayConnection:
     @classmethod
     async def establish(cls, psk: bytes, relay_host: str, relay_port: int,
                         node_id: str,
-                        msg_handler: "Callable[[dict[str, object]], Any]"
+                        msg_handler: "Callable[[remote_wire.WireMsg], Any]"
                         ) -> "RelayConnection":
         # ① lookup + relay_open（同一信令短连接）
         sig = await SignalClient.connect(relay_host, relay_port, psk)
         try:
-            await sig.send({"t": "lookup", "node": node_id})
+            await sig.send(remote_wire.LookupMsg(
+                msg_id=0, node=node_id))  # udp_ep 省略——relayd 回退 TCP 对端
             resp = await sig.recv(timeout=5.0)
-            sid = resp.get("sid")
-            if not resp.get("ok") or not isinstance(sid, str):
-                raise TransportError(f"节点不可达: {resp.get('error')}")
-            await sig.send({"t": "relay_open", "node": node_id, "sid": sid})
+            if not isinstance(resp, remote_wire.LookupResp):
+                raise TransportError(
+                    f"lookup 应答异常: {type(resp).__name__}")
+            sid = resp.sid
+            if not resp.ok or not sid:
+                raise TransportError(f"节点不可达: {resp.error or '(无详情)'}")
+            await sig.send(remote_wire.RelayOpen(msg_id=0, node=node_id, sid=sid))
             ready = await sig.recv(timeout=5.0)
-            if str(ready.get("t")) != "relay_ready":
-                raise TransportError(f"relay_open 失败: {ready}")
+            if not isinstance(ready, remote_wire.RelayReady):
+                raise TransportError(f"relay_open 失败: {type(ready).__name__}")
         except (ConnectionError, OSError, asyncio.TimeoutError) as e:
             await sig.close()
             raise TransportError(f"中继信令失败: {e}") from e
         # ② 数据连接 attach → relay_start
         data = await SignalClient.connect(relay_host, relay_port, psk)
         try:
-            await data.send({"t": "relay_attach", "sid": sid})
+            await data.send(remote_wire.RelayAttach(msg_id=0, sid=sid))
             ack = await data.recv(timeout=10.0)
-            if str(ack.get("t")) != "relay_start":
-                raise TransportError(f"relay_attach 失败: {ack.get('t')}")
+            if not isinstance(ack, remote_wire.RelayStart):
+                raise TransportError(
+                    f"relay_attach 失败: {type(ack).__name__}")
             # ③ 端到端握手（initiator）
             initiator = NoiseHandshake(initiator=True, psk=psk)
             data._writer.write(FrameCodec().pack_tcp(initiator.write_message()))  # noqa: SLF001
@@ -327,15 +335,15 @@ class RelayConnection:
                 if not chunk:
                     break
                 for payload in self._frames.feed(chunk):
-                    msg = decode_msg(self._session.decrypt_seq(payload))
-                    await self._handler(msg)
+                    await self._handler(
+                        remote_wire.decode(self._session.decrypt_seq(payload)))
         except (ConnectionError, OSError, CryptoError, asyncio.IncompleteReadError) as e:
             # 对端断开——会话失效（上层下次重建）; 断开原因留痕（排查打洞/中继稳定性）
             logger.debug("会话读取失败（对端断开，待重建）: %s", e)
 
-    async def send_msg(self, msg: dict[str, object]) -> None:
+    async def send_msg(self, msg: remote_wire.WireMsg) -> None:
         self._data._writer.write(self._codec.pack_tcp(  # noqa: SLF001
-            self._session.encrypt_seq(encode_msg(msg))))
+            self._session.encrypt_seq(remote_wire.encode(msg))))
         await self._data._writer.drain()  # noqa: SLF001
 
     @property
@@ -401,7 +409,7 @@ class RemoteTransport:
         self._thread: "threading.Thread | None" = None
         self._conn: "DirectConnection | RelayConnection | None" = None
         self._session_lock = asyncio.Lock()  # review#3: 并发 job 重复建立→连接泄漏
-        self._pending: "dict[int, asyncio.Future[dict[str, object]]]" = {}
+        self._pending: "dict[int, asyncio.Future[remote_wire.WireMsg]]" = {}
         self._next_id = 1
         self._last_active = 0.0
 
@@ -454,9 +462,13 @@ class RemoteTransport:
 
     def request(self, method: str, path: str,
                 body: "dict[str, object] | None" = None,
-                token: str = "") -> "dict[str, object]":
-        """api.req → api.resp（status/mime/body）; 失败抛 TransportError。"""
-        return self._submit(ApiJob(method=method, path=path, body=body, token=token))
+                token: str = "") -> "remote_wire.ApiResp":
+        """api.req → ApiResp（强类型）; 失败抛 TransportError。"""
+        got = self._submit(ApiJob(method=method, path=path, body=body, token=token))
+        if not isinstance(got, remote_wire.ApiResp):
+            raise TransportError(
+                f"api 请求收到非响应消息: {type(got).__name__}")
+        return got
 
     def probe(self) -> bool:
         """ping/pong 健康探测（remote_link 心跳语义复用）。"""
@@ -466,7 +478,7 @@ class RemoteTransport:
         except TransportError:
             return False
 
-    def _submit(self, job: TransportJob) -> "dict[str, object]":
+    def _submit(self, job: TransportJob) -> "remote_wire.WireMsg":
         if self._loop is None:
             raise TransportError("transport 未启动")
         async_task = asyncio.run_coroutine_threadsafe(
@@ -482,23 +494,26 @@ class RemoteTransport:
 
     # ── loop 内实现 ───────────────────────────────────
 
-    async def _handle_job(self, job: TransportJob) -> "dict[str, object]":
+    async def _handle_job(self, job: TransportJob) -> "remote_wire.WireMsg":
         conn = await self._ensure_session()
         self._last_active = time.monotonic()
         msg_id = self._next_id
         self._next_id += 1
-        fut: "asyncio.Future[dict[str, object]]" = \
+        from services.remote_wire import ApiReq, ApiResp, PingMsg, WireMsg
+        fut: "asyncio.Future[WireMsg]" = \
             asyncio.get_running_loop().create_future()
         self._pending[msg_id] = fut
         try:
             if isinstance(job, ApiJob):
-                await conn.send_msg({"t": "api.req", "id": msg_id,
-                                     "method": job.method, "path": job.path,
-                                     "body": job.body, "token": job.token or None})
+                await conn.send_msg(ApiReq(msg_id=msg_id, method=job.method,
+                                           path=job.path, body=job.body,
+                                           token=job.token or None))
                 logger.debug("api.req %s %s（id=%s 路径=%s）", job.method, job.path, msg_id,
                              "直连" if isinstance(conn, DirectConnection) else "中继")
             else:  # PingJob
-                await conn.send_msg({"t": "ping", "id": msg_id})
+                await conn.send_msg(PingMsg(msg_id=msg_id))
+            # 返回 WireMsg（ApiResp 或 PongMsg）; api 窄化在 request()——
+            # probe 的 pong 在此通过（此前误置于此导致 probe 恒失败）
             return await asyncio.wait_for(fut, timeout=self._cfg.api_timeout_sec)
         except (ConnectionError, OSError, asyncio.TimeoutError, CryptoError,
                 ValueError) as e:
@@ -546,14 +561,12 @@ class RemoteTransport:
                 logger.debug("会话 close 异常（忽略）: %s", e)
             self._conn = None
 
-    async def _on_msg(self, msg: dict[str, object]) -> None:
-        """会话入站分发: api.resp/pong → future; 其他忽略。"""
-        t = str(msg.get("t", ""))
-        if t in ("api.resp", "pong"):
-            msg_id = msg.get("id")
-            if isinstance(msg_id, int):
-                fut = self._pending.get(msg_id)
-                if fut is not None and not fut.done():
-                    fut.set_result(msg)
-                    return
-        logger.debug("transport 未匹配消息: %s", t)
+    async def _on_msg(self, msg: "object") -> None:
+        """会话入站分发: ApiResp/PongMsg → future（同池，msg_id 对应）; 其他忽略。"""
+        from services.remote_wire import ApiResp, PongMsg, WireMsg
+        if isinstance(msg, (ApiResp, PongMsg)):
+            fut = self._pending.get(msg.msg_id)
+            if fut is not None and not fut.done():
+                fut.set_result(cast("WireMsg", msg))
+                return
+        logger.debug("transport 未匹配消息: %s", type(msg).__name__)

@@ -332,8 +332,19 @@ export interface RemoteLinkStatusView {
 export interface SwitchResultView {
   ok: boolean;
   error?: string;
-  detail?: string;
   warnings: string[];
+}
+
+/** 远程节点「更新并重启」响应 */
+export interface UpdateRestartView {
+  ok: boolean;
+  old_boot_token: string;
+  pull_output?: string;
+}
+
+/** 远程节点 health 转发（进程身份信号） */
+export interface HealthForwardView {
+  boot_token?: string;
 }
 
 export interface NodeConfigView {

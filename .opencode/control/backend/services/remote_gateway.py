@@ -30,6 +30,7 @@ from services.remote_crypto import (
     decode_msg,
     encode_msg,
 )
+from services import remote_wire
 from services.remote_signal import SignalClient
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ class UdpSession:
     def __init__(self, session: SessionCrypto,
                  send_fn: "Callable[[bytes, tuple[str, int]], None]",
                  addr: "tuple[str, int]",
-                 dispatcher: "Callable[[dict[str, object], UdpSession], Any]") -> None:
+                 dispatcher: "Callable[[remote_wire.WireMsg, UdpSession], Any]") -> None:
         self._session = session
         self._send_fn = send_fn
         self._addr = addr
@@ -66,34 +67,37 @@ class UdpSession:
     async def handle_frame(self, ciphertext: bytes, counter: int) -> None:
         """解密一帧 → 分片累积/完整消息分发。"""
         plaintext = self._session.decrypt(ciphertext, counter)
-        msg = decode_msg(plaintext)
+        msg = remote_wire.decode(plaintext)
         self.last_active = time.monotonic()
-        t = str(msg.get("t"))
-        if t == "_frag":
+        if isinstance(msg, remote_wire.UnknownMsg) and str(msg.raw.get("t")) == "_frag":
             if self._reasm is None:
-                self._reasm = Reassembler(msg)
-            assembled = self._reasm.feed(msg)
+                self._reasm = Reassembler(msg.raw)
+            assembled = self._reasm.feed(msg.raw)
             if assembled is not None:
                 self._reasm = None
-                await self._dispatch_msg(decode_msg(assembled))
+                await self._dispatch_msg(remote_wire.decode(assembled))
             else:
                 nack = self._reasm.due_nack()
                 if nack is not None:
-                    await self.send_msg(nack)
+                    await self._send_frag_envelope(nack)
         else:
             await self._dispatch_msg(msg)
 
-    async def _dispatch_msg(self, msg: dict[str, object]) -> None:
+    async def _dispatch_msg(self, msg: remote_wire.WireMsg) -> None:
         await self._dispatcher(msg, self)
 
-    async def send_msg(self, msg: dict[str, object]) -> None:
+    async def send_msg(self, msg: remote_wire.WireMsg) -> None:
         """发送消息（超 FRAG_LIMIT 自动分片; 每片独立加密为 UDP 帧）。"""
-        plaintext = encode_msg(msg)
+        plaintext = remote_wire.encode(msg)
         if Fragmenter.need_split(plaintext):
             for frag in self._fragmenter.split(plaintext):
-                await self._send_plain(encode_msg(frag))
+                await self._send_frag_envelope(frag)
         else:
             await self._send_plain(plaintext)
+
+    async def _send_frag_envelope(self, frag: "dict[str, object]") -> None:
+        """分片信封直发（crypto 层机制信封——不经业务消息对象）。"""
+        await self._send_plain(encode_msg(frag))
 
     async def _send_plain(self, plaintext: bytes) -> None:
         ciphertext, counter = self._session.encrypt(plaintext)
@@ -230,9 +234,10 @@ class RemoteGateway:
                 await self._ensure_udp()
                 client = await SignalClient.connect(
                     self._relay_host, self._relay_port, self._psk)
-                await client.send({"t": "register", "node": self._node_id, "ver": 1})
+                from services.remote_wire import SignalRegister
+                await client.send(SignalRegister(msg_id=0, node=self._node_id, ver=1))
                 ack = await client.recv(timeout=10.0)
-                if str(ack.get("t")) != "registered":
+                if not isinstance(ack, remote_wire.Registered):
                     raise ConnectionError(f"注册应答异常: {ack}")
                 self._client = client
                 backoff = RECONNECT_MIN_SEC
@@ -255,7 +260,8 @@ class RemoteGateway:
         while self._running:
             now = time.monotonic()
             if now - last_hb >= HEARTBEAT_SEC:
-                await client.send({"t": "heartbeat"})
+                from services.remote_wire import SignalHeartbeat
+                await client.send(SignalHeartbeat(msg_id=0))
                 last_hb = now
             if self._sessions:
                 idle_eps = [a for a, s2 in self._sessions.items()
@@ -267,8 +273,8 @@ class RemoteGateway:
                 new_ep = await self._stun_probe()
                 if new_ep is not None and new_ep != ep:
                     ep = new_ep
-                    await client.send({"t": "update_ep",
-                                       "ep": [ep[0], ep[1]]})
+                    from services.remote_wire import SignalUpdateEp
+                    await client.send(SignalUpdateEp(msg_id=0, ep=(ep[0], ep[1])))
                 last_stun = now
             try:
                 msg = await client.recv(timeout=1.0)
@@ -276,37 +282,28 @@ class RemoteGateway:
                 continue
             await self._dispatch(msg, client)
 
-    async def _dispatch(self, msg: dict[str, object], client: SignalClient) -> None:
-        """relayd 下行消息分派。"""
-        t = str(msg.get("t", ""))
-        if t == "punch_hint":
+    async def _dispatch(self, msg: "remote_wire.WireMsg",
+                        client: SignalClient) -> None:
+        """relayd 下行消息分派（isinstance——消息对象已解码）。"""
+        from services.remote_wire import HeartbeatAck, PunchHint, RelayPeer
+        if isinstance(msg, PunchHint):
             await self._on_punch_hint(msg)
-        elif t == "relay_peer":
-            sid = msg.get("sid")
-            if isinstance(sid, str):
-                join_task = asyncio.get_running_loop().create_task(
-                    self._relay_join_and_serve(sid))
-                self._join_tasks.add(join_task)
-                join_task.add_done_callback(self._join_tasks.discard)
-        elif t == "heartbeat_ack":
+        elif isinstance(msg, RelayPeer):
+            join_task = asyncio.get_running_loop().create_task(
+                self._relay_join_and_serve(msg.sid))
+            self._join_tasks.add(join_task)
+            join_task.add_done_callback(self._join_tasks.discard)
+        elif isinstance(msg, HeartbeatAck):
             pass
         else:
-            logger.debug("未知信令消息忽略: %s", t)
+            logger.debug("未知信令消息忽略: %s", type(msg).__name__)
 
     # ── 打洞（protocol.md §6）──────────────────────────
 
-    async def _on_punch_hint(self, msg: dict[str, object]) -> None:
+    async def _on_punch_hint(self, msg: "remote_wire.PunchHint") -> None:
         """对 client endpoint 互射 punch 包（用固定 UDP socket——映射一致性）。"""
-        client = msg.get("client")
-        items = cast("list[object] | None", client if isinstance(client, list) else None)
-        if (items is None or len(items) != 2 or not isinstance(items[0], str)
-                or not isinstance(items[1], int) or isinstance(items[1], bool)):
-            logger.warning("punch_hint 参数非法: %s", msg)
-            return
-        sid = msg.get("sid")
-        if not isinstance(sid, str):
-            return
-        target = (items[0], items[1])
+        sid = msg.sid
+        target = msg.client
         packet = (json.dumps({"t": "punch", "sid": sid,
                               "mac": self._punch_auth.mac(sid)}) + "\n").encode()
         logger.info("打洞互射开始 → %s:%s（sid=%s, %d 包 × %.0fms）",
@@ -353,19 +350,16 @@ class RemoteGateway:
 
     # ── 会话分发 ──────────────────────────────────────
 
-    async def _session_dispatch(self, msg: dict[str, object],
+    async def _session_dispatch(self, msg: remote_wire.WireMsg,
                                 session: UdpSession) -> None:
         """端到端会话消息分发（UDP 直连路径; 与中继循环同语义）。"""
-        t = str(msg.get("t", ""))
-        if t == "ping":
-            await session.send_msg({"t": "pong", "id": msg.get("id"),
-                                    "ts": time.time()})
-        elif t == "api.req":
-            resp = await self._forward_api(msg)
-            resp["id"] = msg.get("id", 0)
-            await session.send_msg(resp)
+        if isinstance(msg, remote_wire.PingMsg):
+            await session.send_msg(remote_wire.PongMsg(
+                msg_id=msg.msg_id, ts=time.time()))
+        elif isinstance(msg, remote_wire.ApiReq):
+            await session.send_msg(await self._forward_api(msg))  # ApiResp 同 id 直传
         else:
-            logger.debug("未知会话消息忽略: %s", t)
+            logger.debug("未知会话消息忽略: %s", type(msg).__name__)
 
     # ── 中继会话（protocol.md §4.2/§4.3）────────────────
 
@@ -375,10 +369,11 @@ class RemoteGateway:
         try:
             conn = await SignalClient.connect(self._relay_host, self._relay_port,
                                               self._psk)
-            await conn.send({"t": "relay_join", "sid": sid})
+            await conn.send(remote_wire.RelayJoin(msg_id=0, sid=sid))
             ack = await conn.recv(timeout=10.0)
-            if str(ack.get("t")) != "relay_start":
-                raise ConnectionError(f"relay_join 应答异常: {ack.get('t')}")
+            if not isinstance(ack, remote_wire.RelayStart):
+                raise ConnectionError(
+                    f"relay_join 应答异常: {type(ack).__name__}")
             # 管道态: 与 client 的端到端 Noise 握手（client 发起 msg1）
             responder = NoiseHandshake(initiator=False, psk=self._psk)
             # 管道裸字节——循环 feed 直到出帧（与其他握手点同模式，防 TCP 分段）
@@ -415,60 +410,56 @@ class RemoteGateway:
                 if not chunk:
                     break
                 for payload in frame_reader.feed(chunk):
-                    msg = decode_msg(session.decrypt_seq(payload))
-                    t = str(msg.get("t", ""))
-                    if t == "ping":
-                        await self._relay_send(conn, session,
-                                               {"t": "pong", "id": msg.get("id"),
-                                                "ts": time.time()})
-                    elif t == "api.req":
-                        resp = await self._forward_api(msg)
-                        resp["id"] = msg.get("id", 0)
-                        await self._relay_send(conn, session, resp)
+                    msg = remote_wire.decode(session.decrypt_seq(payload))
+                    if isinstance(msg, remote_wire.PingMsg):
+                        await self._relay_send(conn, session, remote_wire.PongMsg(
+                            msg_id=msg.msg_id, ts=time.time()))
+                    elif isinstance(msg, remote_wire.ApiReq):
+                        await self._relay_send(
+                            conn, session, await self._forward_api(msg))
                     else:
-                        logger.debug("中继会话未知消息: %s", t)
+                        logger.debug("中继会话未知消息: %s", type(msg).__name__)
         except (ConnectionError, OSError, CryptoError, asyncio.IncompleteReadError):
             pass  # 对端断开——正常终态
 
     async def _relay_send(self, conn: SignalClient, session: SessionCrypto,
-                          msg: dict[str, object]) -> None:
+                          msg: remote_wire.WireMsg) -> None:
         conn._writer.write(self._codec.pack_tcp(  # noqa: SLF001
-            session.encrypt_seq(encode_msg(msg))))
+            session.encrypt_seq(remote_wire.encode(msg))))
         await conn._writer.drain()
 
     # ── api.req 本机转发（protocol.md §4.3/D1）───────────
 
-    async def _forward_api(self, msg: dict[str, object]) -> dict[str, object]:
+    async def _forward_api(self, msg: remote_wire.ApiReq) -> remote_wire.ApiResp:
         """api.req → 本机 backend HTTP → api.resp（业务零耦合的转发层）。"""
         if not self._backend_port:
-            return {"t": "api.resp", "status": 503, "mime": "text/plain",
-                    "body": "backend port 未配置"}
-        method = str(msg.get("method", "GET"))
-        path = str(msg.get("path", "/"))
-        body = msg.get("body")
-        token = msg.get("token")
+            return remote_wire.ApiResp(msg_id=msg.msg_id, status=503,
+                                       mime="text/plain", body="backend port 未配置")
+        method = msg.method or "GET"
+        path = msg.path or "/"
         headers: "dict[str, str]" = {}
-        if isinstance(token, str) and token:
-            headers["Authorization"] = f"Bearer {token}"
-        json_body = cast("dict[str, object] | None",
-                          body if isinstance(body, dict) else None)
+        if msg.token:
+            headers["Authorization"] = f"Bearer {msg.token}"
+        json_body = msg.body
         try:
             async with httpx.AsyncClient(timeout=30.0) as http:
                 r = await http.request(method, f"http://127.0.0.1:{self._backend_port}{path}",
                                        json=json_body, headers=headers)
         except httpx.HTTPError as e:
-            return {"t": "api.resp", "status": 502, "mime": "text/plain",
-                    "body": f"backend 转发失败: {e}"}
+            return remote_wire.ApiResp(msg_id=msg.msg_id, status=502,
+                                       mime="text/plain",
+                                       body=f"backend 转发失败: {e}")
         resp: httpx.Response = r
         mime_raw = resp.headers.get("content-type")  # pyright: ignore[reportAny] —— httpx Headers.get 存根泛型返回 Any
         mime = mime_raw if isinstance(mime_raw, str) else "application/json"
         status = int(resp.status_code)
         content = bytes(resp.content)
         if "json" in mime:
-            return {"t": "api.resp", "status": status, "mime": mime,
-                    "body": cast("dict[str, object] | list[object]", r.json())}
-        return {"t": "api.resp", "status": status, "mime": mime,
-                "body": content}
+            return remote_wire.ApiResp(
+                msg_id=msg.msg_id, status=status, mime=mime,
+                body=cast("dict[str, object] | list[object]", r.json()))
+        return remote_wire.ApiResp(msg_id=msg.msg_id, status=status,
+                                   mime=mime, body=content)
 
     # ── STUN ─────────────────────────────────────────
 

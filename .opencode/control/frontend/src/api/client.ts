@@ -16,6 +16,7 @@ import type {
   ConfigSurface, ConfigMetaResponse,
   ProcessRegistryView, HeartbeatsResponse,
   RemoteLinkStatusView, SwitchResultView, NodeConfigView, AutostartView,
+  UpdateRestartView, HealthForwardView,
 } from "../types";
 
 const instance: AxiosInstance = axios.create({
@@ -169,14 +170,14 @@ export const api = {
   },
 
   /** 远程节点「更新并重启」: git pull + restart; 返回旧 boot_token（轮询新 token 判定重启完成） */
-  async updateRestartRemote(): Promise<{ ok: boolean; old_boot_token: string; pull_output?: string }> {
-    const r = await instance.post<{ ok: boolean; old_boot_token: string; pull_output?: string }>("/api/remote/update-restart");
+  async updateRestartRemote(): Promise<UpdateRestartView> {
+    const r = await instance.post<UpdateRestartView>("/api/remote/update-restart");
     return r.data;
   },
 
   /** 远程节点 boot_token 探测（经主控转发——远程 health 的进程身份信号） */
   async remoteBootToken(): Promise<string | null> {
-    const r = await instance.get<Record<string, unknown>>("/api/remote/health-forward");
+    const r = await instance.get<HealthForwardView>("/api/remote/health-forward");
     const t = r.data?.boot_token;
     return typeof t === "string" ? t : null;
   },

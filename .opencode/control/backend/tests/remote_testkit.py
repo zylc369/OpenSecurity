@@ -182,16 +182,16 @@ class RelayE2eClient(RelayPipeClient):
         self._writer.write(FrameCodec().pack_tcp(self.e2e.encrypt_seq(encode_msg(msg))))
         await self._writer.drain()
 
-    async def recv_e2e(self, timeout: float = 5.0) -> dict[str, object]:
-        """端到端会话帧接收。"""
-        from services.remote_crypto import FrameCodec, decode_msg
+    async def recv_e2e(self, timeout: float = 5.0) -> "object":
+        """端到端会话帧接收（wire 消息对象）。"""
+        from services import remote_wire
         frames = self._frames.feed(b"")
         while not frames:
             chunk = await asyncio.wait_for(self._reader.read(4096), timeout=timeout)
             if not chunk:
                 raise ConnectionError("对端已断开")
             frames = self._frames.feed(chunk)
-        return decode_msg(self.e2e.decrypt_seq(frames[0]))
+        return remote_wire.decode(self.e2e.decrypt_seq(frames[0]))
 
 
 

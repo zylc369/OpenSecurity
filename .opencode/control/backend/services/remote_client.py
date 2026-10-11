@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 if TYPE_CHECKING:  # 仅类型检查（零运行时依赖——transport 延迟构建）
     from services.remote_transport import RemoteTransport, TransportConfig
@@ -86,7 +86,7 @@ class RemoteConsoleClient:
             h["Authorization"] = f"Bearer {self._token}"
         return h
 
-    def _post_json(self, path: str, payload: dict[str, Any], timeout: float | None = None):
+    def _post_json(self, path: str, payload: "dict[str, object]", timeout: float | None = None):
         """POST 并解析 JSON; 任何失败统一 RemoteUnavailable。"""
         if self._p2p_cfg is not None:
             return self._p2p_call("POST", path, payload)
@@ -109,7 +109,7 @@ class RemoteConsoleClient:
             raise RemoteUnavailable(f"连接远程失败: {e}") from e
         return self._parse(r, url)
 
-    def _put_json(self, path: str, payload: dict[str, Any], timeout: float | None = None):
+    def _put_json(self, path: str, payload: "dict[str, object]", timeout: float | None = None):
         """PUT 并解析 JSON; 任何失败统一 RemoteUnavailable。"""
         if self._p2p_cfg is not None:
             return self._p2p_call("PUT", path, payload)
@@ -136,7 +136,7 @@ class RemoteConsoleClient:
         return self._transport
 
     def _p2p_call(self, method: str, path: str,
-                  payload: "dict[str, Any] | None") -> dict[str, Any]:
+                  payload: "dict[str, object] | None") -> "dict[str, object]":
         """经 transport 的 api.req 调用; 失败语义与 _parse 对齐。
 
         返回与 _parse 同模式: cast 收口为 dict（embed 等 list 响应的形状
@@ -145,23 +145,20 @@ class RemoteConsoleClient:
         from services.remote_transport import TransportError
         transport = self._get_transport()
         try:
-            resp = cast("dict[str, object]",
-                        transport.request(method, path, payload, self._token))
+            resp = transport.request(method, path, payload, self._token)
         except TransportError as e:
             raise RemoteUnavailable(f"远程 P2P 调用失败: {e}") from e
-        status_raw = resp.get("status", 0)
-        status = status_raw if isinstance(status_raw, int) else 0
-        body = resp.get("body")
-        if status == 401:
+        if resp.status == 401:
             raise RemoteUnavailable(f"远程拒绝令牌（401）: {path}")
-        if status >= 500:
-            raise RemoteUnavailable(f"远程服务端错误（{status}）: {path}")
-        if status >= 400:
-            raise RemoteUnavailable(f"远程客户端错误（{status}）: {str(body)[:200]}")
-        return cast("dict[str, Any]", body)
+        if resp.status >= 500:
+            raise RemoteUnavailable(f"远程服务端错误（{resp.status}）: {path}")
+        if resp.status >= 400:
+            raise RemoteUnavailable(
+                f"远程客户端错误（{resp.status}）: {str(resp.body)[:200]}")
+        return cast("dict[str, object]", resp.body)
 
     @staticmethod
-    def _parse(r: httpx.Response, url: str) -> dict[str, Any]:
+    def _parse(r: httpx.Response, url: str) -> "dict[str, object]":
         if r.status_code == 401:
             raise RemoteUnavailable(f"远程拒绝令牌（401）: {url}")
         if r.status_code >= 500:
@@ -169,7 +166,7 @@ class RemoteConsoleClient:
         if r.status_code >= 400:
             raise RemoteUnavailable(f"远程客户端错误（{r.status_code}）: {r.text[:200]}")
         try:
-            return cast("dict[str, Any]", r.json())  # httpx json() 边界——cast 收口
+            return cast("dict[str, object]", r.json())  # httpx json() 边界——cast 收口
         except ValueError as e:
             raise RemoteUnavailable(f"远程响应非 JSON: {url}: {e}") from e
 
