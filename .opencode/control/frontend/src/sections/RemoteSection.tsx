@@ -351,9 +351,9 @@ const RemoteSection: React.FC = () => {
     setApiKeyInput(key);
   }, []);
 
-  /** 单模型状态展示（state → 徽标; 注册表驱动——与环境总览同源） */
+  /** 单模型加载状态徽标——只反映真实加载态; 全局托管/降级状态归卡片头
+      Tag（往单模型塞全局状态会产生"本地: 远程托管"悖论句） */
   const stateBadge = (st: string): { label: string; color: string } => {
-    if (status?.state === "remote") return { label: "远程托管", color: "blue" };
     if (st === "ready") return { label: "已加载", color: "success" };
     if (st === "starting") return { label: "加载中", color: "processing" };
     if (st === "error") return { label: "状态异常", color: "error" };
@@ -616,7 +616,7 @@ const RemoteSection: React.FC = () => {
           {(status?.local_models ?? []).length > 0 && (
             <Space size={6} wrap>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                本地:
+                本地{status?.state === "remote" ? "（远程托管中，故不加载）" : ""}:
               </Typography.Text>
               {(status?.local_models ?? []).map((m) => {
                 const st = stateBadge(m.state);
