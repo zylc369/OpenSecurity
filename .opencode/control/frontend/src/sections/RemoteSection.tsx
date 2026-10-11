@@ -194,11 +194,22 @@ const RemoteSection: React.FC = () => {
       }
       hide();
       if (newToken && newToken !== oldToken) {
+        // pull_output 含目标版本（"Fast-forward … <hash>"）——更新到哪一步了
+        // 直接可见; 指纹对齐（远程行"与本地一致"）是端到端二次确认
+        const pulled = r.pull_output?.match(/([0-9a-f]{7,})\b/);
         message.success(
-          `远程节点已更新并重启完成${r.pull_output ? "（代码已更新）" : ""}`,
+          `远程节点已更新并重启完成${
+            r.pull_output
+              ? `（${pulled ? `已更新至 ${pulled[1]}`
+                            : "代码已更新"}）`
+              : "（代码无新提交，仅重启）"
+          }`,
         );
       } else {
-        message.warning("重启已触发，但 30 秒内远程未恢复健康——请检查远程日志");
+        message.warning(
+          "重启已触发，但 30 秒内远程未恢复健康——大概率启动失败，" +
+          "查看节点日志: tail -40 ~/bw-security-analysis/logs/remote-node.log",
+        );
       }
     } catch (e) {
       hide();

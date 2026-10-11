@@ -415,3 +415,9 @@
 - Q3 测试: 根治了所有文件尾部 "1 error"——根因 test_control.py 极简框架 def test(name) 被 pytest 收集（fixture 'name' not found），且 4 个消费文件 import test 后模块级可见同样被收集。修法: test.__test__=False（属性随函数对象 import 传播）+ conftest collect_ignore
 - 过程事故: ①改名 test→tc_case 未查下游引用炸 4 消费方 import（教训重犯——改共享符号前必 grep 引用方）②python str.replace 改缩进烂尾（禁令重犯——必须用 Edit 工具）——两次均即时回滚/修复
 - 终态: 6 套件 58 用例全绿（6/3/9/10/5/25）+ pyright 0/0/0; e2e_remote 未跑（需节点环境）; test_control 直跑需控制台未运行环境（IPC bind 冲突）
+
+### 2026-10-11 迭代续 34: UI 信息架构合并 + 节点操作禁用 + 打洞调参
+- 节点操作按钮 remoteReady 门控（b891d3c）: 更新并重启/保存KEY/常驻/自启 Switch 在连接未就绪时禁用+Tooltip 原因——操作全经转发通道，连接不在必败
+- 打洞窗口 1.5s→5s（c223fd9）: 弱网 NAT 映射建立慢; 双源同步（config_manager tunables + DirectConnection 默认）
+- 卡片合并: 「当前模式」整卡删除（与「远程连接」开关/降级信息重复）——state 权威不变（后端接口返回，非前端推断）; 状态 Tag 化进卡片头（远程托管/已降级·本地服务/建立中/本地推理）+ unload 倒计时 Tag + 刷新按钮迁移 extra; 本地/远程模型两视角分两行同列展示（"本地: ... / 远程: ..."——同名模型对齐看）; ModeBadge 组件及孤儿 import 清除
+- 注册超时答疑（未改）: Noise 握手 5s + Registered ack 10s + 重连退避 1s×2→30s cap; TCP connect 无显式超时（系统级 ~75s——已向用户提示风险待决策）
