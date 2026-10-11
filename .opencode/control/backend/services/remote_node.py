@@ -40,6 +40,8 @@ from services.detect_py_deps import (  # noqa: E402
     _get_venv_python,
     _log,
 )
+from services.endpoint_probe import EndpointProber, ProbeSpec  # noqa: E402
+from services.runtime_paths import RuntimePaths  # noqa: E402
 
 # ConfigManager / model_assets / _run_install 为重依赖（psutil 等三方包）——
 # 延迟到方法内 import: 保证系统 Python（无三方包）也能执行 venv 自举（鸡生蛋约束）
@@ -55,7 +57,7 @@ def _registry() -> "ModelAssetRegistry":
 BOOTSTRAP_ENV = "_REMOTE_NODE_BOOTSTRAPPED"
 REQUIRED_MODEL_IDS: tuple[str, ...] = ("bge-m3", "bge-reranker-v2-m3", "glm-ocr")
 TTS_MODEL_ID = "kokoro-tts"
-MODEL_WAIT_TIMEOUT_SEC = 1800  # 单模型下载等待上限（大模型慢网络兜底）
+MODEL_WAIT_TIMEOUT_SEC = 3600  # 全部模型下载等待上限（官方直连慢网络实测 30min 不够）
 
 
 @dataclass(frozen=True)
@@ -184,6 +186,16 @@ class RemoteNodeBootstrapper:
         wanted = relay.to_env_updates()
         updates = {key: val for key, val in wanted.items()
                    if (cm.get(key) or "").strip() != val}
+        # 控制台令牌: 远程节点语义必配——非空才会绑 0.0.0.0（LAN 可视化访问）
+        # + 节点模式预载; 为空则自动生成（用户从启动日志取值, 填 MacBook 远程 TAB 令牌）
+        api_key_now = (cm.get(cm.Keys.CONTROL_API_KEY) or "").strip()
+        if not api_key_now:
+            import secrets
+            api_key = secrets.token_urlsafe(32)
+            updates[cm.Keys.CONTROL_API_KEY] = api_key
+            _log("[+] 已生成控制台令牌 CONTROL_API_KEY = " + api_key)
+            _log("    用途: ①LAN 浏览器可视化访问的前提 ②MacBook 远程 TAB(HTTP直连模式)"
+                 "的 Bearer 令牌——填入「远程控制台令牌」")
         if updates:
             cm.set(updates)
             _log(f"[+] 配置已落盘: {sorted(updates)}")
@@ -209,11 +221,41 @@ class RemoteNodeBootstrapper:
         return RelayConfig(**values)
 
     # ---- 步骤 4: 模型 ensure ------------------------------------------------
+    HF_OFFICIAL = "https://huggingface.co"
+    HF_MIRROR = "https://hf-mirror.com"
+    # 测速路径: bge-m3 权重（2.3GB——4s 内读不完; 官方与镜像同 repo 路径,
+    # 302 到各自 CDN, 测的是真实下载链路吞吐。小文件会一次 read 读完导致
+    # 循环 break、total/时长 被低估为 ~0）
+    HF_PROBE_PATH = "BAAI/bge-m3/resolve/main/pytorch_model.bin"
+
+    def ensure_hf_endpoint(self) -> None:
+        """.ai_env 未配置 HF_ENDPOINT 时双端测速取优——镜像显著快（>2x）才切并固化。
+
+        已显式配置则完全尊重用户选择（含强制官方的场景），零干预。
+        官方胜出不写配置（保持空=官方默认, 网络环境变化后下次引导可重探）;
+        镜像胜出写入固化（探测结论"官方不可达/显著慢"短期不会变）。
+        """
+        cm = _cm().get_instance()
+        if (cm.get(cm.Keys.HF_ENDPOINT) or "").strip():
+            return  # 显式配置优先
+        spec = ProbeSpec(path=self.HF_PROBE_PATH)
+        _log(f"[*] HF 端点测速（各 {spec.duration_sec:.0f}s）...")
+        official, mirror = EndpointProber.probe_all(
+            [self.HF_OFFICIAL, self.HF_MIRROR], spec)
+        _log(f"    官方 {official.mbps} MB/s | 镜像 {mirror.mbps} MB/s")
+        if EndpointProber.significantly_faster(mirror, official):
+            _log("[!] 镜像显著更快——写入 .ai_env:")
+            _log(f"    HF_ENDPOINT={self.HF_MIRROR}")
+            cm.set_one(cm.Keys.HF_ENDPOINT, self.HF_MIRROR)
+        else:
+            _log("[+] 使用官方端点直连")
+
     def ensure_models(self) -> list[str]:
         """确保模型缓存就位（已缓存秒过）。Returns: 本次实际等待的模型 id 列表。"""
         if self._args.skip_models:
             _log("[*] --skip-models: 跳过模型检查")
             return []
+        self.ensure_hf_endpoint()
         ids = list(REQUIRED_MODEL_IDS)
         if not self._args.skip_tts:
             ids.append(TTS_MODEL_ID)
@@ -276,12 +318,44 @@ class RemoteNodeBootstrapper:
             _log(f"[*] 等待下载: {', '.join(parts)}")
 
     # ---- 步骤 5: 启动控制台 -------------------------------------------------
-    def launch(self) -> None:
-        """exec server.py（信号处理/模型预载/uvicorn 全复用其 main）。"""
+    def launch(self) -> int:
+        """spawn 独立会话的控制台进程, 等就绪后返回（SSH 断开不影响控制台）。
+
+        - start_new_session=True: 新会话+新进程组——SIGHUP 免疫（脚本退出/SSH
+          断开不连带）; stdio 重定向 LOGS_DIR/remote-node.log（-u 无缓冲可实时 tail）
+        - 就绪信号: IPC socket 文件出现（server 侧 "bind 成功，本实例成为监听者"
+          的权威标志; 早于模型加载, 不会久等）
+        - Returns: 控制台 pid（调用方随后退出, 控制台继续跑）
+        """
         backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        _log("[*] 启动控制台 ...")
-        os.chdir(backend_dir)
-        os.execv(sys.executable, [sys.executable, "server.py"])
+        log_path = os.path.join(RuntimePaths.LOGS_DIR, "remote-node.log")
+        os.makedirs(RuntimePaths.LOGS_DIR, exist_ok=True)
+        ipc_path = _cm().get_instance().ipc_addr()
+        _log("[*] 启动控制台（独立会话）...")
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"\n===== remote-node start {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+            proc = subprocess.Popen(
+                [sys.executable, "-u", "server.py"], cwd=backend_dir,
+                stdout=fh, stderr=fh, start_new_session=True)
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            if os.path.exists(ipc_path):
+                _log(f"[+] 控制台已就绪: pid={proc.pid}（独立会话, SSH 断开不影响）")
+                _log(f"    日志: tail -f {log_path}")
+                _log(f"    停止: kill {proc.pid}")
+                return proc.pid
+            if proc.poll() is not None:
+                break
+            time.sleep(0.5)
+        _log(f"[ERROR] 控制台启动失败（{proc.pid} 已退出或 90s 未就绪）——日志尾部:")
+        try:
+            with open(log_path, encoding="utf-8", errors="ignore") as fh:
+                tail = fh.read().splitlines()[-25:]
+            for line in tail:
+                _log(f"    {line}")
+        except OSError:
+            pass
+        sys.exit(1)
 
     # ---- 计划与入口 ---------------------------------------------------------
     def build_plan(self) -> BootstrapPlan:
@@ -317,7 +391,7 @@ class RemoteNodeBootstrapper:
         self.ensure_deps()
         self.ensure_config()
         self.ensure_models()
-        self.launch()               # exec——不返回
+        self.launch()               # spawn 独立会话 + 等就绪; 返回后脚本正常结束
 
     def _print_plan(self, plan: BootstrapPlan) -> None:
         _log("[*] === 远程节点引导计划（--check，不执行）===")

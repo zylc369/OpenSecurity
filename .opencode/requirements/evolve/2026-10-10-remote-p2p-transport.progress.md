@@ -166,3 +166,24 @@
 - 修复: ①ModelAsset.required_files（权重候选集, 任一存在=完整; 四条目补全）②_is_cached 完整性校验（部分快照=未缓存, 重下成本低——断点续传）③Cache directory not found 静默（首次环境正常态, 消除警告轰炸）④_wait_models 完成判定改 download.status=="done"（worker returncode=0 才 done）
 - 验证: 本机完整缓存 True / 模拟缺权重 False / 四条目候选集正确; pyright 0; 49 tests
 - MacMini 里程碑实绩: gateway 已注册（node=OpenSecurityServer → 74.120.173.111:41000）; CONTROL_RESIDENT 常驻生效
+
+## 2026-10-11 迭代: 启动后脱离会话 + CONTROL_API_KEY 自动生成
+- launch() 重写: exec（同生共死）→ Popen(start_new_session=True) 独立会话 + stdio 重定向 LOGS_DIR/remote-node.log（-u 无缓冲）+ 就绪信号（IPC socket 出现, 早于模型加载）+ 脚本退出——SSH 断开不影响控制台
+- ensure_config 补 CONTROL_API_KEY: 为空自动生成 token_urlsafe(32)（LAN 0.0.0.0 绑定前提 + 节点模式预载 + MacBook 远程 TAB Bearer 令牌三合一）
+- 两种远程模式语义确认并告知用户: 模式1 HTTP直连(REMOTE_CONSOLE_URL/TOKEN) / 模式2 P2P(P2P_CLIENT_ENABLE 优先, 关则回退模式1)
+- VPS unit systemd 版本自适应（219→full / 235+→strict; 日志统一 journal; 静态 .service 退役, deploy.py 单一来源）
+- STUN 链路实测 5/5 健康（NAT Endpoint-Independent, 打洞前景好）; 昨晚失败为凌晨波动
+- 测试事故记录: 沙箱验证误用 pkill -f server.py 全局模糊匹配（事后核实零误伤, 本机控制台/MCP 全存活）——整改: 清理一律按精确 pid/killpg
+- 验证: launch 单元级（存活/独立会话 sid 断言/日志重定向/精确清理）; CONTROL_API_KEY 生成幂等
+
+## 2026-10-11 迭代续: 端点测速组件沉淀 + CI 依赖补齐
+- 新增 services/endpoint_probe.py（通用 HTTP 端点吞吐测速器: EndpointSpeed/ProbeSpec/EndpointProber——probe/probe_all/fastest/significantly_faster; 纯 stdlib; 失败以数据表达不抛出）
+- remote_node.ensure_hf_endpoint 改为组件消费（内联实现删除; 镜像显著快 >2x 才切防抖动; 官方胜出不写配置保留重探空间）
+- MODEL_WAIT_TIMEOUT_SEC 1800→3600
+- CI type-check.yml 补 cryptography==47.0.0 msgpack==1.1.2（remote_crypto 引入时漏配 runner 依赖——非改坏是漏配）
+- 验证: pyright 0 / 组件四项断言 / remote_node 五场景回归（经组件接口）/ 真实不可达路径
+
+### 过程缺陷记录（第 5 次——用户问"测试过吗"抓出）
+- 事故: endpoint_probe 组件化交付时 IO 成功路径未真实执行（全程 mock）——用户质疑后补跑, 立刻暴露测速文件选 config.json（1KB 一次读完→break→0.0MB/s）的 bug
+- 修复: 测速路径改 pytorch_model.bin（2.3GB 读不完）; 真实验证 7.97/8.05 MB/s
+- 整改纪律追加: IO 类代码（网络/磁盘/子进程）验证必须含至少一次真实成功路径, mock 只补边界
