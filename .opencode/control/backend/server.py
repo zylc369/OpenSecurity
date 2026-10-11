@@ -325,12 +325,11 @@ def main() -> None:
     # - 节点角色（CONTROL_API_KEY 已配置）→ 预加载全部三模型（专职资源节点）
     _cm = ConfigManager.get_instance()
     _api_key = (_cm.get(_cm.Keys.CONTROL_API_KEY) or "").strip()
-    _remote_enabled = ((_cm.get(_cm.Keys.REMOTE_CONSOLE_ENABLED) or "").strip().lower() in ("1", "true")
-                       and (_cm.get(_cm.Keys.REMOTE_CONSOLE_URL) or "").strip())
+    _remote_on = _cm.p2p_settings().transport_mode is not None  # mode 即开关
     if _api_key:
         log.info("节点模式（CONTROL_API_KEY 已配置）: 预加载全部三模型")
         ModelInferenceService.get_instance().preload_all_models_background()
-    elif _remote_enabled:
+    elif _remote_on:
         log.info("远程模型已启用: 跳过本地预加载（心跳判定后再决定加载）")
     else:
         ModelInferenceService.get_instance().preload_embedder_background()

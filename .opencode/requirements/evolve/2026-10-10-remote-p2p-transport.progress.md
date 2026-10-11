@@ -211,3 +211,38 @@
 - 说明强化: ①P2P_CLIENT_ENABLE hint 首句"非直接启用远程——仅选择管道" ②切换远程按钮加 Tooltip（含 disabled 态提示"URL 是 client 构建前提"）+ 问号图标
 - 注: URL 仍必填是架构约束（RemoteConsoleClient 构建前提, P2P 参数挂其上）; 按钮 disabled+Tooltip 可见化此约束
 - 验证: tsc 0 错 + vite build ✓ + basedpyright 0/0/0
+
+### 2026-10-11 迭代续 4: 管道枚举重构（fail-closed）
+- 用户拍板: ①模式三（P2P优先HTTP兜底）不做 ②模式一二互斥 ③枚举非 bool: RemoteTransportMode(StrEnum) p2p|http; 缺失/trim空/非法 → 不开任何管道 ④按钮永可点，点击时按管道分通道校验 ⑤P2P_CLIENT_ENABLE/远程模型开关行删除
+- 实施: 枚举类+parse（严格 fail-closed）; Keys 增删; P2PSettings.transport_mode; ConfigField 新增 select 类型（options 机制三层 dataclass 透传: ConfigField→ConfigEntry→ConfigMetaEntry→前端 Select）; switch_to_remote 分通道校验（P2P 缺项清单/HTTP 缺 URL/None 引导配置）; client 构建条件 url or p2p（破 URL 必填）; status.transport 下发前端徽标（远程·P2P隧道/HTTP直连/管道未配置）
+- 隐藏 bug 清理: 发现并删除旧存量 P2P_CLIENT_ENABLE ConfigField（与我 6 键声明同键重复——上轮未查全量声明的验证疏漏）
+- 函数内 import 遮蔽教训: switch_to_remote 后段的局部 import ConfigManager 使函数开头使用点 Unbound——删局部 import（顶层已有）
+- 验证: basedpyright 0/0/0; tsc 0 错; vite build ✓; 枚举 fail-closed 六断言; meta 下发断言（select options/旧键清零）; api_guard 6 passed（1 已知基线）
+
+### 2026-10-11 迭代续 5: 枚举纪律补课（用户四连问）
+- 用户指出四处裸字符串: ①ConfigMetaEntry.type ②RemoteLinkStatus.transport ③前端 ConfigFieldType ④追问纪律为何不遵守
+- 修正: ConfigFieldType(StrEnum) 五成员，声明层(39处)/领域模型/meta 三层全枚举; transport: RemoteTransportMode|None（asdict+json.dumps StrEnum→字符串形态验证）; TS 侧 transport 收紧为 ""|"p2p"|"http" union（TS 的 string literal union 即 TS 惯用枚举形态，ConfigFieldType 本就是 union）
+- 连带挖出: 五键双重声明的系统性存量 bug（上上轮加 6 键未 grep 全量→与旧声明重复; 其中旧 RELAY_PORT 声明 type="number" 为从未生效的无效类型）——旧组删除，remote surface 14 键唯一断言入验证
+- 根因反思: 规则 9 执行浮于"知道"，写代码时未逐字段自查"这个字符串有没有枚举/该不该建枚举"; 新增字段必须过三问: 值域有限?→枚举; 跨层传递?→枚举贯穿; 前端对应?→union 对齐
+
+### 2026-10-11 迭代续 6: options 强类型化（规则 9 dict 禁令）
+- 用户指出 options: dict[str,str]|None 违反 dict 禁令
+- 修正: SelectOption(frozen dataclass: value/label); 三层类型——ConfigField/ConfigEntry: tuple[SelectOption,...]|None（不可变集合）; ConfigMetaEntry: list（JSON 边界，组装处显式转换）; 前端 SelectOption interface 对齐
+- 值域校验单一事实源: _resolve_value 对 select 型自动从 options 派生值域（删手写 validator——防值域与选项漂移）; 顺手枚举化 _default_of 两处 type=="path" 裸串比较
+- 兑现构建层 fail-fast: _init_once 扫描——select 漏 options/value 重复/非 select 带 options → 启动即 ValueError
+- 验证: basedpyright 0/0/0; asdict 序列化断言 list[{value,label}]; 领域模型 tuple 断言; tsc/build ✓
+
+### 2026-10-11 迭代续 7: review 审计修复（2 高危 + 2 测试 + 4 低危）
+- review 发现（运行时验证）: High-1 ENABLED 声明删除致 get() 返回 None——switch 成功后心跳 5s 内强制 OFF（两管道全灭）; High-2 _probe_once/reload_config 的 url 门控未跟随 P2P 免 URL
+- 修复: ENABLED 声明恢复为 Surface.HIDDEN（UI 隐藏 + get 语义保留; set_one 直写不受 readonly 拦截——按钮路径实测闭环）; 门控改 enabled and (url or p2p齐备)
+- 测试显式化: switch 用例注入 _fake_p2p_http（P2PSettings transport_mode=HTTP + finally 恢复）——fail-closed 前置由测试自声明，不依赖沙箱残留; 存量断言更新（remote 面 9→14 条目; ENABLED readonly 断言→TRANSPORT_MODE select 断言）
+- 低危: transport TS union 加 null（后端 None→JSON null 实测）; validator 缓存恢复先查后跑; _REMOTE_LINK_KEYS 热重载键补 5 管道键（"保存即热重载"注释兑现）; 节点管理卡片门控 url→url或p2pReady; 陈旧注释 2 处
+- 中途自纠: 一次垃圾 edit（X if False else Y）立即撤销——疲劳时更要用工具约束
+- 验证: pyright 0/0/0; 23 passed（3 基线 fixture error）; tsc/build ✓
+
+### 2026-10-11 迭代续 8: 用户设计终版落地——mode 即开关 + 悬浮双按钮
+- 用户拍板（最终形态）: ①切换按钮=禁用态主按钮 hover 弹两按钮（切换 P2P 连接/切换远程链接），提醒在按钮上（删问号） ②toggle: 当前模式带✓再点=清空关闭; 点另一模式=直切 ③开关标签显示模式名（非布尔） ④REMOTE_CONSOLE_ENABLED 删除——REMOTE_TRANSPORT_MODE 已含开关概念（有值=开+管道，空=关）⑤前端不做本地状态推导，一切按后端接口最新数据刷新（通用逻辑）
+- 实施: switch_to_remote/local → switch_transport(mode)/switch_off(); _read_config enabled 从 mode 派生; switch API transport: "p2p"|"http"|""; MODE ConfigField 转 hidden + 通用写接口守卫（防绕过校验）; ENABLED 键/声明/set_one/守卫/server.py 全链零残留; 前端 Popover hover 双按钮（switchingTo 独立 loading; ✓图标; 开关标签三态文案）
+- 新用例: P2P 免 URL 切换（四项齐备+url 空 → 成功写 MODE=p2p——用户核心场景）
+- 状态空间塌缩: (ENABLED×MODE) 4 态含 2 无意义 → MODE 3 态; 管道选择与开关合并为一个动作
+- 验证: pyright 0/0/0; 24 passed（3 基线）; tsc/build ✓; ENABLED grep 零残留

@@ -34,6 +34,38 @@ from services.runtime_paths import RuntimePaths
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class SelectOption:
+    """select 型字段的单个选项（强类型; dict 禁令——规则 9）。"""
+    value: str
+    label: str  # 前端显示名
+
+
+class ConfigFieldType(StrEnum):
+    """配置控件类型（声明 → 领域模型 → meta 全链路枚举; 前端渲染分派依据）。"""
+    PASSWORD = "password"
+    PATH = "path"
+    TEXT = "text"
+    BOOL = "bool"
+    SELECT = "select"  # 须配 options（value → 显示名）
+
+
+class RemoteTransportMode(StrEnum):
+    """远程传输管道（fail-closed: 缺失/空/非法值 → 不开任何管道，须显式选择）。"""
+    P2P = "p2p"      # Noise 隧道（打洞直连/中继），无需公网暴露
+    HTTP = "http"    # HTTP 直连（REMOTE_CONSOLE_URL + TOKEN）
+
+    @classmethod
+    def parse(cls, raw: str | None) -> "RemoteTransportMode | None":
+        """严格解析: trim 后空或非法值 → None（不注入任何管道）。"""
+        if raw is None:
+            return None
+        try:
+            return cls(raw.strip().lower())
+        except ValueError:
+            return None
+
+
 class Surface(StrEnum):
     """配置渲染面（ConfigField 声明归属 + 接口请求参数值域）。
 
@@ -114,13 +146,14 @@ class ConfigEntry:
 
     key: str
     label: str
-    type: str  # password / path / text / bool
+    type: ConfigFieldType
     hint: str
     required: bool
     value: str  # 最终结果（.ai_env 值或声明默认; 无默认未配置=""）
     category: ConfigCategory
     surfaces: list[Surface]  # 生效场景（一键可多场景）
     readonly: bool
+    options: tuple[SelectOption, ...] | None = None  # select 型选项（其余类型 None）
 
 
 @dataclass
@@ -133,7 +166,7 @@ class ConfigMetaEntry:
     """
 
     label: str
-    type: str  # password / path / text / bool
+    type: ConfigFieldType
     hint: str
     required: bool
     default_value: str
@@ -141,6 +174,7 @@ class ConfigMetaEntry:
     category_code: str  # 分类 code（ConfigCategory 枚举值）
     category_desc: str  # 分类描述（服务端权威，前端原样显示）
     readonly: bool  # true = 任何页面禁用态渲染 + 写接口 422
+    options: list[SelectOption] | None = None  # select 型选项（asdict → [{value,label}]）
 
 
 @dataclass(frozen=True)
@@ -153,7 +187,7 @@ class P2PSettings:
     psk_valid: bool
     node_id: str
     gateway_enable: bool
-    client_enable: bool
+    transport_mode: "RemoteTransportMode | None"
 
 
 class ConfigManager:
@@ -223,7 +257,6 @@ class ConfigManager:
         HF_ENDPOINT = "HF_ENDPOINT"
         # 远程模型卸载: 本地侧三键
         REMOTE_CONSOLE_URL = "REMOTE_CONSOLE_URL"
-        REMOTE_CONSOLE_ENABLED = "REMOTE_CONSOLE_ENABLED"
         REMOTE_CONSOLE_TOKEN = "REMOTE_CONSOLE_TOKEN"
         # 远程模型卸载: 节点侧三键
         CONTROL_API_KEY = "CONTROL_API_KEY"
@@ -235,7 +268,7 @@ class ConfigManager:
         RELAY_PSK = "RELAY_PSK"                # base64(32B)，relayd genkey 生成
         REMOTE_NODE_ID = "REMOTE_NODE_ID"      # gateway 注册名 / client lookup 目标
         P2P_GATEWAY_ENABLE = "P2P_GATEWAY_ENABLE"  # 节点角色开关（Mac Mini=1）
-        P2P_CLIENT_ENABLE = "P2P_CLIENT_ENABLE"    # 主控角色开关（remote_client 走 transport）
+        REMOTE_TRANSPORT_MODE = "REMOTE_TRANSPORT_MODE"  # 管道枚举 p2p|http（fail-closed）
         # 远程链接可调参数
         REMOTE_HEARTBEAT_INTERVAL_SEC = "REMOTE_HEARTBEAT_INTERVAL_SEC"
         REMOTE_FAIL_THRESHOLD = "REMOTE_FAIL_THRESHOLD"
@@ -322,7 +355,7 @@ class ConfigManager:
         声明都是完整的可审计/review 对象，隐式默认 = 隐式行为）。"""
         key: str                                # .ai_env 中的 key
         label: str                              # 前端展示的中文名
-        type: str                               # password / path / text / bool
+        type: ConfigFieldType
         hint: str                               # 字段说明 / 获取地址
         required: bool                          # 是否必要（缺失时 banner 提醒）
         validator: Callable[[str], tuple[bool, str]] | None  # 值校验（构建层执行）
@@ -330,6 +363,9 @@ class ConfigManager:
         category: ConfigCategory                # 分类（分组归属）
         surfaces: list[Surface]                 # 生效场景（一键可多场景）
         readonly: bool                          # 只读（禁用渲染 + 写接口 422）
+        # select 型必填; 其余类型恒 None（非行为的类型空位，不构成隐式行为
+        # 默认）——select 声明漏 options / value 重复由 _init_once 构建层校验报错
+        options: tuple[SelectOption, ...] | None = None
 
     # ═══════════════ 实例状态与构造 ═══════════════
 
@@ -346,6 +382,19 @@ class ConfigManager:
         self._validation_cache: dict[tuple[str, str], tuple[bool, str]] = {}
         # 未声明键告警去重（同键只告警一次; 声明后自然不再触发）
         self._undeclared_warned: set[str] = set()
+        # select 声明完整性构建层校验（fail-fast: 声明错误启动即暴露，
+        # 不等到运行时渲染/写校验才发现）
+        for f in self._FIELDS:
+            if f.type is ConfigFieldType.SELECT:
+                vals = [o.value for o in (f.options or ())]
+                if not vals:
+                    raise ValueError(
+                        f"ConfigField {f.key}: select 型必须声明 options（非空 SelectOption 元组）")
+                if len(vals) != len(set(vals)):
+                    raise ValueError(f"ConfigField {f.key}: select options 的 value 重复")
+            elif f.options is not None:
+                raise ValueError(
+                    f"ConfigField {f.key}: 非 select 型不得声明 options（当前 {f.type.value}）")
 
     def _read_dev_mode_once(self) -> bool:
         """启动期一次性读取（.ai_env 优先——source=ai_env 键的文件是权威，
@@ -419,7 +468,7 @@ class ConfigManager:
             return {}
         configs = self._parse(path.read_text(errors="ignore"))
         for decl in self._FIELDS:
-            if decl.type == "path" and configs.get(decl.key):
+            if decl.type is ConfigFieldType.PATH and configs.get(decl.key):
                 configs[decl.key] = os.path.abspath(os.path.expanduser(configs[decl.key]))
         return configs
 
@@ -428,17 +477,24 @@ class ConfigManager:
         """声明默认值（path 型与配置值同规归一化; 无默认 → ""）。"""
         if not decl.default_value:
             return ""
-        if decl.type == "path":
+        if decl.type is ConfigFieldType.PATH:
             return os.path.abspath(os.path.expanduser(decl.default_value))
         return decl.default_value
 
     def _resolve_value(self, decl: "ConfigManager.ConfigField", config_value: str) -> str:
-        """最终值: 非空配置值（经 validator 校验, 非法记日志回落默认）;
-        空/缺失 → 声明默认。"""
+        """最终值: 非空配置值（经校验, 非法记日志回落默认）; 空/缺失 → 声明默认。
+
+        select 型值域校验由 options 声明单一事实源派生（不写手写 validator——
+        防值域与选项漂移）; 其余类型走声明 validator。
+        """
         stripped = config_value.strip()
         if not stripped:
             return self._default_of(decl)
-        if decl.validator is not None:
+        if decl.type is ConfigFieldType.SELECT:
+            allowed = {o.value for o in (decl.options or ())}
+            verdict = ((True, "") if stripped in allowed else
+                       (False, f"须为 {'/'.join(sorted(allowed))} 之一"))
+        elif decl.validator is not None:
             cache_key = (decl.key, config_value)
             verdict = self._validation_cache.get(cache_key)
             if verdict is None:
@@ -480,7 +536,7 @@ class ConfigManager:
                 required=decl.required,
                 value=self._resolve_value(decl, configs.get(decl.key, "")),
                 category=decl.category, surfaces=decl.surfaces,
-                readonly=decl.readonly,
+                readonly=decl.readonly, options=decl.options,
             ))
         return entries
 
@@ -652,7 +708,7 @@ class ConfigManager:
             psk_valid=len(psk) == 32,
             node_id=(vals.get(k.REMOTE_NODE_ID) or "").strip(),
             gateway_enable=(vals.get(k.P2P_GATEWAY_ENABLE) or "").strip().lower() in ("1", "true"),
-            client_enable=(vals.get(k.P2P_CLIENT_ENABLE) or "").strip().lower() in ("1", "true"),
+            transport_mode=RemoteTransportMode.parse(vals.get(k.REMOTE_TRANSPORT_MODE)),
         )
 
     def heartbeat_tunables(self) -> HeartbeatTunables:
@@ -704,6 +760,7 @@ class ConfigManager:
                 category_code=entry.category.value,
                 category_desc=entry.category.desc,
                 readonly=entry.readonly,
+                options=list(entry.options) if entry.options is not None else None,
             )
             cats_with_entries.add(entry.category)
         categories = [CategoryView(code=c.value, desc=c.desc)
@@ -768,7 +825,7 @@ class ConfigManager:
     _FIELDS: list[ConfigField] = [
         # ── 必要/常规 ──
         ConfigField(
-            key=Keys.DEEPSEEK_API_KEY, label="DeepSeek API 密钥", type="password",
+            key=Keys.DEEPSEEK_API_KEY, label="DeepSeek API 密钥", type=ConfigFieldType.PASSWORD,
             hint="获取地址：https://platform.deepseek.com/api-keys",
             validator=validate_api_key,
             category=ConfigCategory.MODELS,
@@ -776,7 +833,7 @@ class ConfigManager:
             surfaces=[Surface.CONFIG], readonly=False,
         ),
         ConfigField(
-            key=Keys.IDA_PRO_HOME, label="IDA Pro 安装目录", type="path",
+            key=Keys.IDA_PRO_HOME, label="IDA Pro 安装目录", type=ConfigFieldType.PATH,
             hint="该目录下需有 idat 可执行文件; "
                  "macOS: /Applications/IDA Professional 9.1.app/Contents/MacOS; "
                  "Linux: /opt/ida-9.0; Windows: C:\\Program Files\\IDA Pro 9.0",
@@ -787,7 +844,7 @@ class ConfigManager:
         ),
         # ── 常规可选 ──
         ConfigField(
-            key=Keys.DEEPSEEK_MODEL, label="DeepSeek 模型名", type="text",
+            key=Keys.DEEPSEEK_MODEL, label="DeepSeek 模型名", type=ConfigFieldType.TEXT,
             hint="不配置默认 deepseek-flash（events MCP 提取模型；需要更强提取质量可改 deepseek-v4-pro）",
             required=False, default_value="deepseek-flash",
             category=ConfigCategory.MODELS,
@@ -795,7 +852,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.DEEPSEEK_SMALL_MODEL, label="DeepSeek 轻量模型名", type="text",
+            key=Keys.DEEPSEEK_SMALL_MODEL, label="DeepSeek 轻量模型名", type=ConfigFieldType.TEXT,
             hint="时间戳推断模型; 不配置默认 deepseek-flash",
             required=False, default_value="deepseek-flash",
             category=ConfigCategory.MODELS,
@@ -803,7 +860,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.HF_ENDPOINT, label="HuggingFace 端点", type="text",
+            key=Keys.HF_ENDPOINT, label="HuggingFace 端点", type=ConfigFieldType.TEXT,
             hint="国内直连不稳时配置镜像，如 https://hf-mirror.com",
             required=False,
             category=ConfigCategory.MODELS,
@@ -811,7 +868,7 @@ class ConfigManager:
             surfaces=[Surface.CONFIG], readonly=False,
         ),
         ConfigField(
-            key=Keys.GITHUB_TOKEN, label="GitHub API 令牌", type="password",
+            key=Keys.GITHUB_TOKEN, label="GitHub API 令牌", type=ConfigFieldType.PASSWORD,
             hint="外部工具下载加速（防未认证 60 次/小时配额耗尽）；未配置时兜底 gh auth token",
             required=False,
             category=ConfigCategory.TOOLS,
@@ -819,7 +876,7 @@ class ConfigManager:
             surfaces=[Surface.CONFIG], readonly=False,
         ),
         ConfigField(
-            key=Keys.JULIANG_TRADE_NO, label="代理IP供应商订单号", type="text",
+            key=Keys.JULIANG_TRADE_NO, label="代理IP供应商订单号", type=ConfigFieldType.TEXT,
             hint="代理 IP 池用（juliangip.com 企业版套餐的业务编号，会员中心-业务管理获取）",
             required=False,
             category=ConfigCategory.PROXY,
@@ -827,7 +884,7 @@ class ConfigManager:
             surfaces=[Surface.CONFIG], readonly=False,
         ),
         ConfigField(
-            key=Keys.JULIANG_API_KEY, label="代理IP供应商 API 秘钥", type="password",
+            key=Keys.JULIANG_API_KEY, label="代理IP供应商 API 秘钥", type=ConfigFieldType.PASSWORD,
             hint="与订单号配套的 API Key（同页面获取）；两项都配置后 proxy MCP/代理池才可用",
             required=False,
             category=ConfigCategory.PROXY,
@@ -835,7 +892,7 @@ class ConfigManager:
             surfaces=[Surface.CONFIG], readonly=False,
         ),
         ConfigField(
-            key=Keys.RESUME_ANALYSIS_ENABLED, label="分析续传开关", type="bool",
+            key=Keys.RESUME_ANALYSIS_ENABLED, label="分析续传开关", type=ConfigFieldType.BOOL,
             hint="默认开启，0=关闭——会话压缩后自动注入分析状态续传提示",
             required=False, default_value="1",
             category=ConfigCategory.BEHAVIOR,
@@ -843,7 +900,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.REFLECT_NUDGE_ENABLED, label="反思提醒开关", type="bool",
+            key=Keys.REFLECT_NUDGE_ENABLED, label="反思提醒开关", type=ConfigFieldType.BOOL,
             hint="反思纸条+反思唤醒两通道总开关; 默认开启，0=关闭",
             required=False, default_value="1",
             category=ConfigCategory.BEHAVIOR,
@@ -851,7 +908,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.REFLECT_NUDGE_INTERVAL_MIN, label="反思提醒间隔（分钟）", type="text",
+            key=Keys.REFLECT_NUDGE_INTERVAL_MIN, label="反思提醒间隔（分钟）", type=ConfigFieldType.TEXT,
             hint="净活跃时长（扣除会话空闲）超过该间隔即注入提醒; 默认 30 分钟，改后 30s 内生效",
             required=False, default_value="30",
             category=ConfigCategory.BEHAVIOR,
@@ -859,7 +916,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.PERMISSION_ASK_TIMEOUT_SEC, label="权限询问超时（秒）", type="text",
+            key=Keys.PERMISSION_ASK_TIMEOUT_SEC, label="权限询问超时（秒）", type=ConfigFieldType.TEXT,
             hint="权限询问超过该秒数未处理则自动拒绝（附引导反馈）; 0=关闭; 默认 60 秒，改后 30s 内生效",
             required=False, default_value="60",
             category=ConfigCategory.BEHAVIOR,
@@ -867,7 +924,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.PERMISSION_ASK_TIMEOUT_TYPES, label="超时自动拒绝的权限类型", type="text",
+            key=Keys.PERMISSION_ASK_TIMEOUT_TYPES, label="超时自动拒绝的权限类型", type=ConfigFieldType.TEXT,
             hint="逗号分隔的权限类型名; 默认仅 external_directory（目录权限），可加 edit/bash 等",
             required=False, default_value="external_directory",
             category=ConfigCategory.BEHAVIOR,
@@ -875,64 +932,30 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.CONTROL_FRONTEND_DEV, label="前端开发模式", type="bool",
+            key=Keys.CONTROL_FRONTEND_DEV, label="前端开发模式", type=ConfigFieldType.BOOL,
             hint="1=vite dev(5173)，0/删除=发布态(dist/)。改后需重启控制台生效",
             required=False,
             category=ConfigCategory.DEVELOPER,
             validator=None, default_value="",
             surfaces=[Surface.CONFIG], readonly=False,
         ),
-        # ── 远程连接（REMOTE 页; ENABLED 只读——只能经「切换远程」按钮） ──
+        # ── 远程连接（REMOTE 页; REMOTE_TRANSPORT_MODE 为状态机键——hidden:
+        #    值经「切换远程」按钮专用路径读写（switch 端点先校验后置位），
+        #    不出现在任何 UI 渲染面——选择即开关，全在按钮上） ──
         ConfigField(
-            key=Keys.RELAY_HOST, label="P2P 中继服务器地址", type="text",
-            hint="remote-p2p 的 relayd VPS 地址（IP）; 打洞直连优先、此处兜底中继",
+            key=Keys.REMOTE_TRANSPORT_MODE, label="远程传输管道", type=ConfigFieldType.SELECT,
+            hint="状态机键（hidden）——值只能经远程页「切换远程」按钮变更（switch 端点"
+                 "先校验后置位）; mode 即开关: p2p/http=开+管道，空=关",
             required=False,
-            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
-            validator=None, default_value="",
+            category=ConfigCategory.REMOTE, surfaces=[Surface.HIDDEN],
+            validator=None,  # select 值域校验由 options 单一事实源派生（_resolve_value）
+            default_value="",
             readonly=False,
+            options=(SelectOption("p2p", "P2P 隧道"),
+                     SelectOption("http", "HTTP 直连")),
         ),
         ConfigField(
-            key=Keys.RELAY_PORT, label="P2P 中继端口", type="number",
-            hint="relayd 监听端口（默认 41000; 与 VPS 侧 REMOTE_RELAY_PORT 一致）",
-            required=False,
-            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
-            validator=None, default_value="41000",
-            readonly=False,
-        ),
-        ConfigField(
-            key=Keys.RELAY_PSK, label="P2P 预共享密钥", type="password",
-            hint="base64(32B)，relayd 上 genkey 生成（Noise NNpsk2 认证+加密）",
-            required=False,
-            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
-            validator=None, default_value="",
-            readonly=False,
-        ),
-        ConfigField(
-            key=Keys.REMOTE_NODE_ID, label="P2P 节点 ID", type="text",
-            hint="gateway 注册名（必须显式配置; 节点侧=本机注册名，主控侧=目标节点名）",
-            required=False,
-            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
-            validator=None, default_value="",
-            readonly=False,
-        ),
-        ConfigField(
-            key=Keys.P2P_CLIENT_ENABLE, label="P2P 客户端开关", type="bool",
-            hint="1=remote_client 走 P2P 传输（直连/中继），0=HTTP 直连（现状）",
-            required=False,
-            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
-            validator=None, default_value="0",
-            readonly=False,
-        ),
-        ConfigField(
-            key=Keys.P2P_GATEWAY_ENABLE, label="P2P 网关开关", type="bool",
-            hint="1=本进程作为节点角色（Mac Mini 上开启），注册到 relayd 接受连接",
-            required=False,
-            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
-            validator=None, default_value="0",
-            readonly=False,
-        ),
-        ConfigField(
-            key=Keys.REMOTE_CONSOLE_URL, label="远程控制台链接", type="text",
+            key=Keys.REMOTE_CONSOLE_URL, label="远程控制台链接", type=ConfigFieldType.TEXT,
             hint="远程节点（如 Mac Mini）控制台地址，如 http://192.168.1.20:9776",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
@@ -940,33 +963,16 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.REMOTE_CONSOLE_TOKEN, label="远程控制台令牌", type="password",
+            key=Keys.REMOTE_CONSOLE_TOKEN, label="远程控制台令牌", type=ConfigFieldType.PASSWORD,
             hint="与远程节点 CONTROL_API_KEY 相同的值（Bearer 鉴权）",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
             validator=None, default_value="",
             readonly=False,
         ),
-        ConfigField(
-            key=Keys.REMOTE_CONSOLE_ENABLED, label="远程模型开关", type="bool",
-            hint="只读——只能经「切换远程」按钮变更（先校验后置位）",
-            required=False, readonly=True,
-            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
-            validator=None, default_value="",
-        ),
         # ── remote-p2p 连接（hidden→remote: 全量可见可配; 保存即热重载重建 client） ──
         ConfigField(
-            key=Keys.P2P_CLIENT_ENABLE, label="P2P 客户端", type="bool",
-            hint="非直接启用远程——仅选择管道: 远程流量走 P2P 隧道（Noise 加密+打洞直连，"
-                 "无需公网暴露）还是 HTTP 直连。实际启用远程须点「切换远程」按钮（总开关）。"
-                 "生效需 P2P 四项齐备（本开关+中继地址+密钥+节点ID），缺任一自动回退 HTTP 直连",
-            required=False,
-            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
-            validator=None, default_value="0",
-            readonly=False,
-        ),
-        ConfigField(
-            key=Keys.RELAY_HOST, label="中继服务器地址", type="text",
+            key=Keys.RELAY_HOST, label="中继服务器地址", type=ConfigFieldType.TEXT,
             hint="relayd 所在 VPS 的公网 IP（三端一致）",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
@@ -974,7 +980,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.RELAY_PORT, label="中继服务器端口", type="text",
+            key=Keys.RELAY_PORT, label="中继服务器端口", type=ConfigFieldType.TEXT,
             hint="relayd 监听端口，留空=默认 41000（TCP+UDP 须一致）",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
@@ -982,7 +988,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.RELAY_PSK, label="中继预共享密钥", type="password",
+            key=Keys.RELAY_PSK, label="中继预共享密钥", type=ConfigFieldType.PASSWORD,
             hint="Noise NNpsk2 预共享密钥 base64(32B)——deploy-relayd.sh 部署时生成并打印，三端一致",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
@@ -990,7 +996,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.REMOTE_NODE_ID, label="远程节点 ID", type="text",
+            key=Keys.REMOTE_NODE_ID, label="远程节点 ID", type=ConfigFieldType.TEXT,
             hint="双视角: 远程节点侧=本机注册名（如 Mac Mini 的 OpenSecurityServer）; "
                  "主控侧=要连接的节点注册名",
             required=False,
@@ -999,7 +1005,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.P2P_GATEWAY_ENABLE, label="P2P 网关节点", type="bool",
+            key=Keys.P2P_GATEWAY_ENABLE, label="P2P 网关节点", type=ConfigFieldType.BOOL,
             hint="1=本机作为远程推理节点注册到 relayd（Mac Mini 等节点机用）; 主控端保持 0。"
                  "节点机推荐经 start-remote-node.sh 引导（自动补齐配套键）",
             required=False,
@@ -1010,7 +1016,7 @@ class ConfigManager:
         # ── 节点侧（hidden——远程页节点管理卡片经专用端点管理;
         #    CONTROL_API_KEY 变更触发重绑 0.0.0.0 副作用，通用写接口不可达） ──
         ConfigField(
-            key=Keys.CONTROL_API_KEY, label="本机控制台鉴权令牌", type="password",
+            key=Keys.CONTROL_API_KEY, label="本机控制台鉴权令牌", type=ConfigFieldType.PASSWORD,
             hint="配置后本控制台对局域网开放推理类 API（Bearer 校验）并绑 0.0.0.0；远程节点（Mac Mini）用",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.HIDDEN],
@@ -1018,7 +1024,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.CONTROL_RESIDENT, label="控制台常驻", type="bool",
+            key=Keys.CONTROL_RESIDENT, label="控制台常驻", type=ConfigFieldType.BOOL,
             hint="1=禁用心跳自杀机制（无 opencode 连接也不退出）；远程节点用",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.HIDDEN],
@@ -1026,7 +1032,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.CONTROL_AUTOSTART, label="开机自动启动", type="bool",
+            key=Keys.CONTROL_AUTOSTART, label="开机自动启动", type=ConfigFieldType.BOOL,
             hint="1=安装 LaunchAgent 开机自启（macOS，需开启自动登录）；远程节点用",
             required=False,
             category=ConfigCategory.REMOTE, surfaces=[Surface.HIDDEN],
@@ -1036,7 +1042,7 @@ class ConfigManager:
         # ── 代理调参（config 页代理分类，可改，消费方重读即生效;
         #    default_value 与 ProxyTunables 默认同源） ──
         ConfigField(
-            key=Keys.JULIANG_IP_TTL_SEC, label="代理单 IP 存活（秒）", type="text",
+            key=Keys.JULIANG_IP_TTL_SEC, label="代理单 IP 存活（秒）", type=ConfigFieldType.TEXT,
             hint="单 IP 寿命（5 分钟档）",
             required=False, default_value=str(_PT_D.ip_ttl_sec),
             category=ConfigCategory.PROXY,
@@ -1044,7 +1050,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.JULIANG_TTL_MARGIN_SEC, label="代理到期余量（秒）", type="text",
+            key=Keys.JULIANG_TTL_MARGIN_SEC, label="代理到期余量（秒）", type=ConfigFieldType.TEXT,
             hint="到期安全余量",
             required=False, default_value=str(_PT_D.ttl_margin_sec),
             category=ConfigCategory.PROXY,
@@ -1052,7 +1058,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.PROXY_ROTATE_CONN_THRESHOLD, label="代理轮换连接阈值", type="text",
+            key=Keys.PROXY_ROTATE_CONN_THRESHOLD, label="代理轮换连接阈值", type=ConfigFieldType.TEXT,
             hint="proxy 模式下新建连接数满此值自动轮换",
             required=False, default_value=str(_PT_D.rotate_conn_threshold),
             category=ConfigCategory.PROXY,
@@ -1060,7 +1066,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.DOMAIN_COOLDOWN_SEC, label="域名限流冷却（秒）", type="text",
+            key=Keys.DOMAIN_COOLDOWN_SEC, label="域名限流冷却（秒）", type=ConfigFieldType.TEXT,
             hint="域名冷却 10 分钟档",
             required=False, default_value=str(_PT_D.domain_cooldown_sec),
             category=ConfigCategory.PROXY,
@@ -1068,7 +1074,7 @@ class ConfigManager:
             readonly=False,
         ),
         ConfigField(
-            key=Keys.ROTATE_HISTORY_LIMIT, label="轮换历史上限", type="text",
+            key=Keys.ROTATE_HISTORY_LIMIT, label="轮换历史上限", type=ConfigFieldType.TEXT,
             hint="rotate_history 条数上限",
             required=False, default_value=str(_PT_D.rotate_history_limit),
             category=ConfigCategory.PROXY,
@@ -1077,42 +1083,42 @@ class ConfigManager:
         ),
         # ── 远程调参（REMOTE 页只读展示; 写接口 422） ──
         ConfigField(
-            key=Keys.REMOTE_HEARTBEAT_INTERVAL_SEC, label="远程心跳间隔（秒）", type="text",
+            key=Keys.REMOTE_HEARTBEAT_INTERVAL_SEC, label="远程心跳间隔（秒）", type=ConfigFieldType.TEXT,
             hint="远程节点健康探测周期; 修改后下个周期生效",
             required=False, default_value=str(_RT_D.heartbeat_interval_sec), readonly=True,
             category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
             validator=None,
         ),
         ConfigField(
-            key=Keys.REMOTE_FAIL_THRESHOLD, label="远程降级阈值（连续失败次数）", type="text",
+            key=Keys.REMOTE_FAIL_THRESHOLD, label="远程降级阈值（连续失败次数）", type=ConfigFieldType.TEXT,
             hint="连续失败达此次数 → 降级本地",
             required=False, default_value=str(_RT_D.fail_threshold), readonly=True,
             category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
             validator=None,
         ),
         ConfigField(
-            key=Keys.REMOTE_RECOVER_THRESHOLD, label="远程恢复阈值（连续成功次数）", type="text",
+            key=Keys.REMOTE_RECOVER_THRESHOLD, label="远程恢复阈值（连续成功次数）", type=ConfigFieldType.TEXT,
             hint="降级后连续成功达此次数 → 切回远程",
             required=False, default_value=str(_RT_D.recover_threshold), readonly=True,
             category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
             validator=None,
         ),
         ConfigField(
-            key=Keys.REMOTE_UNLOAD_DELAY_SEC, label="恢复后稳定期（秒）", type="text",
+            key=Keys.REMOTE_UNLOAD_DELAY_SEC, label="恢复后稳定期（秒）", type=ConfigFieldType.TEXT,
             hint="切回远程后稳定此时长才卸载本地模型（释放内存）",
             required=False, default_value=str(_RT_D.unload_delay_sec), readonly=True,
             category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
             validator=None,
         ),
         ConfigField(
-            key=Keys.REMOTE_INFER_TIMEOUT_SEC, label="远程推理超时（秒）", type="text",
+            key=Keys.REMOTE_INFER_TIMEOUT_SEC, label="远程推理超时（秒）", type=ConfigFieldType.TEXT,
             hint="远程 embed/rerank/ocr 请求超时",
             required=False, default_value=str(_RT_D.infer_timeout_sec), readonly=True,
             category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
             validator=None,
         ),
         ConfigField(
-            key=Keys.REMOTE_PROBE_TIMEOUT_SEC, label="远程探测超时（秒）", type="text",
+            key=Keys.REMOTE_PROBE_TIMEOUT_SEC, label="远程探测超时（秒）", type=ConfigFieldType.TEXT,
             hint="健康探测请求超时（应远小于心跳间隔）",
             required=False, default_value=str(_RT_D.probe_timeout_sec), readonly=True,
             category=ConfigCategory.REMOTE_TUNING, surfaces=[Surface.REMOTE],
@@ -1120,21 +1126,21 @@ class ConfigManager:
         ),
         # ── 心跳调参（hidden——无页面; 手编 .ai_env，每轮 sweep 重读） ──
         ConfigField(
-            key=Keys.HEARTBEAT_TIMEOUT_SEC, label="心跳超时（秒）", type="text",
+            key=Keys.HEARTBEAT_TIMEOUT_SEC, label="心跳超时（秒）", type=ConfigFieldType.TEXT,
             hint="opencode 超此时长未跳心跳 → 移除条目",
             required=False, default_value=str(_HT_D.timeout_sec),
             category=ConfigCategory.SYSTEM, surfaces=[Surface.HIDDEN],
             validator=None, readonly=False,
         ),
         ConfigField(
-            key=Keys.HEARTBEAT_SWEEP_INTERVAL_SEC, label="心跳 sweep 周期（秒）", type="text",
+            key=Keys.HEARTBEAT_SWEEP_INTERVAL_SEC, label="心跳 sweep 周期（秒）", type=ConfigFieldType.TEXT,
             hint="后台周期清理间隔",
             required=False, default_value=str(_HT_D.sweep_interval_sec),
             category=ConfigCategory.SYSTEM, surfaces=[Surface.HIDDEN],
             validator=None, readonly=False,
         ),
         ConfigField(
-            key=Keys.HEARTBEAT_GRACE_SEC, label="心跳启动宽限（秒）", type="text",
+            key=Keys.HEARTBEAT_GRACE_SEC, label="心跳启动宽限（秒）", type=ConfigFieldType.TEXT,
             hint="表空超过此时长才自杀（覆盖 spawn 就绪等待+首跳）",
             required=False, default_value=str(_HT_D.grace_sec),
             category=ConfigCategory.SYSTEM, surfaces=[Surface.HIDDEN],

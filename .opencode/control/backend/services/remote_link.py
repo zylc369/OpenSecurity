@@ -28,7 +28,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from services.config_manager import ConfigManager
+from services.config_manager import ConfigManager, RemoteTransportMode
 from services.logging_setup import LogManager
 from services.ocr_engines import MlxEngine
 from services.remote_client import RemoteConsoleClient, RemoteHealthInfo
@@ -65,6 +65,7 @@ class RemoteLinkStatus:
     token_configured: bool
     token_prefix: str                  # 前 6 位（脱敏）
     state: str                         # off / remote / degraded
+    transport: RemoteTransportMode | None  # None = 未配置/非法（fail-closed，不开任何管道）
     fail_streak: int
     recover_streak: int
     last_ok_at: float | None           # wall clock 秒
@@ -129,10 +130,13 @@ class RemoteLinkService:
         self._task: "asyncio.Task[None] | None" = None
 
     def _read_config(self) -> tuple[str, bool, str]:
-        """读远程三 KEY（ConfigManager 唯一读写方）。"""
-        from services.config_manager import ConfigManager
+        """读远程三要素（ConfigManager 唯一读写方）。
+
+        enabled 由 REMOTE_TRANSPORT_MODE 派生（mode 即开关: 有值=开，
+        空/非法=关——fail-closed）; 不再有独立的 ENABLED 键。
+        """
         url = (ConfigManager.get_instance().get(ConfigManager.Keys.REMOTE_CONSOLE_URL) or "").strip()
-        enabled = (ConfigManager.get_instance().get(ConfigManager.Keys.REMOTE_CONSOLE_ENABLED) or "").strip().lower() in ("1", "true")
+        enabled = (ConfigManager.get_instance().p2p_settings().transport_mode is not None)
         token = (ConfigManager.get_instance().get(ConfigManager.Keys.REMOTE_CONSOLE_TOKEN) or "").strip()
         return url, enabled, token
 
@@ -208,13 +212,17 @@ class RemoteLinkService:
                 logger.exception("心跳周期异常（忽略继续）")
 
     async def _probe_once(self) -> bool:
-        """单次探测 + 状态机评估。返回本轮是否成功。"""
+        """单次探测 + 状态机评估。返回本轮是否成功。
+
+        启用门控按管道: http → url; p2p → 隧道配置齐备（免 URL）。
+        """
         url, enabled, token = self._read_config()
         with self._lock:
+            p2p = self._p2p_config_locked()
             self._sync_client_locked(url, token)
-            if not (enabled and url):
+            if not (enabled and (url or p2p is not None)):
                 if self._state != self.STATE_OFF:
-                    logger.info("远程未启用（ENABLED=0 或 URL 空）→ OFF")
+                    logger.info("远程未启用（ENABLED=0 或两条管道均不可用）→ OFF")
                     self._state = self.STATE_OFF
                     self._cancel_unload_locked()
                 return False
@@ -314,11 +322,26 @@ class RemoteLinkService:
 
     # ── 切换操作（routes/remote.py 调用）──────────────────
 
-    async def switch_to_remote(self) -> SwitchResult:
-        """校验远程（连通+token+版本指纹）→ 成功写 ENABLED=1 并评估。"""
-        url, enabled, token = self._read_config()
-        if not url:
-            return SwitchResult(ok=False, error="未配置远程控制台链接（REMOTE_CONSOLE_URL）")
+    async def switch_transport(self, mode: RemoteTransportMode) -> SwitchResult:
+        """切换到指定管道（先校验后置位——mode 即开关: 置位=开，清空=关）。
+
+        按管道分通道校验（p2p 只校验 P2P 四项; http 只校验链接/令牌），
+        成功写 REMOTE_TRANSPORT_MODE 并评估。
+        """
+        url, _enabled, token = self._read_config()
+        if mode is RemoteTransportMode.HTTP and not url:
+            return SwitchResult(ok=False, error=(
+                "HTTP 直连管道须填写远程控制台链接（REMOTE_CONSOLE_URL）"))
+        if mode is RemoteTransportMode.P2P:
+            p2p = ConfigManager.get_instance().p2p_settings()
+            missing = [name for name, ok in (
+                ("中继服务器地址（RELAY_HOST）", bool(p2p.relay_host)),
+                ("中继预共享密钥（RELAY_PSK，base64 32B）", p2p.psk_valid),
+                ("远程节点 ID（REMOTE_NODE_ID）", bool(p2p.node_id)),
+            ) if not ok]
+            if missing:
+                return SwitchResult(ok=False, error=(
+                    f"P2P 管道配置不全，缺: {'、'.join(missing)}"))
         with self._lock:
             self._sync_client_locked(url, token)
         ok, reason, info = await self._probe_raw()
@@ -335,8 +358,8 @@ class RemoteLinkService:
                 warnings.append(f"模型 {m.repo_id} 版本不一致（本地 {local[m.repo_id][:8]}… / "
                                 f"远程 {m.snapshot[:8]}…）——向量空间可能漂移")
 
-        from services.config_manager import ConfigManager
-        ConfigManager.get_instance().set_one(ConfigManager.Keys.REMOTE_CONSOLE_ENABLED, "1")
+        ConfigManager.get_instance().set_one(
+            ConfigManager.Keys.REMOTE_TRANSPORT_MODE, mode.value)
         self.reload_config()
         # 立即评估（校验刚成功 → 单次定态 REMOTE）
         with self._lock:
@@ -349,24 +372,25 @@ class RemoteLinkService:
         logger.info("切换远程成功（url=%s, warnings=%d）", url, len(warnings))
         return SwitchResult(ok=True, warnings=warnings)
 
-    def switch_to_local(self) -> SwitchResult:
-        """写 ENABLED=0 → OFF。本地模型保持加载（不卸载）。"""
-        from services.config_manager import ConfigManager
-        ConfigManager.get_instance().set_one(ConfigManager.Keys.REMOTE_CONSOLE_ENABLED, "0")
+    def switch_off(self) -> SwitchResult:
+        """关闭远程（清空 REMOTE_TRANSPORT_MODE——mode 即开关）→ OFF。本地模型保持加载（不卸载）。"""
+        ConfigManager.get_instance().set_one(
+            ConfigManager.Keys.REMOTE_TRANSPORT_MODE, "")
         with self._lock:
             self._state = self.STATE_OFF
             self._cancel_unload_locked()
-        logger.info("切换本地（ENABLED=0; 本地模型保持加载）")
+        logger.info("切换本地（REMOTE_TRANSPORT_MODE 清空; 本地模型保持加载）")
         return SwitchResult(ok=True)
 
     def reload_config(self) -> None:
-        """配置热重载: 重建 client + 清零计数（PUT /api/config?surface=remote 写 URL/TOKEN 后由写边界钩子调用）。"""
+        """配置热重载: 重建 client + 清零计数（PUT /api/config?surface=remote 写管道键后由写边界钩子调用）。"""
         url, _enabled, token = self._read_config()
         with self._lock:
+            p2p = self._p2p_config_locked()
             self._sync_client_locked(url, token)
             self._fail_streak = 0
             self._recover_streak = 0
-            if not url:
+            if not (url or p2p is not None):  # 两管道均不可用才 OFF（p2p 免 URL）
                 self._state = self.STATE_OFF
                 self._cancel_unload_locked()
 
@@ -379,8 +403,10 @@ class RemoteLinkService:
         from services.config_manager import ConfigManager
         from services.remote_transport import TransportConfig
         p2p = ConfigManager.get_instance().p2p_settings()
-        if not (p2p.client_enable and p2p.psk_valid and p2p.relay_host
-                and p2p.node_id):
+        # 管道注入: 仅 transport_mode 显式为 P2P（fail-closed——None/http 均不注入）;
+        # 四项齐备（mode+psk+host+node）才走隧道，缺任一即 None（HTTP 或不可用）
+        if not (p2p.transport_mode is RemoteTransportMode.P2P and p2p.psk_valid
+                and p2p.relay_host and p2p.node_id):
             return None
         t = _tunables()
         return TransportConfig(
@@ -404,18 +430,19 @@ class RemoteLinkService:
         self._client = RemoteConsoleClient(
             url, token=token,
             infer_timeout=t.infer_timeout_sec,
-            probe_timeout=t.probe_timeout_sec, p2p=p2p) if url else None
+            probe_timeout=t.probe_timeout_sec, p2p=p2p) if (url or p2p) else None
         self._client_url = url
         self._client_token = token
         self._client_p2p = p2p
-        if url:
-            logger.info("远程 client 已（重）建: %s（P2P=%s）", url,
-                        "on" if p2p else "off")
+        if url or p2p:
+            logger.info("远程 client 已（重）建: 管道=%s（url=%s）",
+                        "p2p" if p2p else "http", url or "<无>")
 
     # ── 状态快照 ─────────────────────────────────────────
 
     def status(self) -> RemoteLinkStatus:
         url, enabled, token = self._read_config()
+        mode = ConfigManager.get_instance().p2p_settings().transport_mode
         with self._lock:
             local_models: "dict[str, str]" = {}
             try:
@@ -437,6 +464,7 @@ class RemoteLinkService:
                 token_configured=bool(token),
                 token_prefix=token[:6] if token else "",
                 state=self._state,
+                transport=mode,
                 fail_streak=self._fail_streak,
                 recover_streak=self._recover_streak,
                 last_ok_at=self._last_ok_at,

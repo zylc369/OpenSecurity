@@ -18,6 +18,7 @@ import {
   Button,
   Card,
   Col,
+  Popover,
   Descriptions,
   Input,
   Popconfirm,
@@ -64,15 +65,29 @@ function ModeBadge({ status }: { status: RemoteLinkStatusView | null }) {
   if (!status)
     return <Typography.Text type="secondary">加载中…</Typography.Text>;
   if (status.state === "remote") {
+    const tp = status.transport;
     return (
       <Space size={8}>
         <CloudServerOutlined style={{ fontSize: 22, color: "#0A6CFF" }} />
         <Typography.Text strong style={{ fontSize: 18 }}>
           远程模式
         </Typography.Text>
-        <Tag color="blue" style={{ marginInlineEnd: 0 }}>
-          推理走远程节点
-        </Tag>
+        {tp === "p2p" && (
+          <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>
+            P2P 隧道
+          </Tag>
+        )}
+        {tp === "http" && (
+          <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+            HTTP 直连
+          </Tag>
+        )}
+        {!tp && (
+          <Tag color="warning" style={{ marginInlineEnd: 0 }}>
+            管道未配置
+          </Tag>
+        )}
+        <Typography.Text type="secondary">推理走远程节点</Typography.Text>
       </Space>
     );
   }
@@ -106,7 +121,8 @@ function ModeBadge({ status }: { status: RemoteLinkStatusView | null }) {
 const RemoteSection: React.FC = () => {
   const { message } = AntApp.useApp();
   const [status, setStatus] = useState<RemoteLinkStatusView | null>(null);
-  // 连接配置: meta 驱动（surface=remote——URL/TOKEN 可写 + ENABLED 只读）
+  // 连接配置: meta 驱动（surface=remote——管道/RELAY/URL/TOKEN 等可写;
+  // ENABLED 为 hidden 状态机键不经此面，状态显示归模式徽标）
   const rmeta = useConfigMeta("remote");
   const {
     data: rconfigs,
@@ -116,6 +132,7 @@ const RemoteSection: React.FC = () => {
   const [rvalues, setRvalues] = useState<ConfigMap>({});
   const [saving, setSaving] = useState(false);
   const [switching, setSwitching] = useState(false);
+  const [switchingTo, setSwitchingTo] = useState<"" | "p2p" | "http">("");
   // 卡片 3: 远程节点管理（经转发）
   const [nodeCfg, setNodeCfg] = useState<NodeConfigView | null>(null);
   const [autostart, setAutostart] = useState<AutostartView | null>(null);
@@ -154,7 +171,6 @@ const RemoteSection: React.FC = () => {
   );
   const linkGroup = findGroup(rgroups, "remote");
   const tuningGroup = findGroup(rgroups, "remote_tuning");
-  const remoteUrl = rvalues["REMOTE_CONSOLE_URL"] ?? "";
 
   const rdirty = useMemo(() => {
     if (!rconfigs || !rmeta.data) return false;
@@ -215,12 +231,15 @@ const RemoteSection: React.FC = () => {
   };
 
   const doSwitch = useCallback(
-    async (target: "remote" | "local") => {
+    async (transport: "" | "p2p" | "http") => {
       setSwitching(true);
+      setSwitchingTo(transport);
       try {
-        const r = await api.switchRemote(target);
+        const r = await api.switchRemote(transport);
         if (r.ok) {
-          message.success(target === "remote" ? "已切换远程" : "已切换本地");
+          const label = transport === "p2p" ? "P2P 连接"
+            : transport === "http" ? "远程链接" : "";
+          message.success(label ? `已切换: ${label}` : "已关闭远程（回到本地推理）");
           if (r.warnings?.length) {
             message.warning({ content: r.warnings.join("；"), duration: 10 });
           }
@@ -230,14 +249,15 @@ const RemoteSection: React.FC = () => {
             duration: 10,
           });
         }
+        // 一切以后端最新数据为准刷新（通用逻辑——不做本地状态推导）
         const st = await api.getRemoteStatus();
         setStatus(st);
-        // 切换会写 REMOTE_CONSOLE_ENABLED → 刷新配置源，只读行与状态机同步
         refreshRemoteConfig();
       } catch (e) {
         message.error(e instanceof Error ? e.message : String(e));
       } finally {
         setSwitching(false);
+        setSwitchingTo("");
       }
     },
     [message, refreshRemoteConfig],
@@ -265,9 +285,11 @@ const RemoteSection: React.FC = () => {
     }
   }, []);
 
+  // 节点管理加载门控: 两管道任一可用（http=url; p2p=管道已配——转发走隧道）
+  const p2pReady = status?.transport === "p2p";
   useEffect(() => {
-    if (status?.url) void loadNodeInfo();
-  }, [status?.url, loadNodeInfo]);
+    if (status?.url || p2pReady) void loadNodeInfo();
+  }, [status?.url, p2pReady, loadNodeInfo]);
 
   const saveApiKey = useCallback(
     async (value: string) => {
@@ -370,7 +392,14 @@ const RemoteSection: React.FC = () => {
               style={{ marginInlineEnd: 0 }}
               color={enabled ? "green" : "default"}
             >
-              开关: {enabled ? "已开启" : "已关闭"}
+              开关:{" "}
+              {status?.transport === "p2p"
+                ? "P2P 连接"
+                : status?.transport === "http"
+                  ? "远程链接"
+                  : enabled
+                    ? "已开启"
+                    : "已关闭"}
             </Tag>
             {degraded && (
               <Tag color="error" style={{ marginInlineEnd: 0 }}>
@@ -397,42 +426,56 @@ const RemoteSection: React.FC = () => {
                 更新并重启
               </Button>
             </Popconfirm>
-            {enabled ? (
-              <Popconfirm
-                title="切换本地？"
-                description="模型推理改回本地; 本地资源保持可用"
-                okText="切换本地"
-                cancelText="取消"
-                onConfirm={() => void doSwitch("local")}
-                disabled={switching}
-              >
-                <Button loading={switching} danger>
-                  切换本地
-                </Button>
-              </Popconfirm>
-            ) : (
-              <Space size={4}>
-                <Tooltip
-                  title={
-                    remoteUrl.trim()
-                      ? "两层开关：本按钮 = 总开关（本地 ↔ 远程推理，点击时才做连通性校验，失败会展示原因）; 「P2P 客户端」= 管道选择（远程流量走 P2P 隧道还是 HTTP 直连）。开了 P2P 不会直接启用远程——仍需点本按钮。"
-                      : "需先填写「远程控制台链接」并保存——它是远程 client 的构建前提（P2P 的 HTTP 直连回退通道）"
-                  }
-                >
-                  <span>
+            <Popover
+              trigger="hover"
+              placement="bottomRight"
+              content={
+                <Space direction="vertical" size={8} style={{ width: 220 }}>
+                  <Tooltip
+                    title={status?.transport === "p2p"
+                      ? "当前模式——再次点击清空模式配置（回到本地推理）"
+                      : "只用 P2P 隧道（Noise 加密+打洞直连，无需公网暴露）; 只校验中继三项+节点 ID，不要求远程链接"}
+                  >
                     <Button
-                      type="primary"
+                      block
                       icon={<ApiOutlined />}
-                      loading={switching}
-                      disabled={!remoteUrl.trim()}
-                      onClick={() => void doSwitch("remote")}
+                      loading={switching && switchingTo === "p2p"}
+                      onClick={() => void doSwitch(status?.transport === "p2p" ? "" : "p2p")}
                     >
-                      切换远程
+                      切换 P2P 连接
+                      {status?.transport === "p2p" && (
+                        <CheckCircleOutlined style={{ color: "#52c41a", marginInlineStart: 8 }} />
+                      )}
                     </Button>
-                  </span>
-                </Tooltip>
-              </Space>
-            )}
+                  </Tooltip>
+                  <Tooltip
+                    title={status?.transport === "http"
+                      ? "当前模式——再次点击清空模式配置（回到本地推理）"
+                      : "只用 HTTP 直连; 只校验远程链接+令牌"}
+                  >
+                    <Button
+                      block
+                      icon={<LinkOutlined />}
+                      loading={switching && switchingTo === "http"}
+                      onClick={() => void doSwitch(status?.transport === "http" ? "" : "http")}
+                    >
+                      切换远程链接
+                      {status?.transport === "http" && (
+                        <CheckCircleOutlined style={{ color: "#52c41a", marginInlineStart: 8 }} />
+                      )}
+                    </Button>
+                  </Tooltip>
+                </Space>
+              }
+            >
+              <span>
+                <Button type="primary" icon={<ApiOutlined />} disabled={switching}>
+                  {enabled
+                    ? `切换远程（${status?.transport === "p2p" ? "P2P" : "链接"}）▾`
+                    : "切换远程 ▾"}
+                </Button>
+              </span>
+            </Popover>
           </Space>
         }
       >
@@ -640,11 +683,11 @@ const RemoteSection: React.FC = () => {
           </Space>
         }
       >
-        {!status?.url ? (
+        {!status?.url && !p2pReady ? (
           <Alert
             type="info"
             showIcon
-            message="先在上方配置远程连接（链接 + 令牌）才能管理远程节点"
+            message="先在上方配置远程连接（HTTP 链接+令牌，或 P2P 管道四项）才能管理远程节点"
           />
         ) : !nodeCfg ? (
           <Alert

@@ -102,37 +102,44 @@ def test_health_fingerprints():
 @test("routes/remote: switch 失败不置位 / 成功置位 ENABLED")
 def test_switch_paths():
     import services.config_manager as cs
+    from services.config_manager import P2PSettings, RemoteTransportMode
     written = {}
     _cmi = cs.ConfigManager.get_instance()
     orig_write = _cmi.set_one
     _cmi.set_one = lambda k, v: written.update({k: v}) or {}  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+    # 管道前置显式注入（fail-closed 校验前置由测试自声明——http 与 fake url 配对）
+    orig_p2p = _cmi.p2p_settings
+    _cmi.p2p_settings = lambda: P2PSettings(  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+        relay_host="", relay_port=41000, psk=b"", psk_valid=False,
+        node_id="", gateway_enable=False, transport_mode=RemoteTransportMode.HTTP)
     try:
         # 失败路径
         _fake_remote_link(ok_probe=False)
         c = _client()
-        r = c.post("/api/remote/switch", json={"target": "remote"})
+        r = c.post("/api/remote/switch", json={"transport": "http"})
         d = r.json()
         assert_true(not d["ok"], "校验失败 ok=False")
         assert_true("boom" in d.get("detail", ""), f"detail 含原因: {d.get('detail')}")
-        assert_eq(written, {}, "失败不写 ENABLED")
+        assert_eq(written, {}, "失败不写 MODE")
 
         # 成功路径
         _fake_remote_link(ok_probe=True)
-        r = c.post("/api/remote/switch", json={"target": "remote"})
+        r = c.post("/api/remote/switch", json={"transport": "http"})
         d = r.json()
         assert_true(d["ok"], f"成功 ok=True: {d}")
-        assert_eq(written.get("REMOTE_CONSOLE_ENABLED"), "1", "置位 ENABLED=1")
+        assert_eq(written.get("REMOTE_TRANSPORT_MODE"), "http", "置位 MODE=http")
 
-        # 切本地
-        r = c.post("/api/remote/switch", json={"target": "local"})
+        # 关闭（清空模式）
+        r = c.post("/api/remote/switch", json={"transport": ""})
         d = r.json()
         assert_true(d["ok"])
-        assert_eq(written.get("REMOTE_CONSOLE_ENABLED"), "0")
+        assert_eq(written.get("REMOTE_TRANSPORT_MODE"), "", "清空 MODE=关")
 
-        # 非法 target
-        r = c.post("/api/remote/switch", json={"target": "xxx"})
-        assert_eq(r.status_code, 422, "非法 target 422")
+        # 非法 transport
+        r = c.post("/api/remote/switch", json={"transport": "xxx"})
+        assert_eq(r.status_code, 422, "非法 transport 422")
     finally:
+        _cmi.p2p_settings = orig_p2p  # pyright: ignore[reportAttributeAccessIssue]  (测试恢复)
         _cmi.set_one = orig_write
 
 

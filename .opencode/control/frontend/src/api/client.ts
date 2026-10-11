@@ -163,8 +163,8 @@ export const api = {
     return r.data;
   },
 
-  async switchRemote(target: "remote" | "local"): Promise<SwitchResultView> {
-    const r = await instance.post<SwitchResultView>("/api/remote/switch", { target });
+  async switchRemote(transport: "" | "p2p" | "http"): Promise<SwitchResultView> {
+    const r = await instance.post<SwitchResultView>("/api/remote/switch", { transport });
     return r.data;
   },
 

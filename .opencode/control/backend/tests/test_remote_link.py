@@ -54,6 +54,26 @@ def _mk_service(url="http://fake.remote:1", enabled=True, token="tok123"):
     return svc
 
 
+def _fake_p2p_http():
+    """管道前置显式注入（transport=http，与 fake url 配对; finally 恢复）。
+
+    switch 的 fail-closed 校验前置条件由测试自声明——不依赖沙箱/环境残留。
+    返回 (patch_fn, restore_fn)。
+    """
+    import services.config_manager as cs
+    from services.config_manager import P2PSettings, RemoteTransportMode
+    _cmi = cs.ConfigManager.get_instance()
+    orig = _cmi.p2p_settings
+
+    def restore():
+        _cmi.p2p_settings = orig  # pyright: ignore[reportAttributeAccessIssue]  (测试恢复)
+
+    _cmi.p2p_settings = lambda: P2PSettings(  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+        relay_host="", relay_port=41000, psk=b"", psk_valid=False,
+        node_id="", gateway_enable=False, transport_mode=RemoteTransportMode.HTTP)
+    return restore
+
+
 def _ok_info(latency=12.5):
     return RemoteHealthInfo(
         service="opencode-control", version="t",
@@ -201,28 +221,57 @@ def test_note_request_failure():
 @test("remote_link: switch_to_remote 校验失败不置位 / 成功置位")
 def test_switch_to_remote():
     import services.config_manager as cs
+    from services.config_manager import RemoteTransportMode
     written = {}
     _cmi = cs.ConfigManager.get_instance()
     orig_write = _cmi.set_one
     _cmi.set_one = lambda k, v: written.update({k: v}) or {}  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+    restore_p2p = _fake_p2p_http()
     try:
         async def run():
             svc = _mk_service()
             # 校验失败
             _set_probe(svc, ["boom"])
-            r = await svc.switch_to_remote()
+            r = await svc.switch_transport(RemoteTransportMode.HTTP)
             assert_true(not r.ok, "校验失败 ok=False")
             assert_true("boom" in r.error, f"error 含原因: {r.error}")
-            assert_eq(written, {}, "校验失败不写 ENABLED")
+            assert_eq(written, {}, "校验失败不写 MODE")
 
             # 校验成功（版本指纹一致——fake snapshot 与本地对比可能不一致 → 只警告）
             _set_probe(svc, [])
-            r = await svc.switch_to_remote()
+            r = await svc.switch_transport(RemoteTransportMode.HTTP)
             assert_true(r.ok, f"校验成功 ok=True: {r.error}")
-            assert_eq(written.get("REMOTE_CONSOLE_ENABLED"), "1", "成功写 ENABLED=1")
+            assert_eq(written.get("REMOTE_TRANSPORT_MODE"), "http", "成功写 MODE=http")
             assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE, "切换后 REMOTE")
         asyncio.run(run())
     finally:
+        restore_p2p()
+        _cmi.set_one = orig_write
+
+
+@test("remote_link: P2P 模式免 URL——四项齐备即可切换（不要求远程链接）")
+def test_switch_p2p_without_url():
+    import services.config_manager as cs
+    from services.config_manager import P2PSettings, RemoteTransportMode
+    written = {}
+    _cmi = cs.ConfigManager.get_instance()
+    orig_write = _cmi.set_one
+    orig_p2p = _cmi.p2p_settings
+    _cmi.set_one = lambda k, v: written.update({k: v}) or {}  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+    _cmi.p2p_settings = lambda: P2PSettings(  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+        relay_host="74.120.173.111", relay_port=41000, psk=b"x" * 32, psk_valid=True,
+        node_id="OpenSecurityServer", gateway_enable=False,
+        transport_mode=RemoteTransportMode.P2P)
+    try:
+        async def run():
+            svc = _mk_service(url="", enabled=False, token="")  # 无 URL 的纯 P2P 场景
+            _set_probe(svc, [])
+            r = await svc.switch_transport(RemoteTransportMode.P2P)
+            assert_true(r.ok, f"P2P 免 URL 切换成功: {r.error}")
+            assert_eq(written.get("REMOTE_TRANSPORT_MODE"), "p2p", "写 MODE=p2p")
+        asyncio.run(run())
+    finally:
+        _cmi.p2p_settings = orig_p2p  # pyright: ignore[reportAttributeAccessIssue]  (测试恢复)
         _cmi.set_one = orig_write
 
 
@@ -237,9 +286,9 @@ def test_switch_to_local():
         svc = _mk_service()
         svc._state = rl_module.RemoteLinkService.STATE_REMOTE  # noqa: SLF001
         svc._schedule_unload_locked()  # noqa: SLF001 —— 安排一个卸载
-        r = svc.switch_to_local()
+        r = svc.switch_off()
         assert_true(r.ok)
-        assert_eq(written.get("REMOTE_CONSOLE_ENABLED"), "0", "写 ENABLED=0")
+        assert_eq(written.get("REMOTE_TRANSPORT_MODE"), "", "清空 MODE=关")
         assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_OFF, "状态 OFF")
         assert_true(svc.status().unload_countdown_sec is None, "卸载被取消")
     finally:

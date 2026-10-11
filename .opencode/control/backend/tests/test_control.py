@@ -919,8 +919,8 @@ def test_e2e_config_meta():
     rem = r.json()
     assert_eq([c["code"] for c in rem["categories"]], ["remote", "remote_tuning"],
               "remote 面分类序")
-    assert_eq(len(rem["entries"]), 9, "remote 面 9 条目")
-    assert_true(rem["entries"]["REMOTE_CONSOLE_ENABLED"]["readonly"], "ENABLED 只读")
+    assert_eq(len(rem["entries"]), 13, "remote 面 13 条目（连接 5+URL/TOKEN+调参 6; MODE=hidden 状态键不出面）")
+    assert_true("REMOTE_TRANSPORT_MODE" not in rem["entries"], "MODE 为按钮专用键不出面")
     assert_true(rem["entries"]["REMOTE_HEARTBEAT_INTERVAL_SEC"]["readonly"],
                 "远程调参只读")
     assert_true(not rem["entries"]["REMOTE_CONSOLE_URL"]["readonly"], "URL 可写")
@@ -950,11 +950,11 @@ def test_e2e_config_write_surface():
     r = cp.client.post("http://localhost/api/config/update",
                       json={"surfaces": ["remote"], "configs": {"NOT_DECLARED_KEY": "x"}}, timeout=5)
     assert_eq(r.status_code, 422, "remote 面写未声明键应 422")
-    # ENABLED: 专用守卫文案（引导「切换远程」按钮）先于通用校验
+    # MODE: 专用守卫文案（引导「切换远程」按钮）先于通用校验——mode 即开关
     r = cp.client.post("http://localhost/api/config/update",
-                      json={"surfaces": ["remote"], "configs": {"REMOTE_CONSOLE_ENABLED": "1"}}, timeout=5)
+                      json={"surfaces": ["remote"], "configs": {"REMOTE_TRANSPORT_MODE": "p2p"}}, timeout=5)
     assert_eq(r.status_code, 422)
-    assert_true("切换远程" in str(r.json().get("detail", "")), "ENABLED 报错引导按钮")
+    assert_true("切换远程" in str(r.json().get("detail", "")), "MODE 报错引导按钮")
     # DELETE 同一守卫链: 跨面删除拒绝 + readonly 键删除拒绝
     r = cp.client.post("http://localhost/api/config/delete",
                          json={"surfaces": ["config"], "keys": ["REMOTE_CONSOLE_URL"]}, timeout=5)

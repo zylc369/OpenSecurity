@@ -6,6 +6,7 @@
  * hint 同行」的位置不一致）:
  *   password → Input.Password（小眼睛）   path → Input + 实时存在性徽标
  *   bool     → Select(1/0)                text  → Input
+ *   select   → Select（meta.options 权威下发——value→显示名; 枚举值域服务端管控）
  *   readonly=true → 控件禁用 + 显示生效值（值或默认）+「只读」徽标。
  */
 import React, { useEffect, useState } from "react";
@@ -92,6 +93,30 @@ const ConfigFieldRow: React.FC<{
           disabled={disabled}
           style={{ width: 140 }}
           options={[{ value: "1", label: "开 (1)" }, { value: "0", label: "关 (0)" }]}
+          onChange={(nv) => set(nv ?? "")}
+        />
+      );
+    }
+    if (m.type === "select") {
+      if (ro) {
+        const matched = m.options?.find((o) => o.value === value);
+        return (
+          <Space size={8}>
+            <Typography.Text>
+              {matched?.label ?? effectiveText()}
+            </Typography.Text>
+            <Tag style={{ marginInlineEnd: 0 }}>只读</Tag>
+          </Space>
+        );
+      }
+      return (
+        <Select
+          value={value === "" ? undefined : value}
+          placeholder="未设置（不开任何管道）"
+          allowClear
+          disabled={disabled}
+          style={{ width: 220 }}
+          options={(m.options ?? []).map((o) => ({ value: o.value, label: o.label }))}
           onChange={(nv) => set(nv ?? "")}
         />
       );

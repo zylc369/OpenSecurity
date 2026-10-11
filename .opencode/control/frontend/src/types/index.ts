@@ -232,7 +232,7 @@ export interface FsCheckResult {
 
 // ─── /api/config/meta ─────────────────────────────────────
 
-export type ConfigFieldType = "password" | "path" | "text" | "bool";
+export type ConfigFieldType = "password" | "path" | "text" | "bool" | "select";
 
 export interface ConfigMetaItem {
   label: string;
@@ -247,8 +247,16 @@ export interface ConfigMetaItem {
   readonly: boolean;
   /** 分类 code（分组归属; 顺序与可选值由服务端 categories 数组驱动） */
   category_code: string;
+  /** select 型选项（服务端权威下发; 与后端 SelectOption 一一对应） */
+  options?: SelectOption[];
   /** 分类描述（服务端权威，原样显示，前端不自行发挥） */
   category_desc: string;
+}
+
+/** select 型选项（与后端 SelectOption dataclass 一一对应; asdict 序列化形态） */
+export interface SelectOption {
+  value: string;
+  label: string;
 }
 
 export type ConfigMetaMap = Record<string, ConfigMetaItem>;
@@ -291,6 +299,8 @@ export interface RemoteLinkStatusView {
   token_configured: boolean;
   token_prefix: string;
   state: RemoteLinkState;
+  /** 管道枚举（与后端 RemoteTransportMode 一致; null = 未配置/非法——fail-closed 不开任何管道） */
+  transport: null | "p2p" | "http";
   fail_streak: number;
   recover_streak: number;
   last_ok_at: number | null;

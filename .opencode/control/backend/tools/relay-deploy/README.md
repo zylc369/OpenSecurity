@@ -60,14 +60,16 @@ TTS 自测: `cd .opencode/control/backend && python -m services.tts_service --sm
 
 ## 三、MacBook（控制台客户端）
 
-`.ai_env`（或经控制台远程页 UI 配置——保存即热重载，无需重启）:
+`.ai_env`（管道外的原材料可经控制台远程页 UI 配置——保存即热重载; 管道本身只经「切换远程」按钮切换，不走配置区）:
 ```
 RELAY_HOST=<VPS_IP>
 RELAY_PSK=<PSK>
 REMOTE_NODE_ID=<要连的节点ID>
-P2P_CLIENT_ENABLE=1        # 0=回退 HTTP 直连
-REMOTE_CONSOLE_URL=http://<MacMini局域网IP>:<port>   # HTTP 直连回退通道（P2P 关闭/配置不全时用; URL 必填——远程 client 的构建前提）
-REMOTE_CONSOLE_TOKEN=<节点的 CONTROL_API_KEY 值>      # HTTP 直连的 Bearer 凭证（两键一值:
+# 管道选择（REMOTE_TRANSPORT_MODE=p2p|http）不在配置区——经远程页「切换远程」
+# 按钮悬浮选择: 切换 P2P 连接（只用 P2P，免 URL）/ 切换远程链接（HTTP 直连）;
+# 再点当前模式 = 清空关闭。手编 .ai_env 预置 mode 也生效（mode 即开关）。
+REMOTE_CONSOLE_URL=http://<MacMini局域网IP>:<port>   # 仅 http 管道需要（P2P 管道可不填）
+REMOTE_CONSOLE_TOKEN=<节点的 CONTROL_API_KEY 值>      # 仅 http 管道需要（两键一值:
                                                           # 节点侧叫 CONTROL_API_KEY，访问端填这里）
 ```
 

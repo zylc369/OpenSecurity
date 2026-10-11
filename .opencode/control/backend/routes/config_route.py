@@ -84,15 +84,15 @@ async def get_required_status(req: ConfigQuery) -> "dict[str, ConfigManager.Conf
 
 
 def _guard_protected_keys(keys: Collection[str]) -> None:
-    """拒绝直接写远程开关（D10: ENABLED 只能经「切换远程」按钮先校验后置位）。
+    """拒绝直接写传输管道（mode 即开关——只能经「切换远程」按钮先校验后置位）。
 
-    通用配置写接口不得绕过 remote_link.switch_to_remote 的校验路径
-    （未校方的 ENABLED=1 会让心跳直接把路由切到未验证的远程节点）。
+    通用配置写接口不得绕过 remote_link.switch_transport 的校验路径
+    （未校验的管道置位会让心跳直接把路由切到未验证的远程节点）。
     """
-    if ConfigManager.get_instance().Keys.REMOTE_CONSOLE_ENABLED in keys:
+    if ConfigManager.get_instance().Keys.REMOTE_TRANSPORT_MODE in keys:
         raise HTTPException(
             status_code=422,
-            detail=f"{ConfigManager.get_instance().Keys.REMOTE_CONSOLE_ENABLED} 只能经「切换远程」按钮写入（先校验后置位）",
+            detail=f"{ConfigManager.get_instance().Keys.REMOTE_TRANSPORT_MODE} 只能经「切换远程」按钮写入（先校验后置位）",
         )
 
 
@@ -129,6 +129,10 @@ def _guard_surface(keys: Collection[str], surfaces: list[SurfaceParam]) -> None:
 _REMOTE_LINK_KEYS = frozenset({
     ConfigManager.Keys.REMOTE_CONSOLE_URL,
     ConfigManager.Keys.REMOTE_CONSOLE_TOKEN,
+    ConfigManager.Keys.RELAY_HOST,
+    ConfigManager.Keys.RELAY_PORT,
+    ConfigManager.Keys.RELAY_PSK,
+    ConfigManager.Keys.REMOTE_NODE_ID,
 })
 
 

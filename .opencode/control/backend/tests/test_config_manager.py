@@ -228,9 +228,8 @@ def test_meta():
     rem = cm.config_meta([Surface.REMOTE])
     assert_eq([c.code for c in rem.categories], ["remote", "remote_tuning"],
               "remote 面分类序")
-    assert_eq(len(rem.entries), 9, "remote 面 9 条目")
-    assert_eq(rem.entries[cm.Keys.REMOTE_CONSOLE_ENABLED].readonly, True,
-              "ENABLED 只读")
+    assert_eq(len(rem.entries), 13, "remote 面 13 条目（MODE=hidden 状态键不出面）")
+    assert_true(cm.Keys.REMOTE_TRANSPORT_MODE not in rem.entries, "MODE 不出面（按钮专用）")
     assert_eq(rem.entries[cm.Keys.REMOTE_HEARTBEAT_INTERVAL_SEC].readonly, True,
               "远程调参只读")
     assert_eq(rem.entries[cm.Keys.REMOTE_CONSOLE_URL].readonly, False, "URL 可写")

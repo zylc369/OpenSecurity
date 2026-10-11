@@ -38,7 +38,7 @@ async def get_status() -> "RemoteLinkStatus":
 
 
 class SwitchRequest(BaseModel):
-    target: str  # "remote" | "local"
+    transport: str  # "p2p" | "http"（切换到对应管道）| ""（关闭——清空模式）
 
 
 @dataclass
@@ -58,13 +58,17 @@ class FingerprintPayload:
 
 @router.post("/switch")
 async def switch(req: SwitchRequest) -> SwitchOutcome:
-    """切换远程（先校验远程有效——失败返回原因不置位）/ 切换本地。"""
-    if req.target == "remote":
-        result = await RemoteLinkService.get_instance().switch_to_remote()
-    elif req.target == "local":
-        result = RemoteLinkService.get_instance().switch_to_local()
+    """切换远程管道（先校验——失败返回原因不置位）/ 关闭（清空模式）。"""
+    from services.config_manager import RemoteTransportMode
+    svc = RemoteLinkService.get_instance()
+    if req.transport == "p2p":
+        result = await svc.switch_transport(RemoteTransportMode.P2P)
+    elif req.transport == "http":
+        result = await svc.switch_transport(RemoteTransportMode.HTTP)
+    elif req.transport == "":
+        result = svc.switch_off()
     else:
-        raise HTTPException(status_code=422, detail="target 必须是 remote 或 local")
+        raise HTTPException(status_code=422, detail="transport 须是 p2p、http 或空串（关闭）")
     return SwitchOutcome(ok=result.ok, error=result.error, warnings=result.warnings,
                          detail=result.error if not result.ok else None)
 
