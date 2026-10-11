@@ -11,7 +11,7 @@
  *
  * 数据源: api.getRemoteStatus() 5s 轮询（后端状态机单一事实源）。
  */
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Badge,
@@ -59,6 +59,39 @@ import type {
 } from "../types";
 
 const POLL_MS = 5000;
+
+/** 倒计时平滑插值: anchor 为后端剩余秒数（每次变化重锚），本地每秒递减到 0。
+ *  值的来源仍是后端——本地只做渲染平滑，不产生数据。 */
+const useSmoothCountdown = (anchor: number | null): number | null => {
+  const [display, setDisplay] = useState<number | null>(null);
+  const anchorRef = useRef<{ value: number; at: number } | null>(null);
+
+  if (anchor !== null && anchor > 0) {
+    anchorRef.current = { value: anchor, at: Date.now() };
+  }
+
+  useEffect(() => {
+    if (anchorRef.current === null) {
+      setDisplay(null);
+      return;
+    }
+    const tick = () => {
+      const a = anchorRef.current;
+      if (a === null) {
+        setDisplay(null);
+        return;
+      }
+      const left = Math.max(0, a.value - (Date.now() - a.at) / 1000);
+      setDisplay(Math.ceil(left));
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [anchor]);
+
+  return display;
+};
+
 
 /** 模式徽标（卡片 2 大字标示 + 降级红闪） */
 function ModeBadge({ status }: { status: RemoteLinkStatusView | null }) {
@@ -154,24 +187,29 @@ const RemoteSection: React.FC = () => {
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [nodeBusy, setNodeBusy] = useState(false);
 
-  // 5s 轮询（单一事实源）
-  useEffect(() => {
-    let alive = true;
-    const poll = async () => {
-      try {
-        const st = await api.getRemoteStatus();
-        if (alive) setStatus(st);
-      } catch {
-        /* 后端不可达时保持上一帧 */
-      }
-    };
-    void poll();
-    const timer = setInterval(poll, POLL_MS);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
-  }, []);
+   // 5s 轮询（单一事实源）
+   useEffect(() => {
+     let alive = true;
+     const poll = async () => {
+       try {
+         const st = await api.getRemoteStatus();
+         if (alive) setStatus(st);
+       } catch {
+         /* 后端不可达时保持上一帧 */
+       }
+     };
+     void poll();
+     const timer = setInterval(poll, POLL_MS);
+     return () => {
+       alive = false;
+       clearInterval(timer);
+     };
+   }, []);
+
+   // 倒计时平滑插值: 后端值=锚点（每 5s 校准），本地每秒递减——
+   // 避免 ceil 离散值随轮询节奏跳变（3→2→1 各隔数秒）
+   const smoothNextSec = useSmoothCountdown(status?.next_probe_in_sec ?? null);
+
 
   useEffect(() => {
     if (rconfigs) setRvalues(rconfigs);
@@ -541,7 +579,7 @@ const RemoteSection: React.FC = () => {
                 }连接建立中…（心跳每轮自动重试，期间推理走本地）`}
                 description={`已尝试 ${status.probe_attempts} 次; ${
                   status.next_probe_in_sec > 0
-                    ? `${Math.ceil(status.next_probe_in_sec)} 秒后第 ${status.probe_attempts + 1} 次尝试（每 ${Math.round(status.probe_interval_sec)} 秒自动重试）`
+                    ? `${smoothNextSec ?? Math.ceil(status.next_probe_in_sec)} 秒后自动重试（探测节奏: 每 ${Math.round(status.probe_interval_sec)} 秒一次）`
                     : "正在尝试中…"
                 }${
                   status.last_fail_reason
@@ -557,7 +595,11 @@ const RemoteSection: React.FC = () => {
                 message={`远程不可用: ${status?.last_fail_reason ?? "未知原因"}`}
                 description={`请求已自动降级到本地（无需操作）; 远程恢复后将自动切回并释放本地资源。后台持续建联: 已尝试 ${status?.probe_attempts ?? 0} 次${
                   status && status.next_probe_in_sec > 0
-                    ? `，${Math.ceil(status.next_probe_in_sec)} 秒后第 ${(status.probe_attempts ?? 0) + 1} 次（每 ${Math.round(status?.probe_interval_sec ?? 5)} 秒）`
+                    ? `，${smoothNextSec ?? Math.ceil(status.next_probe_in_sec)} 秒后自动重试${
+                        status.probe_interval_sec
+                          ? `（探测节奏: 每 ${Math.round(status.probe_interval_sec)} 秒一次）`
+                          : ""
+                      }`
                     : "，正在尝试中…"
                 }`}
               />
