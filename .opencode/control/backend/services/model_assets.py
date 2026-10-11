@@ -251,7 +251,15 @@ class TtsAsset(ModelAsset):
                 dst = TTS_ASSET_DIR / name
                 try:
                     logger.info("[models] TTS 下载 %s ...", name)
-                    urllib.request.urlretrieve(f"{base}/{name}", tmp)  # noqa: S310 —— 固定 Release URL
+                    # 显式超时流式下载（urlretrieve 无超时——网络异常/代理拦截时无限 hang）
+                    req = urllib.request.Request(f"{base}/{name}", method="GET")
+                    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 —— 固定 Release URL
+                        with open(tmp, "wb") as fh:
+                            while True:
+                                chunk = resp.read(1 << 20)
+                                if not chunk:
+                                    break
+                                fh.write(chunk)
                     tmp.rename(dst)
                     logger.info("[models] TTS 完成 %s", name)
                 except Exception:
