@@ -1,8 +1,8 @@
 """远端 TTS 服务（kokoro-onnx; 需求 D5/D8——初版 WAV 24kHz，Opus 列为后续优化）。
 
-模型资产（手动放置，P24 文档含下载命令）:
-  ~/.cache/opensecurity/tts/kokoro-v1_0.onnx   （int8/全量均可）
-  ~/.cache/opensecurity/tts/voices.bin
+模型资产（控制台「环境总览→模型」下载，产物落此目录; 也可手动放置）:
+  ~/.cache/opensecurity/tts/kokoro-v1.0.fp16.onnx     （kokoro-onnx GitHub Release v1.0）
+  ~/.cache/opensecurity/tts/voices-v1.0.bin
 
 失败语义: 模型缺失/依赖未装 → TtsUnavailable（路由层映射 503——
 调用方不需要区分错误种类）。LRU 键 = (voice, speed, text)。
@@ -19,9 +19,8 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 TTS_ASSET_DIR = Path.home() / ".cache" / "opensecurity" / "tts"
-MODEL_FILE = "kokoro-v1_0.onnx"
-VOICES_FILE = "voices.bin"
-TTS_HF_REPO = "onnx-community/Kokoro-82M-v1.0-ONNX"  # 环境总览→模型 的下载源
+MODEL_FILE = "kokoro-v1.0.fp16.onnx"      # kokoro-onnx GitHub Release v1.0（含 zf_*/zm_* 中文音色）
+VOICES_FILE = "voices-v1.0.bin"
 DEFAULT_VOICE = "zf_xiaobei"
 DEFAULT_SPEED = 1.0
 SAMPLE_RATE = 24000
@@ -73,19 +72,12 @@ class TtsService:
         return self._engine is not None
 
     def _model_paths(self) -> "tuple[Path, Path]":
-        """模型文件定位: ① HF hub 缓存（环境总览→模型 的下载产物，优先）
-        → ② 手动放置目录（~/.cache/opensecurity/tts/，回退兼容）。"""
-        try:
-            from huggingface_hub import snapshot_download  # pyright: ignore[reportUnknownVariableType] —— hf 库存根部分缺失
-            from typing import Callable as _Callable, cast as _cast
-            download = _cast("_Callable[..., str]", snapshot_download)  # pyright: ignore[reportUnknownArgumentType]
-            base = Path(download(repo_id=TTS_HF_REPO, local_files_only=True))
-            onnx = next(iter(sorted(base.rglob("*.onnx"))), None)
-            voices = next(iter(base.rglob("voices.bin")), None)
-            if onnx is not None and voices is not None:
-                return onnx, voices
-        except Exception:  # noqa: BLE001 —— 未下载/库缺失 → 走手动目录
-            pass
+        """模型文件定位: TTS_ASSET_DIR（GitHub Release 下载产物/手动放置同一目录）。
+
+        历史: 曾优先 HF hub snapshot——但 kokoro_onnx 引擎所需的 voices.bin
+        在 HF onnx-community 仓库并不存在（音色是 voices/*.bin 每音色一文件，
+        与引擎的单文件打包格式不兼容）——该分支从未可能成功，已删。
+        """
         return TTS_ASSET_DIR / MODEL_FILE, TTS_ASSET_DIR / VOICES_FILE
 
     def engine_ready(self) -> bool:
@@ -139,13 +131,36 @@ class TtsService:
                 self._cache.move_to_end(key)
                 return TtsResult(wav=hit, cached=True, gen_ms=0.0,
                                  voice=voice, speed=speed)
+        # 远程路由（四模型统一远程化——与 embed/rerank/ocr 同语义:
+        # should_use_remote → 远程推理，失败 fallback 本地; 缓存命中不出本机）
+        try:
+            from services.remote_link import RemoteLinkService
+            use_remote = RemoteLinkService.get_instance().should_use_remote()
+        except Exception:  # noqa: BLE001 —— remote_link 未就绪 → 本地
+            use_remote = False
+        if use_remote:
+            from services.remote_client import RemoteUnavailable
+            t0 = time.monotonic()
+            try:
+                client = RemoteLinkService.get_instance().get_client()
+                wav = client.tts_synth(text, voice, speed)
+                return TtsResult(wav=wav, cached=False,
+                                 gen_ms=(time.monotonic() - t0) * 1000,
+                                 voice=voice, speed=speed)
+            except RemoteUnavailable as e:
+                try:
+                    RemoteLinkService.get_instance().note_request_failure(f"tts: {e}")
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning("远程 tts 失败，fallback 本地: %s", e)
         engine = self._get_engine()
         t0 = time.monotonic()
         try:
             from typing import Sequence as _Seq, cast as _cast2
             raw = getattr(engine, "create")(  # pyright: ignore[reportAny] —— 无存根引擎
                 text, voice=voice, speed=speed,
-                lang="cmn-cn" if voice.startswith("z") else "en-us")
+                # espeak-ng 中文语音名为 "cmn"（cmn-cn/zh 均不存在——实测枚举）
+                lang="cmn" if voice.startswith("z") else "en-us")
             samples = _cast2("_Seq[float]",
                              raw[0] if isinstance(raw, tuple) else raw)
         except Exception as e:  # noqa: BLE001 —— 合成失败统一面

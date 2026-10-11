@@ -201,6 +201,29 @@ async def remote_health_forward() -> JSONResponse:
     return JSONResponse(content=data)
 
 
+@router.get("/models-forward")
+async def remote_models_forward() -> JSONResponse:
+    """远程节点模型列表透传（远程管理页查看节点模型状态/下载进度）。"""
+    import asyncio
+    from typing import cast
+    from services.remote_link import RemoteLinkService
+    client = RemoteLinkService.get_instance().get_client()
+    data = cast("object", await asyncio.to_thread(client._get_json, "/api/models"))  # noqa: SLF001 —— 转发层
+    return JSONResponse(content=cast("dict[str, object]", data))
+
+
+@router.post("/models-forward/{model_id}/download")
+async def remote_model_download(model_id: str) -> JSONResponse:
+    """触发远程节点模型下载（POST /api/models/{id}/download 透传）。"""
+    import asyncio
+    from typing import cast
+    from services.remote_link import RemoteLinkService
+    client = RemoteLinkService.get_instance().get_client()
+    data = cast("dict[str, object]", await asyncio.to_thread(
+        client._post_json, f"/api/models/{model_id}/download", {}))  # noqa: SLF001 —— 转发层
+    return JSONResponse(content=data)
+
+
 @router.get("/autostart")
 async def get_autostart(node: str = Query(default="local")) -> JSONResponse:
     """LaunchAgent 安装状态。transit 端点。"""

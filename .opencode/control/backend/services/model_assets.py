@@ -141,6 +141,10 @@ class ModelAsset:
         """下载执行体（平台/类型差异多态; None=无专属 worker，走默认）。"""
         return registry._download_worker  # noqa: SLF001
 
+    def hub_size_gb(self, registry: "ModelAssetRegistry") -> float:
+        """进度口径的磁盘占用（HF hub 默认; TTS 等目录型资产 override）。"""
+        return registry._cache_size_gb(self.repo_id)  # noqa: SLF001
+
     def local_snapshot(self) -> str:
         """本地版本指纹（模型自知其指纹来源: HF snapshot / 目录指纹）。"""
         return ""
@@ -211,6 +215,50 @@ class TtsAsset(ModelAsset):
         return (ModelLoadState.READY if TtsService.get_instance().engine_loaded
                 else ModelLoadState.IDLE)
 
+    def cache_state(self) -> "ModelCacheState":
+        """TTS 缓存判定: 手动目录双文件（onnx+voices）齐备才算 cached。
+
+        不走 HF _is_cached——下载源是 GitHub Release（HF 仓库无 voices.bin，
+        引擎所需单文件打包格式与 HF 的分音色文件不兼容）。"""
+        from services.tts_service import MODEL_FILE, VOICES_FILE, TTS_ASSET_DIR
+        m, v = TTS_ASSET_DIR / MODEL_FILE, TTS_ASSET_DIR / VOICES_FILE
+        if m.is_file() and v.is_file():
+            size = round((m.stat().st_size + v.stat().st_size) / 1024**3, 2)
+            return ModelCacheState(True, str(TTS_ASSET_DIR), size)
+        return ModelCacheState(False, None, 0.0)
+
+    def hub_size_gb(self, registry: "ModelAssetRegistry") -> float:  # noqa: ARG002 —— 签名多态一致
+        """进度口径: 目录磁盘占用（下载落同目录，poller 可见增长）。"""
+        from services.tts_service import TTS_ASSET_DIR
+        if not TTS_ASSET_DIR.is_dir():
+            return 0.0
+        total = sum(f.stat().st_size for f in TTS_ASSET_DIR.rglob("*") if f.is_file())
+        return round(total / 1024**3, 2)
+
+    def download_worker(self, registry: "ModelAssetRegistry") -> "Callable[[ModelAsset], None] | None":  # noqa: ARG002 —— 签名多态一致
+        """专属下载: kokoro-onnx GitHub Release（v1.0——zf_*/zm_* 中文音色名与代码一致）两文件流式下载。
+
+        线程内直下即可（urllib 不受 HF_HUB_OFFLINE 影响）; 临时名+rename
+        原子落盘，中断不残留半文件误判。"""
+        def worker(model: ModelAsset) -> None:  # noqa: ARG001 —— 签名一致
+            import urllib.request
+            from services.tts_service import MODEL_FILE, VOICES_FILE, TTS_ASSET_DIR
+            base = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1"
+            # v1.1-zh 音色为数字名（zf_001...），与代码/前端的 zf_xiaobei 体系不符——用 v1.0
+            TTS_ASSET_DIR.mkdir(parents=True, exist_ok=True)
+            for name in (MODEL_FILE, VOICES_FILE):
+                tmp = TTS_ASSET_DIR / (name + ".part")
+                dst = TTS_ASSET_DIR / name
+                try:
+                    logger.info("[models] TTS 下载 %s ...", name)
+                    urllib.request.urlretrieve(f"{base}/{name}", tmp)  # noqa: S310 —— 固定 Release URL
+                    tmp.rename(dst)
+                    logger.info("[models] TTS 完成 %s", name)
+                except Exception:
+                    tmp.unlink(missing_ok=True)
+                    raise
+        return worker
+
     def local_snapshot(self) -> str:
         """TTS 模型不在 HF hub——目录 size+mtime 短指纹（变更可检测）。"""
         from pathlib import Path
@@ -280,13 +328,13 @@ class ModelAssetRegistry:
         ),
         TtsAsset(
             id="kokoro-tts",
-            repo_id="onnx-community/Kokoro-82M-v1.0-ONNX",
+            repo_id="github:thewh1teagle/kokoro-onnx@model-files-v1.1",  # 下载源标识（实际由专属 worker 下载）
             type=ModelAssetKind.TTS,
-            required_files=("model.onnx", "model.int8.onnx", "onnx/model.onnx"),
+            required_files=(),
             display="Kokoro TTS (82M)",
             purpose="远程朗读语音合成（remote-p2p TTS; legado 经 P2P 调用）",
             min_free_gb=1.0,
-            disk_gb=0.5,
+            disk_gb=0.19,  # v1.0 fp16 onnx 164MB + voices-v1.0 28MB
         ),
     ]
 
@@ -624,7 +672,7 @@ class ModelAssetRegistry:
             with self._lock:
                 if self._states[model.id].status != "downloading":
                     return
-            size_gb = self._cache_size_gb(model.repo_id)
+            size_gb = model.hub_size_gb(self)
             with self._lock:
                 self._states[model.id].progress = min(round(size_gb / model.disk_gb, 2), 0.99)
             time.sleep(2)
