@@ -37,7 +37,38 @@ STANDALONE_ASSET = (f"cpython-{STANDALONE_VER}+{STANDALONE_TAG}"
 STANDALONE_URL = (f"https://github.com/astral-sh/python-build-standalone/releases/download/"
                   f"{STANDALONE_TAG}/{STANDALONE_ASSET}")
 ENVFILE = "/etc/remote-relayd/relay.env"
-SERVICE_FILE = "remote-relayd.service"
+# systemd unit 模板（部署时按远端 systemd 版本生成加固段; 单一来源在本文件）
+SYSTEMD_UNIT_TEMPLATE = """[Unit]
+Description=OpenSecurity remote relayd (P2P signaling + STUN + relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/remote-relayd
+EnvironmentFile=/etc/remote-relayd/relay.env
+ExecStart=/opt/remote-relayd/venv/bin/python -m services.remote_relayd serve
+Restart=always
+RestartSec=3
+{hardening}
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _systemd_hardening(major: int) -> str:
+    """按 systemd 主版本生成加固段。
+
+    relayd 不写任何文件（日志走 journal）——strict 全只读无需 ReadWritePaths 白名单;
+    日志统一 journal（journalctl -u remote-relayd 查），新旧版本行为一致。
+    """
+    base = ["NoNewPrivileges=true", "StandardOutput=journal", "StandardError=journal"]
+    if major >= 235:
+        base.insert(1, "ProtectSystem=strict")   # 235+ 支持 strict
+    else:
+        base.insert(1, "ProtectSystem=full")     # 214+（CentOS 7 的 219 走此档）
+    return "# 加固（systemd " + str(major) + " 档）\n" + "\n".join(base)
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent  # tools/relay-deploy → backend
 REMOTE_PY_DETECT = """
 for c in python3.12 python3.11 python3.10 python3.9 python3; do
@@ -220,12 +251,18 @@ rm -rf /tmp/relayd-py.tar.gz /tmp/relayd-py-extract
         self._report.steps_done.append("ensure_psk(generated)")
 
     def install_systemd(self) -> None:
-        """步骤 5: systemd 服务（enable --now）。"""
+        """步骤 5: systemd 服务（版本自适应加固 + enable --now）。"""
         t = self._t
-        unit_src = Path(__file__).resolve().parent / SERVICE_FILE
-        self._scp("5/6 上传 systemd 单元", [str(unit_src)], f"{t.ssh_dest}:/etc/systemd/system/")
+        ver = self._ssh("5/6 检测 systemd 版本", "systemctl --version | head -1",
+                        capture=True)
+        major = int((ver.stdout or "systemd 0").split()[1].split(".")[0] or 0)
+        unit = SYSTEMD_UNIT_TEMPLATE.format(hardening=_systemd_hardening(major))
+        print(f"    systemd {major} → {'strict' if major >= 235 else 'full'} 加固档")
+        # heredoc 直写（单元内容部署时生成，无静态文件可 scp）
+        self._ssh("5/6 写入 systemd 单元",
+                  f"cat > /etc/systemd/system/remote-relayd.service <<'UNIT-EOF'\n{unit}UNIT-EOF")
         self._ssh("5/6 启用服务", "systemctl daemon-reload && systemctl enable --now remote-relayd")
-        self._report.steps_done.append("install_systemd")
+        self._report.steps_done.append(f"install_systemd(systemd {major})")
 
     def firewall(self) -> None:
         """步骤 6: 防火墙放行 41000 TCP+UDP。"""

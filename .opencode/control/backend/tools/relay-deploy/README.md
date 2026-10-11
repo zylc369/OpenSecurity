@@ -24,7 +24,7 @@ MacMini backend(同款代码) ─────┘──────┘（gateway 
 
 # 运维
 ssh root@<VPS> systemctl status remote-relayd
-ssh root@<VPS> tail -f /var/log/remote-relayd/relayd.log
+ssh root@<VPS> journalctl -u remote-relayd -f
 ```
 
 内存占用 ~60-80MB（1G VPS 富余）。端口: TCP+UDP 41000（云安全组须放行）。
@@ -71,7 +71,7 @@ REMOTE_CONSOLE_URL=http://<MacMini局域网IP>:<port>   # 仍需配置（P2P 关
 
 | 症状 | 排查 |
 |------|------|
-| 手动机能连、朗读失败 | relayd 日志有无 lookup；client `/health`（网关 127.0.0.1:18888/health） |
+| 手动机能连、朗读失败 | relayd 日志（journalctl -u remote-relayd）有无 lookup；client `/health`（网关 127.0.0.1:18888/health） |
 | 打洞总是失败走中继 | 家宽 NAT 类型（光猫桥接+路由器拨号改善）; 中继仍可用（50-80ms） |
 | relayd 拒绝一切连接 | PSK 不一致（三端比对）; failban 触发（等 10 分钟或重启服务） |
 | 控制台切远程失败 | P2P_CLIENT_ENABLE=1 且 PSK/RELAY_HOST 完整; relayd/节点在线 |
