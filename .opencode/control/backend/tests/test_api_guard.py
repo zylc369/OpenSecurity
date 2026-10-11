@@ -150,8 +150,8 @@ def test_lan_trusted_all_allows():
         _cmi.get, guard.ApiGuardMiddleware.__dict__['_is_local'],
         guard.ApiGuardMiddleware.__dict__.get('_is_lan'))
     _cmi.get = lambda key: "some-key" if key == "CONTROL_API_KEY" else None
-    guard.ApiGuardMiddleware._is_local = classmethod(lambda cls, host: False)
-    guard.ApiGuardMiddleware._is_lan = classmethod(lambda cls, host: True)  # 伪造私网来源
+    guard.ApiGuardMiddleware._is_local = classmethod(lambda cls, host: False)  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+    guard.ApiGuardMiddleware._is_lan = classmethod(lambda cls, host: True)  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)  # 伪造私网来源
     try:
         assert_eq(c.get("/api/config").status_code, 200, "管理面放行（LAN 信任）")
         assert_eq(c.get("/").status_code, 200, "前端页面放行")

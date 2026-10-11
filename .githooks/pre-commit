@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# 前端 dist 自动保鲜: 本次提交涉及前端源码时自动重新构建, 并将 dist 并入本次提交。
+# 构建失败（类型错误等）→ 拒绝提交。启用: git config core.hooksPath .githooks
+set -euo pipefail
+FRONTEND=".opencode/control/frontend"
+# 触发范围: src/ 或构建配置（入口/依赖/类型/打包配置）
+if git diff --cached --name-only | grep -qE "^${FRONTEND}/(src/|package(-lock)?\.json|vite\.config\.|tsconfig|index\.html)"; then
+  echo "[pre-commit] 前端源码有变更——自动构建 dist ..."
+  (cd "${FRONTEND}" && npm run build) || {
+    echo "[pre-commit] 构建失败——提交中止（先修复前端错误）" >&2
+    exit 1
+  }
+  git add "${FRONTEND}/dist"
+  echo "[pre-commit] dist 已重新构建并加入本次提交 ✓"
+fi

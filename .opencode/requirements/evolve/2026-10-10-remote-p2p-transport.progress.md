@@ -192,3 +192,8 @@
 - dispatch 新增 LAN 信任层: 节点模式（CONTROL_API_KEY 非空）+ 来源为私网地址（RFC1918/ULA/link-local, ipaddress 判定）→ 全放行（含管理 UI, 免 token）
 - 分层信任模型: 本机（全放行）> LAN（节点模式信任放行）> 公网（白名单+Bearer——0.0.0.0 意外暴露的兜底层）
 - 用例: +2（LAN 信任全放行 / _is_lan 七种地址）; 原 admin_forbidden 用例改名 test_wan_admin_forbidden（语义本是公网来源）
+
+### 过程缺陷记录（第 6 次——CI 红灯）
+- 事故: test_api_guard 新用例 monkeypatch 赋值漏行级 pyright ignore（旧用例有）; 本地验证只扫 services/ 单文件而 CI 扫全目录
+- 修复: 补 ignore; 本地 basedpyright 全目录 0/0/0
+- 整改纪律追加: 本地类型检查一律 cd backend && basedpyright（与 CI 同命令同范围）

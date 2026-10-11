@@ -81,3 +81,14 @@ jobs:
       - name: 单元测试（vitest）
         working-directory: .opencode/control/frontend
         run: npx vitest run
+      - name: dist 新鲜度门禁（防"改了 src 忘构建"——构建产物入库的纪律强制）
+        working-directory: .opencode/control/frontend
+        run: |
+          npm run build
+          if [ -n "$(git status --porcelain dist/)" ]; then
+            echo "::error::dist/ 与 src/ 不一致——前端源码有未构建的变更。"
+            echo "本地执行: cd .opencode/control/frontend && npm run build, 然后把 dist/ 一并提交。"
+            git status --porcelain dist/
+            exit 1
+          fi
+          echo "dist/ 新鲜 ✓（构建产物与源码一致）"

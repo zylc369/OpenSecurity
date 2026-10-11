@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify:fresh": "npm run build && if [ -n \"$(git status --porcelain dist/)\" ]; then echo \"dist 过期——执行 npm run build 后提交 dist/\" && git status --porcelain dist/ && exit 1; else echo \"dist 新鲜 ✓\"; fi"
   },
   "dependencies": {
     "@ant-design/icons": "^5.6.1",
