@@ -954,6 +954,59 @@ class ConfigManager:
             category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
             validator=None, default_value="",
         ),
+        # ── remote-p2p 连接（hidden→remote: 全量可见可配; 保存即热重载重建 client） ──
+        ConfigField(
+            key=Keys.P2P_CLIENT_ENABLE, label="P2P 客户端", type="bool",
+            hint="非直接启用远程——仅选择管道: 远程流量走 P2P 隧道（Noise 加密+打洞直连，"
+                 "无需公网暴露）还是 HTTP 直连。实际启用远程须点「切换远程」按钮（总开关）。"
+                 "生效需 P2P 四项齐备（本开关+中继地址+密钥+节点ID），缺任一自动回退 HTTP 直连",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="0",
+            readonly=False,
+        ),
+        ConfigField(
+            key=Keys.RELAY_HOST, label="中继服务器地址", type="text",
+            hint="relayd 所在 VPS 的公网 IP（三端一致）",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="",
+            readonly=False,
+        ),
+        ConfigField(
+            key=Keys.RELAY_PORT, label="中继服务器端口", type="text",
+            hint="relayd 监听端口，留空=默认 41000（TCP+UDP 须一致）",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="",
+            readonly=False,
+        ),
+        ConfigField(
+            key=Keys.RELAY_PSK, label="中继预共享密钥", type="password",
+            hint="Noise NNpsk2 预共享密钥 base64(32B)——deploy-relayd.sh 部署时生成并打印，三端一致",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="",
+            readonly=False,
+        ),
+        ConfigField(
+            key=Keys.REMOTE_NODE_ID, label="远程节点 ID", type="text",
+            hint="双视角: 远程节点侧=本机注册名（如 Mac Mini 的 OpenSecurityServer）; "
+                 "主控侧=要连接的节点注册名",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="",
+            readonly=False,
+        ),
+        ConfigField(
+            key=Keys.P2P_GATEWAY_ENABLE, label="P2P 网关节点", type="bool",
+            hint="1=本机作为远程推理节点注册到 relayd（Mac Mini 等节点机用）; 主控端保持 0。"
+                 "节点机推荐经 start-remote-node.sh 引导（自动补齐配套键）",
+            required=False,
+            category=ConfigCategory.REMOTE, surfaces=[Surface.REMOTE],
+            validator=None, default_value="0",
+            readonly=False,
+        ),
         # ── 节点侧（hidden——远程页节点管理卡片经专用端点管理;
         #    CONTROL_API_KEY 变更触发重绑 0.0.0.0 副作用，通用写接口不可达） ──
         ConfigField(

@@ -13,40 +13,81 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Alert, Badge, Button, Card, Col, Descriptions, Input, Popconfirm, Row,
-  Space, Switch, Tag, Tooltip, Typography, App as AntApp,
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Col,
+  Descriptions,
+  Input,
+  Popconfirm,
+  Row,
+  Space,
+  Switch,
+  Tag,
+  Tooltip,
+  Typography,
+  App as AntApp,
 } from "antd";
 import {
-  ApiOutlined, CheckCircleOutlined, CloudServerOutlined,
-  DesktopOutlined, LinkOutlined, ReloadOutlined, SaveOutlined,
-  SettingOutlined, SyncOutlined, WarningOutlined, CloudDownloadOutlined } from "@ant-design/icons";
+  ApiOutlined,
+  CheckCircleOutlined,
+  CloudServerOutlined,
+  DesktopOutlined,
+  LinkOutlined,
+  ReloadOutlined,
+  SaveOutlined,
+  SettingOutlined,
+  SyncOutlined,
+  WarningOutlined,
+  CloudDownloadOutlined,
+} from "@ant-design/icons";
 import { api } from "../api/client";
 import { useAllConfig, useConfigMeta } from "../hooks";
 import ConfigFieldRow from "../components/ConfigFieldRow";
-import { findGroup, groupByCategory, writableUpdates } from "../utils/configGrouping";
+import {
+  findGroup,
+  groupByCategory,
+  writableUpdates,
+} from "../utils/configGrouping";
 import type {
-  AutostartView, ConfigMap, NodeConfigView, RemoteLinkStatusView,
+  AutostartView,
+  ConfigMap,
+  NodeConfigView,
+  RemoteLinkStatusView,
 } from "../types";
 
 const POLL_MS = 5000;
 
 /** 模式徽标（卡片 2 大字标示 + 降级红闪） */
 function ModeBadge({ status }: { status: RemoteLinkStatusView | null }) {
-  if (!status) return <Typography.Text type="secondary">加载中…</Typography.Text>;
+  if (!status)
+    return <Typography.Text type="secondary">加载中…</Typography.Text>;
   if (status.state === "remote") {
     return (
       <Space size={8}>
         <CloudServerOutlined style={{ fontSize: 22, color: "#0A6CFF" }} />
-        <Typography.Text strong style={{ fontSize: 18 }}>远程模式</Typography.Text>
-        <Tag color="blue" style={{ marginInlineEnd: 0 }}>推理走远程节点</Tag>
+        <Typography.Text strong style={{ fontSize: 18 }}>
+          远程模式
+        </Typography.Text>
+        <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+          推理走远程节点
+        </Tag>
       </Space>
     );
   }
   if (status.state === "degraded") {
     return (
       <Space size={8} wrap>
-        <WarningOutlined className="remote-degraded-blink" style={{ fontSize: 22, color: "#ff4d4f" }} />
-        <Typography.Text strong className="remote-degraded-blink" style={{ fontSize: 18, color: "#ff4d4f" }}>
+        <WarningOutlined
+          className="remote-degraded-blink"
+          style={{ fontSize: 22, color: "#ff4d4f" }}
+        />
+        <Typography.Text
+          strong
+          className="remote-degraded-blink"
+          style={{ fontSize: 18, color: "#ff4d4f" }}
+        >
           已降级 · 实际使用本地服务
         </Typography.Text>
       </Space>
@@ -55,7 +96,9 @@ function ModeBadge({ status }: { status: RemoteLinkStatusView | null }) {
   return (
     <Space size={8}>
       <DesktopOutlined style={{ fontSize: 22, color: "#52c41a" }} />
-      <Typography.Text strong style={{ fontSize: 18 }}>本地模式</Typography.Text>
+      <Typography.Text strong style={{ fontSize: 18 }}>
+        本地模式
+      </Typography.Text>
     </Space>
   );
 }
@@ -65,7 +108,11 @@ const RemoteSection: React.FC = () => {
   const [status, setStatus] = useState<RemoteLinkStatusView | null>(null);
   // 连接配置: meta 驱动（surface=remote——URL/TOKEN 可写 + ENABLED 只读）
   const rmeta = useConfigMeta("remote");
-  const { data: rconfigs, save: saveRemote, refresh: refreshRemoteConfig } = useAllConfig("remote");
+  const {
+    data: rconfigs,
+    save: saveRemote,
+    refresh: refreshRemoteConfig,
+  } = useAllConfig("remote");
   const [rvalues, setRvalues] = useState<ConfigMap>({});
   const [saving, setSaving] = useState(false);
   const [switching, setSwitching] = useState(false);
@@ -99,28 +146,33 @@ const RemoteSection: React.FC = () => {
   }, [rconfigs]);
 
   const rgroups = useMemo(
-    () => (rmeta.data ? groupByCategory(rmeta.data.entries, rmeta.data.categories) : []),
-    [rmeta.data]);
+    () =>
+      rmeta.data
+        ? groupByCategory(rmeta.data.entries, rmeta.data.categories)
+        : [],
+    [rmeta.data],
+  );
   const linkGroup = findGroup(rgroups, "remote");
   const tuningGroup = findGroup(rgroups, "remote_tuning");
   const remoteUrl = rvalues["REMOTE_CONSOLE_URL"] ?? "";
 
   const rdirty = useMemo(() => {
     if (!rconfigs || !rmeta.data) return false;
-    return Object.entries(writableUpdates(rvalues, rmeta.data.entries))
-      .some(([k, v]) => (v ?? "") !== (rconfigs[k] ?? ""));
+    return Object.entries(writableUpdates(rvalues, rmeta.data.entries)).some(
+      ([k, v]) => (v ?? "") !== (rconfigs[k] ?? ""),
+    );
   }, [rvalues, rconfigs, rmeta.data]);
 
   const saveRemoteConfig = useCallback(async () => {
-    if (!remoteUrl.trim()) {
-      message.warning("远程链接不能为空");
-      return;
-    }
+    // 可用性校验在「切换远程」时做（后端先校验后置位）; 保存只写值——
+    // 远程配置全部可选，允许只配 P2P、只配 HTTP 直连或暂存草稿。
     setSaving(true);
     try {
       const updates = Object.fromEntries(
-        Object.entries(writableUpdates(rvalues, rmeta.data?.entries ?? {}))
-          .map(([k, v]) => [k, (v ?? "").trim()]));
+        Object.entries(writableUpdates(rvalues, rmeta.data?.entries ?? {})).map(
+          ([k, v]) => [k, (v ?? "").trim()],
+        ),
+      );
       await saveRemote(updates);
       message.success("远程连接配置已保存");
     } catch (e) {
@@ -128,7 +180,7 @@ const RemoteSection: React.FC = () => {
     } finally {
       setSaving(false);
     }
-  }, [remoteUrl, rvalues, rmeta.data, saveRemote, message]);
+  }, [rvalues, rmeta.data, saveRemote, message]);
 
   // ── 更新并重启（git pull + restart; 轮询远程 boot_token 变化判定完成——
   //     exec 重启 PID 不变、boot_token 必变，是进程身份的唯一可靠信号）──
@@ -148,7 +200,9 @@ const RemoteSection: React.FC = () => {
       }
       hide();
       if (newToken && newToken !== oldToken) {
-        message.success(`远程节点已更新并重启完成${r.pull_output ? "（代码已更新）" : ""}`);
+        message.success(
+          `远程节点已更新并重启完成${r.pull_output ? "（代码已更新）" : ""}`,
+        );
       } else {
         message.warning("重启已触发，但 30 秒内远程未恢复健康——请检查远程日志");
       }
@@ -160,28 +214,34 @@ const RemoteSection: React.FC = () => {
     }
   };
 
-  const doSwitch = useCallback(async (target: "remote" | "local") => {
-    setSwitching(true);
-    try {
-      const r = await api.switchRemote(target);
-      if (r.ok) {
-        message.success(target === "remote" ? "已切换远程" : "已切换本地");
-        if (r.warnings?.length) {
-          message.warning({ content: r.warnings.join("；"), duration: 10 });
+  const doSwitch = useCallback(
+    async (target: "remote" | "local") => {
+      setSwitching(true);
+      try {
+        const r = await api.switchRemote(target);
+        if (r.ok) {
+          message.success(target === "remote" ? "已切换远程" : "已切换本地");
+          if (r.warnings?.length) {
+            message.warning({ content: r.warnings.join("；"), duration: 10 });
+          }
+        } else {
+          message.error({
+            content: `切换失败: ${r.error || r.detail || "未知原因"}`,
+            duration: 10,
+          });
         }
-      } else {
-        message.error({ content: `切换失败: ${r.error || r.detail || "未知原因"}`, duration: 10 });
+        const st = await api.getRemoteStatus();
+        setStatus(st);
+        // 切换会写 REMOTE_CONSOLE_ENABLED → 刷新配置源，只读行与状态机同步
+        refreshRemoteConfig();
+      } catch (e) {
+        message.error(e instanceof Error ? e.message : String(e));
+      } finally {
+        setSwitching(false);
       }
-      const st = await api.getRemoteStatus();
-      setStatus(st);
-      // 切换会写 REMOTE_CONSOLE_ENABLED → 刷新配置源，只读行与状态机同步
-      refreshRemoteConfig();
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSwitching(false);
-    }
-  }, [message, refreshRemoteConfig]);
+    },
+    [message, refreshRemoteConfig],
+  );
 
   const health = status?.remote_health ?? null;
   const enabled = status?.enabled ?? false;
@@ -192,7 +252,10 @@ const RemoteSection: React.FC = () => {
   // ── 卡片 3: 远程节点管理加载 ─────────────────────────
   const loadNodeInfo = useCallback(async () => {
     try {
-      const [cfg, auto] = await Promise.all([api.getNodeConfig("remote"), api.getAutostart("remote")]);
+      const [cfg, auto] = await Promise.all([
+        api.getNodeConfig("remote"),
+        api.getAutostart("remote"),
+      ]);
       setNodeCfg(cfg);
       setAutostart(auto);
     } catch (e) {
@@ -206,53 +269,81 @@ const RemoteSection: React.FC = () => {
     if (status?.url) void loadNodeInfo();
   }, [status?.url, loadNodeInfo]);
 
-  const saveApiKey = useCallback(async (value: string) => {
-    if (!value.trim()) return;
-    setNodeBusy(true);
-    try {
-      const r = await api.updateNodeConfig({ CONTROL_API_KEY: value.trim() }, "remote");
-      message.success(r.reboot_required ? "已保存; 需重启远程节点控制台生效" : "已保存");
-      await loadNodeInfo();
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      setNodeBusy(false);
-    }
-  }, [message, loadNodeInfo]);
+  const saveApiKey = useCallback(
+    async (value: string) => {
+      if (!value.trim()) return;
+      setNodeBusy(true);
+      try {
+        const r = await api.updateNodeConfig(
+          { CONTROL_API_KEY: value.trim() },
+          "remote",
+        );
+        message.success(
+          r.reboot_required ? "已保存; 需重启远程节点控制台生效" : "已保存",
+        );
+        await loadNodeInfo();
+      } catch (e) {
+        message.error(e instanceof Error ? e.message : String(e));
+      } finally {
+        setNodeBusy(false);
+      }
+    },
+    [message, loadNodeInfo],
+  );
 
-  const toggleNodeKey = useCallback(async (key: "CONTROL_RESIDENT" | "CONTROL_AUTOSTART", on: boolean) => {
-    setNodeBusy(true);
-    try {
-      await api.updateNodeConfig({ [key]: on ? "1" : "0" } as Partial<Record<"CONTROL_RESIDENT" | "CONTROL_AUTOSTART" | "CONTROL_API_KEY", string>>, "remote");
-      message.success("已更新");
-      await loadNodeInfo();
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : String(e));
-      await loadNodeInfo(); // 恢复真实态
-    } finally {
-      setNodeBusy(false);
-    }
-  }, [message, loadNodeInfo]);
+  const toggleNodeKey = useCallback(
+    async (key: "CONTROL_RESIDENT" | "CONTROL_AUTOSTART", on: boolean) => {
+      setNodeBusy(true);
+      try {
+        await api.updateNodeConfig(
+          { [key]: on ? "1" : "0" } as Partial<
+            Record<
+              "CONTROL_RESIDENT" | "CONTROL_AUTOSTART" | "CONTROL_API_KEY",
+              string
+            >
+          >,
+          "remote",
+        );
+        message.success("已更新");
+        await loadNodeInfo();
+      } catch (e) {
+        message.error(e instanceof Error ? e.message : String(e));
+        await loadNodeInfo(); // 恢复真实态
+      } finally {
+        setNodeBusy(false);
+      }
+    },
+    [message, loadNodeInfo],
+  );
 
-  const toggleAutostart = useCallback(async (on: boolean) => {
-    setNodeBusy(true);
-    try {
-      const r = await api.setAutostart(on, "remote");
-      message.success(on ? "LaunchAgent 已安装（设备需开启自动登录）" : "LaunchAgent 已卸载");
-      if (r.hint) message.info({ content: r.hint, duration: 8 });
-      await loadNodeInfo();
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : String(e));
-      await loadNodeInfo();
-    } finally {
-      setNodeBusy(false);
-    }
-  }, [message, loadNodeInfo]);
+  const toggleAutostart = useCallback(
+    async (on: boolean) => {
+      setNodeBusy(true);
+      try {
+        const r = await api.setAutostart(on, "remote");
+        message.success(
+          on
+            ? "LaunchAgent 已安装（设备需开启自动登录）"
+            : "LaunchAgent 已卸载",
+        );
+        if (r.hint) message.info({ content: r.hint, duration: 8 });
+        await loadNodeInfo();
+      } catch (e) {
+        message.error(e instanceof Error ? e.message : String(e));
+        await loadNodeInfo();
+      } finally {
+        setNodeBusy(false);
+      }
+    },
+    [message, loadNodeInfo],
+  );
 
   const genApiKey = useCallback(() => {
     const bytes = new Uint8Array(24);
     crypto.getRandomValues(bytes);
-    const key = Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+    const key = Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
     setApiKeyInput(key);
   }, []);
 
@@ -275,50 +366,73 @@ const RemoteSection: React.FC = () => {
           <Space size={8}>
             <LinkOutlined />
             <span>远程连接</span>
-            <Tag style={{ marginInlineEnd: 0 }} color={enabled ? "green" : "default"}>
+            <Tag
+              style={{ marginInlineEnd: 0 }}
+              color={enabled ? "green" : "default"}
+            >
               开关: {enabled ? "已开启" : "已关闭"}
             </Tag>
             {degraded && (
-              <Tag color="error" style={{ marginInlineEnd: 0 }}>远程失效中</Tag>
+              <Tag color="error" style={{ marginInlineEnd: 0 }}>
+                远程失效中
+              </Tag>
             )}
           </Space>
         }
         extra={
           <Space>
-          <Popconfirm
-            title="更新并重启远程节点？"
-            description="远程 git pull 最新代码后自动重启; 完成前按钮保持转圈（最长 30s）"
-            okText="更新并重启"
-            cancelText="取消"
-            onConfirm={() => void doUpdateRestart()}
-            disabled={updating || !enabled}
-          >
-            <Button loading={updating} icon={<CloudDownloadOutlined />} disabled={!enabled}>
-              更新并重启
-            </Button>
-          </Popconfirm>
-          {enabled ? (
             <Popconfirm
-              title="切换本地？"
-              description="模型推理改回本地; 本地资源保持可用"
-              okText="切换本地"
+              title="更新并重启远程节点？"
+              description="远程 git pull 最新代码后自动重启; 完成前按钮保持转圈（最长 30s）"
+              okText="更新并重启"
               cancelText="取消"
-              onConfirm={() => void doSwitch("local")}
-              disabled={switching}
+              onConfirm={() => void doUpdateRestart()}
+              disabled={updating || !enabled}
             >
-              <Button loading={switching} danger>切换本地</Button>
+              <Button
+                loading={updating}
+                icon={<CloudDownloadOutlined />}
+                disabled={!enabled}
+              >
+                更新并重启
+              </Button>
             </Popconfirm>
-          ) : (
-            <Button
-              type="primary"
-              icon={<ApiOutlined />}
-              loading={switching}
-              disabled={!remoteUrl.trim()}
-              onClick={() => void doSwitch("remote")}
-            >
-              切换远程
-            </Button>
-          )}
+            {enabled ? (
+              <Popconfirm
+                title="切换本地？"
+                description="模型推理改回本地; 本地资源保持可用"
+                okText="切换本地"
+                cancelText="取消"
+                onConfirm={() => void doSwitch("local")}
+                disabled={switching}
+              >
+                <Button loading={switching} danger>
+                  切换本地
+                </Button>
+              </Popconfirm>
+            ) : (
+              <Space size={4}>
+                <Tooltip
+                  title={
+                    remoteUrl.trim()
+                      ? "两层开关：本按钮 = 总开关（本地 ↔ 远程推理，点击时才做连通性校验，失败会展示原因）; 「P2P 客户端」= 管道选择（远程流量走 P2P 隧道还是 HTTP 直连）。开了 P2P 不会直接启用远程——仍需点本按钮。"
+                      : "需先填写「远程控制台链接」并保存——它是远程 client 的构建前提（P2P 的 HTTP 直连回退通道）"
+                  }
+                >
+                  <span>
+                    <Button
+                      type="primary"
+                      icon={<ApiOutlined />}
+                      loading={switching}
+                      disabled={!remoteUrl.trim()}
+                      onClick={() => void doSwitch("remote")}
+                    >
+                      切换远程
+                    </Button>
+                  </span>
+                </Tooltip>
+              </Space>
+            )}
           </Space>
         }
       >
@@ -332,16 +446,23 @@ const RemoteSection: React.FC = () => {
                     <ConfigFieldRow
                       meta={m}
                       value={rvalues[key] ?? ""}
-                      onChange={m.readonly
-                        ? undefined
-                        : (v) => setRvalues((s) => ({ ...s, [key]: v }))}
+                      onChange={
+                        m.readonly
+                          ? undefined
+                          : (v) => setRvalues((s) => ({ ...s, [key]: v }))
+                      }
                     />
                   </Col>
                 );
               })}
               <Col xs={24}>
-                <Button type="primary" icon={<SaveOutlined />} loading={saving}
-                        disabled={!rdirty} onClick={() => void saveRemoteConfig()}>
+                <Button
+                  type="primary"
+                  icon={<SaveOutlined />}
+                  loading={saving}
+                  disabled={!rdirty}
+                  onClick={() => void saveRemoteConfig()}
+                >
                   保存{rdirty ? "（有未保存修改）" : ""}
                 </Button>
               </Col>
@@ -351,12 +472,21 @@ const RemoteSection: React.FC = () => {
           )}
           {degraded && (
             <Alert
-              type="error" showIcon
+              type="error"
+              showIcon
               message={`远程不可用: ${status?.last_fail_reason ?? "未知原因"}`}
               description="请求已自动降级到本地（无需操作）; 远程恢复后将自动切回并释放本地资源"
             />
           )}
-          <Descriptions size="small" column={3} style={{ background: "rgba(0,0,0,0.02)", padding: "8px 12px", borderRadius: 8 }}>
+          <Descriptions
+            size="small"
+            column={3}
+            style={{
+              background: "rgba(0,0,0,0.02)",
+              padding: "8px 12px",
+              borderRadius: 8,
+            }}
+          >
             <Descriptions.Item label="心跳延迟">
               {health ? `${health.latency_ms} ms` : "—"}
             </Descriptions.Item>
@@ -372,10 +502,15 @@ const RemoteSection: React.FC = () => {
           {health && (
             <Space size={6} wrap>
               {health.models.map((m) => (
-                <Tooltip key={m.repo_id} title={`snapshot: ${m.snapshot || "未知"}`}>
-                  <Tag icon={m.loaded ? <CheckCircleOutlined /> : undefined}
-                       color={m.loaded ? "success" : "default"}
-                       style={{ marginInlineEnd: 0 }}>
+                <Tooltip
+                  key={m.repo_id}
+                  title={`snapshot: ${m.snapshot || "未知"}`}
+                >
+                  <Tag
+                    icon={m.loaded ? <CheckCircleOutlined /> : undefined}
+                    color={m.loaded ? "success" : "default"}
+                    style={{ marginInlineEnd: 0 }}
+                  >
                     {m.repo_id.split("/").pop()} {m.loaded ? "" : "(未加载)"}
                   </Tag>
                 </Tooltip>
@@ -403,7 +538,10 @@ const RemoteSection: React.FC = () => {
           <Row gutter={[16, 0]}>
             {tuningGroup.keys.map((key) => (
               <Col xs={24} md={12} xl={8} key={key}>
-                <ConfigFieldRow meta={rmetaEntries[key]} value={rvalues[key] ?? ""} />
+                <ConfigFieldRow
+                  meta={rmetaEntries[key]}
+                  value={rvalues[key] ?? ""}
+                />
               </Col>
             ))}
           </Row>
@@ -426,28 +564,47 @@ const RemoteSection: React.FC = () => {
         }
         extra={
           <Tooltip title="立即刷新">
-            <Button size="small" type="text" icon={<ReloadOutlined />}
-                    onClick={() => void api.getRemoteStatus().then(setStatus).catch(() => {})} />
+            <Button
+              size="small"
+              type="text"
+              icon={<ReloadOutlined />}
+              onClick={() =>
+                void api
+                  .getRemoteStatus()
+                  .then(setStatus)
+                  .catch(() => {})
+              }
+            />
           </Tooltip>
         }
       >
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
-          <div style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            background: degraded ? "rgba(255,77,79,0.06)" : "rgba(0,0,0,0.02)",
-            borderRadius: 10, padding: "14px 16px",
-          }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              background: degraded
+                ? "rgba(255,77,79,0.06)"
+                : "rgba(0,0,0,0.02)",
+              borderRadius: 10,
+              padding: "14px 16px",
+            }}
+          >
             <ModeBadge status={status} />
             <Space size={14}>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 开关配置: {enabled ? "开启" : "关闭"}
               </Typography.Text>
               {degraded && (
-                <Badge status="error" text={
-                  <Typography.Text type="danger" style={{ fontSize: 12 }}>
-                    {status?.last_fail_reason ?? "远程不可用"}
-                  </Typography.Text>
-                } />
+                <Badge
+                  status="error"
+                  text={
+                    <Typography.Text type="danger" style={{ fontSize: 12 }}>
+                      {status?.last_fail_reason ?? "远程不可用"}
+                    </Typography.Text>
+                  }
+                />
               )}
             </Space>
           </div>
@@ -484,15 +641,32 @@ const RemoteSection: React.FC = () => {
         }
       >
         {!status?.url ? (
-          <Alert type="info" showIcon message="先在上方配置远程连接（链接 + 令牌）才能管理远程节点" />
+          <Alert
+            type="info"
+            showIcon
+            message="先在上方配置远程连接（链接 + 令牌）才能管理远程节点"
+          />
         ) : !nodeCfg ? (
-          <Alert type="warning" showIcon
-                 message="远程节点不可达——检查节点控制台是否运行、CONTROL_API_KEY 是否已在本机（节点）页面配置" />
+          <Alert
+            type="warning"
+            showIcon
+            message="远程节点不可达——检查节点控制台是否运行、CONTROL_API_KEY 是否已在本机（节点）页面配置"
+          />
         ) : (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
-            <Descriptions size="small" column={2} style={{ background: "rgba(0,0,0,0.02)", padding: "8px 12px", borderRadius: 8 }}>
+            <Descriptions
+              size="small"
+              column={2}
+              style={{
+                background: "rgba(0,0,0,0.02)",
+                padding: "8px 12px",
+                borderRadius: 8,
+              }}
+            >
               <Descriptions.Item label="鉴权令牌">
-                {nodeCfg.CONTROL_API_KEY ? `${nodeCfg.CONTROL_API_KEY}…（已配置）` : "未配置"}
+                {nodeCfg.CONTROL_API_KEY
+                  ? `${nodeCfg.CONTROL_API_KEY}…（已配置）`
+                  : "未配置"}
               </Descriptions.Item>
               <Descriptions.Item label="LaunchAgent">
                 {autostart?.installed ? "已安装" : "未安装"}
@@ -507,31 +681,49 @@ const RemoteSection: React.FC = () => {
                 onChange={(e) => setApiKeyInput(e.target.value)}
               />
               <Button onClick={genApiKey}>生成随机 KEY</Button>
-              <Button type="primary" loading={nodeBusy} disabled={!apiKeyInput.trim()}
-                      onClick={() => void saveApiKey(apiKeyInput)}>
+              <Button
+                type="primary"
+                loading={nodeBusy}
+                disabled={!apiKeyInput.trim()}
+                onClick={() => void saveApiKey(apiKeyInput)}
+              >
                 保存到节点
               </Button>
             </Space.Compact>
             <Space size={24} wrap>
               <Space size={8}>
-                <Switch checked={nodeCfg.CONTROL_RESIDENT === "1"} loading={nodeBusy}
-                        onChange={(on) => void toggleNodeKey("CONTROL_RESIDENT", on)} />
+                <Switch
+                  checked={nodeCfg.CONTROL_RESIDENT === "1"}
+                  loading={nodeBusy}
+                  onChange={(on) => void toggleNodeKey("CONTROL_RESIDENT", on)}
+                />
                 <Typography.Text>常驻模式</Typography.Text>
                 <Tooltip title="禁用心跳自杀机制——无 opencode 连接时节点控制台不退出（节点推荐开启）">
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>?</Typography.Text>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    ?
+                  </Typography.Text>
                 </Tooltip>
               </Space>
               <Space size={8}>
-                <Switch checked={autostart?.installed ?? false} loading={nodeBusy}
-                        onChange={(on) => void toggleAutostart(on)} />
+                <Switch
+                  checked={autostart?.installed ?? false}
+                  loading={nodeBusy}
+                  onChange={(on) => void toggleAutostart(on)}
+                />
                 <Typography.Text>开机自启</Typography.Text>
                 <Tooltip title="安装 macOS LaunchAgent; 设备需开启「自动登录」（登录后才会拉起）">
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>?</Typography.Text>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    ?
+                  </Typography.Text>
                 </Tooltip>
               </Space>
             </Space>
-            <Alert type="info" showIcon style={{ marginTop: 0 }}
-                   message="部署提示: ① CONTROL_API_KEY 保存后需重启远程节点控制台生效（绑定 0.0.0.0 + 鉴权）; ② Mac mini 需开启系统「自动登录」，LaunchAgent 在登录后运行; ③ 首次绑 0.0.0.0 macOS 可能弹防火墙允许提示" />
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginTop: 0 }}
+              message="部署提示: ① CONTROL_API_KEY 保存后需重启远程节点控制台生效（绑定 0.0.0.0 + 鉴权）; ② Mac mini 需开启系统「自动登录」，LaunchAgent 在登录后运行; ③ 首次绑 0.0.0.0 macOS 可能弹防火墙允许提示"
+            />
           </Space>
         )}
       </Card>

@@ -197,3 +197,17 @@
 - 事故: test_api_guard 新用例 monkeypatch 赋值漏行级 pyright ignore（旧用例有）; 本地验证只扫 services/ 单文件而 CI 扫全目录
 - 修复: 补 ignore; 本地 basedpyright 全目录 0/0/0
 - 整改纪律追加: 本地类型检查一律 cd backend && basedpyright（与 CI 同命令同范围）
+
+## 2026-10-11 迭代续 2: P2P 配置 UI 化 + 分层开关澄清
+- 用户诉求: ①远程页要能看到全部 P2P 配置（可见性）②P2P_CLIENT_ENABLE 与「切换远程」按钮关系疑问
+- 实施: 6 键（P2P_CLIENT/RELAY_HOST/PORT/PSK/REMOTE_NODE_ID/P2P_GATEWAY_ENABLE）从 hidden 升 surface=remote——meta 驱动自动渲染（前端零改动）; PSK 走 password 型掩码; 保存即热重载（写边界钩子 → reload_config → client 重建——UI 配置免重启）
+- 分层语义（实证 remote_link.py:373-413）: 「切换远程」=使用层总开关（REMOTE_CONSOLE_ENABLED，本地/远程推理）; P2P_CLIENT_ENABLE=管道选择（远程流量走 P2P 隧道/HTTP 直连）——正交不冲突; P2P 注入条件=client_enable+psk_valid+relay_host+node_id 四者齐备
+- 过程缺陷（第 7 次）: grep 前端源码键名字面量零命中即断言"UI 不支持"——UI 是 meta 数据驱动渲染，前端不硬编码键名; 正确验证=读组件源码+查 ConfigField 声明
+- 验证: basedpyright 0/0/0; get_entries([Surface.REMOTE]) 六键全出（label/type 断言）
+
+### 2026-10-11 迭代续 3: 保存/校验职责分离 + 两层开关说明
+- 用户报告: 只配 P2P 时保存被"远程链接不能为空"拦截; 要求校验移到切换时
+- 修复: 删前端 saveRemoteConfig 的 URL 空拦截（保存只写值——远程配置全可选）; 校验留在 switch_to_remote（后端先校验后置位, 原生正确）
+- 说明强化: ①P2P_CLIENT_ENABLE hint 首句"非直接启用远程——仅选择管道" ②切换远程按钮加 Tooltip（含 disabled 态提示"URL 是 client 构建前提"）+ 问号图标
+- 注: URL 仍必填是架构约束（RemoteConsoleClient 构建前提, P2P 参数挂其上）; 按钮 disabled+Tooltip 可见化此约束
+- 验证: tsc 0 错 + vite build ✓ + basedpyright 0/0/0
