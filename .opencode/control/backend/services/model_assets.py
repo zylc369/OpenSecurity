@@ -251,16 +251,22 @@ class TtsAsset(ModelAsset):
                 dst = TTS_ASSET_DIR / name
                 try:
                     logger.info("[models] TTS 下载 %s ...", name)
-                    # 显式超时流式下载（urlretrieve 无超时——网络异常/代理拦截时无限 hang）
+                    # 显式超时流式下载（urlretrieve 无超时——网络异常/代理拦截时无限 hang）。
+                    # ProxyHandler({}) 显式直连: 节点进程可能继承终端代理 env，
+                    # 代理挂死时 urllib 走代理连接 hang——家用直连是既有验证路径。
                     from typing import BinaryIO, cast
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                     req = urllib.request.Request(f"{base}/{name}", method="GET")
-                    resp = urllib.request.urlopen(req, timeout=30)  # noqa: S310 —— 固定 Release URL
-                    with cast("BinaryIO", resp), open(tmp, "wb") as fh:  # pyright: ignore[reportAny]
-                        while True:
-                            chunk = resp.read(1 << 20)  # pyright: ignore[reportAny]
-                            if not chunk:
-                                break
-                            fh.write(chunk)
+                    resp = cast("BinaryIO", opener.open(req, timeout=30))  # noqa: S310 —— 固定 Release URL
+                    try:
+                        with open(tmp, "wb") as fh:
+                            while True:
+                                chunk = resp.read(1 << 20)  # pyright: ignore[reportAny]
+                                if not chunk:
+                                    break
+                                fh.write(chunk)
+                    finally:
+                        resp.close()
                     tmp.rename(dst)
                     logger.info("[models] TTS 完成 %s", name)
                 except Exception:
@@ -551,8 +557,14 @@ class ModelAssetRegistry:
 
         worker = model.download_worker(self)
         if worker is not None:
+            # 统一收口: 专属 worker 的状态翻转/进度轮询在 registry 层——
+            # 闭包 worker 自身 raise 时线程死、状态永远停在 downloading（无 error）
             threading.Thread(
-                target=worker, args=(model,), daemon=True, name=f"model-dl-{model.id}"
+                target=self._run_worker, args=(model, worker), daemon=True,
+                name=f"model-dl-{model.id}"
+            ).start()
+            threading.Thread(
+                target=self._progress_poller, args=(model,), daemon=True, name=f"model-dl-progress-{model.id}"
             ).start()
             return True
 
@@ -563,6 +575,20 @@ class ModelAssetRegistry:
             target=self._progress_poller, args=(model,), daemon=True, name=f"model-dl-progress-{model.id}"
         ).start()
         return True
+
+    def _run_worker(self, model: ModelAsset, worker: "Callable[[ModelAsset], None]") -> None:
+        """专属 worker 的状态收口包装: 成功 → done; 异常 → error（消息入状态）。"""
+        try:
+            worker(model)
+            with self._lock:
+                self._states[model.id].status = "done"
+                self._states[model.id].progress = 1.0
+                self._states[model.id].error = ""
+        except Exception as e:  # noqa: BLE001 —— 下载线程统一失败面
+            logger.error("[models] %s 下载失败: %s", model.id, e)
+            with self._lock:
+                self._states[model.id].status = "error"
+                self._states[model.id].error = str(e)[:200]
 
 
     def _ocr_download_worker(self, model: ModelAsset) -> None:
