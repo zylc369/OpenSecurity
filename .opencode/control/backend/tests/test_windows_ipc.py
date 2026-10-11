@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import pytest
 import subprocess
 import sys
 import threading
@@ -24,8 +25,8 @@ sys.path.insert(0, str(BACKEND_DIR))
 sys.path.insert(0, str(BACKEND_DIR.parent.parent / "mcp-servers"))
 
 if os.name != "nt":
-    print("(非 Windows 平台，跳过)")
-    sys.exit(0)
+    # 收集期模块级跳过（sys.exit 会炸全量收集的 INTERNALERROR）
+    pytest.skip("非 Windows 平台", allow_module_level=True)
 
 import httpx
 import uvicorn

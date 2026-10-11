@@ -30,6 +30,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+import errno
 import os
 import subprocess
 import sys
@@ -82,6 +83,31 @@ class ConsoleRestarter:
         threading.Timer(self.RESTART_DELAY_SEC, self.perform).start()
         return True
 
+    @staticmethod
+    def _sanitize_std_fds() -> None:
+        """execv 前修复坏 std fd（EBADF）——exec 原样继承 fd 0/1/2。
+
+        长驻进程的 stdin 可能指向已销毁的 tty（启动终端关闭后）——平时无感，
+        但新 Python 启动时 init_sys_streams 对坏 fd 0 直接 Fatal：
+        "can't initialize sys standard streams / OSError: Bad file descriptor"。
+        检测: lseek 对合法 fd 返回 0/EINVAL/ESPIPE; 坏 fd 返回 EBADF。
+        修复: dup2 /dev/null 到坏 fd（进程可活，日志 fd 1/2 正常时不受影响）。
+        """
+        for fd in (0, 1, 2):
+            try:
+                os.lseek(fd, 0, os.SEEK_CUR)
+            except OSError as e:
+                if e.errno != errno.EBADF:
+                    continue
+                try:
+                    devnull = os.open(os.devnull, os.O_RDWR)
+                    os.dup2(devnull, fd)
+                    if devnull > 2:
+                        os.close(devnull)
+                    logger.warning("execv 前 fd %d 为 EBADF，已重定向 /dev/null", fd)
+                except OSError:
+                    logger.exception("fd %d 自愈失败（exec 后可能 Fatal）", fd)
+
     def perform(self) -> None:
         """执行重启（单独成方法：单测 monkeypatch 本方法验证调度链路）。
 
@@ -97,6 +123,7 @@ class ConsoleRestarter:
             self._restart_windows()
         else:
             argv = [sys.executable, os.path.abspath(sys.argv[0])] + sys.argv[1:]
+            self._sanitize_std_fds()
             logger.info("execv 重启: %s", " ".join(argv))
             os.execv(sys.executable, argv)
 

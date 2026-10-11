@@ -336,6 +336,8 @@ class RemoteNodeBootstrapper:
             fh.write(f"\n===== remote-node start {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
             proc = subprocess.Popen(
                 [sys.executable, "-u", "server.py"], cwd=backend_dir,
+                stdin=subprocess.DEVNULL,  # stdin 免疫终端关闭（坏 fd 0 会在
+                                           # execv 重启时 Fatal: init_sys_streams）
                 stdout=fh, stderr=fh, start_new_session=True)
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
