@@ -4,6 +4,17 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# 拉最新代码（节点机日常=一键"最新+运行"; 失败不阻断——离线/冲突/脏工作区
+# 时以本地代码继续启动，旧代码好过没有节点）:
+if command -v git >/dev/null 2>&1 \
+   && git -C "${HERE}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if git -C "${HERE}" pull --ff-only >/dev/null 2>&1; then
+    echo "[+] git pull: $(git -C "${HERE}" log -1 --oneline)"
+  else
+    echo "[!] git pull 失败（离线/分叉/脏工作区）——以本地代码继续"
+  fi
+fi
+
 # 定位 Python ≥3.11（remote_node 顶层依赖 typing.Never 等 3.11+ 特性）:
 # PATH 的 python3 优先; 过老/缺失则依次尝试常见新版本名; 仍无 → 明确报错
 py_ok() { "${1}" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; }

@@ -408,3 +408,10 @@
 - 验证: 真实复现（子进程 os.close(0) → 自愈 → execv 存活输出 EXEC_OK）; pyright 0/0/0; 相关测试套件全绿
 - 顺手修存量: test_windows_ipc.py 模块级 sys.exit(0) → pytest.skip(allow_module_level=True)（sys.exit 炸全量收集 INTERNALERROR）; test_control.py 的 def test(name) 与 pytest 收集规则冲突致伪 ERROR（该文件为自包含直跑脚本，IPC 测试需控制台未运行环境）
 - MacMini 侧待办: git pull ecb2857 → ./start-remote-node.sh 重新拉起节点
+
+### 2026-10-11 迭代续 33: 用户三问审计 + 测试尾巴根治（0e77c2f 已推送）
+- Q1 复现 vs 推断: 终态复现（os.close(0) 模拟 EBADF → _sanitize_std_fds → execv 存活 EXEC_OK）; "终端关闭→fd0 变 EBADF"因果链是机制推断（MacMini traceback 证明 execv 时确有 std fd 为 EBADF——与推断一致但未在 macOS 实测 tty 销毁细节）; 修复对任何原因的 EBADF 均有效 + stdin=DEVNULL 源头免疫，双保险覆盖
+- Q2 MacMini 进程: 用户上轮 ps 输出为空 + 用户确认未重启 → 不存在（等待 git pull + start-remote-node.sh 拉起）
+- Q3 测试: 根治了所有文件尾部 "1 error"——根因 test_control.py 极简框架 def test(name) 被 pytest 收集（fixture 'name' not found），且 4 个消费文件 import test 后模块级可见同样被收集。修法: test.__test__=False（属性随函数对象 import 传播）+ conftest collect_ignore
+- 过程事故: ①改名 test→tc_case 未查下游引用炸 4 消费方 import（教训重犯——改共享符号前必 grep 引用方）②python str.replace 改缩进烂尾（禁令重犯——必须用 Edit 工具）——两次均即时回滚/修复
+- 终态: 6 套件 58 用例全绿（6/3/9/10/5/25）+ pyright 0/0/0; e2e_remote 未跑（需节点环境）; test_control 直跑需控制台未运行环境（IPC bind 冲突）
