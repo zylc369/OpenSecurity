@@ -319,6 +319,9 @@ const RemoteSection: React.FC = () => {
   const health = status?.remote_health ?? null;
   const localCodeFp = status?.local_code_fingerprint ?? "";
   const enabled = status?.enabled ?? false;
+  // 节点操作（更新并重启/保存 KEY/常驻/自启）全部经远程转发通道——
+  // 连接就绪（state=remote）才可用; 建立中/降级/失败时点击必然失败
+  const remoteReady = status?.state === "remote";
   const degraded = status?.state === "degraded";
   // 守卫后捕获（JSX 回调内属性窄化会丢失）
   const rmetaEntries = rmeta.data?.entries ?? null;
@@ -466,22 +469,32 @@ const RemoteSection: React.FC = () => {
         }
         extra={
           <Space>
-            <Popconfirm
-              title="更新并重启远程节点？"
-              description="远程 git pull 最新代码后自动重启; 完成前按钮保持转圈（最长 30s）"
-              okText="更新并重启"
-              cancelText="取消"
-              onConfirm={() => void doUpdateRestart()}
-              disabled={updating || !enabled}
+            <Tooltip
+              title={
+                !remoteReady
+                  ? "远程连接建立中或不可用——节点操作需要已建立的远程连接"
+                  : ""
+              }
             >
-              <Button
-                loading={updating}
-                icon={<CloudDownloadOutlined />}
-                disabled={!enabled}
-              >
-                更新并重启
-              </Button>
-            </Popconfirm>
+              <span>
+                <Popconfirm
+                  title="更新并重启远程节点？"
+                  description="远程 git pull 最新代码后自动重启; 完成前按钮保持转圈（最长 30s）"
+                  okText="更新并重启"
+                  cancelText="取消"
+                  onConfirm={() => void doUpdateRestart()}
+                  disabled={updating || !enabled || !remoteReady}
+                >
+                  <Button
+                    loading={updating}
+                    icon={<CloudDownloadOutlined />}
+                    disabled={!enabled || !remoteReady}
+                  >
+                    更新并重启
+                  </Button>
+                </Popconfirm>
+              </span>
+            </Tooltip>
             <Popover
               trigger="hover"
               placement="bottomRight"
@@ -822,7 +835,7 @@ const RemoteSection: React.FC = () => {
               <Button
                 type="primary"
                 loading={nodeBusy}
-                disabled={!apiKeyInput.trim()}
+                disabled={!apiKeyInput.trim() || !remoteReady}
                 onClick={() => void saveApiKey(apiKeyInput)}
               >
                 保存到节点
@@ -833,6 +846,7 @@ const RemoteSection: React.FC = () => {
                 <Switch
                   checked={nodeCfg.CONTROL_RESIDENT === "1"}
                   loading={nodeBusy}
+                  disabled={!remoteReady}
                   onChange={(on) => void toggleNodeKey("CONTROL_RESIDENT", on)}
                 />
                 <Typography.Text>常驻模式</Typography.Text>
@@ -846,6 +860,7 @@ const RemoteSection: React.FC = () => {
                 <Switch
                   checked={autostart?.installed ?? false}
                   loading={nodeBusy}
+                  disabled={!remoteReady}
                   onChange={(on) => void toggleAutostart(on)}
                 />
                 <Typography.Text>开机自启</Typography.Text>
