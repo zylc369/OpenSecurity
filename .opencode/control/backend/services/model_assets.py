@@ -15,6 +15,7 @@ import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TypedDict, cast
 
 import psutil
@@ -87,6 +88,23 @@ class ModelAssetStatus:
 # disk_gb:     权重磁盘占用的参考值（GB，进度估算用）
 
 
+class ModelAssetKind(StrEnum):
+    """模型类型（闭值域——新增类型=新枚举成员+新子类）。"""
+    EMBEDDER = "embedder"
+    RERANKER = "reranker"
+    OCR = "ocr"
+    TTS = "tts"
+
+
+class ModelLoadState(StrEnum):
+    """模型本地加载态（跨前后端契约值域——前端 literal union 对齐）。"""
+    READY = "ready"
+    STARTING = "starting"
+    IDLE = "idle"
+    ERROR = "error"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class ModelAsset:
     """模型资产基类——多态扩展点: local_state/local_snapshot 由各类型子类
@@ -95,7 +113,7 @@ class ModelAsset:
     """
     id: str
     repo_id: str
-    type: str            # embedder / reranker / ocr / tts
+    type: ModelAssetKind
     display: str
     purpose: str
     min_free_gb: float
@@ -103,9 +121,9 @@ class ModelAsset:
     required_files: tuple[str, ...] = ()  # 缓存完整性: 快照目录至少存在其一
     ollama_model: str = ""  # ocr 平台差异（win/linux=Ollama; 空=全平台 HF）
 
-    def local_state(self) -> str:
-        """本地加载态（ready/starting/idle/error; 基类默认 unknown）。"""
-        return "unknown"
+    def local_state(self) -> ModelLoadState:
+        """本地加载态（枚举值域; 基类默认 UNKNOWN）。"""
+        return ModelLoadState.UNKNOWN
 
     def loaded(self) -> bool:
         """已加载便捷判定（环境总览/远程页共用口径）。"""
@@ -118,6 +136,10 @@ class ModelAsset:
     def idle_info(self) -> "tuple[float | None, int | None]":
         """（已空闲秒, 自动卸载阈值）——OCR 专用，其余 (None, None)。"""
         return (None, None)
+
+    def download_worker(self, registry: "ModelAssetRegistry") -> "Callable[[ModelAsset], None] | None":
+        """下载执行体（平台/类型差异多态; None=无专属 worker，走默认）。"""
+        return registry._download_worker  # noqa: SLF001
 
     def local_snapshot(self) -> str:
         """本地版本指纹（模型自知其指纹来源: HF snapshot / 目录指纹）。"""
@@ -135,7 +157,8 @@ class ModelAsset:
 class EmbedderAsset(ModelAsset):
     def local_state(self) -> str:
         from services.model_loader import ModelInferenceService
-        return ModelInferenceService.get_instance().embedder_status().state
+        return ModelLoadState(
+            ModelInferenceService.get_instance().embedder_status().state)
 
     def local_snapshot(self) -> str:
         return self._hub_snapshot()
@@ -145,7 +168,8 @@ class EmbedderAsset(ModelAsset):
 class RerankerAsset(ModelAsset):
     def local_state(self) -> str:
         from services.model_loader import ModelInferenceService
-        return ModelInferenceService.get_instance().reranker_status().state
+        return ModelLoadState(
+            ModelInferenceService.get_instance().reranker_status().state)
 
     def local_snapshot(self) -> str:
         return self._hub_snapshot()
@@ -155,7 +179,7 @@ class RerankerAsset(ModelAsset):
 class OcrAsset(ModelAsset):
     def local_state(self) -> str:
         from services.ocr_service import OcrService
-        return OcrService.get_instance().status().state
+        return ModelLoadState(OcrService.get_instance().status().state)
 
     def cache_state(self) -> "ModelCacheState":
         return ModelAssetRegistry.get_instance()._ocr_cache_state(self)  # noqa: SLF001
@@ -164,6 +188,10 @@ class OcrAsset(ModelAsset):
         from services.ocr_service import OcrService
         st = OcrService.get_instance().status()
         return (OcrService.get_instance().idle_sec(), st.idle_release_sec)
+
+    def download_worker(self, registry: "ModelAssetRegistry") -> "Callable[[ModelAsset], None] | None":
+        # OCR 下载链路平台差异大（Ollama/win 分支），专属 worker
+        return registry._ocr_download_worker  # noqa: SLF001
 
     def local_snapshot(self) -> str:
         try:
@@ -180,7 +208,8 @@ class TtsAsset(ModelAsset):
     def local_state(self) -> str:
         # engine_loaded = 引擎懒加载真实态（首次合成才载）; 文件就绪是 cached 维度
         from services.tts_service import TtsService
-        return "ready" if TtsService.get_instance().engine_loaded else "idle"
+        return (ModelLoadState.READY if TtsService.get_instance().engine_loaded
+                else ModelLoadState.IDLE)
 
     def local_snapshot(self) -> str:
         """TTS 模型不在 HF hub——目录 size+mtime 短指纹（变更可检测）。"""
@@ -221,7 +250,7 @@ class ModelAssetRegistry:
         EmbedderAsset(
             id="bge-m3",
             repo_id="BAAI/bge-m3",
-            type="embedder",
+            type=ModelAssetKind.EMBEDDER,
             required_files=("pytorch_model.bin", "model.safetensors"),
             display="BGE-M3",
             purpose="向量化（知识库 / 事件图谱 embedding）",
@@ -231,7 +260,7 @@ class ModelAssetRegistry:
         RerankerAsset(
             id="bge-reranker-v2-m3",
             repo_id="BAAI/bge-reranker-v2-m3",
-            type="reranker",
+            type=ModelAssetKind.RERANKER,
             required_files=("pytorch_model.bin", "model.safetensors"),
             display="BGE Reranker v2 m3",
             purpose="重排序（事件检索 rerank）",
@@ -241,7 +270,7 @@ class ModelAssetRegistry:
         OcrAsset(
             id="glm-ocr",
             repo_id="mlx-community/GLM-OCR-4bit",
-            type="ocr",
+            type=ModelAssetKind.OCR,
             required_files=("model.safetensors", "pytorch_model.bin"),
             display="GLM-OCR (0.9B)",
             purpose="本地图像文字识别（ocr MCP 后端；mac=MLX / 其他=Ollama）",
@@ -252,7 +281,7 @@ class ModelAssetRegistry:
         TtsAsset(
             id="kokoro-tts",
             repo_id="onnx-community/Kokoro-82M-v1.0-ONNX",
-            type="tts",
+            type=ModelAssetKind.TTS,
             required_files=("model.onnx", "model.int8.onnx", "onnx/model.onnx"),
             display="Kokoro TTS (82M)",
             purpose="远程朗读语音合成（remote-p2p TTS; legado 经 P2P 调用）",
@@ -398,20 +427,10 @@ class ModelAssetRegistry:
             return ModelCacheState(False, None, 0.0)
 
 
-    def _ocr_loaded_state(self) -> bool:
-        """OCR 模型当前是否在内存（懒加载 + 空闲卸载，state==ready 即驻留）。"""
-        try:
-            from services.ocr_service import OcrService
-            return OcrService.get_instance().status().state == "ready"
-        except Exception:
-            return False
-
-
     def hardware_summary(self) -> HardwareSummary:
         """整体硬件评估: 全部已缓存模型同时驻留的总内存需求 vs 当前可用。"""
         avail = round(cast(int, psutil.virtual_memory().available) / 1024**3, 1)
-        cached = [m for m in self.MODELS if (
-            self._ocr_cache_state(m).cached if m.type == "ocr" else self._is_cached(m.repo_id).cached)]
+        cached = [m for m in self.MODELS if m.cache_state().cached]
         total = round(sum(m.min_free_gb for m in cached), 1)
         ok = avail >= total
         reason = "" if ok else (
@@ -473,9 +492,10 @@ class ModelAssetRegistry:
             self._states[model.id].progress = 0.0
             self._states[model.id].error = ""
 
-        if model.type == "ocr":
+        worker = model.download_worker(self)
+        if worker is not None:
             threading.Thread(
-                target=self._ocr_download_worker, args=(model,), daemon=True, name=f"model-dl-{model.id}"
+                target=worker, args=(model,), daemon=True, name=f"model-dl-{model.id}"
             ).start()
             return True
 

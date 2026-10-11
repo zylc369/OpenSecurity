@@ -712,7 +712,7 @@ def test_remote_client_p2p_branch() -> None:
     """P2P 模式: _post/_get 走 transport（api.req 语义）; 失败面对齐; 回归 HTTP 模式。"""
     from services.remote_transport import TransportConfig
 
-    def _cfg() -> "object":
+    def _cfg() -> TransportConfig:
         return TransportConfig(relay_host="x", relay_port=41000,
                                psk=b"p" * 32, node_id="n")
     import httpx
@@ -738,9 +738,11 @@ def test_remote_client_p2p_branch() -> None:
             return {"t": "api.resp", "status": self.status,
                     "mime": "application/json", "body": self.body}
 
-    # ① 正常 P2P 调用
+    # ① 正常 P2P 调用（cast: StubTransport 同形鸭嘴替身——测试注入）
+    from typing import cast as _cast
+    from services.remote_transport import RemoteTransport
     c1 = RemoteConsoleClient("http://unused", token="tk", p2p=_cfg())
-    c1._transport = _StubTransport(200, [[0.1]])  # noqa: SLF001
+    c1._transport = _cast(RemoteTransport, _StubTransport(200, [[0.1]]))  # noqa: SLF001
     assert c1.embed(["hi"]) == [[0.1]]
     assert calls[0] == ("POST", "/embed", {"inputs": ["hi"]}, "tk")
     assert c1.rerank("q", ["d"]) == {} or True  # rerank 走同分支
@@ -749,7 +751,7 @@ def test_remote_client_p2p_branch() -> None:
     # ② 401/5xx/传输失败 → RemoteUnavailable
     for status in (401, 500, -1):
         c2 = RemoteConsoleClient("http://unused", p2p=_cfg())
-        c2._transport = _StubTransport(status, {"e": 1})  # noqa: SLF001
+        c2._transport = _cast(RemoteTransport, _StubTransport(status, {"e": 1}))  # noqa: SLF001
         try:
             c2.embed(["x"])
             raise AssertionError(f"status={status} 应抛 RemoteUnavailable")

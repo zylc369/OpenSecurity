@@ -18,7 +18,10 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
+
+if TYPE_CHECKING:  # 仅类型检查（零运行时依赖——transport 延迟构建）
+    from services.remote_transport import RemoteTransport, TransportConfig
 
 import httpx
 
@@ -66,14 +69,14 @@ class RemoteConsoleClient:
 
     def __init__(self, base_url: str, token: str = "",
                  infer_timeout: float = 30.0, probe_timeout: float = 3.0,
-                 p2p: "object | None" = None) -> None:  # TransportConfig（避免循环 import 用 object 边界）
+                 p2p: "TransportConfig | None" = None) -> None:
         self._base = base_url.rstrip("/")
         self._token = token
         self._infer_timeout = infer_timeout
         self._probe_timeout = probe_timeout
         self._http = httpx.Client(timeout=infer_timeout)
         self._p2p_cfg = p2p
-        self._transport: "object | None" = None  # RemoteTransport（延迟构建）
+        self._transport: "RemoteTransport | None" = None  # 延迟构建
 
     # ─── 内部 ─────────────────────────────────────────────
 
@@ -120,20 +123,12 @@ class RemoteConsoleClient:
 
     # ─── P2P 传输分支（protocol.md §4.3 api.req 语义）────
 
-    @staticmethod
-    def _cfg_f(cfg: "dict[str, object]", key: str, default: float) -> float:
-        """p2p dict 的 float 键收口（非法/缺失 → 默认值）。"""
-        value = cfg.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
-        return default
-
-    def _get_transport(self) -> "object":
-        """延迟启动 RemoteTransport（首次 P2P 调用时; 配置已强类型化）。"""
+    def _get_transport(self) -> "RemoteTransport":
+        """延迟启动 RemoteTransport（首次 P2P 调用时）。"""
         if self._transport is None:
-            from services.remote_transport import RemoteTransport, TransportConfig
-            cfg = cast("TransportConfig", self._p2p_cfg)
-            if not cfg.psk or not cfg.relay_host or not cfg.node_id:
+            from services.remote_transport import RemoteTransport
+            cfg = self._p2p_cfg
+            if cfg is None or not cfg.psk or not cfg.relay_host or not cfg.node_id:
                 raise RemoteUnavailable("P2P 配置不完整（relay_host/node_id/psk）")
             transport = RemoteTransport(cfg)
             transport.start()
@@ -151,7 +146,7 @@ class RemoteConsoleClient:
         transport = self._get_transport()
         try:
             resp = cast("dict[str, object]",
-                        transport.request(method, path, payload, self._token))  # type: ignore[attr-defined]
+                        transport.request(method, path, payload, self._token))
         except TransportError as e:
             raise RemoteUnavailable(f"远程 P2P 调用失败: {e}") from e
         status_raw = resp.get("status", 0)
@@ -259,7 +254,7 @@ class RemoteConsoleClient:
         self._http.close()
         if self._transport is not None:
             try:
-                self._transport.stop()  # type: ignore[attr-defined]
+                self._transport.stop()
             except Exception:  # noqa: BLE001 —— 关闭异常不阻断
                 pass
             self._transport = None

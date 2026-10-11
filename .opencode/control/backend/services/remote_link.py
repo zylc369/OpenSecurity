@@ -32,10 +32,12 @@ from typing import TYPE_CHECKING
 
 from services.config_manager import ConfigManager, RemoteTransportMode
 from services.logging_setup import LogManager
-from services.ocr_engines import MlxEngine
 from services.remote_client import RemoteConsoleClient, RemoteHealthInfo
 
+from services.model_assets import ModelLoadState  # pydantic 运行时解析需可见（model_assets 无反向依赖）
+
 if TYPE_CHECKING:  # 仅类型检查用（零运行时依赖——依赖方向经 remote_client 间接）
+    from services.model_assets import ModelAsset
     from services.remote_transport import TransportConfig
 
 logger = LogManager.get_instance().setup_auxiliary("remote_link", "remote-link.log")
@@ -61,31 +63,22 @@ class SwitchResult:
     warnings: list[str] = field(default_factory=list)
 
 
+def _safe_state(m: "ModelAsset") -> "ModelLoadState":
+    """状态采集防护（瞬时异常 → ERROR 态 + 日志——status 接口永不错杀）。"""
+    from services.model_assets import ModelLoadState
+    try:
+        return m.local_state()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("模型状态采集异常（%s）: %s", m.id, e)
+        return ModelLoadState.ERROR
+
+
 @dataclass(frozen=True)
 class LocalModelState:
     """本地单模型状态（注册表驱动——与环境总览同源）。"""
     id: str
     display: str
-    state: str
-
-
-@dataclass(frozen=True)
-class RemoteModelView:
-    """远程单模型指纹视图（节点 health 下发）。"""
-    repo_id: str
-    display: str
-    snapshot: str
-    loaded: bool
-
-
-@dataclass(frozen=True)
-class RemoteHealthSummary:
-    """远程节点健康摘要（status 组装、单一序列化源）。"""
-    service: str
-    version: str
-    code_fingerprint: str
-    latency_ms: float
-    models: list[RemoteModelView]
+    state: "ModelLoadState"  # 延迟注解（StrEnum——JSON 序列化字符串形态）
 
 
 @dataclass
@@ -102,7 +95,7 @@ class RemoteLinkStatus:
     recover_streak: int
     last_ok_at: float | None           # wall clock 秒
     last_fail_reason: str | None
-    remote_health: "RemoteHealthSummary | None"  # 远程节点健康摘要
+    remote_health: "RemoteHealthInfo | None"  # 远程节点健康快照（remote_client 同型直传）
     local_models: "list[LocalModelState]"  # 各模型本地加载态（注册表驱动）
     unload_countdown_sec: float | None # 恢复稳定期倒计时（未安排 → None）
     local_code_fingerprint: str = ""  # 本机代码指纹（与 remote_health.code_fingerprint 对齐检测）
@@ -463,15 +456,13 @@ class RemoteLinkService:
         override 构建（mode_override 路径）。
         """
         p2p = self._p2p_config_locked(mode_override)
+        # 未变跳过（幂等短路）
         if (self._client is not None and url == self._client_url
                 and token == self._client_token and p2p == self._client_p2p):
             return
         # 防拆: 校验中 + 外部调用（无 override）+ 已有 client → 跳过重建
         if (self._validating and self._client is not None
                 and mode_override is None):
-            return
-        if (self._client is not None and url == self._client_url
-                and token == self._client_token and p2p == self._client_p2p):
             return
         if self._client is not None:
             try:
@@ -493,13 +484,14 @@ class RemoteLinkService:
     # ── 状态快照 ─────────────────────────────────────────
 
     def status(self) -> RemoteLinkStatus:
-        from routes.health import code_fingerprint_str
+        from services.runtime_identity import code_fingerprint_str
         url, enabled, token = self._read_config()
         mode = ConfigManager.get_instance().p2p_settings().transport_mode
+        local_fp = code_fingerprint_str()  # 文件系统 IO（glob+stat）——锁外执行
         with self._lock:
-            from services.model_assets import ModelAssetRegistry
+            from services.model_assets import ModelAssetRegistry, ModelLoadState
             local_models = [
-                LocalModelState(id=m.id, display=m.display, state=m.local_state())
+                LocalModelState(id=m.id, display=m.display, state=_safe_state(m))
                 for m in ModelAssetRegistry.MODELS
             ]
             countdown: float | None = None
@@ -512,20 +504,12 @@ class RemoteLinkService:
                 token_prefix=token[:6] if token else "",
                 state=self._state,
                 transport=mode,
-                local_code_fingerprint=code_fingerprint_str(),
+                local_code_fingerprint=local_fp,
                 fail_streak=self._fail_streak,
                 recover_streak=self._recover_streak,
                 last_ok_at=self._last_ok_at,
                 last_fail_reason=self._last_fail_reason,
-                remote_health=RemoteHealthSummary(
-                    service=self._last_health.service,
-                    version=self._last_health.version,
-                    code_fingerprint=self._last_health.code_fingerprint,
-                    latency_ms=self._last_health.latency_ms,
-                    models=[RemoteModelView(repo_id=m.repo_id, display=m.display,
-                                            snapshot=m.snapshot, loaded=m.loaded)
-                            for m in self._last_health.models],
-                ) if self._last_health else None,
+                remote_health=self._last_health,  # 同型直传（零搬运）
                 local_models=local_models,
                 unload_countdown_sec=countdown,
             )

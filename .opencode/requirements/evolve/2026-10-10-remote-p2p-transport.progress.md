@@ -290,3 +290,5 @@
 - 修复: kill 老进程 + 手动等价拉起（OPENCODE_ROOT/OPENSECURITY_HOME env + venv python server.py + 日志重定向）→ local_models=list 验证 ✓
 - 教训（部署事实，此前未认知）: ①控制台后端常驻（重启 opencode ≠ 重启控制台）②**改前后端共享契约必须同步重启后端进程**——只 build 前端=半生效 ③kill 后插件 spawn 依赖下一条消息触发——紧急恢复=手动等价拉起
 - 手动拉起命令（复用）: cd .opencode && OPENCODE_ROOT="$(pwd)" OPENSECURITY_HOME="$HOME/bw-security-analysis" nohup ~/.venv/bin/python control/backend/server.py >> logs/control-stdout.log 2>> logs/control-stderr.log & disown
+
+- 补丁: pydantic 运行时解析 RemoteLinkStatus 需 ModelLoadState 运行时可见（TYPE_CHECKING 不够）——顶层真 import（model_assets 无反向依赖安全）; 重启后 status 接口 ✓（state='ready' 枚举序列化）

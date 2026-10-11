@@ -93,11 +93,7 @@ def _identity() -> HealthIdentity:
     )
 
 
-def code_fingerprint_str() -> str:
-    """代码指纹（规范格式——本地/远程版本对齐检测的唯一形态; 消费方:
-    routes/remote.py 节点 health 载荷 + remote_link.status 本地对照值）。"""
-    n, m = _code_fingerprint()
-    return f"py{n:03d}-m{int(m)}"
+from services.runtime_identity import code_fingerprint_str  # noqa: F401 —— 下沉收口（re-export 供既有 import 兼容）
 
 
 def _code_fingerprint() -> tuple[int, float]:

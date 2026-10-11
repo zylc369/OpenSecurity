@@ -354,6 +354,24 @@ class RelayConnection:
         await self._sig.close()
 
 
+@dataclass(frozen=True)
+class TransportJob:
+    """transport 任务基类（worker 线程 → loop 线程的强类型载荷——tuple[object] 禁令）。"""
+
+
+@dataclass(frozen=True)
+class ApiJob(TransportJob):
+    method: str
+    path: str
+    body: "dict[str, object] | None"
+    token: str
+
+
+@dataclass(frozen=True)
+class PingJob(TransportJob):
+    pass
+
+
 @dataclass
 class TransportConfig:
     """transport 配置（P2PSettings 的 client 侧投影; protocol.md §9 默认值）。"""
@@ -422,7 +440,10 @@ class RemoteTransport:
                 # loop 已关闭（异常退出/重复关闭）——在途取消不可达，
                 # 记录以可排查（等待方将由 api_timeout+15 兜底超时）
                 logger.warning("transport.stop 取消在途请求失败（loop 已关闭）: %s", e)
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            except RuntimeError as e:
+                logger.warning("transport.stop 停止 loop 失败（已关闭）: %s", e)
             if self._thread is not None:
                 self._thread.join(timeout=5.0)
             self._loop.close()
@@ -435,17 +456,17 @@ class RemoteTransport:
                 body: "dict[str, object] | None" = None,
                 token: str = "") -> "dict[str, object]":
         """api.req → api.resp（status/mime/body）; 失败抛 TransportError。"""
-        return self._submit(("api", method, path, body, token))
+        return self._submit(ApiJob(method=method, path=path, body=body, token=token))
 
     def probe(self) -> bool:
         """ping/pong 健康探测（remote_link 心跳语义复用）。"""
         try:
-            self._submit(("ping",))
+            self._submit(PingJob())
             return True
         except TransportError:
             return False
 
-    def _submit(self, job: tuple["object", ...]) -> "dict[str, object]":
+    def _submit(self, job: TransportJob) -> "dict[str, object]":
         if self._loop is None:
             raise TransportError("transport 未启动")
         async_task = asyncio.run_coroutine_threadsafe(
@@ -461,8 +482,7 @@ class RemoteTransport:
 
     # ── loop 内实现 ───────────────────────────────────
 
-    async def _handle_job(self, job: tuple["object", ...]) -> "dict[str, object]":
-        kind = job[0]
+    async def _handle_job(self, job: TransportJob) -> "dict[str, object]":
         conn = await self._ensure_session()
         self._last_active = time.monotonic()
         msg_id = self._next_id
@@ -471,14 +491,13 @@ class RemoteTransport:
             asyncio.get_running_loop().create_future()
         self._pending[msg_id] = fut
         try:
-            if kind == "api":
-                _k, method, path, body, token = job
+            if isinstance(job, ApiJob):
                 await conn.send_msg({"t": "api.req", "id": msg_id,
-                                     "method": method, "path": path,
-                                     "body": body, "token": token or None})
-                logger.debug("api.req %s %s（id=%s 路径=%s）", method, path, msg_id,
+                                     "method": job.method, "path": job.path,
+                                     "body": job.body, "token": job.token or None})
+                logger.debug("api.req %s %s（id=%s 路径=%s）", job.method, job.path, msg_id,
                              "直连" if isinstance(conn, DirectConnection) else "中继")
-            else:  # ping
+            else:  # PingJob
                 await conn.send_msg({"t": "ping", "id": msg_id})
             return await asyncio.wait_for(fut, timeout=self._cfg.api_timeout_sec)
         except (ConnectionError, OSError, asyncio.TimeoutError, CryptoError,

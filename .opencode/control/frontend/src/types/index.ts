@@ -295,11 +295,19 @@ export interface RemoteHealthSummary {
   models: RemoteModelFingerprint[];
 }
 
+/** 模型加载态值域（与后端 ModelLoadState StrEnum 一一对应） */
+export type ModelLoadState =
+  | "ready"
+  | "starting"
+  | "idle"
+  | "error"
+  | "unknown";
+
 /** 本地单模型状态（后端注册表驱动——与环境总览同源） */
 export interface LocalModelState {
   id: string;
   display: string;
-  state: string;
+  state: ModelLoadState;
 }
 
 export interface RemoteLinkStatusView {

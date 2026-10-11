@@ -12,9 +12,8 @@
 """
 from __future__ import annotations
 
-import dataclasses
 import platform
-from typing import Any, Callable, ParamSpec, TypeVar
+from typing import Callable, ParamSpec, TypeVar
 
 from dataclasses import asdict, dataclass, field
 
@@ -23,7 +22,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from services.config_manager import ConfigManager
-from services.remote_client import ModelFingerprint, RemoteConsoleClient
+from services.remote_client import (
+    ModelFingerprint, RemoteConsoleClient, RemoteHealthInfo,
+)
 from services.remote_link import RemoteLinkService, RemoteLinkStatus
 
 router = APIRouter(prefix="/api/remote", tags=["remote"])
@@ -49,12 +50,8 @@ class SwitchOutcome:
     detail: "str | None" = None   # 仅失败时（前端 axios 拦截器读 detail 展示）
 
 
-@dataclass
-class FingerprintPayload:
-    service: str
-    version: str  # 平台标识（"Darwin/arm64"）——供人读
-    code_fingerprint: str  # 代码指纹（health._code_fingerprint 格式）——本地/远程版本对齐检测
-    models: "list[ModelFingerprint]"
+# 节点 health 载荷与主控 RemoteHealthInfo 是同一 wire 契约——共享单一定义
+FingerprintPayload = RemoteHealthInfo
 
 
 @router.post("/switch")
@@ -93,11 +90,8 @@ def _remote_url_configured() -> bool:
 
 
 def _fingerprint_payload() -> FingerprintPayload:
-    """本机三模型指纹（HF snapshot hash; 不加载模型）。"""
-    
-    from services.model_loader import ModelInferenceService
-    from services.ocr_service import OcrService
-    from routes.health import code_fingerprint_str
+    """本机各模型指纹（注册表多态——不加载模型）。"""
+    from services.runtime_identity import code_fingerprint_str
     from services.model_assets import ModelAssetRegistry
     return FingerprintPayload(
         service="opencode-control",
@@ -224,7 +218,7 @@ async def get_autostart(node: str = Query(default="local")) -> JSONResponse:
         return JSONResponse(content=await _forward_get(client, "/api/remote/autostart"))
     from services.launchd_setup import LaunchdManager
     st = LaunchdManager.get_instance().status()
-    return JSONResponse(content=dataclasses.asdict(st))
+    return JSONResponse(content=asdict(st))
 
 
 class AutostartRequest(BaseModel):
