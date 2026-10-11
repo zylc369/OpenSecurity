@@ -254,8 +254,16 @@ class TtsAsset(ModelAsset):
                     # 显式超时流式下载（urlretrieve 无超时——网络异常/代理拦截时无限 hang）。
                     # ProxyHandler({}) 显式直连: 节点进程可能继承终端代理 env，
                     # 代理挂死时 urllib 走代理连接 hang——家用直连是既有验证路径。
+                    # certifi CA: Python.org 版 Python 不自动用系统证书
+                    # （SSL: CERTIFICATE_VERIFY_FAILED——需 Install Certificates.command，
+                    # 无人跑;certifi 随 hf 生态必在 venv，显式指定不依赖系统状态）。
+                    import ssl
+                    import certifi
                     from typing import BinaryIO, cast
-                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    ctx = ssl.create_default_context(cafile=certifi.where())
+                    opener = urllib.request.build_opener(
+                        urllib.request.ProxyHandler({}),
+                        urllib.request.HTTPSHandler(context=ctx))
                     req = urllib.request.Request(f"{base}/{name}", method="GET")
                     resp = cast("BinaryIO", opener.open(req, timeout=30))  # noqa: S310 —— 固定 Release URL
                     try:
