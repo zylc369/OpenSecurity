@@ -68,9 +68,11 @@ def _fake_p2p_http():
     def restore():
         _cmi.p2p_settings = orig  # pyright: ignore[reportAttributeAccessIssue]  (测试恢复)
 
+    # mode=None = 点击前真实态（mode 即开关——成功后才写入; 管道由 switch 的
+    # override 提供，此处只提供原材料）
     _cmi.p2p_settings = lambda: P2PSettings(  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
         relay_host="", relay_port=41000, psk=b"", psk_valid=False,
-        node_id="", gateway_enable=False, transport_mode=RemoteTransportMode.HTTP)
+        node_id="", gateway_enable=False, transport_mode=None)
     return restore
 
 
@@ -261,7 +263,7 @@ def test_switch_p2p_without_url():
     _cmi.p2p_settings = lambda: P2PSettings(  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
         relay_host="74.120.173.111", relay_port=41000, psk=b"x" * 32, psk_valid=True,
         node_id="OpenSecurityServer", gateway_enable=False,
-        transport_mode=RemoteTransportMode.P2P)
+        transport_mode=None)  # 点击前真实态——P2P 由 switch override 构建
     try:
         async def run():
             svc = _mk_service(url="", enabled=False, token="")  # 无 URL 的纯 P2P 场景

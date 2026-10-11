@@ -28,10 +28,15 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from typing import TYPE_CHECKING
+
 from services.config_manager import ConfigManager, RemoteTransportMode
 from services.logging_setup import LogManager
 from services.ocr_engines import MlxEngine
 from services.remote_client import RemoteConsoleClient, RemoteHealthInfo
+
+if TYPE_CHECKING:  # 仅类型检查用（零运行时依赖——依赖方向经 remote_client 间接）
+    from services.remote_transport import TransportConfig
 
 logger = LogManager.get_instance().setup_auxiliary("remote_link", "remote-link.log")
 
@@ -236,12 +241,12 @@ class RemoteLinkService:
         return ok
 
     async def _probe_raw(self) -> tuple[bool, str, RemoteHealthInfo | None]:
-        """底层探测（to_thread 同步 httpx）。"""
-        client = self.get_client()
+        """底层探测（to_thread 同步 httpx）。client 未就绪等任何失败统一面。"""
         try:
+            client = self.get_client()
             info = await asyncio.to_thread(client.probe_health)
             return True, "", info
-        except Exception as e:  # noqa: BLE001 —— 任何失败统一面
+        except Exception as e:  # noqa: BLE001 —— 任何失败统一面（不 500）
             return False, f"{type(e).__name__}: {e}", None
 
     # ── 状态迁移（持锁核心）───────────────────────────────
@@ -343,7 +348,9 @@ class RemoteLinkService:
                 return SwitchResult(ok=False, error=(
                     f"P2P 管道配置不全，缺: {'、'.join(missing)}"))
         with self._lock:
-            self._sync_client_locked(url, token)
+            # 校验阶段按「目标管道」构建 client（mode 即开关——点击时存量 mode
+            # 为空，成功后才写入; 不传 override 会读到 None → 纯 P2P 场景 client 缺失）
+            self._sync_client_locked(url, token, mode_override=mode)
         ok, reason, info = await self._probe_raw()
         if not ok:
             return SwitchResult(ok=False, error=f"远程校验失败: {reason}")
@@ -394,18 +401,24 @@ class RemoteLinkService:
                 self._state = self.STATE_OFF
                 self._cancel_unload_locked()
 
-    def _p2p_config_locked(self) -> "object | None":
-        """P2P 传输配置（client 侧开关开启且配置完整才注入）。
+    def _p2p_config_locked(
+            self, mode_override: RemoteTransportMode | None = None,
+    ) -> "TransportConfig | None":
+        """P2P 传输配置（管道为 P2P 且四项齐备才注入）。
 
-        强类型 TransportConfig（review#3 dict 禁令）; 构造经延迟 import——
-        本模块不顶层依赖 transport（依赖方向经 remote_client 间接）。
+        mode_override: 校验阶段传「目标管道」（mode 即开关——点击时配置里的
+        mode 必然为空，成功后才写入; 校验必须按目标管道构建探测 client，
+        读存量配置会得到 None → 误报"客户端未初始化"）。None = 读存量配置
+        （心跳/热重载路径）。校验场景只会传具体枚举（P2P/HTTP）——不存在
+        "override 成 None"的需求。
         """
         from services.config_manager import ConfigManager
         from services.remote_transport import TransportConfig
         p2p = ConfigManager.get_instance().p2p_settings()
-        # 管道注入: 仅 transport_mode 显式为 P2P（fail-closed——None/http 均不注入）;
-        # 四项齐备（mode+psk+host+node）才走隧道，缺任一即 None（HTTP 或不可用）
-        if not (p2p.transport_mode is RemoteTransportMode.P2P and p2p.psk_valid
+        mode = mode_override if mode_override is not None else p2p.transport_mode
+        # 管道注入: 仅 mode 为 P2P（fail-closed——None/http 均不注入）;
+        # 四项齐备（psk+host+node）才走隧道，缺任一即 None（HTTP 或不可用）
+        if not (mode is RemoteTransportMode.P2P and p2p.psk_valid
                 and p2p.relay_host and p2p.node_id):
             return None
         t = _tunables()
@@ -415,9 +428,14 @@ class RemoteLinkService:
             punch_timeout_sec=t.punch_timeout_sec,
             api_timeout_sec=t.p2p_api_timeout_sec)
 
-    def _sync_client_locked(self, url: str, token: str) -> None:
-        """URL/token/P2P 配置变化时重建 client（持锁调用）。"""
-        p2p = self._p2p_config_locked()
+    def _sync_client_locked(self, url: str, token: str,
+                            mode_override: RemoteTransportMode | None = None,
+    ) -> None:
+        """URL/token/P2P 配置变化时重建 client（持锁调用）。
+
+        mode_override: 校验阶段传目标管道（详见 _p2p_config_locked）。
+        """
+        p2p = self._p2p_config_locked(mode_override)
         if (self._client is not None and url == self._client_url
                 and token == self._client_token and p2p == self._client_p2p):
             return

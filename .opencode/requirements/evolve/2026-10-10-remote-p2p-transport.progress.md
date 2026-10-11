@@ -246,3 +246,14 @@
 - 新用例: P2P 免 URL 切换（四项齐备+url 空 → 成功写 MODE=p2p——用户核心场景）
 - 状态空间塌缩: (ENABLED×MODE) 4 态含 2 无意义 → MODE 3 态; 管道选择与开关合并为一个动作
 - 验证: pyright 0/0/0; 24 passed（3 基线）; tsc/build ✓; ENABLED grep 零残留
+
+### 2026-10-11 迭代续 9: 切换 P2P 500 修复（mode 即开关的时序 bug）
+- 用户实测: 配好 RELAY 四项点「切换 P2P 连接」→ HTTP 500。traceback: get_client() RuntimeError 穿透（在 _probe_raw 的 try 外）
+- 根因: ENABLED→MODE 重构引入的时序矛盾——「mode 即开关」意味着点击时存量 mode 必然为空（成功后才写），而 _p2p_config_locked（P2P 注入判定）读存量配置 → mode=None → 不注入 → 纯 P2P 场景（url 空）client=None → probe 炸。旧模型用户先在配置区选管道（mode 有值）所以校验能过——测试 fake 了 p2p_settings 的 mode 同样掩盖了此时序
+- 修复: ①_p2p_config_locked/_sync_client_locked 增加 mode_override/has_override——校验阶段传目标管道构建 client（reload 时按已写入的正式配置重建，幂等短路） ②_probe_raw 的 get_client 移入 try（client 未就绪 → ok=False 报错而非 500）③测试 fake 改 mode=None（点击前真实态——管道由 switch override 提供，与生产时序一致）
+- 验证: pyright 0/0/0; 15 passed（含 P2P 免 URL 真实时序用例）
+
+### 2026-10-11 迭代续 10: object 类型违纪（用户严厉指出）
+- 违纪: mode_override: "object | None" + has_override: bool 画蛇添足哨兵——RemoteTransportMode 就在顶层 import，无任何循环依赖; 根因是照抄文件内返回值 "object | None" 的历史偷懒模式
+- 修正: mode_override: RemoteTransportMode | None（None=读存量配置，具体枚举=校验目标管道——语义完备，has_override 整个删除）; 返回值 -> "TransportConfig | None"（TYPE_CHECKING import 强类型，__future__ annotations 惰性求值零运行时依赖）
+- 教训固化: 新参数类型的判定不参考"同文件既有写法"（存量模式可能是错的），只按值域判定: 枚举值域→枚举类; 结构化→dataclass; 都不是且确需顶层通用→才考虑 object（本例根本轮不到）

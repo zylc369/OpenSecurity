@@ -111,7 +111,7 @@ def test_switch_paths():
     orig_p2p = _cmi.p2p_settings
     _cmi.p2p_settings = lambda: P2PSettings(  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
         relay_host="", relay_port=41000, psk=b"", psk_valid=False,
-        node_id="", gateway_enable=False, transport_mode=RemoteTransportMode.HTTP)
+        node_id="", gateway_enable=False, transport_mode=None)  # 点击前真实态
     try:
         # 失败路径
         _fake_remote_link(ok_probe=False)
