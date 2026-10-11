@@ -1,0 +1,2 @@
+node_modules/
+# 注意：dist/ 不忽略，需要提交到 git（发布态用户用）

@@ -6,7 +6,7 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-/dist/  # 仅根级（Python 打包产物; frontend/dist 发布态入库——见其目录内 .gitignore）
+/dist/
 downloads/
 eggs/
 .eggs/
