@@ -196,11 +196,16 @@ const RemoteSection: React.FC = () => {
       if (newToken && newToken !== oldToken) {
         // pull_output 含目标版本（"Fast-forward … <hash>"）——更新到哪一步了
         // 直接可见; 指纹对齐（远程行"与本地一致"）是端到端二次确认
-        const pulled = r.pull_output?.match(/([0-9a-f]{7,})\b/);
+        // pull_output 形如 "Updating <旧>..<新>\nFast-forward..."——
+        // 第一个 hash 是旧起点（match 首个=显示旧版本 bug），取目标版本
+        const m = r.pull_output ?? "";
+        const pulled =
+          m.match(/Updating\s+[0-9a-f]+\.\.([0-9a-f]{7,})/)?.[1] ??
+          (m.match(/\b[0-9a-f]{7,}\b/g) ?? []).pop();
         message.success(
           `远程节点已更新并重启完成${
-            r.pull_output
-              ? `（${pulled ? `已更新至 ${pulled[1]}`
+            m
+              ? `（${pulled ? `已更新至 ${pulled}`
                             : "代码已更新"}）`
               : "（代码无新提交，仅重启）"
           }`,

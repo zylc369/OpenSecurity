@@ -497,7 +497,7 @@ class RemoteLinkService:
         from services.runtime_identity import code_fingerprint_str
         url, enabled, token = self._read_config()
         mode = ConfigManager.get_instance().p2p_settings().transport_mode
-        local_fp = code_fingerprint_str()  # 文件系统 IO（glob+stat）——锁外执行
+        local_fp = code_fingerprint_str()  # 文件系统 IO（glob+内容哈希）——锁外执行
         with self._lock:
             from services.model_assets import ModelAssetRegistry, ModelLoadState
             local_models = [
