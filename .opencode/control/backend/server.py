@@ -108,6 +108,10 @@ def create_app() -> FastAPI:
     from services.api_guard import ApiGuardMiddleware
     app.add_middleware(ApiGuardMiddleware)
 
+    # 变更操作审计（非 GET 全记 + 慢请求——排障时"后端当时做了什么"有据可查）
+    from services.audit_middleware import AuditMiddleware
+    app.add_middleware(AuditMiddleware)
+
     # 路由
     from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, \
         processes, knowledge, events, heartbeat, proxy, remote, vision
@@ -251,12 +255,26 @@ def _mount_frontend(app: FastAPI) -> None:
             }
 
 
+def _detach_session() -> None:
+    """脱离调用方进程组——免疫父 shell 会话结束时的组清理信号。
+
+    场景: 经 bash 工具/终端手动 nohup 重启时，进程成为命令子进程（同组），
+    会话结束的组 SIGTERM 会误杀控制台。setsid 使其独立成会话。
+    插件 spawn（detached:true）已是组长 → EPERM 忽略（原状即安全）。
+    """
+    try:
+        os.setsid()
+    except OSError:
+        pass
+
+
 def main() -> None:
     """控制台主入口。
 
     单实例检测 + TCP 顺延绑定 + IPC 监听 + B 方案启动 + 引用计数周期清洗。
 
     时序：
+      0. 脱离调用方进程组（手动重启场景防父会话清理误杀——最先做）
       1. 日志初始化（文件轮转 OPENSECURITY_HOME/logs/control.log——stdio=ignore 下 print 不可见）
       2. IPC 监听（内核排他互斥；按 IpcStartStatus 分支处理）
       3. bind 浏览器 TCP 候选段（9776 起顺延）+ 注册真实端口
@@ -264,10 +282,12 @@ def main() -> None:
       5. 后台线程加载模型
       6. uvicorn.run
     """
+    _detach_session()
     from services.logging_setup import LogManager
     log = LogManager.get_instance().setup()
     log.info("=" * 50)
-    log.info("控制台启动（pid=%d, platform=%s）", os.getpid(), sys.platform)
+    log.info("控制台启动（pid=%d, pgid=%d, platform=%s）",
+             os.getpid(), os.getpgrp(), sys.platform)
 
     from services.config_manager import ConfigManager
     from services.frontend_port import FrontendPortRegistry

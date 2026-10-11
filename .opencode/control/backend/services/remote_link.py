@@ -98,6 +98,9 @@ class RemoteLinkStatus:
     remote_health: "RemoteHealthInfo | None"  # 远程节点健康快照（remote_client 同型直传）
     local_models: "list[LocalModelState]"  # 各模型本地加载态（注册表驱动）
     unload_countdown_sec: float | None # 恢复稳定期倒计时（未安排 → None）
+    probe_attempts: int = 0           # 本轮离线期累计探测次数（成功后清零）
+    probe_interval_sec: float = 5.0   # 探测周期（前端倒计时用）
+    next_probe_in_sec: float = 0.0    # 距下次探测秒数（0=即将/进行中）
     local_code_fingerprint: str = ""  # 本机代码指纹（与 remote_health.code_fingerprint 对齐检测）
 
 
@@ -158,6 +161,9 @@ class RemoteLinkService:
         # _sync_client_locked 不得重建 client——存量配置视角（mode 未写）会误判
         # 需要重建并 close 掉校验用 client → 在途探测挂死在已关闭的 transport loop
         self._validating: bool = False
+        # 建联进度（降级/建联期的"后端仍在工作"可视化）
+        self._probe_attempts: int = 0
+        self._next_probe_at: float = 0.0  # monotonic 时间戳
 
     def _read_config(self) -> tuple[str, bool, str]:
         """读远程三要素（ConfigManager 唯一读写方）。
@@ -236,9 +242,12 @@ class RemoteLinkService:
                     logger.info("远程未启用（ENABLED=0 或两条管道均不可用）→ OFF")
                     self._state = self.STATE_OFF
                     self._cancel_unload_locked()
-                return False
+                return False  # 门控未过——不计数（避免 http+空URL 时 attempts 无限涨）
+            self._probe_attempts += 1
             # 启用态: 探测 → 阈值判定（OFF 初始成功单次定态; DEGRADED 恢复需连续 N 次）
         ok, reason, info = await self._probe_raw()
+        # 探测结束后设下一轮时刻（含探测耗时——倒计时真实; 若探测耗时超周期立即=0）
+        self._next_probe_at = time.monotonic() + _tunables().heartbeat_interval_sec
         if ok:
             assert info is not None
             self._register_success(info)
@@ -260,6 +269,7 @@ class RemoteLinkService:
     def _register_success(self, info: RemoteHealthInfo) -> None:
         with self._lock:
             self._fail_streak = 0
+            self._probe_attempts = 0
             self._recover_streak += 1
             self._last_ok_at = time.time()
             self._last_health = info
@@ -512,6 +522,11 @@ class RemoteLinkService:
                 remote_health=self._last_health,  # 同型直传（零搬运）
                 local_models=local_models,
                 unload_countdown_sec=countdown,
+                probe_attempts=self._probe_attempts,
+                probe_interval_sec=_tunables().heartbeat_interval_sec,
+                next_probe_in_sec=max(
+                    0.0, self._next_probe_at - time.monotonic())
+                if self._next_probe_at else 0.0,
             )
 
 

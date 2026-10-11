@@ -320,6 +320,11 @@ export interface RemoteLinkStatusView {
   transport: null | "p2p" | "http";
   /** 本机代码指纹（与 remote_health.code_fingerprint 对齐检测） */
   local_code_fingerprint: string;
+  /** 本轮离线期累计探测次数（成功后清零——"后端在持续建联"的证据） */
+  probe_attempts: number;
+  probe_interval_sec: number;
+  /** 距下次探测秒数（0=即将/进行中） */
+  next_probe_in_sec: number;
   fail_streak: number;
   recover_streak: number;
   last_ok_at: number | null;

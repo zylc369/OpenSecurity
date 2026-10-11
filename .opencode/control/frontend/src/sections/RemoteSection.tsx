@@ -64,6 +64,21 @@ const POLL_MS = 5000;
 function ModeBadge({ status }: { status: RemoteLinkStatusView | null }) {
   if (!status)
     return <Typography.Text type="secondary">加载中…</Typography.Text>;
+  // 建联中间态可视化: 管道已配置但未连上（OFF）——心跳正在建隧道/探测
+  if (status.state === "off" && status.transport) {
+    const label = status.transport === "p2p" ? "P2P" : "远程链接";
+    return (
+      <Space size={8}>
+        <SyncOutlined spin style={{ fontSize: 22, color: "#faad14" }} />
+        <Typography.Text strong style={{ fontSize: 18, color: "#faad14" }}>
+          {label}连接建立中…
+        </Typography.Text>
+        <Tag color="warning" style={{ marginInlineEnd: 0 }}>
+          期间推理走本地
+        </Tag>
+      </Space>
+    );
+  }
   if (status.state === "remote") {
     const tp = status.transport;
     return (
@@ -516,14 +531,37 @@ const RemoteSection: React.FC = () => {
           ) : (
             <Typography.Text type="secondary">连接配置加载中…</Typography.Text>
           )}
-          {degraded && (
-            <Alert
-              type="error"
-              showIcon
-              message={`远程不可用: ${status?.last_fail_reason ?? "未知原因"}`}
-              description="请求已自动降级到本地（无需操作）; 远程恢复后将自动切回并释放本地资源"
-            />
-          )}
+            {status?.state === "off" && status.transport && (
+              <Alert
+                type="warning"
+                showIcon
+                icon={<SyncOutlined spin />}
+                message={`${
+                  status.transport === "p2p" ? "P2P 隧道" : "远程链接"
+                }连接建立中…（心跳每轮自动重试，期间推理走本地）`}
+                description={`已尝试 ${status.probe_attempts} 次; ${
+                  status.next_probe_in_sec > 0
+                    ? `${Math.ceil(status.next_probe_in_sec)} 秒后第 ${status.probe_attempts + 1} 次尝试（每 ${Math.round(status.probe_interval_sec)} 秒自动重试）`
+                    : "正在尝试中…"
+                }${
+                  status.last_fail_reason
+                    ? `; 最近失败: ${status.last_fail_reason}`
+                    : "; 首次探测含隧道建立（打洞/中继），约 5-10 秒"
+                }`}
+              />
+            )}
+            {degraded && (
+              <Alert
+                type="error"
+                showIcon
+                message={`远程不可用: ${status?.last_fail_reason ?? "未知原因"}`}
+                description={`请求已自动降级到本地（无需操作）; 远程恢复后将自动切回并释放本地资源。后台持续建联: 已尝试 ${status?.probe_attempts ?? 0} 次${
+                  status && status.next_probe_in_sec > 0
+                    ? `，${Math.ceil(status.next_probe_in_sec)} 秒后第 ${(status.probe_attempts ?? 0) + 1} 次（每 ${Math.round(status?.probe_interval_sec ?? 5)} 秒）`
+                    : "，正在尝试中…"
+                }`}
+              />
+            )}
           <Descriptions
             size="small"
             column={3}
@@ -534,7 +572,15 @@ const RemoteSection: React.FC = () => {
             }}
           >
             <Descriptions.Item label="心跳延迟">
-              {health ? `${health.latency_ms} ms` : "—"}
+              {health ? (
+                `${health.latency_ms} ms`
+              ) : status?.state === "off" && status.transport ? (
+                <Tag color="warning" style={{ marginInlineEnd: 0 }}>
+                  建联中（首次探测含隧道建立，约 5-10s）
+                </Tag>
+              ) : (
+                "—"
+              )}
             </Descriptions.Item>
             <Descriptions.Item label="连续成功">
               {status ? `${status.recover_streak} 次` : "—"}

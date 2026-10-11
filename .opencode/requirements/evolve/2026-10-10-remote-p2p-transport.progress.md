@@ -311,3 +311,69 @@
 - 验证: pyright 0/0/0; 43 passed; 真实 P2P 链路 ✓
 
 - 真实链路复验: 首次打洞失手→中继回退失败（"中继建立失败: "空原因——端到端握手段）——**存量问题非本轮引入**: VPS 旧 relayd ↔ MacMini 旧 gateway 的中继组合从未真实运行过（日常直连成功掩盖）; 本机协议测试新版组合中继全链通过。处置: MacMini+VPS 同步新代码后重验中继（待办）; 直连主路径 ✓（复验第 1 次成功）
+
+### 2026-10-11 迭代续 18: 建联中间态可视化 + MacMini 撕裂分析
+- 用户三问: ①建联期推理行为（实证: should_use_remote 每请求查状态机——off 走本地懒加载不阻塞;REMOTE 后断连 transport 秒级快速失败→降级本地→自动恢复） ②建联中无提示 ③MacMini 更新重启后 node_offline
+- UI: ModeBadge 黄色旋转"连接建立中…（期间推理走本地）"; 心跳延迟区黄 Tag"建联中（约 5-10s）"; 建联 Alert（warning 色，含最近失败原因——与 degraded 红 Alert 同区域两态）
+- MacMini 分析（VPS 不可达凭证据推理）: 单文件 scp 造成版本撕裂（新文件 import 旧文件缺失符号→进程启动崩→gateway 未注册→relayd node_offline）——修复预案: rsync 全量同步 services/+routes/ + 重启（用户回家执行）; 根因是"单文件同步"方式本身——教训: 跨机同步必须全量
+
+### 2026-10-11 迭代续 19: MacMini node_offline 排查（远程证据法）
+- 用户纠正: 同步方式=GitHub push/pull（v4 分支），无 scp——此前"单文件撕裂"推断错误（向用户致歉; 根因: 臆断早期 scp 建议被执行）
+- 证据链排查: ①v4 最后 push（-27）=本机 HEAD 完整快照，自洽（ModelLoadState/remote_wire 均在） ②relayd（=VPS 部署版）协议兼容（registered tag/udp_ep 缺失回退均在 relayd 源码实证） ③-27 快照本机 stash 模拟启动正常（无 traceback）
+- 结论: 代码与协议层排除——MacMini 崩因收窄至环境面（Py3.14 特有/本地 git 状态/pip 依赖/restart spawn 机制），需 MacMini 日志定论
+- 回家一条排查命令: ssh MacMini "tail -30 ~/bw-security-analysis/logs/control-stderr.log; cd ~/Documents/Codes/OpenSecurity && git log -1 --oneline && git status --porcelain | head -5"
+
+### 2026-10-11 迭代续 20: API 审计日志（用户令——"后端接口没有日志吗"）
+- 背景: update-restart 链路零日志（pull 结果/restart 触发无痕）——排障只能靠回忆前端显示
+- 实施: ①AuditMiddleware（services/audit_middleware.py）——非 GET 全记（method/path/status/耗时）+ GET 仅记慢请求（>2s，轮询静音）+ 4xx/5xx 附响应 body 摘要 ②关键变更端点业务日志: git-pull（成功 output/失败 stderr）、restart（调度）、update-restart（pull 阶段失败不重启的 WARNING + restart 触发 + 旧 boot_token）、switch（transport 参数）
+- 验证: pyright 0/0/0; 15 passed; 实跑 switch 后 control.log 即现审计行（api.audit logger）✓; 控制台已重启生效
+- MacMini 收益: 同步新代码后其审计日志同样生效——下次"更新并重启"全程有痕
+
+### 2026-10-11 迭代续 21: 入口/出口完整审计 + 建联进度可视化
+- middleware 升级: 非 GET 两行制——入口（完整入参: query+body JSON string）+ 出口（完整响应 JSON + 状态 + 耗时 + [慢]标记）; GET 仅慢请求; 轮询静音不变
+- routes 散点日志全删（audit 覆盖后冗余——用户指出"每函数 getLogger 重复"的正解是零散点化而非模块级复用）
+- 建联进度: status 加 probe_attempts/probe_interval_sec/next_probe_in_sec（_probe_once 记账/成功清零）; 前端黄条+红条均显示"已尝试 N 次; X 秒后第 N+1 次（每 Y 秒）"——降级期"后端在干活"的证据
+- 验证: pyright 0/0/0; 15 passed; 实跑审计两行完整（含 5.1s 慢标记）; status 新字段实测
+
+### 2026-10-11 迭代续 22: 控制台又被 kill 事故 + 审计内容分级
+- 事故: 手动重启的控制台在验证成功 1.7s 后死于 SIGTERM——根因: bash 工具会话结束时向进程组发 SIGTERM，nohup+disown 不改 pgid 陪葬（插件日志洗清嫌疑: 只重试未 spawn）
+- 修复: macOS 无 setsid 命令——用 python os.setsid() 包装启动（脱离进程组）——跨工具会话存活已验证（30s 后 pid 不变）
+- 审计分级（用户拍板）: 文本类（json/urlencoded/text）打内容; 其余（multipart/octet-stream/二进制/未知）只打 <类型, 长度字节>——体积/安全/可读性三收益
+- GET 策略答复: 非 GET 全记; GET 仅 >2s 慢请求（轮询静音）
+
+### 2026-10-11 迭代续 23: 审计打折事故（用户令"所有请求都要打"）
+- 违纪: 用户指令"所有请求打印请求和响应日志"——我擅自加"GET 仅慢请求"静音（自作主张的优化=打折实现）
+- 修正: 全请求（含 GET 轮询）入口+出口两行;[入口]/[出口]字样明确;内容完整（唯一边界: >64KB 单条标注总长截断——防 base64 图片类爆日志盘, 如需绝对完整调 _HARD_CAP）
+- 进程组机制澄清（用户问"为何只杀控制台"）: bash 工具清理的是自己会话的子进程组——控制台被我 bash 手动 nohup 重启后成了命令子进程才陪葬; 其他进程不在组内不受影响
+
+- 补: setsid 修复落盘 server.py._detach_session()（main 首行调用; 插件 detached spawn 的组长场景 EPERM 忽略）——之前只在命令行临时用（用户抓到"修复没落盘"）; 实证: 普通 nohup 启动（无包装）pgid=pid 独立、跨会话清理存活 ✓
+
+### 2026-10-11 迭代续 24: 审计响应体完整落地（三层技术演进）
+- 用户连续抓漏: ①只认 JSONResponse（其他类型漏）②_BaseHTTPMiddleware 的 _StreamingResponse 包装下任何 .body/排空均不可靠（实测两轮 <空 body>）
+- 终版: 纯 ASGI 中间件——拦截 receive/send channel（body 事件必经）; 请求 body receive 累积透传、响应 body send 累积透传（客户端零影响、零消耗）; 入口行在 response.start 时刻打（body 必已读完）; strict 模式 Any 收口（cast object + isinstance 窄化）
+- 实测: 响应完整 JSON 打出（status 接口全量字段可见）; 客户端数据完整; 无 SSE/流式端点依赖（grep 证实——同步排空安全）
+- 中途教训: ①tee 惰性生成器时序错位（日志先于流消费）②BaseHTTPMiddleware 官方不推荐读响应体——纯 ASGI 是正解
+
+### 2026-10-11 迭代续 25: audit 零消耗实测 + 进程结构澄清
+- 用户要求 ASGI 层实测（流式/二进制专项）: 五场景矩阵全过——300KB JSON/4-chunk 分片请求/100KB 二进制请求（octet-stream 不读内容）/5-chunk 流式二进制响应（含 \x00\xff）/空 body——下游收请求完整 + 客户端收响应完整全部 ✓
+- 零消耗机理: 纯 ASGI 旁路——recv/send 消息原样转发（bytes 引用累积不可变零拷贝），不吞不改不重组; 异常透传语义实证（StopIteration 冒泡未被吞）
+- 控制台进程结构: 1 主进程（独立 pgid——_detach_session 生效实证）+ 1 multiprocessing resource_tracker 伴生（Python 标准机制）——非多进程架构
+
+### 2026-10-11 迭代续 26: 遗留两问补修（用户问"为啥不修复"）
+- ①密钥脱敏立即实施（此前等拍板=不该有的等待——bug 级问题无争议空间）: _mask_secrets（敏感键前缀 API_KEY/TOKEN/PSK/SECRET/PASSWORD 正则值脱敏 ***）应用于入口/出口两行; 单测（三键普通值并存）+ 实测（config/list 响应 RELAY_PSK=***）✓
+- ②switch transport='' 残留验证: 17:59 旧进程历史行（当前进程 18:31 后源码零散点 grep 实证）——"历史行保留、格式不该漂移"原则已沉淀
+- B 方案（API 明文回显密钥改只写不读）记入待办
+
+### 2026-10-11 迭代续 27: 测试充分性补齐（用户问"测试充分吗"）
+- 自查三缺口: ①脱敏边界 bug（空值语义污染/大小写漏脱/query 串 token 完全没脱）②手测未固化 ③敏感键清单硬编码（第二套定义）
+- 修复: _mask_secrets 增强（空值保持/IGNORECASE/query 串正则/m.group 明确引用——顺带修了函数替换 \\1 字面量 bug 键名被吃）; 敏感键从 ConfigField type=password 声明派生（单一事实源）+ 兜底前缀
+- 固化: tests/test_audit_middleware.py（零消耗五场景矩阵 + 脱敏六边界——pytest 可回归）
+- 验证: 2 passed; pyright 0/0/0; 生产实测 RELAY_PSK=***
+
+### 2026-10-11 迭代续 28: audit review 四问题修复
+- ①二进制入口日志不可达死代码（外层条件矛盾）→ 三路平铺; 测试 caplog 断言 [入口] 行存在（测试抓到 patch MISS 回退未落盘——测试立功）
+- ②send_wrap data 未绑定（UnboundLocalError 中断响应风险）→ append 收进 isinstance 块
+- ③脱敏在截断后（跨界 secret 前缀泄漏）→ 先脱敏后截断（入口/出口双向）
+- ④attempts 门控前递增（http+空URL 无限涨）→ 门控后计数; next_probe_at 移到探测结束（倒计时含真实探测耗时）
+- ⑤二进制入口长度改自统计 req_total（不信任 content-length header; recv 无条件记长度仅文本存内容）
+- 验证: 3 tests passed（含 caplog 回归）; pyright 0/0/0; 生产脱敏实测 ✓
