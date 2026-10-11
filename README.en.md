@@ -32,7 +32,7 @@ Four helper agents are dispatched on demand by the main agents: `searcher` (exte
 3. **Memory store**: queryable in real time (search past experience before starting), fully logged (every tool call and result written per task, supporting compaction recovery and after-the-fact review), and self-evolving (analysis agents decide which reusable solutions to persist; the store gets thicker with use).
 4. **Permission timeout auto-reject**: unanswered permission prompts are auto-rejected after a timeout (default 60 seconds, by default only for the external_directory type; both configurable), and the rejection carries guidance so the model reroutes on its own. Tasks don't stall waiting for a click.
 5. **Proxy module**: when bulk scanning or verification bursts hit rate limits, it rotates to another exit automatically; rate-limited addresses are cooled down. Tasks aren't cut off by throttling or blocking.
-6. **Local models**: BGE-M3 (embeddings), Reranker (re-ranking), and GLM-OCR (image text) run locally (~7.6GB in total); they can also be offloaded to another machine on the LAN. Saves money, and keeps your data in-house.
+6. **Local models**: BGE-M3 (embeddings), Reranker (re-ranking), and GLM-OCR (image text) run locally (~7.6GB in total); they can also be offloaded to another machine as a remote inference node — direct LAN access, or over a P2P tunnel from anywhere (no public IP, no exposed ports). Saves money, and keeps your data in-house.
 7. **Console**: starts together with the main service; environment dashboard (one-click install for whatever is missing) and configuration management (tools / models / proxy / behavior) on one screen.
 
 > This is the state I want: **you go to sleep, it keeps working.**
@@ -86,7 +86,7 @@ Hardware requirements (test machine: MacBook Pro / M4 Pro / 48GB):
 | Main service + console | ~3GB |
 | Headroom for analysis tasks | 8GB+ |
 
-**32GB RAM minimum, 48GB recommended**; add 25GB+ of disk for tool images and model caches. If your machine is light, the models can be offloaded to another machine on the LAN (remote inference node).
+**32GB RAM minimum, 48GB recommended**; add 25GB+ of disk for tool images and model caches. If your machine is light, the models can be offloaded to another machine as a remote inference node — direct LAN access, or over a P2P tunnel from anywhere (see [remote node deployment](.opencode/control/backend/tools/relay-deploy/README.md)).
 
 Hardware OK → pull **Tag ≥ 2.0**; otherwise stay on master (1.0).
 
@@ -188,6 +188,7 @@ Common actions around an analysis task are available as slash commands — type 
 | [2.0 Field Notes](docs/项目介绍/2.0-实战博文/01-无人值守完成CTF挑战.md) | Unattended CTF solving: the 2.0 field record (Chinese) |
 | [Knowledge & Memory System](docs/项目介绍/知识与记忆体系.md) | Read/write mechanics of the knowledge base and memory store (Chinese) |
 | [New Machine Setup Guide](docs/项目介绍/新机器配置指南.md) | Setting up the whole system on a fresh machine (Chinese) |
+| [Remote Node Deployment](.opencode/control/backend/tools/relay-deploy/README.md) | remote-p2p: VPS relay + hole-punching direct connection (incl. phone TTS chain) |
 | [Adding a New Agent](docs/contributing/add-new-agent.md) | Extending the platform with new security domains |
 | [Roadmap](docs/ROADMAP.en.md) | Project roadmap and future directions |
 | [Plugin Development](https://github.com/zylc369/OpenSecurity/blob/main/.opencode/binary-analysis/knowledge-base/opencode-plugin-development-guide.md) | OpenCode Plugin engineering practices |
