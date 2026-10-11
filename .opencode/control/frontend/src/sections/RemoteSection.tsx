@@ -4,7 +4,7 @@
  * 三卡片:
  *   1. 远程连接: URL/TOKEN 配置 + 开关状态（忠实显示配置值）+ 切换按钮
  *      （切换远程 = 先校验，失败红色展示原因，成功后按钮翻转）+ 远程健康度
- *   2. 当前模式: 实际生效模式（本地/远程/已降级——降级红色闪烁+原因）
+ *   2. 状态 Tag（卡片头）: 远程托管/已降级/建立中/本地推理——后端 state 权威
  *      + 本地三模型加载状态 + 卸载倒计时
  *   3. 远程节点管理: CONTROL_API_KEY 设置（可生成随机）/ 常驻开关 /
  *      开机自启（LaunchAgent）——全部经本控制台转发到远程节点
@@ -14,7 +14,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
-  Badge,
   Button,
   Card,
   Col,
@@ -33,12 +32,10 @@ import {
 import {
   ApiOutlined,
   CheckCircleOutlined,
-  CloudServerOutlined,
-  DesktopOutlined,
   LinkOutlined,
-  ReloadOutlined,
   SaveOutlined,
   SettingOutlined,
+  ReloadOutlined,
   SyncOutlined,
   WarningOutlined,
   CloudDownloadOutlined,
@@ -93,78 +90,6 @@ const useSmoothCountdown = (anchor: number | null): number | null => {
 };
 
 
-/** 模式徽标（卡片 2 大字标示 + 降级红闪） */
-function ModeBadge({ status }: { status: RemoteLinkStatusView | null }) {
-  if (!status)
-    return <Typography.Text type="secondary">加载中…</Typography.Text>;
-  // 建联中间态可视化: 管道已配置但未连上（OFF）——心跳正在建隧道/探测
-  if (status.state === "off" && status.transport) {
-    const label = status.transport === "p2p" ? "P2P" : "远程链接";
-    return (
-      <Space size={8}>
-        <SyncOutlined spin style={{ fontSize: 22, color: "#faad14" }} />
-        <Typography.Text strong style={{ fontSize: 18, color: "#faad14" }}>
-          {label}连接建立中…
-        </Typography.Text>
-        <Tag color="warning" style={{ marginInlineEnd: 0 }}>
-          期间推理走本地
-        </Tag>
-      </Space>
-    );
-  }
-  if (status.state === "remote") {
-    const tp = status.transport;
-    return (
-      <Space size={8}>
-        <CloudServerOutlined style={{ fontSize: 22, color: "#0A6CFF" }} />
-        <Typography.Text strong style={{ fontSize: 18 }}>
-          远程模式
-        </Typography.Text>
-        {tp === "p2p" && (
-          <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>
-            P2P 隧道
-          </Tag>
-        )}
-        {tp === "http" && (
-          <Tag color="blue" style={{ marginInlineEnd: 0 }}>
-            HTTP 直连
-          </Tag>
-        )}
-        {!tp && (
-          <Tag color="warning" style={{ marginInlineEnd: 0 }}>
-            管道未配置
-          </Tag>
-        )}
-        <Typography.Text type="secondary">推理走远程节点</Typography.Text>
-      </Space>
-    );
-  }
-  if (status.state === "degraded") {
-    return (
-      <Space size={8} wrap>
-        <WarningOutlined
-          className="remote-degraded-blink"
-          style={{ fontSize: 22, color: "#ff4d4f" }}
-        />
-        <Typography.Text
-          strong
-          className="remote-degraded-blink"
-          style={{ fontSize: 18, color: "#ff4d4f" }}
-        >
-          已降级 · 实际使用本地服务
-        </Typography.Text>
-      </Space>
-    );
-  }
-  return (
-    <Space size={8}>
-      <DesktopOutlined style={{ fontSize: 22, color: "#52c41a" }} />
-      <Typography.Text strong style={{ fontSize: 18 }}>
-        本地模式
-      </Typography.Text>
-    </Space>
-  );
-}
 
 const RemoteSection: React.FC = () => {
   const { message } = AntApp.useApp();
@@ -460,15 +385,55 @@ const RemoteSection: React.FC = () => {
                     ? "已开启"
                     : "已关闭"}
             </Tag>
-            {degraded && (
-              <Tag color="error" style={{ marginInlineEnd: 0 }}>
-                远程失效中
+            {/* 状态 Tag（原「当前模式」卡片语义合并至此——后端 state 权威） */}
+            {status?.state === "remote" && (
+              <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+                远程托管
+              </Tag>
+            )}
+            {status?.state === "degraded" && (
+              <Tag
+                color="error"
+                style={{ marginInlineEnd: 0 }}
+                icon={<WarningOutlined />}
+              >
+                已降级 · 本地服务
+              </Tag>
+            )}
+            {status?.state === "off" && status.transport && (
+              <Tag
+                color="warning"
+                style={{ marginInlineEnd: 0 }}
+                icon={<SyncOutlined spin />}
+              >
+                建立中
+              </Tag>
+            )}
+            {status?.state === "off" && !status?.transport && (
+              <Tag style={{ marginInlineEnd: 0 }}>本地推理</Tag>
+            )}
+            {status?.unload_countdown_sec != null && (
+              <Tag color="purple" style={{ marginInlineEnd: 0 }}>
+                {Math.ceil(status.unload_countdown_sec)}s 后释放本地内存
               </Tag>
             )}
           </Space>
         }
         extra={
           <Space>
+            <Tooltip title="立即刷新状态">
+              <Button
+                size="small"
+                type="text"
+                icon={<ReloadOutlined />}
+                onClick={() =>
+                  void api
+                    .getRemoteStatus()
+                    .then(setStatus)
+                    .catch(() => {})
+                }
+              />
+            </Tooltip>
             <Tooltip
               title={
                 !remoteReady
@@ -646,11 +611,31 @@ const RemoteSection: React.FC = () => {
                 : "—"}
             </Descriptions.Item>
           </Descriptions>
+          {/* 模型状态（本地/远程两视角——同名模型对齐看; state=off 本地行省略
+              时仍保留: 降级即切本地，本地态是"降级即切"的安心感来源） */}
+          {(status?.local_models ?? []).length > 0 && (
+            <Space size={6} wrap>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                本地:
+              </Typography.Text>
+              {(status?.local_models ?? []).map((m) => {
+                const st = stateBadge(m.state);
+                return (
+                  <Tag key={`l-${m.id}`} color={st.color} style={{ marginInlineEnd: 0 }}>
+                    {m.display}: {st.label}
+                  </Tag>
+                );
+              })}
+            </Space>
+          )}
           {health && (
             <Space size={6} wrap>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                远程:
+              </Typography.Text>
               {health.models.map((m) => (
                 <Tooltip
-                  key={m.repo_id}
+                  key={`r-${m.repo_id}`}
                   title={`${m.repo_id}\nsnapshot: ${m.snapshot || "未知"}`}
                 >
                   <Tag
@@ -664,7 +649,7 @@ const RemoteSection: React.FC = () => {
                 </Tooltip>
               ))}
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                远程 {health.version}
+                {health.version}
                 {health.code_fingerprint
                   ? ` · 代码 ${health.code_fingerprint}${
                       localCodeFp && localCodeFp !== health.code_fingerprint
@@ -702,79 +687,6 @@ const RemoteSection: React.FC = () => {
           </Row>
         </Card>
       )}
-
-      {/* ── 卡片 2: 当前模式 ─────────────────────────────── */}
-      <Card
-        {...cardProps}
-        title={
-          <Space size={8}>
-            <DesktopOutlined />
-            <span>当前模式</span>
-            {status?.unload_countdown_sec != null && (
-              <Tag color="purple" style={{ marginInlineEnd: 0 }}>
-                {Math.ceil(status.unload_countdown_sec)}s 后释放本地内存
-              </Tag>
-            )}
-          </Space>
-        }
-        extra={
-          <Tooltip title="立即刷新">
-            <Button
-              size="small"
-              type="text"
-              icon={<ReloadOutlined />}
-              onClick={() =>
-                void api
-                  .getRemoteStatus()
-                  .then(setStatus)
-                  .catch(() => {})
-              }
-            />
-          </Tooltip>
-        }
-      >
-        <Space direction="vertical" size={12} style={{ width: "100%" }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              background: degraded
-                ? "rgba(255,77,79,0.06)"
-                : "rgba(0,0,0,0.02)",
-              borderRadius: 10,
-              padding: "14px 16px",
-            }}
-          >
-            <ModeBadge status={status} />
-            <Space size={14}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                开关配置: {enabled ? "开启" : "关闭"}
-              </Typography.Text>
-              {degraded && (
-                <Badge
-                  status="error"
-                  text={
-                    <Typography.Text type="danger" style={{ fontSize: 12 }}>
-                      {status?.last_fail_reason ?? "远程不可用"}
-                    </Typography.Text>
-                  }
-                />
-              )}
-            </Space>
-          </div>
-          <Space size={8} wrap>
-            {(status?.local_models ?? []).map((m) => {
-              const st = stateBadge(m.state);
-              return (
-                <Tag key={m.id} color={st.color} style={{ marginInlineEnd: 0 }}>
-                  {m.display}: {st.label}
-                </Tag>
-              );
-            })}
-          </Space>
-        </Space>
-      </Card>
 
       {/* ── 卡片 3: 远程节点管理（经转发）─────────────────── */}
       <Card
