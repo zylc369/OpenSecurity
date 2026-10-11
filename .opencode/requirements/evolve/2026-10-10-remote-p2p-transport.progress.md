@@ -187,3 +187,8 @@
 - 事故: endpoint_probe 组件化交付时 IO 成功路径未真实执行（全程 mock）——用户质疑后补跑, 立刻暴露测速文件选 config.json（1KB 一次读完→break→0.0MB/s）的 bug
 - 修复: 测速路径改 pytorch_model.bin（2.3GB 读不完）; 真实验证 7.97/8.05 MB/s
 - 整改纪律追加: IO 类代码（网络/磁盘/子进程）验证必须含至少一次真实成功路径, mock 只补边界
+
+## 2026-10-11 迭代续: ApiGuard 分层信任（用户决策: 局域网可信）
+- dispatch 新增 LAN 信任层: 节点模式（CONTROL_API_KEY 非空）+ 来源为私网地址（RFC1918/ULA/link-local, ipaddress 判定）→ 全放行（含管理 UI, 免 token）
+- 分层信任模型: 本机（全放行）> LAN（节点模式信任放行）> 公网（白名单+Bearer——0.0.0.0 意外暴露的兜底层）
+- 用例: +2（LAN 信任全放行 / _is_lan 七种地址）; 原 admin_forbidden 用例改名 test_wan_admin_forbidden（语义本是公网来源）

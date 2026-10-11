@@ -22,6 +22,8 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+import ipaddress
+
 from services.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,20 @@ class ApiGuardMiddleware(BaseHTTPMiddleware):
         return (host or "").lower() in cls.LOCAL_HOSTS
 
     @classmethod
+    def _is_lan(cls, host: str | None) -> bool:
+        """请求来源是否私网地址（RFC1918 IPv4 / IPv6 ULA+link-local）。
+
+        节点模式（CONTROL_API_KEY 已配置）下 LAN 来源视同信任放行——家用
+        局域网可信的部署形态; 公网来源仍走 Bearer（0.0.0.0 绑定的意外暴露
+        由令牌层兜底）。
+        """
+        try:
+            addr = ipaddress.ip_address((host or "").split("%")[0])
+        except ValueError:
+            return False
+        return addr.is_private or addr.is_link_local
+
+    @classmethod
     def _path_allowed(cls, path: str) -> bool:
         """路径是否在局域网白名单（精确 + 尾斜杠容忍）。"""
         normalized = path.rstrip("/") or "/"
@@ -70,6 +86,9 @@ class ApiGuardMiddleware(BaseHTTPMiddleware):
             return JSONResponse(
                 {"detail": "Forbidden: 本控制台未开放局域网访问（CONTROL_API_KEY 未配置）"},
                 status_code=403)
+        if self._is_lan(host):
+            # 节点模式 + 局域网来源 → 信任放行（含管理 UI; 家用内网可信形态）
+            return await call_next(request)
 
         if not self._path_allowed(request.url.path):
             logger.warning("鉴权拒绝（路径不在局域网白名单）: host=%s path=%s", host, request.url.path)

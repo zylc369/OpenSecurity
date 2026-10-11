@@ -83,8 +83,8 @@ def test_lan_whitelist_token():
         guard.ApiGuardMiddleware._is_local = orig_local
 
 
-@test("api_guard: 局域网 + 非白名单路径 → 403（管理面不暴露）")
-def test_lan_admin_forbidden():
+@test("api_guard: 公网来源 + 非白名单路径 → 403（管理面不暴露; 0.0.0.0 意外暴露的兜底层）")
+def test_wan_admin_forbidden():
     import services.api_guard as guard
     import services.config_manager as cs
     app = _mk_app()
@@ -137,3 +137,41 @@ if __name__ == "__main__":
             if not ok:
                 print(f"  ✗ {_n}: {_msg}")
         sys.exit(1)
+
+
+@test("api_guard: 节点模式 + 局域网来源 → 全放行（LAN 信任——含管理 UI）")
+def test_lan_trusted_all_allows():
+    import services.api_guard as guard
+    import services.config_manager as cs
+    app = _mk_app()
+    c = _client(app)  # LAN 信任层免 token
+    _cmi = cs.ConfigManager.get_instance()
+    orig_read, orig_local, orig_lan = (
+        _cmi.get, guard.ApiGuardMiddleware.__dict__['_is_local'],
+        guard.ApiGuardMiddleware.__dict__.get('_is_lan'))
+    _cmi.get = lambda key: "some-key" if key == "CONTROL_API_KEY" else None
+    guard.ApiGuardMiddleware._is_local = classmethod(lambda cls, host: False)
+    guard.ApiGuardMiddleware._is_lan = classmethod(lambda cls, host: True)  # 伪造私网来源
+    try:
+        assert_eq(c.get("/api/config").status_code, 200, "管理面放行（LAN 信任）")
+        assert_eq(c.get("/").status_code, 200, "前端页面放行")
+        assert_eq(c.post("/embed").status_code, 200, "推理 API 放行（免 token）")
+    finally:
+        _cmi.get = orig_read
+        guard.ApiGuardMiddleware._is_local = orig_local
+        if orig_lan is not None:
+            guard.ApiGuardMiddleware._is_lan = orig_lan
+
+
+@test("api_guard: _is_lan 私网地址判定（RFC1918/ULA/链路本地）")
+def test_is_lan_addresses():
+    g = ApiGuardMiddleware if False else __import__(
+        "services.api_guard", fromlist=["ApiGuardMiddleware"]).ApiGuardMiddleware
+    assert_true(g._is_lan("192.168.3.5"), "192.168 私网")
+    assert_true(g._is_lan("10.0.0.1"), "10/8 私网")
+    assert_true(g._is_lan("172.16.0.1"), "172.16/12 私网")
+    assert_true(g._is_lan("fd00::1"), "IPv6 ULA")
+    assert_true(g._is_lan("fe80::1%en0"), "链路本地（带 zone）")
+    assert_true(not g._is_lan("74.120.173.111"), "公网 IPv4 不算")
+    assert_true(not g._is_lan("2001:db8::1"), "公网 IPv6 不算")
+    assert_true(not g._is_lan("not-an-ip"), "非 IP 字符串不算")
