@@ -283,11 +283,11 @@ const RemoteSection: React.FC = () => {
     }
   }, []);
 
-  // 节点管理加载门控: 两管道任一可用（http=url; p2p=管道已配——转发走隧道）
-  const p2pReady = status?.transport === "p2p";
+  // 节点管理加载门控: http=url 配置即可转发; p2p=隧道已建立（state=remote）——
+  // transport==="p2p" 只代表管道配置，建立前加载必失败且 state 变化不触发重跑（空态卡死根因）
   useEffect(() => {
-    if (status?.url || p2pReady) void loadNodeInfo();
-  }, [status?.url, p2pReady, loadNodeInfo]);
+    if (status?.url || remoteReady) void loadNodeInfo();
+  }, [status?.url, remoteReady, loadNodeInfo]);
 
   const saveApiKey = useCallback(
     async (value: string) => {
@@ -719,11 +719,17 @@ const RemoteSection: React.FC = () => {
           </Space>
         }
       >
-        {!status?.url && !p2pReady ? (
+        {!status?.url && !status?.transport ? (
           <Alert
             type="info"
             showIcon
             message="先在上方配置远程连接（HTTP 链接+令牌，或 P2P 管道四项）才能管理远程节点"
+          />
+        ) : !nodeCfg && !remoteReady ? (
+          <Alert
+            type="info"
+            showIcon
+            message="远程连接建立中——就绪后自动加载管理功能（无需刷新）"
           />
         ) : !nodeCfg ? (
           <Alert
