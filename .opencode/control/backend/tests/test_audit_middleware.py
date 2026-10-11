@@ -4,6 +4,16 @@
   1. 零消耗: 请求/响应消息流经 middleware 后逐字节不变（流式/二进制/分片/空）
   2. 脱敏: 敏感键值（含大小写/query 串）不落日志; 空值保持; 普通值不动
 运行: cd backend && python -m pytest tests/test_audit_middleware.py -q
+
+⚠ 验证纪律（血泪教训——2026-10-11 mode 值消失事故）:
+  独立验证脚本**永不写生产 .ai_env**——沙箱样板（双 env 缺一不可——
+  .ai_env 挂在 OPENCODE_ROOT 下，只设 HOME 不隔离:
+    import tempfile, os
+    os.environ["OPENSECURITY_HOME"] = tempfile.mkdtemp()
+    os.environ["OPENCODE_ROOT"] = tempfile.mkdtemp()  # ← 2026-10-11 事故: 漏此项致生产覆盖
+    # import services 之后断言: ConfigManager...ai_env_path 不含生产路径再写
+  switch 类验证后**不复位**（mode 是用户会话状态资产，复位=替用户关远程）;
+  直连 ConfigManager 的写操作现在会留痕（config 写入 pid=… 日志行）。
 """
 from __future__ import annotations
 # pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false, reportUnknownLambdaType=false

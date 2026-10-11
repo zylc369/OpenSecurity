@@ -568,7 +568,19 @@ class ConfigManager:
             if key not in updated_keys:
                 new_lines.append(f"{key}={value}")
         self._atomic_write(self.ai_env_path, "\n".join(new_lines) + "\n")
+        # 写留痕（含直连脚本路径——HTTP 路径另有 audit 中间件; 下次"配置值消失"
+        # 类问题直接可溯: 键/pid/敏感值脱敏）
+        self._log_write(updates)
         return configs
+
+    def _log_write(self, updates: dict[str, str]) -> None:
+        import os
+        shown: dict[str, str] = {}
+        for k, v in updates.items():
+            f = self.field_of(k)
+            shown[k] = "***" if (f is not None and f.type is ConfigFieldType.PASSWORD
+                                 and v) else v
+        logger.info("config 写入 pid=%d: %s", os.getpid(), shown)
 
     def set_one(self, key: str, value: str) -> dict[str, str]:
         """更新单个配置（等价 set({key: value}）; 测试 monkeypatch 锚点）。"""
@@ -648,7 +660,24 @@ class ConfigManager:
 
     @staticmethod
     def _atomic_write(path: Path, content: str) -> None:
-        """原子写（迁移期桥接 services.process_lock; 批次 D 后直连 ProcessLockUtil）。"""
+        """原子写 + 写前备份（.ai_env 丢失事故的可逆保障与取证源）。
+
+        备份: 写前将现文件复制为 .ai_env.bak.<mtime戳>（保留最近 20 份）——
+        ① 任何丢失可回溯恢复 ② 备份序列的 diff 精确定位"哪次写丢了什么"。
+        """
+        import shutil
+        if path.exists() and path.name == ".ai_env":
+            try:
+                bak = path.with_name(
+                    f".ai_env.bak.{int(path.stat().st_mtime)}")
+                if not bak.exists():
+                    shutil.copy2(path, bak)
+                baks = sorted(
+                    path.parent.glob(".ai_env.bak.*"), key=lambda p: p.name)
+                for old_bak in baks[:-20]:
+                    old_bak.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("ai_env 备份失败（不阻断写）: %s", e)
         from services.process_lock import ProcessLockUtil
         ProcessLockUtil.atomic_write(path, content)
 
