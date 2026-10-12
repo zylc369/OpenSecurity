@@ -40,6 +40,8 @@ CACHE_LIMIT = 2048
 CACHE_BYTES_LIMIT = 256 * 1024 * 1024  # 256MiB 字节预算（大 WAV 防撑爆内存）
 MAX_TEXT_LEN = 2000
 WORKER_TIMEOUT_SEC = 300.0  # 单请求上限（368 字实测 ~30s; 长文+冷启动余量）
+# 空闲自动释放（对齐 OCR 的 idle 模式; TTS 模型加载重（冷 ~10s）→ 阈值比 OCR(600s) 长）
+WORKER_IDLE_SEC = float(os.environ.get("TTS_WORKER_IDLE_SEC", "1800"))
 
 
 class TtsUnavailable(RuntimeError):
@@ -66,11 +68,17 @@ class WorkerResponse:
 
 
 class TtsWorkerClient:
-    """worker 子进程生命周期 + 行协议收发（线程安全——TtsService 全局锁内使用）。"""
+    """worker 子进程生命周期 + 行协议收发（线程安全——TtsService 全局锁内使用）。
+
+    空闲自动释放: 每分钟检查 last_active，超 WORKER_IDLE_SEC 无请求 → kill
+    （内存全归还; 下次请求冷启动 ~10s——听书间歇场景的内存/延迟平衡点）。
+    """
 
     def __init__(self) -> None:
         self._proc: subprocess.Popen[str] | None = None  # type: ignore[type-arg]
         self._lock = threading.Lock()
+        self._last_active = 0.0
+        self._idle_watchdog: threading.Timer | None = None
 
     @property
     def alive(self) -> bool:
@@ -114,6 +122,8 @@ class TtsWorkerClient:
     def request(self, payload: "dict[str, Any]") -> WorkerResponse:
         """一发一收（调用方持 TtsService 锁——串行天然成立）。超时杀进程。"""
         proc = self._ensure()
+        self._last_active = time.monotonic()
+        self._ensure_idle_watchdog()
         assert proc.stdin is not None and proc.stdout is not None
         try:
             proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -148,6 +158,26 @@ class TtsWorkerClient:
             duration=float(dur) if isinstance(dur, (int, float)) else 0.0,
         )
 
+    def _ensure_idle_watchdog(self) -> None:
+        """单例看门狗（1min 周期; daemon 线程不阻退出）。"""
+        if self._idle_watchdog is not None:
+            return
+
+        def _check() -> None:
+            # 无锁读（60s 粒度检查; 竞态窗口≈检查点与请求更新 last_active 的
+            # 微秒级交叠——即便误杀，请求侧 broken-pipe 自愈重启，无数据损失）
+            self._idle_watchdog = None
+            if (self._proc is not None and self._last_active > 0
+                    and time.monotonic() - self._last_active > WORKER_IDLE_SEC):
+                logger.info("[tts] 空闲 %.0fs → 释放 worker（内存归还; 下次请求冷启动 ~10s）",
+                            WORKER_IDLE_SEC)
+                self._kill()
+
+        timer = threading.Timer(60.0, _check)
+        timer.daemon = True
+        timer.start()
+        self._idle_watchdog = timer
+
     def _kill(self) -> None:
         if self._proc is not None:
             self._proc.kill()
@@ -156,6 +186,9 @@ class TtsWorkerClient:
 
     def shutdown(self) -> None:
         with self._lock:
+            if self._idle_watchdog is not None:
+                self._idle_watchdog.cancel()
+                self._idle_watchdog = None
             self._kill()
 
 

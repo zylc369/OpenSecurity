@@ -263,8 +263,12 @@ class ProxyPool:
         if not self.credentials_configured():
             raise JuliangError("供应商凭证未配置（控制台配置页填写 JULIANG_TRADE_NO / JULIANG_API_KEY）")
         cfg = config_manager.ConfigManager.get_instance().get_kv_list([config_manager.Surface.CONFIG])
-        trade_no = cast("str", cfg[config_manager.ConfigManager.get_instance().Keys.JULIANG_TRADE_NO])  # credentials_configured 已保证存在
-        api_key = cast("str", cfg[config_manager.ConfigManager.get_instance().Keys.JULIANG_API_KEY])
+        # get 读取（credentials_configured 与此处两次读取间配置可能被测试/重载切换——
+        # 假设破裂时给 JuliangError 统一面而非裸 KeyError）
+        trade_no = cast("str", cfg.get(config_manager.ConfigManager.get_instance().Keys.JULIANG_TRADE_NO, ""))
+        api_key = cast("str", cfg.get(config_manager.ConfigManager.get_instance().Keys.JULIANG_API_KEY, ""))
+        if not trade_no or not api_key:
+            raise JuliangError("供应商凭证在读取间隙失效（配置热切换?）——重试请求")
         params: "dict[str, int | str]" = {"trade_no": trade_no, "num": 1, "pt": 1,
                                           "result_type": "json", "ip_remain": 1, "filter": 1}
         params["sign"] = ProxyPool._julang_sign(params, api_key)
