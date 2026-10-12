@@ -103,14 +103,32 @@ const ModelBlock: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; on
 const ModelsSection: React.FC<Props> = ({ models, onDownload, onRelease }) => {
   if (!models) return <Typography.Text type="secondary">加载中…</Typography.Text>;
 
-  return (
+  // 场景分组（tag 语义）: 安全分析模型 vs 语音合成——TTS 与安全分析无关，分组展示
+  const security = models.filter((m) => m.type !== "tts");
+  const tts = models.filter((m) => m.type === "tts");
+
+  const grid = (list: ModelAsset[]) => (
     <Row gutter={[8, 8]}>
-      {models.map((m) => (
+      {list.map((m) => (
         <Col key={m.id} xs={24} md={12}>
           <ModelBlock m={m} onDownload={onDownload} onRelease={onRelease} />
         </Col>
       ))}
     </Row>
+  );
+
+  return (
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      {security.length > 0 && grid(security)}
+      {tts.length > 0 && (
+        <div>
+          <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
+            语音合成（可选——听书场景; --model-tags tts 圈选安装）
+          </Typography.Text>
+          {grid(tts)}
+        </div>
+      )}
+    </Space>
   );
 };
 

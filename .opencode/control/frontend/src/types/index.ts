@@ -201,7 +201,7 @@ export interface DownloadState {
 export interface ModelAsset {
   id: string;
   repo_id: string;
-  type: string;           // embedder / reranker / ocr
+  type: string;           // embedder / reranker / ocr / tts
   display: string;
   purpose: string;
   min_free_gb: number;
@@ -213,6 +213,20 @@ export interface ModelAsset {
   idle_sec: number | null;        // OCR 专用: 已空闲秒数（未加载 null）
   idle_timeout_sec: number | null; // OCR 专用: 空闲自动卸载阈值（600s）
   download: DownloadState;
+}
+
+// ─── /api/tts/voices ──────────────────────────────────────
+
+export interface VoiceAsset {
+  id: string;
+  name: string;
+  gender: string;          // female / male
+  description: string;
+  wav: string;
+  ref_text: string;
+  default_speed: number;
+  source: string;          // builtin（内置）/ user（上传）
+  available: boolean;      // 参考音频文件在位
 }
 
 export interface ModelsResponse {

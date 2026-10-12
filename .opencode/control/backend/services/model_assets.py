@@ -96,6 +96,17 @@ class ModelAssetKind(StrEnum):
     TTS = "tts"
 
 
+class ModelTag(StrEnum):
+    """模型场景标签（安装圈选维度——与 DepTag 同构不同域:
+    新增场景=新枚举成员; 资产注册时声明 tags，安装侧按 --model-tags 圈选）。
+
+    默认 SECURITY: 安全分析模型（embed/rerank/ocr）——不指定 tags 时的安装范围。
+    TTS: 语音合成模型——非必须，显式圈选才安装。
+    """
+    SECURITY = "security"
+    TTS = "tts"
+
+
 class ModelLoadState(StrEnum):
     """模型本地加载态（跨前后端契约值域——前端 literal union 对齐）。"""
     READY = "ready"
@@ -120,6 +131,7 @@ class ModelAsset:
     disk_gb: float
     required_files: tuple[str, ...] = ()  # 缓存完整性: 快照目录至少存在其一
     ollama_model: str = ""  # ocr 平台差异（win/linux=Ollama; 空=全平台 HF）
+    tags: tuple[ModelTag, ...] = (ModelTag.SECURITY,)  # 场景标签（安装圈选; 默认安全组）
 
     def local_state(self) -> ModelLoadState:
         """本地加载态（枚举值域; 基类默认 UNKNOWN）。"""
@@ -209,63 +221,64 @@ class OcrAsset(ModelAsset):
 
 @dataclass(frozen=True)
 class TtsAsset(ModelAsset):
+    """CosyVoice3-8bit（mlx-community 官方量化版; mlx-audio-plus 引擎推理）。
+
+    模型放自定义目录（非 HF cache）: 局域网 rsync 部署简单、hf-mirror 对
+    冷门仓库 308 回源不可靠。目录由 tts_service.TTS_MODEL_DIR 定型。"""
+
     def local_state(self) -> str:
-        # engine_loaded = 引擎懒加载真实态（首次合成才载）; 文件就绪是 cached 维度
+        # engine_loaded = worker 存活真实态（懒加载）; 文件就绪是 cached 维度
         from services.tts_service import TtsService
         return (ModelLoadState.READY if TtsService.get_instance().engine_loaded
                 else ModelLoadState.IDLE)
 
     def cache_state(self) -> "ModelCacheState":
-        """TTS 缓存判定: 手动目录双文件（onnx+voices）齐备才算 cached。
-
-        不走 HF _is_cached——下载源是 GitHub Release（HF 仓库无 voices.bin，
-        引擎所需单文件打包格式与 HF 的分音色文件不兼容）。"""
-        from services.tts_service import MODEL_FILE, VOICES_FILE, TTS_ASSET_DIR
-        m, v = TTS_ASSET_DIR / MODEL_FILE, TTS_ASSET_DIR / VOICES_FILE
-        if m.is_file() and v.is_file():
-            size = round((m.stat().st_size + v.stat().st_size) / 1024**3, 2)
-            return ModelCacheState(True, str(TTS_ASSET_DIR), size)
+        """目录判定: 三关键文件齐备才算 cached（model/tokenizer/config）。"""
+        from services.tts_service import TTS_MODEL_DIR
+        need = ("model.safetensors", "tokenizer.json", "config.json")
+        if all((TTS_MODEL_DIR / f).is_file() for f in need):
+            total = sum((TTS_MODEL_DIR / f).stat().st_size for f in need)
+            return ModelCacheState(True, str(TTS_MODEL_DIR), round(total / 1024**3, 2))
         return ModelCacheState(False, None, 0.0)
 
     def hub_size_gb(self, registry: "ModelAssetRegistry") -> float:  # noqa: ARG002 —— 签名多态一致
         """进度口径: 目录磁盘占用（下载落同目录，poller 可见增长）。"""
-        from services.tts_service import TTS_ASSET_DIR
-        if not TTS_ASSET_DIR.is_dir():
+        from services.tts_service import TTS_MODEL_DIR
+        if not TTS_MODEL_DIR.is_dir():
             return 0.0
-        total = sum(f.stat().st_size for f in TTS_ASSET_DIR.rglob("*") if f.is_file())
+        total = sum(f.stat().st_size for f in TTS_MODEL_DIR.rglob("*") if f.is_file())
         return round(total / 1024**3, 2)
 
     def download_worker(self, registry: "ModelAssetRegistry") -> "Callable[[ModelAsset], None] | None":  # noqa: ARG002 —— 签名多态一致
-        """专属下载: kokoro-onnx GitHub Release（v1.0——zf_*/zm_* 中文音色名与代码一致）两文件流式下载。
+        """专属下载: HF snapshot_download → 自定义目录（local_dir 模式）。
 
-        线程内直下即可（urllib 不受 HF_HUB_OFFLINE 影响）; 临时名+rename
-        原子落盘，中断不残留半文件误判。"""
+        HF_ENDPOINT 环境变量生效（mirror 加速）; 冷门仓库 mirror 可能 308
+        回源——失败时错误信息附局域网 rsync 替代指引（部署主路径）。"""
         def worker(model: ModelAsset) -> None:  # noqa: ARG001 —— 签名一致
+            import os
             import urllib.request
-            from services.tts_service import MODEL_FILE, VOICES_FILE, TTS_ASSET_DIR
-            base = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1"
-            # v1.1-zh 音色为数字名（zf_001...），与代码/前端的 zf_xiaobei 体系不符——用 v1.0
-            TTS_ASSET_DIR.mkdir(parents=True, exist_ok=True)
-            for name in (MODEL_FILE, VOICES_FILE):
-                tmp = TTS_ASSET_DIR / (name + ".part")
-                dst = TTS_ASSET_DIR / name
-                try:
-                    logger.info("[models] TTS 下载 %s ...", name)
-                    # 显式超时流式下载（urlretrieve 无超时——网络异常/代理拦截时无限 hang）。
-                    # ProxyHandler({}) 显式直连: 节点进程可能继承终端代理 env，
-                    # 代理挂死时 urllib 走代理连接 hang——家用直连是既有验证路径。
-                    # certifi CA: Python.org 版 Python 不自动用系统证书
-                    # （SSL: CERTIFICATE_VERIFY_FAILED——需 Install Certificates.command，
-                    # 无人跑;certifi 随 hf 生态必在 venv，显式指定不依赖系统状态）。
-                    import ssl
-                    import certifi
-                    from typing import BinaryIO, cast
-                    ctx = ssl.create_default_context(cafile=certifi.where())
-                    opener = urllib.request.build_opener(
-                        urllib.request.ProxyHandler({}),
-                        urllib.request.HTTPSHandler(context=ctx))
-                    req = urllib.request.Request(f"{base}/{name}", method="GET")
-                    resp = cast("BinaryIO", opener.open(req, timeout=30))  # noqa: S310 —— 固定 Release URL
+            from services.tts_service import TTS_MODEL_DIR
+            TTS_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            # 局域网源模式: TTS_MODEL_SOURCE（如 http://192.168.3.2:8899/）——
+            # 主控机 serve 模型目录，节点逐文件直拉（HF 冷门仓库 mirror 308 回源
+            # 不可靠，局域网 rsync 级速度是部署主路径）
+            source = os.environ.get("TTS_MODEL_SOURCE", "").rstrip("/")
+            files = ("model.safetensors", "tokenizer.json", "tokenizer_config.json", "config.json")
+            if source:
+                logger.info("[models] CosyVoice3 局域网下载 ← %s", source)
+                import ssl
+                import certifi
+                from typing import BinaryIO, cast as _cast
+                ctx = ssl.create_default_context(cafile=certifi.where())
+                opener = urllib.request.build_opener(
+                    urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ctx))
+                for name in files:
+                    tmp = TTS_MODEL_DIR / (name + ".part")
+                    dst = TTS_MODEL_DIR / name
+                    if dst.is_file():
+                        continue
+                    req = urllib.request.Request(f"{source}/{name}", method="GET")
+                    resp = _cast("BinaryIO", opener.open(req, timeout=60))  # noqa: S310 —— 部署者可控源
                     try:
                         with open(tmp, "wb") as fh:
                             while True:
@@ -276,29 +289,30 @@ class TtsAsset(ModelAsset):
                     finally:
                         resp.close()
                     tmp.rename(dst)
-                    logger.info("[models] TTS 完成 %s", name)
-                except Exception:
-                    tmp.unlink(missing_ok=True)
-                    raise
+                    logger.info("[models] CosyVoice3 完成 %s", name)
+                return
+            logger.info("[models] CosyVoice3 HF 下载 → %s", TTS_MODEL_DIR)
+            from huggingface_hub import snapshot_download  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType, reportPartialUnknown] —— hf_hub 存根泛型缺失
+            try:
+                snapshot_download(
+                    repo_id=model.repo_id,
+                    local_dir=str(TTS_MODEL_DIR),
+                    endpoint=registry._hf_endpoint(),  # noqa: SLF001 —— 转发层
+                )
+            except Exception as e:  # noqa: BLE001 —— 下载失败统一面（附替代指引）
+                raise RuntimeError(
+                    f"CosyVoice3 下载失败: {e}。替代: 主控机 'python3 -m http.server 8899 --directory <模型目录>' "
+                    f"+ 节点 .ai_env 配 TTS_MODEL_SOURCE=http://<主控IP>:8899 后重试下载") from e
         return worker
 
     def local_snapshot(self) -> str:
-        """TTS 模型不在 HF hub——目录 size+mtime 短指纹（变更可检测）。"""
-        from pathlib import Path
-        d = Path.home() / ".cache" / "opensecurity" / "tts"
-        if not d.is_dir():
+        """目录 size+mtime 短指纹（变更可检测）。"""
+        from services.tts_service import TTS_MODEL_DIR
+        if not TTS_MODEL_DIR.is_dir():
             return ""
-        st = max((f.stat() for f in d.rglob("*") if f.is_file()),
+        st = max((f.stat() for f in TTS_MODEL_DIR.rglob("*") if f.is_file()),
                  key=lambda s: s.st_mtime, default=None)
-        return f"tts-{int(st.st_size)}-{int(st.st_mtime)}" if st else ""
-    # ocr 平台差异：mac(apple silicon)=MLX/HF；win/linux=Ollama。
-    # 空 = 全平台 HF 下载（embedder/reranker）
-    ollama_model: str = ""
-    # 缓存完整性: 快照目录中**至少存在其中一个**文件才算完整（权重文件候选集）。
-    # 防"部分下载=已缓存"假完成（snapshot_download 启动即建 repo 目录，
-    # scan_cache_dir 只看目录存在会误判; 大权重文件才是下载主体）
-    required_files: tuple[str, ...] = ()
-
+        return f"cv3-{int(st.st_size)}-{int(st.st_mtime)}" if st else ""
 
 
 # ─── 下载状态管理（进程内全局，线程安全）─────────────────────
@@ -350,14 +364,15 @@ class ModelAssetRegistry:
             ollama_model="glm-ocr",
         ),
         TtsAsset(
-            id="kokoro-tts",
-            repo_id="github:thewh1teagle/kokoro-onnx@model-files-v1.1",  # 下载源标识（实际由专属 worker 下载）
+            id="cosyvoice3-8bit",
+            repo_id="mlx-community/Fun-CosyVoice3-0.5B-2512-8bit",
             type=ModelAssetKind.TTS,
-            required_files=(),
-            display="Kokoro TTS (82M)",
-            purpose="远程朗读语音合成（remote-p2p TTS; legado 经 P2P 调用）",
-            min_free_gb=1.0,
-            disk_gb=0.19,  # v1.0 fp16 onnx 164MB + voices-v1.0 28MB
+            required_files=("model.safetensors",),
+            display="CosyVoice3 (0.5B 8bit)",
+            purpose="远程朗读语音合成（remote-p2p TTS; legado 经 P2P 调用; 音色库可选音色）",
+            min_free_gb=4.0,
+            disk_gb=1.4,
+            tags=(ModelTag.TTS,),
         ),
     ]
 
@@ -512,6 +527,22 @@ class ModelAssetRegistry:
         return HardwareSummary(ok=ok, reason=reason, notes=tuple(notes),
                                available_gb=avail, total_required_gb=total)
 
+
+    @classmethod
+    def filter_by_tags(cls, tags: "list[str] | None") -> "list[ModelAsset]":
+        """按场景标签圈选资产（安装范围判定——ensure_models/前端分组共用）。
+
+        tags 为空/None → 默认安全组（向后兼容: 不指定=装安全模型）。
+        传入值需在 ModelTag 值域内（未知值 ValueError——防静默漏装）。
+        """
+        if not tags:
+            return [m for m in cls.MODELS if ModelTag.SECURITY in m.tags]
+        known = {t.value for t in ModelTag}
+        unknown = [t for t in tags if t not in known]
+        if unknown:
+            raise ValueError(f"未知模型标签: {unknown}（可选: {sorted(known)}）")
+        wanted = {ModelTag(t) for t in tags}
+        return [m for m in cls.MODELS if wanted & set(m.tags)]
 
     def get_model_assets(self) -> list[ModelAssetStatus]:
         """全部模型资产状态（/api/models 与 deps 快照的数据源）。"""

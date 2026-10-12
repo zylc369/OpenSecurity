@@ -1,32 +1,30 @@
-"""远端 TTS 路由（D5——经 P2P transport 或节点本机 HTTP 调用，同一语义）。
+"""远端 TTS 路由（经 P2P transport 或节点本机 HTTP 调用，同一语义）。
 
-POST /api/tts   {text, voice?, speed?} → audio/wav（bytes body）
-GET  /api/tts/voices → {"voices": [...]}
-失败: TtsUnavailable → 503; 文本非法 → 400。
+POST /api/tts        {text, voice?, speed?} → audio/wav（bytes body）
+GET  /api/tts/voices → {"voices": [VoiceAsset 字典...]}
+POST /api/tts/voices → 上传新音色（multipart: wav + 表单字段）——无删除端点
+失败: TtsUnavailable → 503; 文本/音色非法 → 400。
 """
 from __future__ import annotations
 
 import logging
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
-from services.tts_service import (
-    DEFAULT_SPEED,
-    DEFAULT_VOICE,
-    TtsService,
-    TtsUnavailable,
-)
+from services.tts_service import DEFAULT_SPEED, TtsService, TtsUnavailable
+from services.voice_library import VoiceError, VoiceLibrary
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tts", tags=["tts"])
 
 
 class TtsRequest(BaseModel):
-    """合成请求（voice/speed 可省——阅读 App 侧只传 text 亦可）。"""
+    """合成请求（voice 省略=音色库默认; speed 1.0 原速 / <1 服务端减速）。"""
 
     text: str = Field(min_length=1, max_length=2000)
-    voice: str = DEFAULT_VOICE
+    voice: str = ""
     speed: float = Field(default=DEFAULT_SPEED, ge=0.5, le=3.0)
 
 
@@ -50,9 +48,30 @@ def synthesize(req: TtsRequest,
 
 
 @router.get("/voices")
-def voices(svc: TtsService = Depends(get_tts_service)) -> "dict[str, list[str]]":
-    """音色列表（引擎未就绪时仅返回默认音色——可用性优先）。"""
-    if not svc.engine_ready():
-        return {"voices": [DEFAULT_VOICE]}
-    known = ["zf_xiaobei", "zm_yunxi", "zm_yunjian", "af_heart"]
-    return {"voices": known}
+def voices() -> "dict[str, list[dict[str, Any]]]":
+    """音色列表（双源合并——内置在前用户在后; 引擎无关恒可用）。"""
+    from dataclasses import asdict
+    items: list[dict[str, Any]] = []
+    for v in VoiceLibrary.get_instance().list_voices():
+        d = dict(asdict(v))  # pyright: ignore[reportAny] —— asdict 存根 Any
+        d["available"] = v.resolved_wav(VoiceLibrary.get_instance()).is_file()
+        items.append(d)  # pyright: ignore[reportUnknownArgumentType] —— asdict Any 收口
+    return {"voices": items}
+
+
+@router.post("/voices")
+async def upload_voice(
+    wav: UploadFile = File(...),  # noqa: B008 —— FastAPI 声明式依赖
+    name: str = Form(...),
+    gender: str = Form(...),
+    ref_text: str = Form(...),
+    description: str = Form(""),
+) -> "dict[str, Any]":
+    """上传音色（服务端统一转 24kHz 单声道; 校验失败 400）。"""
+    raw = await wav.read()
+    try:
+        asset = VoiceLibrary.get_instance().add_user_voice(
+            raw, name=name, gender=gender, description=description, ref_text=ref_text)
+    except VoiceError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, "id": asset.id}

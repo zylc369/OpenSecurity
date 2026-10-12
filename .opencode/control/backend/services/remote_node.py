@@ -7,8 +7,8 @@
   3. 配置初始化  — RELAY 四键（RELAY_HOST/RELAY_PORT/RELAY_PSK/REMOTE_NODE_ID）缺失时
                    参数注入或终端交互补齐; 落盘远程模式键组:
                    P2P_GATEWAY_ENABLE=1（gateway 必开）+ CONTROL_RESIDENT=1（心跳不自杀）
-  4. 模型 ensure — 三必需（bge-m3/bge-reranker-v2-m3/glm-ocr）+ kokoro-tts 默认;
-                   --skip-tts 跳过 TTS、--skip-models 全跳（已缓存项秒过）
+  4. 模型 ensure — --model-tags 圈选（默认安全三件套; 含 tts 则加 CosyVoice3）;
+                   --model-tags 圈选安装范围（默认安全组）、--skip-models 全跳（已缓存项秒过）
   5. 启动控制台  — exec python server.py（信号/模型预载/uvicorn 全复用其 main）
 
 --check 模式: 打印引导计划（将写的配置/将装的模型/启动命令）后退出——预检工具。
@@ -55,8 +55,6 @@ def _registry() -> "ModelAssetRegistry":
     return ModelAssetRegistry.get_instance()
 
 BOOTSTRAP_ENV = "_REMOTE_NODE_BOOTSTRAPPED"
-REQUIRED_MODEL_IDS: tuple[str, ...] = ("bge-m3", "bge-reranker-v2-m3", "glm-ocr")
-TTS_MODEL_ID = "kokoro-tts"
 MODEL_WAIT_TIMEOUT_SEC = 3600  # 全部模型下载等待上限（官方直连慢网络实测 30min 不够）
 
 
@@ -69,7 +67,7 @@ class RemoteNodeArgs:
     relay_psk: str = ""
     node_id: str = ""
     skip_models: bool = False
-    skip_tts: bool = False
+    model_tags: tuple[str, ...] = ()  # 圈选安装范围（空=默认安全组; 如 ("security","tts")）
     assume_yes: bool = False
     check_only: bool = False
 
@@ -256,11 +254,8 @@ class RemoteNodeBootstrapper:
             _log("[*] --skip-models: 跳过模型检查")
             return []
         self.ensure_hf_endpoint()
-        ids = list(REQUIRED_MODEL_IDS)
-        if not self._args.skip_tts:
-            ids.append(TTS_MODEL_ID)
-        reg = _registry()
-        pending = self._start_pending(reg, ids)
+        ids = [m.id for m in _registry().filter_by_tags(list(self._args.model_tags))]
+        pending = self._start_pending(reg := _registry(), ids)
         if not pending:
             _log("[+] 模型缓存全部就位，零下载")
             return []
@@ -370,8 +365,8 @@ class RemoteNodeBootstrapper:
                                capture_output=True)
         cm = _cm().get_instance()
         relay = self._collect_relay(cm)
-        ids = [] if self._args.skip_models else (
-            list(REQUIRED_MODEL_IDS) + ([] if self._args.skip_tts else [TTS_MODEL_ID]))
+        ids = [] if self._args.skip_models else [
+            m.id for m in _registry().filter_by_tags(list(self._args.model_tags))]
         return BootstrapPlan(
             venv_python=venv_python,
             deps_install_needed=probe.returncode != 0,
@@ -415,16 +410,19 @@ def _parse_args(argv: list[str]) -> RemoteNodeArgs:
     parser.add_argument("--relay-psk", default="", help="RELAY_PSK（base64 32B，与 relayd 一致）")
     parser.add_argument("--node-id", default="", help="节点 ID（如 macmini）")
     parser.add_argument("--skip-models", action="store_true", help="跳过模型检查/下载")
-    parser.add_argument("--skip-tts", action="store_true", help="跳过 kokoro-tts（仅三必需）")
+    parser.add_argument("--model-tags", default="",
+                        help="模型圈选标签（逗号分隔: security,tts; 空=默认安全组）")
     parser.add_argument("-y", "--assume-yes", action="store_true", help="免交互（当前用于语义显式化）")
     parser.add_argument("--check", action="store_true",
                         help="只打印引导计划，不执行（预检工具）")
     ns = parser.parse_args(argv)
     from typing import cast
+    model_tags_raw = cast("str", ns.model_tags)
     return RemoteNodeArgs(
         relay_host=cast("str", ns.relay_host), relay_port=cast("str", ns.relay_port),
         relay_psk=cast("str", ns.relay_psk), node_id=cast("str", ns.node_id),
-        skip_models=cast("bool", ns.skip_models), skip_tts=cast("bool", ns.skip_tts),
+        skip_models=cast("bool", ns.skip_models),
+        model_tags=tuple(t.strip() for t in model_tags_raw.split(",") if t.strip()),
         assume_yes=cast("bool", ns.assume_yes), check_only=cast("bool", ns.check),
     )
 

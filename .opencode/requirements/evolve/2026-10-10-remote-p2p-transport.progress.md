@@ -421,3 +421,34 @@
 - 打洞窗口 1.5s→5s（c223fd9）: 弱网 NAT 映射建立慢; 双源同步（config_manager tunables + DirectConnection 默认）
 - 卡片合并: 「当前模式」整卡删除（与「远程连接」开关/降级信息重复）——state 权威不变（后端接口返回，非前端推断）; 状态 Tag 化进卡片头（远程托管/已降级·本地服务/建立中/本地推理）+ unload 倒计时 Tag + 刷新按钮迁移 extra; 本地/远程模型两视角分两行同列展示（"本地: ... / 远程: ..."——同名模型对齐看）; ModeBadge 组件及孤儿 import 清除
 - 注册超时答疑（未改）: Noise 握手 5s + Registered ack 10s + 重连退避 1s×2→30s cap; TCP connect 无显式超时（系统级 ~75s——已向用户提示风险待决策）
+
+### 2026-10-11 迭代续 35: 更新并重启验证链实战闭环（三轮迭代至全绿）
+- 用户两次实测点击 + 本人一轮 API 触发，验证链三层全数达成:
+  ①audit: Updating X..Y 终点=最新 commit; ②boot_token 变化=真重启; ③指纹对齐 py101-3c28fc9c 双端一致 ✓（首次真实达成）
+- 过程修三个真 bug:
+  a) 提示显示旧起点 hash（正则 match 首个=起点）→ 取 "Updating X..Y" 的 Y
+  b) 指纹用 mtime——同 commit 两机 checkout 时刻必不同="与本地一致"永不达成的永久误报 → 内容哈希
+  c) 内容哈希编入绝对路径（含用户名/家目录）跨机必不同 → 相对路径参与哈希
+- MacMini 复活确认: state=remote + transport=p2p（打洞链路恢复）; 本地后端重启完成（含新 dist）
+- 节点更新触发方式新增: 经转发接口 POST /api/remote/update-restart（与 UI 按钮同链路，agent 可自主驱动）
+
+### 2026-10-11 迭代续 36: MCP 消费链路真机验证（用户纠正优先级——UI 绿灯≠消费链路通）
+- embed 端到端 ✓: 首请求 1.59s（MacMini 侧 bge-m3 懒加载触发——远程健康 loaded 由 false 转 true 的直接证据）+ 稳态 0.51-0.62s（远程热路径特征;本地已加载形态应 ~50-80ms）+ 本地模型未加载却成功返回 1024 维=必然远程
+- rerank ✓: 0.91s 远程特征（_route_predict 远程分支同判据）
+- OCR: 本地服务无远程分支（架构现状非回归）——/api/ocr/extract 200 正常（1x1 图空文本 2.9s=本地 glm-ocr 懒加载）
+- TTS: 本地 TtsService 无远程分支（架构现状）——MacBook 无 Kokoro 模型故 503（报本地路径）; Legado 主线设计本就是手机直连 MacMini 节点（节点有 Kokoro——远程健康可见），不经 MacBook 中转，无碍主线
+- 结论: MCP 知识库检索主链路（embed+rerank）远程化真机闭环; OCR/TTS 为本地资产服务
+
+### 2026-10-11 迭代续 37: 四模型统一远程化收官（用户裁决: 裁剪无正当性）
+- 用户裁决: 所有模型统一远程路由（要不要用由调用方/状态机决定，不写死）;本地闲置自动释放反而使本地保留无意义
+- 认错: 上一轮断言"OCR 远程分支未实现"是错的——只 grep 了 model_loader 没搜 ocr_service（远程分支一直在且工作;MacMini glm-ocr loaded=true 是我的请求触发的——2.9s=远程懒加载非本地）。教训: 否定性断言前必须全量搜索
+- TTS 远程化实施（34cb8d6..12d2cff 六连发）:
+  a) TtsService.synthesize 远程路由（缓存命中不出本机→远程→fallback 本地）+ RemoteClient.tts_synth（WAV 二进制经 wire ApiResp.body bytes——gateway 对非 JSON 已有支持）
+  b) 下载源大修: HF onnx-community 仓库无 voices.bin（引擎需 kokoro-onnx GitHub Release 单文件格式）——HF 分支自写下即死代码;改 GitHub Release v1.0（zf_xiaobei 音色名体系;v1.1-zh 是数字名 zf_001 不符）;文件落 ~/.cache/opensecurity/tts
+  c) espeak 中文语音码实测 "cmn"（cmn-cn/zh 不存在）
+  d) kokoro-onnx 依赖注册 console_runtime（venv 实装）
+  e) 专属 worker 状态收口 _run_worker（异常线程死→状态永停 downloading 无 error 的盲区）+ poller 补启
+  f) 下载直连（防代理 env 污染）+ certifi CA（Python.org 版无系统证书——MacMini SSL 验证失败根因）+ 超时流式（urlretrieve 无限 hang）
+  g) models-forward 列表/下载转发端点（远程节点管理的模型管理能力）
+- 真机终验: 节点 done 1.0 → /api/tts 200/331KB/RIFF/1.56s（MacMini Kokoro loaded=true）;本地 fallback 路径独立验证过（远程失败→本地合成 252KB WAV）
+- 四模型远程化全部真机闭环: embed ✓ rerank ✓ ocr ✓(本就存在) tts ✓(本轮)

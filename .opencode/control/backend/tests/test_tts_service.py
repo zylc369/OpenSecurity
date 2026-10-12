@@ -1,0 +1,89 @@
+"""TtsService 单测（worker 协议 mock——不起真模型; 远程路由强制本地）。"""
+# pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from services.tts_service import (  # noqa: E402
+    TtsService, TtsUnavailable, WorkerResponse)
+
+
+def _reset_for_tests() -> None:
+    TtsService._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_service(monkeypatch, tmp_path):
+    """每用例独立实例 + 远程路由关闭 + 假 worker。"""
+    _reset_for_tests()
+    svc = TtsService.get_instance()
+    # 远程链路不可用 → use_remote=False（本地路径）
+    import services.remote_link as rl
+    monkeypatch.setattr(rl.RemoteLinkService, "should_use_remote",
+                        lambda self: False)
+    calls: list[dict] = []
+
+    class _FakeWorker:
+        alive = True
+
+        def request(self, payload: dict) -> WorkerResponse:
+            calls.append(payload)
+            out = Path(str(payload["out"]))
+            out.write_bytes(b"RIFF-fake-wav-bytes")
+            return WorkerResponse(ok=True, path=str(out), duration=1.0)
+
+    monkeypatch.setattr(svc._worker, "request", _FakeWorker().request)
+    monkeypatch.setattr(svc._worker, "_ensure", lambda: None)
+    yield svc, calls
+    _reset_for_tests()
+
+
+def test_synth_default_voice(_fresh_service):
+    svc, calls = _fresh_service
+    r = svc.synthesize("你好世界")
+    assert r.wav.startswith(b"RIFF")
+    assert r.cached is False
+    assert r.voice == "official_female"  # 音色库默认
+    assert len(calls) == 1
+    assert calls[0]["ref_text"]  # 音色逐字稿透传 worker
+
+
+def test_cache_hit(_fresh_service):
+    svc, calls = _fresh_service
+    svc.synthesize("同一段文本", speed=0.9)
+    r2 = svc.synthesize("同一段文本", speed=0.9)
+    assert r2.cached is True and r2.gen_ms == 0.0
+    assert len(calls) == 1  # 只发一次 worker 请求
+    # 不同 speed 不共享缓存
+    svc.synthesize("同一段文本", speed=1.0)
+    assert len(calls) == 2
+
+
+def test_unknown_voice(_fresh_service):
+    svc, _ = _fresh_service
+    with pytest.raises(ValueError, match="未知音色"):
+        svc.synthesize("文本", voice="不存在的音色")
+
+
+def test_worker_error_surface(_fresh_service, monkeypatch):
+    svc, _ = _fresh_service
+
+    def _fail(payload: dict) -> WorkerResponse:
+        return WorkerResponse(ok=False, error="RuntimeError: 模型崩")
+
+    monkeypatch.setattr(svc._worker, "request", _fail)
+    with pytest.raises(TtsUnavailable, match="worker 合成失败"):
+        svc.synthesize("文本")
+
+
+def test_speed_clamp(_fresh_service):
+    svc, calls = _fresh_service
+    svc.synthesize("文本", speed=99.0)   # 越界钳制到 3.0
+    svc.synthesize("文本2", speed=0.1)   # 越界钳制到 0.5
+    assert calls[0]["speed"] == 3.0 and calls[1]["speed"] == 0.5

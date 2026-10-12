@@ -791,7 +791,7 @@ def test_tts_service_error_facets() -> None:
         except ValueError:
             pass
         # 模型缺失（干净环境大概率无模型; 有模型则跳过此断言）
-        if not svc.engine_ready():
+        if not svc.engine_loaded:
             try:
                 svc.synthesize("你好")
                 raise AssertionError("应抛 TtsUnavailable")
@@ -815,8 +815,6 @@ def test_tts_route_with_stub(monkeypatch: "object") -> None:
     fake = SimpleNamespace()
     fake.synthesize = lambda text, voice="v", speed=1.0: tts_mod.TtsResult(
         wav=b"RIFFwav", cached=False, gen_ms=1.0, voice=voice, speed=speed)
-    fake.voices = lambda: ["zf_xiaobei"]
-    fake.engine_ready = lambda: True
 
     app = FastAPI()
     app.include_router(router)
@@ -827,7 +825,9 @@ def test_tts_route_with_stub(monkeypatch: "object") -> None:
     assert r.headers["content-type"].startswith("audio/wav")
     assert r.content == b"RIFFwav"
     r2 = client.get("/api/tts/voices")
-    voices_list = cast("list[object]", r2.json()["voices"])
-    assert voices_list[0] == "zf_xiaobei" and len(voices_list) == 4
+    voices_list = cast("list[dict[str, object]]", r2.json()["voices"])
+    # 音色库语义: 双源合并的 VoiceAsset 字典（内置官方女声恒在首位）
+    assert voices_list and voices_list[0]["id"] == "official_female"
+    assert voices_list[0]["available"] is True
     r3 = client.post("/api/tts", json={"text": ""})
     assert r3.status_code == 422  # pydantic min_length 拦截

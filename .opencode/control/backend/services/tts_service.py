@@ -1,42 +1,54 @@
-"""远端 TTS 服务（kokoro-onnx; 需求 D5/D8——初版 WAV 24kHz，Opus 列为后续优化）。
+"""TTS 服务（CosyVoice3-8bit @ mlx-audio-plus 引擎，常驻 worker 子进程推理）。
 
-模型资产（控制台「环境总览→模型」下载，产物落此目录; 也可手动放置）:
-  ~/.cache/opensecurity/tts/kokoro-v1.0.fp16.onnx     （kokoro-onnx GitHub Release v1.0）
-  ~/.cache/opensecurity/tts/voices-v1.0.bin
+架构:
+  本地: TtsWorkerClient → .venv-tts python scripts/tts_worker.py（stdin/stdout
+        行式 JSON 协议; 模型常驻 worker 内; 每请求 mx.clear_cache; 尾部静音
+        自动重试; speed<1 ffmpeg atempo 后处理）。
+  远程: should_use_remote → P2P → 节点同构 TtsService（失败 fallback 本地）。
+  音色: VoiceLibrary 双源（内置 git 资产 + 用户运行时）; voice 参数=音色 id。
 
-失败语义: 模型缺失/依赖未装 → TtsUnavailable（路由层映射 503——
-调用方不需要区分错误种类）。LRU 键 = (voice, speed, text)。
+worker 生命周期: 首次合成懒启动; 单请求超时杀进程（下次自动重拉）; 空闲常驻
+（听书场景）; release() 显式回收（模型目录变更/测试）。
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
+import subprocess
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from services.voice_library import VoiceAsset as VoiceAssetT
 
 logger = logging.getLogger(__name__)
 
-TTS_ASSET_DIR = Path.home() / ".cache" / "opensecurity" / "tts"
-MODEL_FILE = "kokoro-v1.0.fp16.onnx"      # kokoro-onnx GitHub Release v1.0（含 zf_*/zm_* 中文音色）
-VOICES_FILE = "voices-v1.0.bin"
-DEFAULT_VOICE = "zf_xiaobei"
+# CosyVoice3-8bit 模型目录（自定义目录非 HF cache——局域网 rsync 部署 + 目录口径检测）
+TTS_MODEL_DIR = Path(os.environ.get("OPENSECURITY_HOME",
+                                    str(Path.home() / "bw-security-analysis"))) / "models" / "cosyvoice3-8bit"
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent
+WORKER_SCRIPT = _BACKEND_ROOT / "scripts" / "tts_worker.py"
+WORKER_VENV_PY = _BACKEND_ROOT / ".venv-tts" / "bin" / "python"
+
 DEFAULT_SPEED = 1.0
-SAMPLE_RATE = 24000
 CACHE_LIMIT = 2048
-CACHE_BYTES_LIMIT = 256 * 1024 * 1024  # 256MiB 字节预算（review#7——条目数上限之外防大 WAV 撑爆内存）
+CACHE_BYTES_LIMIT = 256 * 1024 * 1024  # 256MiB 字节预算（大 WAV 防撑爆内存）
 MAX_TEXT_LEN = 2000
+WORKER_TIMEOUT_SEC = 300.0  # 单请求上限（368 字实测 ~30s; 长文+冷启动余量）
 
 
 class TtsUnavailable(RuntimeError):
     """TTS 不可用（模型缺失/依赖未装/合成失败统一面）。"""
 
 
-@dataclass(frozen=True)
+@dataclass
 class TtsResult:
-    """合成结果（WAV 全文件字节）。"""
-
+    """合成结果（WAV 字节 + 路由元数据）。"""
     wav: bytes
     cached: bool
     gen_ms: float
@@ -44,93 +56,171 @@ class TtsResult:
     speed: float
 
 
+@dataclass
+class WorkerResponse:
+    """worker 行协议响应（解析边界——dict 值域在 request 内消化定型）。"""
+    ok: bool
+    error: str = ""
+    path: str = ""
+    duration: float = 0.0
+
+
+class TtsWorkerClient:
+    """worker 子进程生命周期 + 行协议收发（线程安全——TtsService 全局锁内使用）。"""
+
+    def __init__(self) -> None:
+        self._proc: subprocess.Popen[str] | None = None  # type: ignore[type-arg]
+        self._lock = threading.Lock()
+
+    @property
+    def alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def _ensure(self) -> "subprocess.Popen[str]":
+        if self.alive and self._proc is not None:
+            return self._proc
+        if not WORKER_VENV_PY.is_file():
+            self._bootstrap_venv()
+        if not (TTS_MODEL_DIR / "model.safetensors").is_file():
+            raise TtsUnavailable(
+                f"模型未就绪: 在控制台「环境总览→模型」下载 CosyVoice3，"
+                f"或 rsync 模型目录到 {TTS_MODEL_DIR}")
+        if self._proc is not None:
+            self._kill()
+        logger.info("[tts] 启动 worker（模型加载 ~10s）")
+        self._proc = subprocess.Popen(  # noqa: S603 —— 固定脚本路径
+            [str(WORKER_VENV_PY), str(WORKER_SCRIPT), "--model-dir", str(TTS_MODEL_DIR)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,  # worker 日志经协议透传; stderr 弃流防管道阻塞
+            text=True, bufsize=1,
+        )
+        return self._proc
+
+    @staticmethod
+    def _bootstrap_venv() -> None:
+        """.venv-tts 缺失时自愈安装（节点远程部署无手动通道——模型在位而
+        依赖缺失的唯一解; uv+镜像 ~2-4min; 失败抛 TtsUnavailable）。"""
+        installer = _BACKEND_ROOT / "scripts" / "install_tts_deps.sh"
+        if not installer.is_file():
+            raise TtsUnavailable(f"TTS 环境未就绪且缺安装脚本: {installer}")
+        logger.info("[tts] .venv-tts 缺失 → 自愈安装（uv+镜像，2-4 分钟）")
+        import subprocess as _sp
+        r = _sp.run(["/bin/zsh", str(installer)], capture_output=True, text=True,
+                    timeout=900)  # noqa: S603,S607 —— 固定项目脚本
+        if r.returncode != 0 or not WORKER_VENV_PY.is_file():
+            raise TtsUnavailable(
+                f"TTS 环境自愈安装失败: {r.stdout[-400:]} {r.stderr[-400:]}")
+
+    def request(self, payload: "dict[str, Any]") -> WorkerResponse:
+        """一发一收（调用方持 TtsService 锁——串行天然成立）。超时杀进程。"""
+        proc = self._ensure()
+        assert proc.stdin is not None and proc.stdout is not None
+        try:
+            proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError) as e:
+            self._kill()
+            raise TtsUnavailable(f"worker 管道断开: {e}") from e
+        timer = threading.Timer(WORKER_TIMEOUT_SEC, self._kill)
+        timer.start()
+        try:
+            line = proc.stdout.readline()  # pyright: ignore[reportAny] —— text mode readline
+        finally:
+            timer.cancel()
+        if not line:
+            self._kill()
+            raise TtsUnavailable(
+                f"worker 无响应（超时 {WORKER_TIMEOUT_SEC:.0f}s 或崩溃——已回收，下次请求重启）")  # pyright: ignore[reportAny] —— line Any 透传
+        try:
+            parsed: object = json.loads(line)  # pyright: ignore[reportAny] —— json 解析边界
+            raw = cast("dict[str, object]", parsed)
+        except json.JSONDecodeError as e:
+            self._kill()
+            raise TtsUnavailable(f"worker 协议响应损坏: {line[:200]}") from e
+        ok = raw.get("ok")
+        err = raw.get("error", "")
+        path = raw.get("path", "")
+        dur = raw.get("duration", 0.0)
+        return WorkerResponse(
+            ok=bool(ok) if isinstance(ok, bool) else False,
+            error=err if isinstance(err, str) else str(err),
+            path=path if isinstance(path, str) else "",
+            duration=float(dur) if isinstance(dur, (int, float)) else 0.0,
+        )
+
+    def _kill(self) -> None:
+        if self._proc is not None:
+            self._proc.kill()
+            self._proc.wait(timeout=10)
+            self._proc = None
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._kill()
+
+
 class TtsService:
-    """kokoro-onnx 懒加载 + LRU 缓存（线程安全; 全局单例 get_instance）。"""
+    """TTS 合成（缓存/远程路由/worker 本地推理三件套，全局单例）。"""
 
     _instance: "TtsService | None" = None
     _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._engine: "object | None" = None  # kokoro_onnx.Kokoro
-        self._engine_failed = False            # 依赖缺失只报一次（避免每请求重复 import 报错）
         self._cache: "OrderedDict[tuple[str, float, str], bytes]" = OrderedDict()
+        self._lock = threading.Lock()
+        self._worker = TtsWorkerClient()
 
     @classmethod
     def get_instance(cls) -> "TtsService":
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
-                    cls._instance = TtsService()
+                    cls._instance = cls()
         return cls._instance
 
-    # ── 引擎 ─────────────────────────────────────────
+    @classmethod
+    def _reset_for_tests(cls) -> None:
+        with cls._instance_lock:
+            if cls._instance is not None:
+                cls._instance._worker.shutdown()
+            cls._instance = None
 
     @property
     def engine_loaded(self) -> bool:
-        """引擎是否已加载（懒加载真实态; 不触发加载——模型资产状态页用）。"""
-        return self._engine is not None
-
-    def _model_paths(self) -> "tuple[Path, Path]":
-        """模型文件定位: TTS_ASSET_DIR（GitHub Release 下载产物/手动放置同一目录）。
-
-        历史: 曾优先 HF hub snapshot——但 kokoro_onnx 引擎所需的 voices.bin
-        在 HF onnx-community 仓库并不存在（音色是 voices/*.bin 每音色一文件，
-        与引擎的单文件打包格式不兼容）——该分支从未可能成功，已删。
-        """
-        return TTS_ASSET_DIR / MODEL_FILE, TTS_ASSET_DIR / VOICES_FILE
-
-    def engine_ready(self) -> bool:
-        """模型文件与依赖是否就绪（不触发加载）。"""
-        model, voices = self._model_paths()
-        return model.is_file() and voices.is_file()
-
-    def _get_engine(self) -> "object":
-        if self._engine is not None:
-            return self._engine
-        if self._engine_failed:
-            raise TtsUnavailable("TTS 引擎不可用（先前初始化失败——见日志）")
-        model, voices = self._model_paths()
-        if not (model.is_file() and voices.is_file()):
-            raise TtsUnavailable(
-                f"模型未就绪: 在控制台「环境总览→模型」下载 Kokoro TTS，"
-                f"或手动放置 {TTS_ASSET_DIR}（{model.name}/{voices.name}）")
-        try:
-            from kokoro_onnx import Kokoro  # type: ignore[no-any-reexport] —— 无存根库
-        except ImportError as e:
-            self._engine_failed = True
-            logger.warning("kokoro-onnx 未安装: %s", e)
-            raise TtsUnavailable("kokoro-onnx 未安装（pip install kokoro-onnx）") from e
-        try:
-            t0 = time.monotonic()
-            from typing import Callable as _Callable, cast as _cast
-            engine_ctor = _cast("_Callable[[str, str], object]", Kokoro)
-            self._engine = engine_ctor(str(model), str(voices))
-            logger.info("TTS 引擎已加载（%.1fs）", time.monotonic() - t0)
-            return self._engine
-        except Exception as e:  # noqa: BLE001 —— 引擎初始化失败统一面
-            self._engine_failed = True
-            logger.exception("TTS 引擎初始化失败")
-            raise TtsUnavailable(f"引擎初始化失败: {e}") from e
+        """worker 存活即已加载（模型常驻 worker 内——懒启动语义）。"""
+        return self._worker.alive
 
     # ── 合成 ─────────────────────────────────────────
 
-    def synthesize(self, text: str, voice: str = DEFAULT_VOICE,
+    def synthesize(self, text: str, voice: str = "",
                    speed: float = DEFAULT_SPEED) -> TtsResult:
-        """文本 → WAV 字节（LRU 命中标记 cached）。空文本 ValueError。"""
+        """文本 → WAV 字节（LRU 命中标记 cached）。空文本 ValueError。
+
+        voice: 音色库 id（空=默认音色）; speed: 1.0 原速, <1 服务端 atempo 减速。
+        """
+        from services.voice_library import VoiceLibrary, VoiceError
         text = text.strip()
         if not text:
             raise ValueError("文本为空")
         if len(text) > MAX_TEXT_LEN:
             raise ValueError(f"文本过长（{len(text)} > {MAX_TEXT_LEN}）")
+        try:
+            voice_asset = (VoiceLibrary.get_instance().get(voice)
+                           if voice else VoiceLibrary.get_instance().default_voice())
+        except VoiceError as e:
+            raise TtsUnavailable(str(e)) from e
+        if voice_asset is None:
+            available = [v.id for v in VoiceLibrary.get_instance().list_voices()]
+            raise ValueError(f"未知音色: {voice}（可选: {available}）")
         speed = min(max(speed, 0.5), 3.0)
-        key = (voice, speed, text)
+        voice_id = voice_asset.id
+        key = (voice_id, speed, text)
         with self._lock:
             hit = self._cache.get(key)
             if hit is not None:
                 self._cache.move_to_end(key)
                 return TtsResult(wav=hit, cached=True, gen_ms=0.0,
-                                 voice=voice, speed=speed)
+                                 voice=voice_id, speed=speed)
         # 远程路由（四模型统一远程化——与 embed/rerank/ocr 同语义:
         # should_use_remote → 远程推理，失败 fallback 本地; 缓存命中不出本机）
         try:
@@ -143,30 +233,17 @@ class TtsService:
             t0 = time.monotonic()
             try:
                 client = RemoteLinkService.get_instance().get_client()
-                wav = client.tts_synth(text, voice, speed)
+                wav = client.tts_synth(text, voice_id, speed)
                 return TtsResult(wav=wav, cached=False,
                                  gen_ms=(time.monotonic() - t0) * 1000,
-                                 voice=voice, speed=speed)
+                                 voice=voice_id, speed=speed)
             except RemoteUnavailable as e:
                 try:
                     RemoteLinkService.get_instance().note_request_failure(f"tts: {e}")
                 except Exception:  # noqa: BLE001
                     pass
                 logger.warning("远程 tts 失败，fallback 本地: %s", e)
-        engine = self._get_engine()
-        t0 = time.monotonic()
-        try:
-            from typing import Sequence as _Seq, cast as _cast2
-            raw = getattr(engine, "create")(  # pyright: ignore[reportAny] —— 无存根引擎
-                text, voice=voice, speed=speed,
-                # espeak-ng 中文语音名为 "cmn"（cmn-cn/zh 均不存在——实测枚举）
-                lang="cmn" if voice.startswith("z") else "en-us")
-            samples = _cast2("_Seq[float]",
-                             raw[0] if isinstance(raw, tuple) else raw)
-        except Exception as e:  # noqa: BLE001 —— 合成失败统一面
-            raise TtsUnavailable(f"合成失败: {e}") from e
-        wav = WavEncoder.encode(samples, SAMPLE_RATE)
-        gen_ms = (time.monotonic() - t0) * 1000
+        wav, gen_ms = self._synth_local(text, voice_asset, speed)
         with self._lock:
             self._cache[key] = wav
             self._cache.move_to_end(key)
@@ -174,51 +251,54 @@ class TtsService:
                    or sum(len(v) for v in self._cache.values()) > CACHE_BYTES_LIMIT):
                 self._cache.popitem(last=False)
         return TtsResult(wav=wav, cached=False, gen_ms=gen_ms,
-                         voice=voice, speed=speed)
+                         voice=voice_id, speed=speed)
+
+    def _synth_local(self, text: str, voice_asset: "VoiceAssetT", speed: float) -> "tuple[bytes, float]":
+        """本地 worker 合成（临时 wav → 字节; 音色文件随请求传递路径）。"""
+        import tempfile
+        t0 = time.monotonic()
+        from services.voice_library import VoiceLibrary
+        lib = VoiceLibrary.get_instance()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            out_path = tmp.name
+        try:
+            resp = self._worker.request({
+                "id": f"tts-{time.monotonic_ns()}",
+                "op": "synth",
+                "text": text,
+                "wav": str(voice_asset.resolved_wav(lib)),
+                "ref_text": voice_asset.ref_text,
+                "out": out_path,
+                "speed": speed,
+            })
+            if not resp.ok:
+                raise TtsUnavailable(f"worker 合成失败: {resp.error or '未知'}")
+            wav = Path(resp.path or out_path).read_bytes()
+            return wav, (time.monotonic() - t0) * 1000
+        finally:
+            Path(out_path).unlink(missing_ok=True)
 
     def cache_size(self) -> int:
         with self._lock:
             return len(self._cache)
 
     def release(self) -> None:
-        """释放引擎与缓存（模型目录变更后重载用）。"""
+        """释放 worker 与缓存（模型目录变更后重载用）。"""
         with self._lock:
-            self._engine = None
-            self._engine_failed = False
+            self._worker.shutdown()
             self._cache.clear()
 
 
-class WavEncoder:
-    """float32 一维采样 → WAV 文件字节（无第三方依赖; PCM16 单声道封装器）。"""
-
-    @staticmethod
-    def encode(samples: "object", sample_rate: int) -> bytes:
-        import io
-        import struct
-        import wave
-        from typing import Sequence, cast
-        floats = list(cast("Sequence[float]", samples))
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)  # int16
-            w.setframerate(sample_rate)
-            clipped = [max(-1.0, min(1.0, f)) for f in floats]
-            w.writeframes(struct.pack(f"<{len(clipped)}h",
-                                      *[int(f * 32767) for f in clipped]))
-        return buf.getvalue()
-
-
 def _smoke_main(argv: "list[str]") -> int:
-    """python -m services.tts_service --smoke "文本" [voice]。"""
+    """python -m services.tts_service --smoke "文本" [voice_id]。"""
     import sys
     logging.basicConfig(level=logging.INFO)
     if "--smoke" not in argv:
-        print("用法: python -m services.tts_service --smoke <文本> [voice]")
+        print("用法: python -m services.tts_service --smoke <文本> [voice_id]")
         return 2
     args = [a for a in argv[1:] if a != "--smoke"]
     text = args[0] if args else "你好，这是远程语音合成测试。"
-    voice = args[1] if len(args) > 1 else DEFAULT_VOICE
+    voice = args[1] if len(args) > 1 else ""
     try:
         result = TtsService.get_instance().synthesize(text, voice=voice)
     except (TtsUnavailable, ValueError) as e:
@@ -236,4 +316,4 @@ def _smoke_main(argv: "list[str]") -> int:
 
 if __name__ == "__main__":
     import sys
-    raise SystemExit(_smoke_main(sys.argv))
+    sys.exit(_smoke_main(sys.argv))
