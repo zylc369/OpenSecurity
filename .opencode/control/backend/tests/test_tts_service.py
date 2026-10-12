@@ -87,3 +87,34 @@ def test_speed_clamp(_fresh_service):
     svc.synthesize("文本", speed=99.0)   # 越界钳制到 3.0
     svc.synthesize("文本2", speed=0.1)   # 越界钳制到 0.5
     assert calls[0]["speed"] == 3.0 and calls[1]["speed"] == 0.5
+
+
+def test_tail_silence_detection(tmp_path):
+    """worker 尾部静音判定（纯函数——合成半截事故的检测器）。"""
+    import importlib.util
+    import numpy as np
+    import soundfile as sf
+    # worker 在 scripts/（非包内）——按路径加载
+    spec = importlib.util.spec_from_file_location(
+        "tts_worker", str(Path(__file__).parent.parent / "scripts" / "tts_worker.py"))
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType, reportAny] —— 动态加载边界
+    spec.loader.exec_module(mod)  # pyright: ignore[reportUnknownMemberType] —— 动态加载边界
+
+    sr = 24000
+    # 正常音频（尾部有声）
+    loud = tmp_path / "loud.wav"
+    tone = np.full(sr * 12, 0.3, dtype=np.float32)
+    sf.write(str(loud), tone, sr, subtype="PCM_16")
+    checker = mod._tail_is_silent  # pyright: ignore[reportUnknownMemberType, reportAny] —— 动态加载
+    assert checker(loud) is False
+    # 尾部 10s 全静音（半截合成）
+    silent = tmp_path / "silent.wav"
+    tone2 = np.concatenate([np.full(sr * 2, 0.3, dtype=np.float32),
+                            np.zeros(sr * 10, dtype=np.float32)])
+    sf.write(str(silent), tone2, sr, subtype="PCM_16")
+    assert checker(silent) is True
+    # 短于检测窗（全有声）
+    short = tmp_path / "short.wav"
+    sf.write(str(short), np.full(sr * 3, 0.3, dtype=np.float32), sr, subtype="PCM_16")
+    assert checker(short) is False

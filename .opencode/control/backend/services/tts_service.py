@@ -91,7 +91,7 @@ class TtsWorkerClient:
         self._proc = subprocess.Popen(  # noqa: S603 —— 固定脚本路径
             [str(WORKER_VENV_PY), str(WORKER_SCRIPT), "--model-dir", str(TTS_MODEL_DIR)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,  # worker 日志经协议透传; stderr 弃流防管道阻塞
+            stderr=None,  # 继承主控 stderr（控制台日志文件）——worker 加载/崩溃可诊断
             text=True, bufsize=1,
         )
         return self._proc
