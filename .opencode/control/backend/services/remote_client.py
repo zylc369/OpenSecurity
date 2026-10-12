@@ -195,6 +195,10 @@ class RemoteConsoleClient:
             raise RemoteUnavailable(f"远程 /api/ocr/extract 响应畸形: {str(data)[:120]}")
         return text
 
+    # TTS 请求级超时: 节点首请求含自愈装依赖（幂等 ~20s）+ worker 冷启
+    # (~10s) + 长文合成——推理默认超时不够，单独放宽
+    TTS_TIMEOUT_SEC = 600.0
+
     def tts_synth(self, text: str, voice: str, speed: float) -> bytes:
         """语音合成（POST /api/tts——WAV 二进制响应，不经 _post_json 的
         JSON 假设; gateway 对非 JSON 响应以原始 bytes 装入 ApiResp.body）。"""
@@ -203,7 +207,8 @@ class RemoteConsoleClient:
             from services.remote_transport import TransportError
             transport = self._get_transport()
             try:
-                resp = transport.request("POST", "/api/tts", payload, self._token)
+                resp = transport.request("POST", "/api/tts", payload, self._token,
+                                         timeout=self.TTS_TIMEOUT_SEC)
             except TransportError as e:
                 raise RemoteUnavailable(f"远程 P2P 调用失败: {e}") from e
             if resp.status != 200:
@@ -215,7 +220,7 @@ class RemoteConsoleClient:
         url = f"{self._base}/api/tts"
         try:
             r = self._http.post(url, json=payload, headers=self._headers(),
-                                timeout=self._infer_timeout)
+                                timeout=max(self._infer_timeout, self.TTS_TIMEOUT_SEC))
         except httpx.HTTPError as e:
             raise RemoteUnavailable(f"连接远程失败: {e}") from e
         if r.status_code != 200:
