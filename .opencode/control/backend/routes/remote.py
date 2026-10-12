@@ -201,6 +201,18 @@ async def remote_health_forward() -> JSONResponse:
     return JSONResponse(content=data)
 
 
+@router.get("/sysinfo-forward")
+async def remote_sysinfo_forward() -> JSONResponse:
+    """远程节点 /api/hardware 透传（节点芯片/内存/磁盘等硬件信息，部署规划用）。"""
+    import asyncio
+    from typing import cast
+    from services.remote_link import RemoteLinkService
+    client = RemoteLinkService.get_instance().get_client()
+    data = cast("dict[str, object]", await asyncio.to_thread(
+        client._get_json, "/api/hardware"))  # noqa: SLF001 —— 转发层
+    return JSONResponse(content=data)
+
+
 @router.get("/models-forward")
 async def remote_models_forward() -> JSONResponse:
     """远程节点模型列表透传（远程管理页查看节点模型状态/下载进度）。"""
