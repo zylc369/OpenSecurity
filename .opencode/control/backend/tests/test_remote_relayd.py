@@ -780,8 +780,14 @@ def test_remote_client_p2p_branch() -> None:
 # ── P15/P16: TTS 服务与路由 ────────────────────────────
 
 
-def test_tts_service_error_facets() -> None:
+def test_tts_service_error_facets(monkeypatch: "object") -> None:
     from services.tts_service import TtsService, TtsUnavailable
+    import services.tts_service as tts_mod
+
+    # 强制无模型环境（模型目录指向空 tmp——不依赖宿主机是否已部署）
+    import pathlib, tempfile
+    _empty = pathlib.Path(tempfile.mkdtemp())
+    monkeypatch.setattr(tts_mod, "TTS_MODEL_DIR", _empty / "no-model")  # type: ignore[attr-defined]
 
     svc = TtsService()
     try:
@@ -791,8 +797,8 @@ def test_tts_service_error_facets() -> None:
             raise AssertionError("应抛 ValueError")
         except ValueError:
             pass
-        # 模型缺失（干净环境大概率无模型; 有模型则跳过此断言）
-        if not svc.engine_loaded:
+        # 模型缺失（强制空目录——恒成立）
+        if True:
             try:
                 svc.synthesize("你好")
                 raise AssertionError("应抛 TtsUnavailable")
