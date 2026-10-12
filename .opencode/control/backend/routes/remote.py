@@ -226,7 +226,7 @@ async def remote_model_push(model_id: str) -> JSONResponse:
         if not f.is_file() or f.name.startswith("."):
             continue
         total = f.stat().st_size
-        CH = 4 * 1024 * 1024  # base64 后 ~5.5MB < wire TCP 帧上限
+        CH = 512 * 1024  # base64 后 ~0.7MB——中继模式低吞吐容忍（小片防超时）
         offset = 0
         with open(f, "rb") as fh:
             while offset < total:
@@ -237,7 +237,7 @@ async def remote_model_push(model_id: str) -> JSONResponse:
                     "b64": base64.b64encode(data).decode("ascii"), "done": done}
                 await asyncio.to_thread(
                     client._post_json,  # noqa: SLF001 —— 转发层
-                    f"/api/models/{model_id}/ingest", body, 120.0)
+                    f"/api/models/{model_id}/ingest", body, 300.0)
                 offset += len(data)
         pushed.append(f"{f.name}:{total}")
     return JSONResponse(content={"ok": True, "model_id": model_id, "files": pushed})

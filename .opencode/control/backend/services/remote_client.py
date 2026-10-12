@@ -89,7 +89,7 @@ class RemoteConsoleClient:
     def _post_json(self, path: str, payload: "dict[str, object]", timeout: float | None = None):
         """POST 并解析 JSON; 任何失败统一 RemoteUnavailable。"""
         if self._p2p_cfg is not None:
-            return self._p2p_call("POST", path, payload)
+            return self._p2p_call("POST", path, payload, timeout)
         url = f"{self._base}{path}"
         try:
             r = self._http.post(url, json=payload, headers=self._headers(),
@@ -136,7 +136,8 @@ class RemoteConsoleClient:
         return self._transport
 
     def _p2p_call(self, method: str, path: str,
-                  payload: "dict[str, object] | None") -> "dict[str, object]":
+                  payload: "dict[str, object] | None",
+                  timeout: float | None = None) -> "dict[str, object]":
         """经 transport 的 api.req 调用; 失败语义与 _parse 对齐。
 
         返回与 _parse 同模式: cast 收口为 dict（embed 等 list 响应的形状
@@ -145,7 +146,7 @@ class RemoteConsoleClient:
         from services.remote_transport import TransportError
         transport = self._get_transport()
         try:
-            resp = transport.request(method, path, payload, self._token)
+            resp = transport.request(method, path, payload, self._token, timeout=timeout)
         except TransportError as e:
             raise RemoteUnavailable(f"远程 P2P 调用失败: {e}") from e
         if resp.status == 401:

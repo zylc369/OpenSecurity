@@ -373,6 +373,7 @@ class ApiJob(TransportJob):
     path: str
     body: "dict[str, object] | None"
     token: str
+    timeout_sec: float = 0.0  # >0 覆盖配置默认（大文件分片慢链路放宽）
 
 
 @dataclass(frozen=True)
@@ -462,9 +463,15 @@ class RemoteTransport:
 
     def request(self, method: str, path: str,
                 body: "dict[str, object] | None" = None,
-                token: str = "") -> "remote_wire.ApiResp":
-        """api.req → ApiResp（强类型）; 失败抛 TransportError。"""
-        got = self._submit(ApiJob(method=method, path=path, body=body, token=token))
+                token: str = "",
+                timeout: float | None = None) -> "remote_wire.ApiResp":
+        """api.req → ApiResp（强类型）; 失败抛 TransportError。
+
+        timeout: 本请求级超时（None=配置默认——大文件分片等慢链路场景显式放宽）。"""
+        job = ApiJob(method=method, path=path, body=body, token=token)
+        if timeout is not None:
+            job.timeout_sec = timeout  # pyright: ignore[reportAttributeAccessIssue] —— dataclass 可变补注
+        got = self._submit(job)
         if not isinstance(got, remote_wire.ApiResp):
             raise TransportError(
                 f"api 请求收到非响应消息: {type(got).__name__}")
@@ -481,11 +488,14 @@ class RemoteTransport:
     def _submit(self, job: TransportJob) -> "remote_wire.WireMsg":
         if self._loop is None:
             raise TransportError("transport 未启动")
+        # ApiJob 可带请求级超时（大文件分片慢链路放宽; 其余用配置默认）
+        req_timeout = (job.timeout_sec if isinstance(job, ApiJob) and job.timeout_sec > 0
+                       else self._cfg.api_timeout_sec)
         async_task = asyncio.run_coroutine_threadsafe(
             self._handle_job(job), self._loop)
         try:
             return async_task.result(
-                timeout=self._cfg.api_timeout_sec + 15.0)
+                timeout=req_timeout + 15.0)
         except concurrent.futures.TimeoutError as e:
             async_task.cancel()
             raise TransportError("请求超时（transport 线程）") from e
@@ -514,7 +524,10 @@ class RemoteTransport:
                 await conn.send_msg(PingMsg(msg_id=msg_id))
             # 返回 WireMsg（ApiResp 或 PongMsg）; api 窄化在 request()——
             # probe 的 pong 在此通过（此前误置于此导致 probe 恒失败）
-            return await asyncio.wait_for(fut, timeout=self._cfg.api_timeout_sec)
+            return await asyncio.wait_for(
+                fut,
+                timeout=(job.timeout_sec if isinstance(job, ApiJob) and job.timeout_sec > 0
+                         else self._cfg.api_timeout_sec))
         except (ConnectionError, OSError, asyncio.TimeoutError, CryptoError,
                 ValueError) as e:
             await self._drop_session()
