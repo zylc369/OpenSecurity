@@ -442,7 +442,9 @@ class RemoteGateway:
             headers["Authorization"] = f"Bearer {msg.token}"
         json_body = msg.body
         try:
-            async with httpx.AsyncClient(timeout=30.0) as http:
+            # TTS 长请求（自愈+冷启+长文合成可达数分钟）与普通推理共用——
+            # 放宽到 600s（普通请求秒级返回不受影响; 30s 会截断节点本地慢请求）
+            async with httpx.AsyncClient(timeout=600.0) as http:
                 r = await http.request(method, f"http://127.0.0.1:{self._backend_port}{path}",
                                        json=json_body, headers=headers)
         except httpx.HTTPError as e:
