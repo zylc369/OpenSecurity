@@ -734,7 +734,8 @@ def test_remote_client_p2p_branch() -> None:
         def stop(self) -> None: ...
         def request(self, method: str, path: str,
                     body: "dict[str, object] | None" = None,
-                    token: str = "") -> "remote_wire.ApiResp":
+                    token: str = "",
+                    timeout: float | None = None) -> "remote_wire.ApiResp":
             calls.append((method, path, body, token))
             if self.status == -1:  # 模拟传输失败
                 raise TransportError("boom")
