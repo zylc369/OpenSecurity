@@ -87,7 +87,7 @@ class TtsWorkerClient:
     def _ensure(self) -> "subprocess.Popen[str]":
         if self.alive and self._proc is not None:
             return self._proc
-        if not WORKER_VENV_PY.is_file():
+        if not self._venv_healthy():
             self._bootstrap_venv()
         if not (TTS_MODEL_DIR / "model.safetensors").is_file():
             raise TtsUnavailable(
@@ -103,6 +103,18 @@ class TtsWorkerClient:
             text=True, bufsize=1,
         )
         return self._proc
+
+    @staticmethod
+    def _venv_healthy() -> bool:
+        """.venv-tts 健康检查（非仅存在——半成品 venv（有解释器缺包）
+        必须触发幂等补装，否则 worker 永远缺包。"""
+        if not WORKER_VENV_PY.is_file():
+            return False
+        import subprocess as _sp
+        r = _sp.run([str(WORKER_VENV_PY), "-c",
+                     "from mlx_audio.tts.models.cosyvoice3 import cosyvoice3; import numpy"],
+                    capture_output=True, timeout=60)  # noqa: S603 —— 固定 venv 解释器
+        return r.returncode == 0
 
     @staticmethod
     def _bootstrap_venv() -> None:
