@@ -469,8 +469,9 @@ class RemoteTransport:
 
         timeout: 本请求级超时（None=配置默认——大文件分片等慢链路场景显式放宽）。"""
         job = ApiJob(method=method, path=path, body=body, token=token)
-        if timeout is not None:
-            job.timeout_sec = timeout  # pyright: ignore[reportAttributeAccessIssue] —— dataclass 可变补注
+        if timeout is not None:  # frozen dataclass → replace 重建（不可变语义）
+            import dataclasses as _dc
+            job = _dc.replace(job, timeout_sec=timeout)
         got = self._submit(job)
         if not isinstance(got, remote_wire.ApiResp):
             raise TransportError(
