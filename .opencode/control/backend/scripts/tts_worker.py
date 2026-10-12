@@ -123,7 +123,17 @@ def main() -> int:
     if shutil.which("ffmpeg") is None:
         print("[worker][warn] ffmpeg 不在 PATH——speed<1 的请求将失败", file=sys.stderr, flush=True)
 
-    for line in sys.stdin:  # 常驻循环: 一行请求一行响应
+    import select as _select
+    while True:  # 常驻循环: 一行请求一行响应 + 孤儿自杀（父进程死亡守护）
+        ready, _, _ = _select.select([sys.stdin], [], [], 5.0)
+        if not ready:
+            if os.getppid() == 1:  # 孤儿（父已死）→ 退出释放模型内存
+                print("[worker] 父进程已死（ppid=1）→ 自杀退出", file=sys.stderr, flush=True)
+                return 0
+            continue
+        line = sys.stdin.readline()
+        if not line:  # EOF（管道关闭）
+            return 0
         line = line.strip()
         if not line:
             continue
