@@ -265,7 +265,8 @@ class TtsAsset(ModelAsset):
             source = os.environ.get("TTS_MODEL_SOURCE", "").rstrip("/")
             if not source:
                 # git 配置文件源（部署期主控 IP 随代码到节点——节点无 env 写入通道）
-                src_file = Path(__file__).resolve().parent.parent / "scripts" / "lan_model_source"
+                from pathlib import Path as _P
+                src_file = _P(__file__).resolve().parent.parent / "scripts" / "lan_model_source"
                 if src_file.is_file():
                     val = src_file.read_text(encoding="utf-8").strip()
                     if val.startswith("http"):
