@@ -226,7 +226,7 @@ async def remote_model_push(model_id: str) -> JSONResponse:
         if not f.is_file() or f.name.startswith("."):
             continue
         total = f.stat().st_size
-        CH = 8 * 1024 * 1024
+        CH = 4 * 1024 * 1024  # base64 后 ~5.5MB < wire TCP 帧上限
         offset = 0
         with open(f, "rb") as fh:
             while offset < total:
