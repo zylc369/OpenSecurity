@@ -201,6 +201,48 @@ async def remote_health_forward() -> JSONResponse:
     return JSONResponse(content=data)
 
 
+@router.post("/models-push/{model_id}")
+async def remote_model_push(model_id: str) -> JSONResponse:
+    """主控本地模型文件 → P2P 分片推送至节点（局域网隔离/冷门仓库的部署通路）。
+
+    读 $OPENSECURITY_HOME/models/<model_id>/ 下全部文件，逐文件 8MB 分片
+    base64 经 wire POST 到节点 /api/models/{id}/ingest。同步执行（大模型
+    数分钟——调用方给足超时）。"""
+    import asyncio
+    import base64
+    import os
+    from pathlib import Path
+    from typing import cast
+    from services.remote_link import RemoteLinkService
+    client = RemoteLinkService.get_instance().get_client()
+    home = Path(os.environ.get("OPENSECURITY_HOME",
+                               str(Path.home() / "bw-security-analysis")))
+    src_dir = home / "models" / model_id
+    if not src_dir.is_dir():
+        return JSONResponse(status_code=404,
+                            content={"detail": f"主控无此模型目录: {src_dir}"})
+    pushed: list[str] = []
+    for f in sorted(src_dir.iterdir()):
+        if not f.is_file() or f.name.startswith("."):
+            continue
+        total = f.stat().st_size
+        CH = 8 * 1024 * 1024
+        offset = 0
+        with open(f, "rb") as fh:
+            while offset < total:
+                data = fh.read(CH)
+                done = offset + len(data) >= total
+                body: dict[str, object] = {
+                    "name": f.name, "offset": offset, "total": total,
+                    "b64": base64.b64encode(data).decode("ascii"), "done": done}
+                await asyncio.to_thread(
+                    client._post_json,  # noqa: SLF001 —— 转发层
+                    f"/api/models/{model_id}/ingest", body, 120.0)
+                offset += len(data)
+        pushed.append(f"{f.name}:{total}")
+    return JSONResponse(content={"ok": True, "model_id": model_id, "files": pushed})
+
+
 @router.get("/sysinfo-forward")
 async def remote_sysinfo_forward() -> JSONResponse:
     """远程节点 /api/hardware 透传（节点芯片/内存/磁盘等硬件信息，部署规划用）。"""
