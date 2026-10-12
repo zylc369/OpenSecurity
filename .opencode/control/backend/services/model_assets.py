@@ -263,6 +263,13 @@ class TtsAsset(ModelAsset):
             # 主控机 serve 模型目录，节点逐文件直拉（HF 冷门仓库 mirror 308 回源
             # 不可靠，局域网 rsync 级速度是部署主路径）
             source = os.environ.get("TTS_MODEL_SOURCE", "").rstrip("/")
+            if not source:
+                # git 配置文件源（部署期主控 IP 随代码到节点——节点无 env 写入通道）
+                src_file = Path(__file__).resolve().parent.parent / "scripts" / "lan_model_source"
+                if src_file.is_file():
+                    val = src_file.read_text(encoding="utf-8").strip()
+                    if val.startswith("http"):
+                        source = val.rstrip("/")
             files = ("model.safetensors", "tokenizer.json", "tokenizer_config.json", "config.json")
             if source:
                 logger.info("[models] CosyVoice3 局域网下载 ← %s", source)
