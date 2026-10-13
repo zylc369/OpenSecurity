@@ -270,6 +270,52 @@ class TtsAsset(ModelAsset):
             # 局域网源模式: TTS_MODEL_SOURCE（如 http://192.168.3.2:8899/）——
             # 主控机 serve 模型目录，节点逐文件直拉（HF 冷门仓库 mirror 308 回源
             # 不可靠，局域网 rsync 级速度是部署主路径）
+            # torch 资产: 逐文件 URL 直下（snapshot_download 的 mirror-API 组合
+            # 在冷门/官方仓库上均不稳; resolve URL 经 308 自动跟随，节点直连
+            # 官方 CDN 实测可达（家用宽带对 hf CDN 的常见状态）
+            _TORCH_FILES = (
+                "llm.pt", "flow.pt", "hift.pt", "campplus.onnx",
+                "speech_tokenizer_v3.onnx", "cosyvoice3.yaml",
+                "config.json", "configuration.json",
+                "CosyVoice-BlankEN/model.safetensors", "CosyVoice-BlankEN/merges.txt",
+                "CosyVoice-BlankEN/vocab.json", "CosyVoice-BlankEN/config.json",
+                "CosyVoice-BlankEN/generation_config.json",
+                "CosyVoice-BlankEN/tokenizer_config.json",
+            )
+            if model.id == "cosyvoice3-torch":
+                import ssl
+                import urllib.request
+                import certifi
+                from typing import BinaryIO, cast as _cast2
+                from services.tts_service import _HOME as _tts_home
+                torch_dir = _tts_home / "models" / "cosyvoice3-torch"
+                torch_dir.mkdir(parents=True, exist_ok=True)
+                base = registry._hf_endpoint().rstrip("/")  # noqa: SLF001 —— 转发层
+                ctx = ssl.create_default_context(cafile=certifi.where())
+                opener = urllib.request.build_opener(
+                    urllib.request.ProxyHandler({}),
+                    urllib.request.HTTPSHandler(context=ctx))
+                for rel in _TORCH_FILES:
+                    dst = torch_dir / rel
+                    if dst.is_file():
+                        continue
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = dst.with_suffix(dst.suffix + ".part")
+                    url = f"{base}/{model.repo_id}/resolve/main/{rel}"
+                    logger.info("[models] CosyVoice3-torch 下载 %s", rel)
+                    resp = _cast2("BinaryIO", opener.open(url, timeout=60))  # noqa: S310 —— 固定官方源
+                    try:
+                        with open(tmp, "wb") as fh:
+                            while True:
+                                chunk = resp.read(1 << 20)  # pyright: ignore[reportAny]
+                                if not chunk:
+                                    break
+                                fh.write(chunk)
+                    finally:
+                        resp.close()
+                    tmp.rename(dst)
+                logger.info("[models] CosyVoice3-torch 全部文件完成")
+                return
             source = os.environ.get("TTS_MODEL_SOURCE", "").rstrip("/")
             if not source:
                 # git 配置文件源（部署期主控 IP 随代码到节点——节点无 env 写入通道）
