@@ -37,7 +37,8 @@ pip_install "torch==2.3.1" "torchaudio==2.3.1" "scipy==1.17.1" "numpy<2" "setupt
 pip_install conformer==0.3.2 diffusers==0.29.0 hydra-core==1.3.2 HyperPyYAML==1.2.3 \
   inflect==7.3.1 librosa==0.10.2 lightning==2.2.4 modelscope networkx omegaconf==2.3.0 \
   onnx==1.16.0 onnxruntime==1.18.1 protobuf==4.25 rich soundfile==0.12.1 \
-  transformers==4.51.3 x-transformers==2.11.24 wetext gdown wget matplotlib pyarrow==16.1.0
+  transformers==4.51.3 x-transformers==2.11.24 wetext gdown wget matplotlib pyarrow==16.1.0 \
+  pyworld==0.3.4
 pip_install --no-build-isolation openai-whisper==20231117
 "$PY" -c "import sys; sys.path.insert(0, '$REPO_DIR'); sys.path.insert(0, '$REPO_DIR/third_party/Matcha-TTS'); from cosyvoice.cli.cosyvoice import AutoModel; print('[tts-torch] import 链 OK')"
 echo "[tts-torch] 完成"

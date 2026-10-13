@@ -153,14 +153,21 @@ class RemoteNodeBootstrapper:
         # TTS 依赖（独立 venv .venv-tts）按 tags 圈选联动——一条龙覆盖
         tts_installed = False
         if "tts" in self._args.model_tags:
-            tts_installer = Path(__file__).resolve().parent.parent / "scripts" / "install_tts_deps.sh"
-            probe_tts = subprocess.run(
-                [str(Path(__file__).resolve().parent.parent / ".venv-tts" / "bin" / "python"),
-                 "-c", "from mlx_audio.tts.models.cosyvoice3 import cosyvoice3; import numpy"],
-                capture_output=True)
-            if probe_tts.returncode != 0 and tts_installer.is_file():
-                _log("[*] --model-tags tts: TTS 环境缺失——安装 .venv-tts（2-4min）")
-                subprocess.run(["/bin/zsh", str(tts_installer)], timeout=900)  # noqa: S603,S607
+            _root = Path(__file__).resolve().parent.parent
+            engine = os.environ.get("TTS_ENGINE", "torch").strip().lower()
+            if engine == "torch":
+                installer = _root / "scripts" / "install_tts_torch.sh"
+                venv_py = _root / ".venv-cosy-tts" / "bin" / "python"
+                probe_code = ("import sys; sys.path.insert(0, 'third_party/CosyVoice'); "
+                              "from cosyvoice.cli.cosyvoice import AutoModel")
+            else:
+                installer = _root / "scripts" / "install_tts_deps.sh"
+                venv_py = _root / ".venv-tts" / "bin" / "python"
+                probe_code = ("from mlx_audio.tts.models.cosyvoice3 import cosyvoice3; "
+                              "import numpy")
+            if not self._tts_env_ready() and installer.is_file():
+                _log(f"[*] --model-tags tts: TTS 环境缺失（engine={engine}）——安装 {installer.name}")
+                subprocess.run(["/bin/zsh", str(installer)], timeout=1200)  # noqa: S603,S607
                 tts_installed = True
         if probe.returncode == 0:
             _log("[+] 依赖齐备（fastapi 可导入），跳过安装")
@@ -261,13 +268,42 @@ class RemoteNodeBootstrapper:
         else:
             _log("[+] 使用官方端点直连")
 
+    def _selected_model_ids(self) -> list[str]:
+        """tags 圈选 + tts 引擎择一（默认 torch——双 tts 资产只装当前引擎对应的）。"""
+        selected = _registry().filter_by_tags(list(self._args.model_tags))
+        if "tts" in self._args.model_tags:
+            engine = os.environ.get("TTS_ENGINE", "torch").strip().lower()
+            pick = "cosyvoice3-torch" if engine == "torch" else "cosyvoice3-8bit"
+            selected = [m for m in selected if m.id != "cosyvoice3-torch" or engine == "torch"]
+            selected = [m for m in selected if m.id != "cosyvoice3-8bit" or engine == "plus"]
+            _log(f"[*] tts 引擎={engine} → 模型={pick}")
+        return [m.id for m in selected]
+
+    def _tts_env_ready(self) -> bool:
+        """当前引擎的 TTS venv 健康探测（--check 计划与 ensure_deps 共用）。"""
+        _root = Path(__file__).resolve().parent.parent
+        engine = os.environ.get("TTS_ENGINE", "torch").strip().lower()
+        if engine == "torch":
+            venv_py = _root / ".venv-cosy-tts" / "bin" / "python"
+            probe_code = ("import sys; sys.path.insert(0, 'third_party/CosyVoice'); "
+                          "from cosyvoice.cli.cosyvoice import AutoModel")
+        else:
+            venv_py = _root / ".venv-tts" / "bin" / "python"
+            probe_code = ("from mlx_audio.tts.models.cosyvoice3 import cosyvoice3; "
+                          "import numpy")
+        if not venv_py.is_file():
+            return False
+        r = subprocess.run([str(venv_py), "-c", probe_code],
+                           capture_output=True, cwd=str(_root))
+        return r.returncode == 0
+
     def ensure_models(self) -> list[str]:
         """确保模型缓存就位（已缓存秒过）。Returns: 本次实际等待的模型 id 列表。"""
         if self._args.skip_models:
             _log("[*] --skip-models: 跳过模型检查")
             return []
         self.ensure_hf_endpoint()
-        ids = [m.id for m in _registry().filter_by_tags(list(self._args.model_tags))]
+        ids = self._selected_model_ids()
         pending = self._start_pending(reg := _registry(), ids)
         if not pending:
             _log("[+] 模型缓存全部就位，零下载")
@@ -378,8 +414,7 @@ class RemoteNodeBootstrapper:
                                capture_output=True)
         cm = _cm().get_instance()
         relay = self._collect_relay(cm)
-        ids = [] if self._args.skip_models else [
-            m.id for m in _registry().filter_by_tags(list(self._args.model_tags))]
+        ids = [] if self._args.skip_models else self._selected_model_ids()
         return BootstrapPlan(
             venv_python=venv_python,
             deps_install_needed=probe.returncode != 0,
