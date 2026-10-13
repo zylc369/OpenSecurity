@@ -158,6 +158,11 @@ def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
 
 
 def main() -> int:
+    # stdout 纪律: 行协议独占 stdout——依赖库（modelscope/cosyvoice）的
+    # print 劫持到 stderr（防协议污染——"Downloading Model..." 之类）
+    _protocol_stdout = sys.stdout
+    sys.stdout = sys.stderr
+
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--model-dir", required=True, help="CosyVoice3 模型目录")
     ap.add_argument("--engine", default="plus", choices=["plus", "torch"],
@@ -186,13 +191,16 @@ def main() -> int:
         try:
             req = json.loads(line)
         except json.JSONDecodeError as e:
-            print(json.dumps({"id": "", "ok": False, "error": f"协议解析失败: {e}"}), flush=True)
+            _protocol_stdout.write(json.dumps(
+                {"id": "", "ok": False, "error": f"协议解析失败: {e}"}) + "\n")
+            _protocol_stdout.flush()
             continue
         try:
             resp = _synth(req, args.model_dir)
         except Exception as e:  # noqa: BLE001 —— worker 错误统一面（主进程决策重启）
             resp = {"id": req.get("id", ""), "ok": False, "error": f"{type(e).__name__}: {e}"}
-        print(json.dumps(resp, ensure_ascii=False), flush=True)
+        _protocol_stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+        _protocol_stdout.flush()
     return 0
 
 
