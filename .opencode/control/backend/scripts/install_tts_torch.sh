@@ -38,7 +38,7 @@ pip_install() {
 # pip/uv 的 index 协商在部分网络下漏源——直 URL 零协商零歧义）
 "$PY" -m pip install --quiet \
   "https://download.pytorch.org/whl/cpu/torch-2.3.1-cp312-none-macosx_11_0_arm64.whl" \
-  "https://download.pytorch.org/whl/cpu/torchaudio-2.3.1-cp312-none-macosx_11_0_arm64.whl"
+  "https://download.pytorch.org/whl/cpu/torchaudio-2.3.1-cp312-cp312-macosx_11_0_arm64.whl"
 pip_install "scipy==1.17.1" "numpy<2" "setuptools<81"
 pip_install conformer==0.3.2 diffusers==0.29.0 hydra-core==1.3.2 HyperPyYAML==1.2.3 \
   inflect==7.3.1 librosa==0.10.2 lightning==2.2.4 modelscope networkx omegaconf==2.3.0 \
