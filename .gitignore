@@ -57,4 +57,4 @@ dmypy.json
 node_modules/
 
 /tmp
-/.privacy-data
+/.privacy-data.opencode/control/backend/third_party/
