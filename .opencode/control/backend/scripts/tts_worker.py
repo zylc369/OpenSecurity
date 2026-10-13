@@ -30,16 +30,54 @@ SILENCE_TAIL_SEC = 10.0
 SILENCE_PEAK_THRESHOLD = 0.02
 
 _model: Any = None  # 常驻模型实例（首次请求懒加载）
+_ENGINE = "plus"  # plus（mlx 8bit）| torch（官方 fp32——cv3 同源）
 
 
 def _load(model_dir: str) -> Any:
     global _model
     if _model is None:
-        from mlx_audio.tts.utils import load_model
         t0 = time.monotonic()
-        _model = load_model(model_path=model_dir)
-        print(f"[worker] 模型加载完成 {time.monotonic()-t0:.1f}s", file=sys.stderr, flush=True)
+        if _ENGINE == "torch":
+            # CosyVoice 官方栈（AutoModel + zero-shot; speed 为真 mel 插值变速）
+            _BACKEND = Path(__file__).resolve().parent.parent
+            sys.path.insert(0, str(_BACKEND / "third_party" / "CosyVoice"))
+            sys.path.insert(0, str(_BACKEND / "third_party" / "CosyVoice" / "third_party" / "Matcha-TTS"))
+            from cosyvoice.cli.cosyvoice import AutoModel
+            _model = AutoModel(model_dir=model_dir)
+        else:
+            from mlx_audio.tts.utils import load_model
+            _model = load_model(model_path=model_dir)
+        print(f"[worker][{_ENGINE}] 模型加载完成 {time.monotonic()-t0:.1f}s",
+              file=sys.stderr, flush=True)
     return _model
+
+
+def _synth_torch(req: "dict[str, Any]", model: Any) -> "tuple[Path, float, float]":
+    """torch 引擎合成（AutoModel.zero-shot; chunks 拼接; speed 原生 mel 插值）。"""
+    import numpy as np
+    import soundfile as sf
+    import torch
+    text = str(req["text"]).strip()
+    out_path = Path(str(req["out"]))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    speed = float(req.get("speed") or 1.0)
+    for attempt in (1, 2):
+        t0 = time.monotonic()
+        prompt_text = f"You are a helpful assistant.<|endofprompt|>{req.get('ref_text', '')}"
+        chunks = list(model.inference_zero_shot(
+            text, prompt_text, str(req["wav"]), stream=False, speed=speed))
+        if not chunks:
+            raise RuntimeError("torch 模型无音频产出")
+        full = torch.cat([c["tts_speech"] for c in chunks], dim=-1)
+        data = full.squeeze(0).numpy().astype(np.float32)
+        sf.write(str(out_path), data, model.sample_rate, subtype="PCM_16")
+        duration = float(len(data) / model.sample_rate)
+        rtf = (time.monotonic() - t0) / max(duration, 0.01)
+        if attempt == 1 and _tail_is_silent(out_path):
+            print(f"[worker][torch] 尾部静音 → 重试", file=sys.stderr, flush=True)
+            continue
+        break
+    return out_path, duration, rtf
 
 
 def _tail_is_silent(wav_path: Path) -> bool:
@@ -68,12 +106,16 @@ def _atempo(wav_path: Path, speed: float) -> None:
 
 
 def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
+    model = _load(model_dir)
+    if _ENGINE == "torch":
+        out_path, duration, rtf = _synth_torch(req, model)
+        retried = False
+        return {"id": req.get("id", ""), "ok": True, "path": str(out_path),
+                "duration": round(duration, 2), "rtf": round(rtf, 3), "retried": retried}
     import numpy as np
     import soundfile as sf
     from mlx_audio.tts.generate import load_audio
     import mlx.core as mx
-
-    model = _load(model_dir)
     text = str(req["text"]).strip()
     out_path = Path(str(req["out"]))
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,7 +160,11 @@ def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--model-dir", required=True, help="CosyVoice3 模型目录")
+    ap.add_argument("--engine", default="plus", choices=["plus", "torch"],
+                    help="推理引擎（plus=mlx 8bit 轻量; torch=官方 fp32 cv3 同源品质）")
     args = ap.parse_args()
+    global _ENGINE
+    _ENGINE = args.engine
 
     if shutil.which("ffmpeg") is None:
         print("[worker][warn] ffmpeg 不在 PATH——speed<1 的请求将失败", file=sys.stderr, flush=True)

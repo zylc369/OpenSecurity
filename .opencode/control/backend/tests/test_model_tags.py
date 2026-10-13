@@ -21,13 +21,14 @@ def test_default_is_security_group():
 
 
 def test_tts_only():
-    ids = [m.id for m in ModelAssetRegistry.filter_by_tags(["tts"])]
-    assert ids == ["cosyvoice3-8bit"]
+    ids = {m.id for m in ModelAssetRegistry.filter_by_tags(["tts"])}
+    assert ids == {"cosyvoice3-8bit", "cosyvoice3-torch"}
 
 
 def test_combined():
     ids = {m.id for m in ModelAssetRegistry.filter_by_tags(["security", "tts"])}
-    assert {"bge-m3", "bge-reranker-v2-m3", "glm-ocr", "cosyvoice3-8bit"} <= ids
+    assert {"bge-m3", "bge-reranker-v2-m3", "glm-ocr",
+            "cosyvoice3-8bit", "cosyvoice3-torch"} <= ids
 
 
 def test_unknown_tag_rejected():

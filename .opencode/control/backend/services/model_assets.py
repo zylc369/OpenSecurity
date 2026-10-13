@@ -233,12 +233,20 @@ class TtsAsset(ModelAsset):
                 else ModelLoadState.IDLE)
 
     def cache_state(self) -> "ModelCacheState":
-        """目录判定: 三关键文件齐备才算 cached（model/tokenizer/config）。"""
-        from services.tts_service import TTS_MODEL_DIR
-        need = ("model.safetensors", "tokenizer.json", "config.json")
-        if all((TTS_MODEL_DIR / f).is_file() for f in need):
-            total = sum((TTS_MODEL_DIR / f).stat().st_size for f in need)
-            return ModelCacheState(True, str(TTS_MODEL_DIR), round(total / 1024**3, 2))
+        """目录判定（按资产 id 定目录与关键文件——8bit 三件套 / torch 权重件）。"""
+        import os
+        from pathlib import Path as _P
+        home = _P(os.environ.get("OPENSECURITY_HOME",
+                                 str(_P.home() / "bw-security-analysis")))
+        if self.id == "cosyvoice3-torch":
+            d = home / "models" / "cosyvoice3-torch"
+            need = ("llm.pt", "flow.pt", "speech_tokenizer_v3.onnx")
+        else:
+            d = home / "models" / "cosyvoice3-8bit"
+            need = ("model.safetensors", "tokenizer.json", "config.json")
+        if all((d / f).is_file() for f in need):
+            total = sum((d / f).stat().st_size for f in need)
+            return ModelCacheState(True, str(d), round(total / 1024**3, 2))
         return ModelCacheState(False, None, 0.0)
 
     def hub_size_gb(self, registry: "ModelAssetRegistry") -> float:  # noqa: ARG002 —— 签名多态一致
@@ -370,6 +378,17 @@ class ModelAssetRegistry:
             min_free_gb=4.0,
             disk_gb=1.2,
             ollama_model="glm-ocr",
+        ),
+        TtsAsset(
+            id="cosyvoice3-torch",
+            repo_id="FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
+            type=ModelAssetKind.TTS,
+            required_files=("llm.pt",),
+            display="CosyVoice3 (0.5B torch)",
+            purpose="远程朗读语音合成·上品音质（官方 fp32 栈; TTS_ENGINE=torch 使用）",
+            min_free_gb=8.0,
+            disk_gb=5.1,
+            tags=(ModelTag.TTS,),
         ),
         TtsAsset(
             id="cosyvoice3-8bit",

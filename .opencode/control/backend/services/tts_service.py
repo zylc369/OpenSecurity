@@ -28,12 +28,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# CosyVoice3-8bit 模型目录（自定义目录非 HF cache——局域网 rsync 部署 + 目录口径检测）
-TTS_MODEL_DIR = Path(os.environ.get("OPENSECURITY_HOME",
-                                    str(Path.home() / "bw-security-analysis"))) / "models" / "cosyvoice3-8bit"
+# 引擎选择（plus=mlx 8bit 轻量快速; torch=官方 fp32 cv3 同源品质——速度换质量）
+TTS_ENGINE = os.environ.get("TTS_ENGINE", "torch").strip().lower()
+_HOME = Path(os.environ.get("OPENSECURITY_HOME", str(Path.home() / "bw-security-analysis")))
+# CosyVoice3 模型目录（自定义目录非 HF cache——局域网 rsync 部署 + 目录口径检测）
+TTS_MODEL_DIR = (_HOME / "models" / "cosyvoice3-8bit" if TTS_ENGINE == "plus"
+                 else _HOME / "models" / "cosyvoice3-torch")
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 WORKER_SCRIPT = _BACKEND_ROOT / "scripts" / "tts_worker.py"
-WORKER_VENV_PY = _BACKEND_ROOT / ".venv-tts" / "bin" / "python"
+WORKER_VENV_PY = (_BACKEND_ROOT / ".venv-tts" / "bin" / "python" if TTS_ENGINE == "plus"
+                  else _BACKEND_ROOT / ".venv-cosy-tts" / "bin" / "python")
 
 DEFAULT_SPEED = 1.0
 CACHE_LIMIT = 2048
@@ -89,15 +93,17 @@ class TtsWorkerClient:
             return self._proc
         if not self._venv_healthy():
             self._bootstrap_venv()
-        if not (TTS_MODEL_DIR / "model.safetensors").is_file():
+        _need = ("model.safetensors",) if TTS_ENGINE == "plus" else ("llm.pt", "flow.pt")
+        if not all((TTS_MODEL_DIR / f).is_file() for f in _need):
             raise TtsUnavailable(
-                f"模型未就绪: 在控制台「环境总览→模型」下载 CosyVoice3，"
-                f"或 rsync 模型目录到 {TTS_MODEL_DIR}")
+                f"模型未就绪（engine={TTS_ENGINE}）: 在控制台「环境总览→模型」下载，"
+                f"或放置模型目录到 {TTS_MODEL_DIR}")
         if self._proc is not None:
             self._kill()
         logger.info("[tts] 启动 worker（模型加载 ~10s）")
         self._proc = subprocess.Popen(  # noqa: S603 —— 固定脚本路径
-            [str(WORKER_VENV_PY), str(WORKER_SCRIPT), "--model-dir", str(TTS_MODEL_DIR)],
+            [str(WORKER_VENV_PY), str(WORKER_SCRIPT), "--model-dir", str(TTS_MODEL_DIR),
+             "--engine", TTS_ENGINE],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=None,  # 继承主控 stderr（控制台日志文件）——worker 加载/崩溃可诊断
             text=True, bufsize=1,
@@ -111,9 +117,12 @@ class TtsWorkerClient:
         if not WORKER_VENV_PY.is_file():
             return False
         import subprocess as _sp
-        r = _sp.run([str(WORKER_VENV_PY), "-c",
-                     "from mlx_audio.tts.models.cosyvoice3 import cosyvoice3; import numpy"],
-                    capture_output=True, timeout=60)  # noqa: S603 —— 固定 venv 解释器
+        if TTS_ENGINE == "torch":
+            probe_code = "import sys; sys.path.insert(0, 'third_party/CosyVoice'); sys.path.insert(0, 'third_party/CosyVoice/third_party/Matcha-TTS'); from cosyvoice.cli.cosyvoice import AutoModel"
+        else:
+            probe_code = "from mlx_audio.tts.models.cosyvoice3 import cosyvoice3; import numpy"
+        r = _sp.run([str(WORKER_VENV_PY), "-c", probe_code], capture_output=True,
+                    timeout=120, cwd=str(_BACKEND_ROOT))  # noqa: S603 —— 固定 venv 解释器
         return r.returncode == 0
 
     @staticmethod
