@@ -1,20 +1,20 @@
 [
   {
+    "id": "official_female_v4",
+    "name": "官方女声（默认）",
+    "gender": "female",
+    "description": "torch 引擎 + cv3_full_female 二度锚定（终审 8 成复刻——听书默认）",
+    "wav": "official_female_v4.wav",
+    "ref_text": "细那康子们，吃饭了，呜嘞呜嘞呜嘞～系着围裙的崔桂英左手端碗，右手握勺，边呼喊边敲打着粥缸边缘。坐在旁边正给水烟袋装烟叶的李维汉一脚踢在女人大腚上，没好气地骂道：",
+    "default_speed": 1.0
+  },
+  {
     "id": "official_female",
-    "name": "官方女声",
+    "name": "官方女声（原版参考）",
     "gender": "female",
     "description": "CosyVoice3 官方参考女声（欢快柔和，听书验收上品）",
     "wav": "official_female.wav",
     "ref_text": "希望你以后能够做的比我还好呦。",
     "default_speed": 0.9
-  },
-  {
-    "id": "official_female_v4",
-    "name": "官方女声·上品版",
-    "gender": "female",
-    "description": "cv3_full_female（torch 原速上品验收）片段二度锚定",
-    "wav": "official_female_v4.wav",
-    "ref_text": "细那康子们，吃饭了，呜嘞呜嘞呜嘞～系着围裙的崔桂英左手端碗，右手握勺，边呼喊边敲打着粥缸边缘。坐在旁边正给水烟袋装烟叶的李维汉一脚踢在女人大腚上，没好气地骂道：",
-    "default_speed": 1.0
   }
 ]
