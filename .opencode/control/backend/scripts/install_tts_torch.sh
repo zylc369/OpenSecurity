@@ -26,8 +26,24 @@ fi
 #    grpc/tensorrt/gradio 等 webui/训练件剔除——推理不需要）
 # 全程 stdlib venv + pip（uv 的 index 解析对老版本 torch 不可靠——PyPI 已
 # 下架 <2.9，uv 的版本协商会漏掉 --index-url 指定的自定义源）
+# 版本校验: torch wheel 是 cp312——venv 必须 3.12（旧 venv 可能是 uv 建的 3.13）
+if [[ -x "${VENV_DIR}/bin/python" ]]; then
+  VV="$("${VENV_DIR}/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo none)"
+  if [[ "$VV" != "3.12" ]]; then
+    echo "[tts-torch] venv 版本 $VV ≠ 3.12 → 重建"
+    rm -rf "$VENV_DIR"
+  fi
+fi
 if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-  python3 -m venv "$VENV_DIR"
+  # 3.12 定位: 系统优先 → uv 管理的（uv python find）→ 无则报错
+  P312="$(command -v python3.12 || true)"
+  if [[ -z "$P312" && -n "$UV_BIN" ]]; then
+    P312="$("$UV_BIN" python find 3.12 2>/dev/null || true)"
+  fi
+  if [[ -z "$P312" ]]; then
+    echo "[tts-torch][ERROR] 无 Python 3.12（torch wheel 为 cp312）——安装 python3.12 后重试"; exit 1
+  fi
+  "$P312" -m venv "$VENV_DIR"
 fi
 PY="${VENV_DIR}/bin/python"
 "$PY" -m pip install --quiet --upgrade pip --index-url "$MIRROR"
