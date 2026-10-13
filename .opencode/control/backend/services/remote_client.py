@@ -213,7 +213,7 @@ class RemoteConsoleClient:
                 raise RemoteUnavailable(f"远程 P2P 调用失败: {e}") from e
             if resp.status != 200:
                 raise RemoteUnavailable(
-                    f"远程 /api/tts {resp.status}: {str(resp.body)[:120]}")
+                    f"远程 /api/tts {resp.status}: {str(resp.body)[:400]}")
             if not isinstance(resp.body, (bytes, bytearray)):
                 raise RemoteUnavailable("远程 /api/tts 响应非二进制（非 WAV）")
             return bytes(resp.body)
