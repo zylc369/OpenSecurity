@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -149,9 +150,21 @@ class RemoteNodeBootstrapper:
         """fastapi 哨兵探测; 缺则 console_runtime 集安装。Returns: 是否执行了安装。"""
         probe = subprocess.run([sys.executable, "-c", "import fastapi"],
                                capture_output=True)
+        # TTS 依赖（独立 venv .venv-tts）按 tags 圈选联动——一条龙覆盖
+        tts_installed = False
+        if "tts" in self._args.model_tags:
+            tts_installer = Path(__file__).resolve().parent.parent / "scripts" / "install_tts_deps.sh"
+            probe_tts = subprocess.run(
+                [str(Path(__file__).resolve().parent.parent / ".venv-tts" / "bin" / "python"),
+                 "-c", "from mlx_audio.tts.models.cosyvoice3 import cosyvoice3; import numpy"],
+                capture_output=True)
+            if probe_tts.returncode != 0 and tts_installer.is_file():
+                _log("[*] --model-tags tts: TTS 环境缺失——安装 .venv-tts（2-4min）")
+                subprocess.run(["/bin/zsh", str(tts_installer)], timeout=900)  # noqa: S603,S607
+                tts_installed = True
         if probe.returncode == 0:
             _log("[+] 依赖齐备（fastapi 可导入），跳过安装")
-            return False
+            return tts_installed
         _log("[*] 依赖缺失——安装 console_runtime 集（stdlib venv）")
         from services.detect_py_deps import DepTag, _run_install
         _run_install(dry_run=False, tags=[DepTag.CONSOLE_RUNTIME], venv_backend="stdlib")
