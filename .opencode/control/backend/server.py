@@ -320,8 +320,13 @@ def main() -> None:
 
     # 步骤 4: 启动心跳周期检测后台任务（表空过宽限 → 自杀）
     def shutdown():
-        log.info("控制台 shutdown（清理 IPC + 退出）")
+        log.info("控制台 shutdown（清理 IPC/TTS worker + 退出）")
         IpcListener.get_instance().cleanup()
+        try:  # TTS worker 显式回收（孤儿自杀 5s 轮询是兜底——正常退出走这里零延迟）
+            from services.tts_service import TtsService
+            TtsService.get_instance().release()
+        except Exception as e:  # noqa: BLE001 —— 退出路径不因清理失败阻塞
+            log.warning("TTS worker 清理异常（忽略）: %s", e)
         # 用 os._exit 跳过任何 atexit hook（避免 uvicorn 优雅关闭阻塞）
         import os
         os._exit(ConfigManager.Protocol.EXIT_CODE_NORMAL)

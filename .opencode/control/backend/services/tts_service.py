@@ -288,8 +288,10 @@ class TtsService:
                 except Exception:  # noqa: BLE001
                     pass
                 logger.warning("远程 tts 失败，fallback 本地: %s", e)
-        wav, gen_ms = self._synth_local(text, voice_asset, speed)
+        # 本地合成全程持锁: worker 单请求串行是协议现实，并发请求排队
+        #（防双请求各 spawn 一个 worker 的竞态）
         with self._lock:
+            wav, gen_ms = self._synth_local(text, voice_asset, speed)
             self._cache[key] = wav
             self._cache.move_to_end(key)
             while (len(self._cache) > CACHE_LIMIT
