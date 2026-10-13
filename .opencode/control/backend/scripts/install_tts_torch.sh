@@ -34,7 +34,14 @@ pip_install() {
   else "$PY" -m pip install --quiet --index-url "$MIRROR" "$@"; fi
 }
 # torch/torchaudio 走 PyTorch 官方源（阿里镜像缺 2.3.1 的 macOS arm wheel）
-pip_install --index-url https://download.pytorch.org/whl/cpu "torch==2.3.1" "torchaudio==2.3.1"
+# 独立调用（不经 pip_install——其内部 --index-url 会与外层冲突）
+if [[ -n "$UV_BIN" ]]; then
+  "$UV_BIN" pip install --python "$PY" --index-url https://download.pytorch.org/whl/cpu \
+    "torch==2.3.1" "torchaudio==2.3.1"
+else
+  "$PY" -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu \
+    "torch==2.3.1" "torchaudio==2.3.1"
+fi
 pip_install "scipy==1.17.1" "numpy<2" "setuptools<81"
 pip_install conformer==0.3.2 diffusers==0.29.0 hydra-core==1.3.2 HyperPyYAML==1.2.3 \
   inflect==7.3.1 librosa==0.10.2 lightning==2.2.4 modelscope networkx omegaconf==2.3.0 \
