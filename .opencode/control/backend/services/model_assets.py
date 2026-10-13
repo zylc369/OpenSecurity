@@ -233,17 +233,13 @@ class TtsAsset(ModelAsset):
                 else ModelLoadState.IDLE)
 
     def cache_state(self) -> "ModelCacheState":
-        """目录判定（按资产 id 定目录与关键文件——8bit 三件套 / torch 权重件）。"""
+        """目录判定: torch 权重三件齐备才算 cached。"""
         import os
         from pathlib import Path as _P
         home = _P(os.environ.get("OPENSECURITY_HOME",
                                  str(_P.home() / "bw-security-analysis")))
-        if self.id == "cosyvoice3-torch":
-            d = home / "models" / "cosyvoice3-torch"
-            need = ("llm.pt", "flow.pt", "speech_tokenizer_v3.onnx")
-        else:
-            d = home / "models" / "cosyvoice3-8bit"
-            need = ("model.safetensors", "tokenizer.json", "config.json")
+        d = home / "models" / "cosyvoice3-torch"
+        need = ("llm.pt", "flow.pt", "speech_tokenizer_v3.onnx")
         if all((d / f).is_file() for f in need):
             total = sum((d / f).stat().st_size for f in need)
             return ModelCacheState(True, str(d), round(total / 1024**3, 2))
@@ -431,20 +427,9 @@ class ModelAssetRegistry:
             type=ModelAssetKind.TTS,
             required_files=("llm.pt",),
             display="CosyVoice3 (0.5B torch)",
-            purpose="远程朗读语音合成·上品音质（官方 fp32 栈; TTS_ENGINE=torch 使用）",
+            purpose="远程朗读语音合成（官方 fp32 栈——听书生产引擎）",
             min_free_gb=8.0,
             disk_gb=5.1,
-            tags=(ModelTag.TTS,),
-        ),
-        TtsAsset(
-            id="cosyvoice3-8bit",
-            repo_id="mlx-community/Fun-CosyVoice3-0.5B-2512-8bit",
-            type=ModelAssetKind.TTS,
-            required_files=("model.safetensors",),
-            display="CosyVoice3 (0.5B 8bit)",
-            purpose="远程朗读语音合成（remote-p2p TTS; legado 经 P2P 调用; 音色库可选音色）",
-            min_free_gb=4.0,
-            disk_gb=1.4,
             tags=(ModelTag.TTS,),
         ),
     ]

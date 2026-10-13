@@ -150,23 +150,13 @@ class RemoteNodeBootstrapper:
         """fastapi 哨兵探测; 缺则 console_runtime 集安装。Returns: 是否执行了安装。"""
         probe = subprocess.run([sys.executable, "-c", "import fastapi"],
                                capture_output=True)
-        # TTS 依赖（独立 venv .venv-tts）按 tags 圈选联动——一条龙覆盖
+        # TTS 依赖（独立 venv .venv-cosy-tts）按 tags 圈选联动——一条龙覆盖
         tts_installed = False
         if "tts" in self._args.model_tags:
             _root = Path(__file__).resolve().parent.parent
-            engine = os.environ.get("TTS_ENGINE", "torch").strip().lower()
-            if engine == "torch":
-                installer = _root / "scripts" / "install_tts_torch.sh"
-                venv_py = _root / ".venv-cosy-tts" / "bin" / "python"
-                probe_code = ("import sys; sys.path.insert(0, 'third_party/CosyVoice'); "
-                              "from cosyvoice.cli.cosyvoice import AutoModel")
-            else:
-                installer = _root / "scripts" / "install_tts_deps.sh"
-                venv_py = _root / ".venv-tts" / "bin" / "python"
-                probe_code = ("from mlx_audio.tts.models.cosyvoice3 import cosyvoice3; "
-                              "import numpy")
+            installer = _root / "scripts" / "install_tts_torch.sh"
             if not self._tts_env_ready() and installer.is_file():
-                _log(f"[*] --model-tags tts: TTS 环境缺失（engine={engine}）——安装 {installer.name}")
+                _log(f"[*] --model-tags tts: TTS 环境缺失——安装 {installer.name}")
                 subprocess.run(["/bin/zsh", str(installer)], timeout=1200)  # noqa: S603,S607
                 tts_installed = True
         if probe.returncode == 0:
@@ -269,28 +259,16 @@ class RemoteNodeBootstrapper:
             _log("[+] 使用官方端点直连")
 
     def _selected_model_ids(self) -> list[str]:
-        """tags 圈选 + tts 引擎择一（默认 torch——双 tts 资产只装当前引擎对应的）。"""
-        selected = _registry().filter_by_tags(list(self._args.model_tags))
-        if "tts" in self._args.model_tags:
-            engine = os.environ.get("TTS_ENGINE", "torch").strip().lower()
-            pick = "cosyvoice3-torch" if engine == "torch" else "cosyvoice3-8bit"
-            selected = [m for m in selected if m.id != "cosyvoice3-torch" or engine == "torch"]
-            selected = [m for m in selected if m.id != "cosyvoice3-8bit" or engine == "plus"]
-            _log(f"[*] tts 引擎={engine} → 模型={pick}")
-        return [m.id for m in selected]
+        """tags 圈选（tts tag 当前对应 cosyvoice3-torch 单资产）。"""
+        return [m.id for m in _registry().filter_by_tags(list(self._args.model_tags))]
 
     def _tts_env_ready(self) -> bool:
-        """当前引擎的 TTS venv 健康探测（--check 计划与 ensure_deps 共用）。"""
+        """TTS venv 健康探测（--check 计划与 ensure_deps 共用）。"""
         _root = Path(__file__).resolve().parent.parent
-        engine = os.environ.get("TTS_ENGINE", "torch").strip().lower()
-        if engine == "torch":
-            venv_py = _root / ".venv-cosy-tts" / "bin" / "python"
-            probe_code = ("import sys; sys.path.insert(0, 'third_party/CosyVoice'); "
-                          "from cosyvoice.cli.cosyvoice import AutoModel")
-        else:
-            venv_py = _root / ".venv-tts" / "bin" / "python"
-            probe_code = ("from mlx_audio.tts.models.cosyvoice3 import cosyvoice3; "
-                          "import numpy")
+        venv_py = _root / ".venv-cosy-tts" / "bin" / "python"
+        probe_code = ("import sys; sys.path.insert(0, 'third_party/CosyVoice'); "
+                      "sys.path.insert(0, 'third_party/CosyVoice/third_party/Matcha-TTS'); "
+                      "from cosyvoice.cli.cosyvoice import AutoModel")
         if not venv_py.is_file():
             return False
         r = subprocess.run([str(venv_py), "-c", probe_code],

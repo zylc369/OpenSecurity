@@ -318,6 +318,17 @@ def main() -> None:
         IpcListener.get_instance().cleanup()
         sys.exit(ConfigManager.Protocol.EXIT_CODE_PORT_EXHAUSTED)
 
+    # TTS 环境预热（后台线程——节点重启后自动补装 venv/依赖，消除首个
+    # 合成请求撞上自愈安装窗口的竞态 fallback; 本机环境齐备时秒过零开销）
+    import threading as _threading
+    def _tts_warmup() -> None:
+        try:
+            from services.tts_service import TtsWorkerClient
+            TtsWorkerClient()._venv_healthy()  # noqa: SLF001 —— 预热探测
+        except Exception:  # noqa: BLE001 —— 预热失败不阻塞启动（首请求自愈兜底）
+            pass
+    _threading.Thread(target=_tts_warmup, daemon=True).start()
+
     # 步骤 4: 启动心跳周期检测后台任务（表空过宽限 → 自杀）
     def shutdown():
         log.info("控制台 shutdown（清理 IPC/TTS worker + 退出）")
