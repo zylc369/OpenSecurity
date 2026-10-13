@@ -833,8 +833,8 @@ def test_tts_route_with_stub(monkeypatch: "object") -> None:
     assert r.content == b"RIFFwav"
     r2 = client.get("/api/tts/voices")
     voices_list = cast("list[dict[str, object]]", r2.json()["voices"])
-    # 音色库语义: 双源合并的 VoiceAsset 字典（内置官方女声恒在首位）
-    assert voices_list and voices_list[0]["id"] == "official_female"
+    # 音色库语义: 双源合并的 VoiceAsset 字典（默认音质 v4 恒在首位）
+    assert voices_list and voices_list[0]["id"] == "official_female_v4"
     assert voices_list[0]["available"] is True
     r3 = client.post("/api/tts", json={"text": ""})
     assert r3.status_code == 422  # pydantic min_length 拦截

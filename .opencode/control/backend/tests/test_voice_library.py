@@ -36,7 +36,7 @@ def _tone_wav(seconds: float, sr: int = 44100) -> bytes:
 def test_builtin_default_voice():
     lib = vl.VoiceLibrary.get_instance()
     v = lib.default_voice()
-    assert v.id == "official_female" and v.source == "builtin"
+    assert v.id == "official_female_v4" and v.source == "builtin"  # 用户终审默认
     assert v.resolved_wav(lib).is_file()  # git 资产在位
 
 
