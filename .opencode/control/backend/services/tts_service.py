@@ -266,31 +266,31 @@ class TtsService:
                 self._cache.move_to_end(key)
                 return TtsResult(wav=hit, cached=True, gen_ms=0.0,
                                  voice=voice_id, speed=speed)
-        # 远程路由（四模型统一远程化——与 embed/rerank/ocr 同语义:
-        # should_use_remote → 远程推理，失败 fallback 本地; 缓存命中不出本机）
-        try:
-            from services.remote_link import RemoteLinkService
-            use_remote = RemoteLinkService.get_instance().should_use_remote()
-        except Exception:  # noqa: BLE001 —— remote_link 未就绪 → 本地
-            use_remote = False
-        if use_remote:
-            from services.remote_client import RemoteUnavailable
-            t0 = time.monotonic()
-            try:
-                client = RemoteLinkService.get_instance().get_client()
-                wav = client.tts_synth(text, voice_id, speed)
-                return TtsResult(wav=wav, cached=False,
-                                 gen_ms=(time.monotonic() - t0) * 1000,
-                                 voice=voice_id, speed=speed)
-            except RemoteUnavailable as e:
-                try:
-                    RemoteLinkService.get_instance().note_request_failure(f"tts: {e}")
-                except Exception:  # noqa: BLE001
-                    pass
-                logger.warning("远程 tts 失败，fallback 本地: %s", e)
-        # 本地合成全程持锁: worker 单请求串行是协议现实，并发请求排队
-        #（防双请求各 spawn 一个 worker 的竞态）
+        # 合成全程持锁（远程+本地统一串行）: worker 协议一问一答 + 远程节点
+        # 同构串行——并发请求排队; 锁外并发会双打远程/fallback 双 spawn worker
         with self._lock:
+            # 远程路由（四模型统一远程化——与 embed/rerank/ocr 同语义:
+            # should_use_remote → 远程推理，失败 fallback 本地; 缓存命中不出本机）
+            try:
+                from services.remote_link import RemoteLinkService
+                use_remote = RemoteLinkService.get_instance().should_use_remote()
+            except Exception:  # noqa: BLE001 —— remote_link 未就绪 → 本地
+                use_remote = False
+            if use_remote:
+                from services.remote_client import RemoteUnavailable
+                t0 = time.monotonic()
+                try:
+                    client = RemoteLinkService.get_instance().get_client()
+                    wav = client.tts_synth(text, voice_id, speed)
+                    return TtsResult(wav=wav, cached=False,
+                                     gen_ms=(time.monotonic() - t0) * 1000,
+                                     voice=voice_id, speed=speed)
+                except RemoteUnavailable as e:
+                    try:
+                        RemoteLinkService.get_instance().note_request_failure(f"tts: {e}")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    logger.warning("远程 tts 失败，fallback 本地: %s", e)
             wav, gen_ms = self._synth_local(text, voice_asset, speed)
             self._cache[key] = wav
             self._cache.move_to_end(key)
