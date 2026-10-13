@@ -33,7 +33,9 @@ _HOME = Path(os.environ.get("OPENSECURITY_HOME", str(Path.home() / "bw-security-
 TTS_MODEL_DIR = _HOME / "models" / "cosyvoice3-torch"
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 WORKER_SCRIPT = _BACKEND_ROOT / "scripts" / "tts_worker.py"
-WORKER_VENV_PY = _BACKEND_ROOT / ".venv-cosy-tts" / "bin" / "python"
+# 主 venv 直跑（依赖已并入: torch 2.14/transformers 5.17/numpy 2.5 + TTS 依赖集）
+import sys as _sys
+WORKER_VENV_PY = Path(_sys.executable)
 
 DEFAULT_SPEED = 1.0
 CACHE_LIMIT = 2048
@@ -97,11 +99,13 @@ class TtsWorkerClient:
         if self._proc is not None:
             self._kill()
         logger.info("[tts] 启动 worker（模型加载 ~10s）")
+        import os as _os
+        env = {**_os.environ, "PYTORCH_ENABLE_MPS_FALLBACK": "1"}
         self._proc = subprocess.Popen(  # noqa: S603 —— 固定脚本路径
             [str(WORKER_VENV_PY), str(WORKER_SCRIPT), "--model-dir", str(TTS_MODEL_DIR)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=None,  # 继承主控 stderr（控制台日志文件）——worker 加载/崩溃可诊断
-            text=True, bufsize=1,
+            text=True, bufsize=1, env=env,
         )
         return self._proc
 
@@ -112,25 +116,25 @@ class TtsWorkerClient:
         if not WORKER_VENV_PY.is_file():
             return False
         import subprocess as _sp
-        probe_code = ("import sys; sys.path.insert(0, 'third_party/CosyVoice'); "
-                      "sys.path.insert(0, 'third_party/CosyVoice/third_party/Matcha-TTS'); "
-                      "from cosyvoice.cli.cosyvoice import AutoModel")
+        _vendor = _BACKEND_ROOT.parents[2] / "vendor" / "tts-funaudio"
+        probe_code = ("import sys; sys.path.insert(0, '" + str(_vendor) + "'); "
+                      "sys.path.insert(0, '" + str(_vendor / "third_party" / "Matcha-TTS") + "'); "
+                      "from cosyvoice.cli.cosyvoice import CosyVoice3")
         r = _sp.run([str(WORKER_VENV_PY), "-c", probe_code], capture_output=True,
-                    timeout=120, cwd=str(_BACKEND_ROOT))  # noqa: S603 —— 固定 venv 解释器
+                    timeout=120)  # noqa: S603 —— 主 venv 解释器
         return r.returncode == 0
 
     @staticmethod
     def _bootstrap_venv() -> None:
-        """.venv-cosy-tts 缺失时自愈安装（节点远程部署无手动通道——模型在位而
-        依赖缺失的唯一解; uv+镜像 ~2-4min; 失败抛 TtsUnavailable）。"""
+        """TTS 依赖缺失时自愈安装到主 venv（vendor 引擎依赖集; 失败抛 TtsUnavailable）。"""
         installer = _BACKEND_ROOT / "scripts" / "install_tts_torch.sh"
         if not installer.is_file():
             raise TtsUnavailable(f"TTS 环境未就绪且缺安装脚本: {installer}")
-        logger.info("[tts] .venv-cosy-tts 缺失 → 自愈安装（uv+镜像，约 3-5 分钟）")
+        logger.info("[tts] TTS 依赖缺失 → 自愈安装到主 venv（约 2-4 分钟）")
         import subprocess as _sp
         r = _sp.run(["/bin/zsh", str(installer)], capture_output=True, text=True,
                     timeout=900)  # noqa: S603,S607 —— 固定项目脚本
-        if r.returncode != 0 or not WORKER_VENV_PY.is_file():
+        if r.returncode != 0:
             raise TtsUnavailable(
                 f"TTS 环境自愈安装失败: {r.stdout[-400:]} {r.stderr[-400:]}")
 

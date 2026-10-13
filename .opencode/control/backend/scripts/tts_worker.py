@@ -32,15 +32,34 @@ _model: Any = None  # 常驻模型实例（首次请求懒加载）
 
 
 def _load(model_dir: str) -> Any:
-    """CosyVoice 官方栈（AutoModel + zero-shot; speed 为 mel 插值变速）。"""
+    """CosyVoice3 @ vendor/tts-funaudio（MPS: llm fp16 / flow fp32 / hift cpu）。
+
+    依赖跑在主 venv（torch 2.14 + transformers 5.17 + numpy 2.5——实测 RTF 0.77）。
+    hift CPU 包装: f0 pitch predictor 用 float64（MPS 不支持）——drmse 踩坑结论。
+    """
     global _model
     if _model is None:
+        import os as _os
         t0 = time.monotonic()
-        _BACKEND = Path(__file__).resolve().parent.parent
-        sys.path.insert(0, str(_BACKEND / "third_party" / "CosyVoice"))
-        sys.path.insert(0, str(_BACKEND / "third_party" / "CosyVoice" / "third_party" / "Matcha-TTS"))
-        from cosyvoice.cli.cosyvoice import AutoModel
-        _model = AutoModel(model_dir=model_dir)
+        _VENDOR = Path(__file__).resolve().parents[4] / "vendor" / "tts-funaudio"
+        _os.chdir(str(_VENDOR))  # 模型 yaml 内路径相对 vendor 仓库根
+        sys.path.insert(0, str(_VENDOR))
+        sys.path.insert(0, str(_VENDOR / "third_party" / "Matcha-TTS"))
+        import torch
+        from cosyvoice.cli.cosyvoice import CosyVoice3
+        cv = CosyVoice3(model_dir=model_dir)
+        m = cv.model
+        if torch.backends.mps.is_available():
+            m.device = torch.device("mps")
+            m.llm.to("mps", torch.float16)   # 带宽减半——最大速度杠杆（整数 token 边界无损）
+            m.flow.to("mps", torch.float32)  # fp32（cached conditioning 撞 half 必炸）
+            m.hift.to("cpu")
+            _orig_hift = m.hift.inference
+            def _hift_cpu(speech_feat, **kw):
+                return _orig_hift(speech_feat.to("cpu"), **kw)
+            m.hift.inference = _hift_cpu     # f0 float64 → CPU
+            print("[worker] 设备: llm/flow→mps(fp16/fp32), hift→cpu", file=sys.stderr, flush=True)
+        _model = cv
         print(f"[worker] 模型加载完成 {time.monotonic()-t0:.1f}s",
               file=sys.stderr, flush=True)
     return _model

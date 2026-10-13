@@ -55,6 +55,3 @@ dmypy.json
 /ai_analyze.log.results
 
 node_modules/
-
-/tmp
-.opencode/control/backend/third_party/

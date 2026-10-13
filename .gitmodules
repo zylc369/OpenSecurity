@@ -14,3 +14,7 @@
 	path = vendor/frida
 	url = git@github.com:frida/frida.git
 	branch = main
+[submodule "vendor/tts-funaudio"]
+	path = vendor/tts-funaudio
+	url = git@github.com:zylc369/tts-funaudio-cozyvoice3.git
+	branch = main
