@@ -24,24 +24,19 @@ fi
 # 2. venv + 依赖（踩坑固化: scipy 1.17.1 修 macOS dyld; numpy<2;
 #    setuptools<81 保 pkg_resources; whisper 走 no-build-isolation;
 #    grpc/tensorrt/gradio 等 webui/训练件剔除——推理不需要）
+# 全程 stdlib venv + pip（uv 的 index 解析对老版本 torch 不可靠——PyPI 已
+# 下架 <2.9，uv 的版本协商会漏掉 --index-url 指定的自定义源）
 if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-  if [[ -n "$UV_BIN" ]]; then "$UV_BIN" venv "$VENV_DIR" --python 3.12
-  else python3 -m venv "$VENV_DIR"; fi
+  python3 -m venv "$VENV_DIR"
 fi
 PY="${VENV_DIR}/bin/python"
+"$PY" -m pip install --quiet --upgrade pip --index-url "$MIRROR"
 pip_install() {
-  if [[ -n "$UV_BIN" ]]; then "$UV_BIN" pip install --python "$PY" --index-url "$MIRROR" "$@"
-  else "$PY" -m pip install --quiet --index-url "$MIRROR" "$@"; fi
+  "$PY" -m pip install --quiet --index-url "$MIRROR" "$@"
 }
-# torch/torchaudio 走 PyTorch 官方源（阿里镜像缺 2.3.1 的 macOS arm wheel）
-# 独立调用（不经 pip_install——其内部 --index-url 会与外层冲突）
-if [[ -n "$UV_BIN" ]]; then
-  "$UV_BIN" pip install --python "$PY" --index-url https://download.pytorch.org/whl/cpu \
-    "torch==2.3.1" "torchaudio==2.3.1"
-else
-  "$PY" -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu \
-    "torch==2.3.1" "torchaudio==2.3.1"
-fi
+# torch/torchaudio 走 PyTorch 官方源（PyPI/阿里均无 2.3.1 的 macOS arm wheel）
+"$PY" -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu \
+  "torch==2.3.1" "torchaudio==2.3.1"
 pip_install "scipy==1.17.1" "numpy<2" "setuptools<81"
 pip_install conformer==0.3.2 diffusers==0.29.0 hydra-core==1.3.2 HyperPyYAML==1.2.3 \
   inflect==7.3.1 librosa==0.10.2 lightning==2.2.4 modelscope networkx omegaconf==2.3.0 \
