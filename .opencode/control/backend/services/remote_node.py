@@ -332,6 +332,32 @@ class RemoteNodeBootstrapper:
             parts = [f"{mid} {snapshot[mid].download.progress * 100:.0f}%" for mid in pending]
             _log(f"[*] 等待下载: {', '.join(parts)}")
 
+    @staticmethod
+    def _kill_existing_console(backend_dir: str) -> None:
+        """已有活控制台实例 → SIGTERM 优雅停机(幂等; 无实例则跳过)。"""
+        from services.ipc_listener import IpcListener
+        if not IpcListener.ipc_probe_alive():
+            return
+        import psutil
+        me = os.getpid()
+        target = os.path.abspath(backend_dir)
+        for proc in psutil.process_iter(["pid", "cwd", "cmdline"]):
+            try:
+                info = proc.info
+                if info["pid"] == me:
+                    continue
+                cl: list[str] = list(info["cmdline"] or [])
+                if cl and cl[-1].endswith("server.py") and info["cwd"] == target:
+                    _log(f"[*] 已有控制台实例(pid={info['pid']})——优雅停机后以新代码重启")
+                    proc.terminate()  # noqa: SIM115 —— wait 兜底回收
+                    try:
+                        proc.wait(timeout=10)
+                    except psutil.TimeoutExpired:
+                        _log(f"[!] pid={info['pid']} 10s 未退——SIGKILL")
+                        proc.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
     # ---- 步骤 5: 启动控制台 -------------------------------------------------
     def launch(self) -> int:
         """spawn 独立会话的控制台进程, 等就绪后返回（SSH 断开不影响控制台）。
@@ -346,6 +372,10 @@ class RemoteNodeBootstrapper:
         log_path = os.path.join(RuntimePaths.LOGS_DIR, "remote-node.log")
         os.makedirs(RuntimePaths.LOGS_DIR, exist_ok=True)
         ipc_path = _cm().get_instance().ipc_addr()
+        # 重复启动防护: 已有活实例 → 先 kill 再以新代码启动(而非"复用退出"
+        # 让旧代码继续跑——git pull 后重启必须生效)。SIGTERM 走 server 优雅
+        # 停机(清 IPC/TTS worker); 残留 socket 由 bind 自愈清理。
+        self._kill_existing_console(backend_dir)
         # 持久化 tags(节点内重启走完整启动链时读回) + 注入节点上下文标记
         # (restart.py 检测此标记 → execv remote_node 而非 execv server)
         cm = _cm().get_instance()
