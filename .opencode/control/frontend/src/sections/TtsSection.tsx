@@ -9,10 +9,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Button, Form, Input, InputNumber, Modal, Progress, Radio, Space,
-  Table, Tag, Typography, message,
+  Table, Tag, Typography, Upload, message,
 } from "antd";
 import {
-  CaretRightOutlined, PauseOutlined, PlayCircleOutlined,
+  CaretRightOutlined, FileTextOutlined, PauseOutlined, PlayCircleOutlined,
   SoundOutlined, StarFilled, UploadOutlined,
 } from "@ant-design/icons";
 import type { VoiceAsset } from "../types";
@@ -120,7 +120,7 @@ const TtsSection: React.FC = () => {
   ) => (
     <div style={{ display: "flex", width: "100%", alignItems: "flex-start", gap: 12 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1, minWidth: 0 }}>
-        <Typography.Text strong style={{ fontSize: 12 }}>{label}</Typography.Text>
+        <Typography.Text strong style={{ fontSize: 13 }}>{label}</Typography.Text>
         {extra}
       </div>
       <Button
@@ -137,7 +137,8 @@ const TtsSection: React.FC = () => {
     return (
       <div style={{ display: "grid", gap: 16, padding: "4px 8px" }}>
         {renderChannelRow(`① 默认文案（${DEFAULT_TEXT.length} 字·覆盖对话/拟声/叹号/省略号）`, "a", v,
-          <Typography.Text type="secondary" style={{ fontSize: 11 }} ellipsis>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}
+            ellipsis={{ tooltip: DEFAULT_TEXT }}>
             {DEFAULT_TEXT.slice(0, 60)}…
           </Typography.Text>, !v.available)}
         {renderChannelRow("② 自定义文字", "b", v,
@@ -148,17 +149,19 @@ const TtsSection: React.FC = () => {
         {renderChannelRow("③ 本地图书模拟（真实听书场景·流式接力）", "c", v,
           <Space direction="vertical" size={2} style={{ width: "100%" }}>
             <Space wrap>
-              <input type="file" accept=".txt,text/plain"
-                onChange={(e) => void onTxtFile(e.target.files?.[0] ?? null)} />
+              <Upload accept=".txt,text/plain" showUploadList={false} maxCount={1}
+                beforeUpload={(f) => { void onTxtFile(f); return false; }}>
+                <Button size="small" icon={<FileTextOutlined />}>选择 txt 文件</Button>
+              </Upload>
               {txtName && <Tag closable onClose={() => { setTxtName(""); setTxtContent(""); }}>
                 {txtName}
               </Tag>}
               <InputNumber min={0} max={Math.max(0, txtContent.length - 1)} value={startIdx}
-                onChange={(n) => setStartIdx(Number(n) || 0)} style={{ width: 110 }}
-                addonBefore="起始" addonAfter="字" size="small" />
+                onChange={(n) => setStartIdx(Number(n) || 0)} style={{ width: 170 }}
+                addonBefore="起始字符" addonAfter="字" size="small" />
             </Space>
             {txtContent && (
-              <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 从第 {startIdx} 字「{txtPreview}…」起 · 共 {txtTail.length} 字 · 约 {txtSegCount} 段
               </Typography.Text>
             )}
@@ -177,7 +180,7 @@ const TtsSection: React.FC = () => {
                 <Progress percent={Math.round(player.state.segProgress * 100)} size="small"
                   showInfo={false} style={{ width: 140, margin: 0 }} />
                 {player.state.error &&
-                  <Typography.Text type="danger" style={{ fontSize: 11 }}>
+                  <Typography.Text type="danger" style={{ fontSize: 12 }}>
                     {player.state.error}
                   </Typography.Text>}
               </Space>
@@ -225,7 +228,7 @@ const TtsSection: React.FC = () => {
               设为默认
             </Button>
           )}
-          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             点击行展开试听 <SoundOutlined />
           </Typography.Text>
         </Space>
@@ -251,7 +254,7 @@ const TtsSection: React.FC = () => {
           onExpand: (expanded, v) => setExpandedId(expanded ? v.id : ""),
         }}
       />
-      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
         上传要求: 3-30 秒清晰人声 + 逐字稿（逐字稿与音频内容一致才能保证克隆质量）
       </Typography.Text>
 
