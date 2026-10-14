@@ -17,13 +17,31 @@ export interface TtsPlayerState {
   buffered: number;    // 已下载完成、尚未播放的段数
   segProgress: number; // 当前段内播放进度 0~1
   error: string;
+  elapsedSec: number;  // 已播放时长（已完成段 + 当前段进度）
+  totalSec: number;    // 总时长（已知段 duration + 未生成段按 0.2s/字估算）
+  firstSegMs: number;  // 首段生成耗时（完成即定格——首响指标）
+  avgGenMs: number;    // 平均每段生成耗时
+  startTick: number;   // start() 时刻（starting 计时, ms）
 }
 
 const INITIAL: TtsPlayerState = {
   status: "idle", segIndex: 0, segTotal: 0, buffered: 0, segProgress: 0, error: "",
+  elapsedSec: 0, totalSec: 0, firstSegMs: 0, avgGenMs: 0, startTick: 0,
 };
 
+/** 中文朗读估速（秒/字）——未生成段总时长估算用 */
+const SEC_PER_CHAR = 0.2;
+
 const PREFETCH = 3; // in-flight 上限(服务端锁串行, 此值只控制客户端并发挂起量)
+
+/** 总时长 = 已知段真实时长 + 未生成段按字数估算 */
+function computeTotalOf(segs: readonly string[], durations: readonly number[]): number {
+  let total = 0;
+  for (let i = 0; i < segs.length; i++) {
+    total += durations[i] ?? segs[i].length * SEC_PER_CHAR;
+  }
+  return total;
+}
 
 export function useTtsPlayer() {
   const [state, setState] = useState<TtsPlayerState>(INITIAL);
@@ -38,6 +56,9 @@ export function useTtsPlayer() {
   const stoppedRef = useRef(true);
   const urlPool = useRef<string[]>([]);
   const errCount = useRef(0);
+  const segDurations = useRef<number[]>([]);   // 已知段真实时长
+  const elapsedBase = useRef(0);               // 已完成段时长累计
+  const genMsList = useRef<number[]>([]);      // 每段生成耗时
 
   const cleanup = useCallback(() => {
     if (audioRef.current) {
@@ -48,6 +69,9 @@ export function useTtsPlayer() {
     for (const u of urlPool.current) URL.revokeObjectURL(u);
     urlPool.current = [];
     blobPromises.current = new Map();
+    segDurations.current = [];
+    elapsedBase.current = 0;
+    genMsList.current = [];
     nextPlayRef.current = 0;
     nextFetchRef.current = 0;
     errCount.current = 0;
@@ -91,7 +115,13 @@ export function useTtsPlayer() {
         return await r2.blob();
       }
     };
-    p = doFetch();
+    const t0 = performance.now();
+    p = doFetch().then((b) => {
+      genMsList.current[idx] = performance.now() - t0;
+      setState((s) => ({ ...s, buffered: Math.max(0,
+        genMsList.current.filter((x) => x > 0).length - nextPlayRef.current - 1) }));
+      return b;
+    });
     blobPromises.current.set(idx, p);
     return p;
   }, []);
@@ -107,17 +137,34 @@ export function useTtsPlayer() {
       const url = URL.createObjectURL(blob);
       urlPool.current.push(url);
       const audio = new Audio(url);
+      urlPool.current.push(url);
       audioRef.current = audio;
-      setState((s) => ({ ...s, status: "playing", segIndex: idx,
-        segTotal: segsRef.current.length, error: "" }));
+      const dur = Number.isFinite(audio.duration) ? audio.duration
+        : segsRef.current[idx].length * SEC_PER_CHAR;
+      segDurations.current[idx] = dur;
+      const gens = genMsList.current.filter((x) => x > 0);
+      setState((s) => ({
+        ...s, status: "playing", segIndex: idx,
+        segTotal: segsRef.current.length, error: "",
+        firstSegMs: genMsList.current[0] ?? s.firstSegMs,
+        avgGenMs: gens.length
+          ? Math.round(gens.reduce((a, b) => a + b, 0) / gens.length) : s.avgGenMs,
+      }));
       audio.ontimeupdate = () => {
+        if (audio !== audioRef.current) return;
         setState((s) => s.segIndex === idx
-          ? { ...s, segProgress: audio.duration
-              ? audio.currentTime / audio.duration : 0 }
+          ? {
+              ...s,
+              segProgress: audio.duration
+                ? audio.currentTime / audio.duration : 0,
+              elapsedSec: elapsedBase.current + audio.currentTime,
+              totalSec: computeTotalOf(segsRef.current, segDurations.current),
+            }
           : s);
       };
       audio.onended = () => {
         if (stoppedRef.current) return;
+        elapsedBase.current += dur;
         playSeg(idx + 1, signal);
       };
       audio.onerror = () => {
@@ -150,7 +197,9 @@ export function useTtsPlayer() {
     pausedRef.current = false;
     const ac = new AbortController();
     abortRef.current = ac;
-    setState({ ...INITIAL, status: "starting", segTotal: segs.length });
+    setState({ ...INITIAL, status: "starting", segTotal: segs.length,
+      startTick: Date.now(), totalSec: segs.reduce(
+        (a, s) => a + s.length * SEC_PER_CHAR, 0) });
     // 预取: 立即挂起后续段(≤PREFETCH in-flight)
     const pump = () => {
       while (!stoppedRef.current

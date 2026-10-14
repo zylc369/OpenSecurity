@@ -84,10 +84,17 @@ function splitOversize(sentence: string, max: number): string[] {
 
 /**
  * 第二遍: 句块贪心合并 → 段数组。
- * @param target 目标段长（加句后 ≥target 即收段; 默认 300）
+ * 渐进分段（首响优化）: 首段小（firstTargets 序列 60→150）——300 字段生成约
+ * 20s 会把首响拖到 20s+; 首段 60 字 ≈5s 出声, 第二段 150 字在首段播放
+ * （~12s）期间完成生成, 第三段起 target（~300 字）全速——听感无断档
+ * （数学: 段 N 播放时长 ≥ 段 N+1 生成时长）。
+ * @param target 目标段长（默认 300）
  * @param hardMax 单句超此长触发逗号兜底（默认 600）
+ * @param firstTargets 前几段的目标长（默认 [60, 150]）
  */
-export function segmentText(text: string, target = 300, hardMax = 600): string[] {
+export function segmentText(
+  text: string, target = 300, hardMax = 600, firstTargets: readonly number[] = [60, 150],
+): string[] {
   const sentences = splitSentences(text);
   const pieces: string[] = [];
   for (const s of sentences) {
@@ -98,7 +105,10 @@ export function segmentText(text: string, target = 300, hardMax = 600): string[]
   let cur = "";
   for (const p of pieces) {
     cur += p;
-    if (cur.length >= target) {
+    const goal = segs.length < firstTargets.length
+      ? firstTargets[segs.length]
+      : target;
+    if (cur.length >= goal) {
       segs.push(cur);
       cur = "";
     }

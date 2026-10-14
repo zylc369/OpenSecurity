@@ -12,8 +12,8 @@ import {
   Table, Tag, Typography, Upload, message,
 } from "antd";
 import {
-  CaretRightOutlined, FileTextOutlined, PauseOutlined, PlayCircleOutlined,
-  SoundOutlined, StarFilled, UploadOutlined,
+  CaretRightOutlined, FileTextOutlined, LoadingOutlined, PauseOutlined,
+  SoundOutlined, StarFilled, StopOutlined, UploadOutlined,
 } from "@ant-design/icons";
 import type { VoiceAsset } from "../types";
 import { useTtsPlayer } from "../hooks/useTtsPlayer";
@@ -30,6 +30,31 @@ interface VoiceAssetX extends VoiceAsset {
   is_default?: boolean;
 }
 
+/** mm:ss（听书尺度小时也兜底 h:mm:ss） */
+function fmtSec(sec: number): string {
+  const s = Math.floor(sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  const mm = String(m).padStart(2, "0");
+  const ss = String(r).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+/** 指标小块（苹果风: 小标签灰 + 值等宽数字） */
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <Typography.Text type="secondary" style={{ fontSize: 11, display: "block" }}>
+        {label}
+      </Typography.Text>
+      <Typography.Text style={{ fontSize: 13, fontVariantNumeric: "tabular-nums" }}>
+        {value}
+      </Typography.Text>
+    </div>
+  );
+}
+
 const TtsSection: React.FC = () => {
   const [voices, setVoices] = useState<VoiceAssetX[] | undefined>();
   const [expandedId, setExpandedId] = useState<string>("");
@@ -43,6 +68,7 @@ const TtsSection: React.FC = () => {
   const player = useTtsPlayer();
   // 播放中的音色 id + 通道（用于行内高亮）
   const [activeVoice, setActiveVoice] = useState("");
+  const bufferedCount = player.state.buffered;
   
 
   const refresh = useCallback(() => {
@@ -167,33 +193,101 @@ const TtsSection: React.FC = () => {
             )}
           </Space>, !v.available || txtTail.trim().length === 0)}
         {isActiveVoice && (
-          <div style={{ padding: "12px 16px", background: "#fafafa", borderRadius: 8 }}>
-            <Space style={{ width: "100%", justifyContent: "space-between" }}>
-              <Space size={16}>
-                <Typography.Text strong style={{ fontSize: 12 }}>
-                  {player.state.status === "starting" && "生成中…首段即将开始"}
-                  {player.state.status === "playing" &&
-                    `第 ${player.state.segIndex + 1}/${player.state.segTotal} 段`}
-                  {player.state.status === "paused" &&
-                    `已暂停（第 ${player.state.segIndex + 1}/${player.state.segTotal} 段）`}
+          <div style={{
+            padding: "16px 20px", background: "linear-gradient(180deg, #fbfbfd 0%, #f5f5f7 100%)",
+            borderRadius: 12, border: "1px solid #e8e8ed",
+          }}>
+            {/* 顶部: 状态行 */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <Space size={8}>
+                {player.state.status === "starting" && (
+                  <LoadingOutlined spin style={{ color: "#0071e3", fontSize: 14 }} />
+                )}
+                <Typography.Text strong style={{ fontSize: 13 }}>
+                  {player.state.status === "starting"
+                    ? `正在生成首段… ${(Math.max(0, Date.now() - player.state.startTick) / 1000).toFixed(1)}s`
+                    : player.state.status === "paused" ? "已暂停"
+                    : "正在朗读"}
                 </Typography.Text>
-                <Progress percent={Math.round(player.state.segProgress * 100)} size="small"
-                  showInfo={false} style={{ width: 140, margin: 0 }} />
-                {player.state.error &&
-                  <Typography.Text type="danger" style={{ fontSize: 12 }}>
-                    {player.state.error}
-                  </Typography.Text>}
+                {player.state.segTotal > 0 && player.state.status !== "starting" && (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    第 {player.state.segIndex + 1} / {player.state.segTotal} 段
+                  </Typography.Text>
+                )}
               </Space>
-              <Space>
-                {player.state.status === "paused"
-                  ? <Button size="small" icon={<PlayCircleOutlined />}
-                      onClick={player.resume}>恢复</Button>
-                  : <Button size="small" icon={<PauseOutlined />}
-                      disabled={player.state.status !== "playing"}
-                      onClick={player.pause}>暂停</Button>}
-                <Button size="small" danger onClick={doStop}>停止</Button>
-              </Space>
-            </Space>
+              {player.state.error && (
+                <Typography.Text type="danger" style={{ fontSize: 12 }}>
+                  {player.state.error}
+                </Typography.Text>
+              )}
+            </div>
+
+            {/* 中控: 停止(左) + 大圆播放/暂停(中) */}
+            <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 28, margin: "14px 0 6px" }}>
+              <Button shape="circle" size="large" danger ghost
+                icon={<StopOutlined style={{ fontSize: 16 }} />}
+                onClick={doStop} title="停止" />
+              {player.state.status === "paused" ? (
+                <div onClick={player.resume} style={{
+                  width: 52, height: 52, borderRadius: "50%",
+                  background: "#0071e3", display: "flex", alignItems: "center",
+                  justifyContent: "center", cursor: "pointer",
+                  boxShadow: "0 4px 14px rgba(0,113,227,.35)",
+                }}>
+                  <CaretRightOutlined style={{ color: "#fff", fontSize: 22, marginLeft: 2 }} />
+                </div>
+              ) : (
+                <div
+                  onClick={player.state.status === "playing" ? player.pause : undefined}
+                  style={{
+                    width: 52, height: 52, borderRadius: "50%",
+                    background: player.state.status === "playing" ? "#0071e3" : "#c7c7cc",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    cursor: player.state.status === "playing" ? "pointer" : "default",
+                    boxShadow: player.state.status === "playing"
+                      ? "0 4px 14px rgba(0,113,227,.35)" : "none",
+                  }}
+                  title={player.state.status === "playing" ? "暂停" : "生成中…"}
+                >
+                  {player.state.status === "starting"
+                    ? <LoadingOutlined spin style={{ color: "#fff", fontSize: 20 }} />
+                    : <PauseOutlined style={{ color: "#fff", fontSize: 20 }} />}
+                </div>
+              )}
+              {/* 占位保持居中对称 */}
+              <div style={{ width: 40 }} />
+            </div>
+
+            {/* 进度条 + 时间刻度 */}
+            <div>
+              <Progress
+                percent={player.state.totalSec > 0
+                  ? Math.min(100, Math.round(
+                      (player.state.elapsedSec / player.state.totalSec) * 100))
+                  : 0}
+                showInfo={false} size={["100%", 6]}
+                strokeColor="#0071e3" trailColor="#e8e8ed"
+              />
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2 }}>
+                <Typography.Text type="secondary" style={{ fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
+                  {fmtSec(player.state.elapsedSec)}
+                </Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
+                  -{fmtSec(Math.max(0, player.state.totalSec - player.state.elapsedSec))}
+                </Typography.Text>
+              </div>
+            </div>
+
+            {/* 底部指标行 */}
+            <div style={{ display: "flex", gap: 18, marginTop: 8, flexWrap: "wrap" }}>
+              <Metric label="首段生成" value={player.state.firstSegMs
+                ? `${(player.state.firstSegMs / 1000).toFixed(1)}s` : "…"} />
+              <Metric label="平均生成/段" value={player.state.avgGenMs
+                ? `${(player.state.avgGenMs / 1000).toFixed(1)}s` : "…"} />
+              <Metric label="已缓冲" value={`${bufferedCount} 段`} />
+              <Metric label="总时长" value={player.state.totalSec
+                ? `≈${fmtSec(player.state.totalSec)}` : "…"} />
+            </div>
           </div>
         )}
       </div>
