@@ -129,7 +129,7 @@ class TtsWorkerClient:
         import subprocess as _sp
         try:
             r = _sp.run([str(WORKER_VENV_PY), "-m", "pip", "install", "--no-deps",
-                         "mlx-audio==0.2.10", "mlx-audio-plus==0.1.8", "mlx-lm",
+                         "mlx-audio==0.2.10", "mlx-audio-plus==0.1.8", "mlx-lm", "soundfile",
                          "-i", "https://mirrors.aliyun.com/pypi/simple/"],
                         capture_output=True, text=True,
                         timeout=900)  # noqa: S603 —— venv 自身 pip
