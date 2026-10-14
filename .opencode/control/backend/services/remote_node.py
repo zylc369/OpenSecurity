@@ -346,14 +346,20 @@ class RemoteNodeBootstrapper:
         log_path = os.path.join(RuntimePaths.LOGS_DIR, "remote-node.log")
         os.makedirs(RuntimePaths.LOGS_DIR, exist_ok=True)
         ipc_path = _cm().get_instance().ipc_addr()
+        # 持久化 tags(节点内重启走完整启动链时读回) + 注入节点上下文标记
+        # (restart.py 检测此标记 → execv remote_node 而非 execv server)
+        cm = _cm().get_instance()
+        if self._args.model_tags:
+            cm.set_one(key=cm.Keys.NODE_MODEL_TAGS, value=",".join(self._args.model_tags))
         _log("[*] 启动控制台（独立会话）...")
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(f"\n===== remote-node start {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+            env_node = {**os.environ, "OPENSECURITY_NODE_LAUNCH": "1"}
             proc = subprocess.Popen(
                 [sys.executable, "-u", "server.py"], cwd=backend_dir,
                 stdin=subprocess.DEVNULL,  # stdin 免疫终端关闭（坏 fd 0 会在
                                            # execv 重启时 Fatal: init_sys_streams）
-                stdout=fh, stderr=fh, start_new_session=True)
+                stdout=fh, stderr=fh, start_new_session=True, env=env_node)
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
             if os.path.exists(ipc_path):
@@ -429,7 +435,7 @@ def _parse_args(argv: list[str]) -> RemoteNodeArgs:
     parser.add_argument("--relay-psk", default="", help="RELAY_PSK（base64 32B，与 relayd 一致）")
     parser.add_argument("--node-id", default="", help="节点 ID（如 macmini）")
     parser.add_argument("--skip-models", action="store_true", help="跳过模型检查/下载")
-    parser.add_argument("--model-tags", default="",
+    parser.add_argument("--model-tags", default="security,tts",
                         help="模型圈选标签（逗号分隔: security,tts; 空=默认安全组）")
     parser.add_argument("-y", "--assume-yes", action="store_true", help="免交互（当前用于语义显式化）")
     parser.add_argument("--check", action="store_true",

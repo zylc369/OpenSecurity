@@ -113,6 +113,10 @@ class ConsoleRestarter:
 
         无需刷新 env: .ai_env 键（source=ai_env）由新进程经 ConfigManager
         直接读文件，env 同名值不参与读取。
+        节点上下文（OPENSECURITY_NODE_LAUNCH=1，由 remote_node 注入）：
+        重启走 remote_node 完整启动链（venv/依赖/模型 ensure 后再拉起
+        server）——"更新并重启"新增依赖/模型时无需人工跑启动脚本;
+        主控（无标记）维持 execv server 原语义。
         """
         if not ConfigManager.get_instance().is_windows:
             try:
@@ -121,11 +125,27 @@ class ConsoleRestarter:
                 pass
         if sys.platform == "win32":
             self._restart_windows()
-        else:
-            argv = [sys.executable, os.path.abspath(sys.argv[0])] + sys.argv[1:]
-            self._sanitize_std_fds()
-            logger.info("execv 重启: %s", " ".join(argv))
-            os.execv(sys.executable, argv)
+            return
+        if os.environ.get("OPENSECURITY_NODE_LAUNCH") == "1":
+            self._restart_via_remote_node()
+            return
+        argv = [sys.executable, os.path.abspath(sys.argv[0])] + sys.argv[1:]
+        self._sanitize_std_fds()
+        logger.info("execv 重启: %s", " ".join(argv))
+        os.execv(sys.executable, argv)
+
+    def _restart_via_remote_node(self) -> None:
+        """节点重启: execv remote_node.py(完整启动链——依赖/模型 ensure)。"""
+        from services.config_manager import ConfigManager
+        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        remote_node = os.path.join(backend_dir, "services", "remote_node.py")
+        cm = ConfigManager.get_instance()
+        tags = (cm.get(cm.Keys.NODE_MODEL_TAGS) or "security,tts").strip()
+        argv = [sys.executable, remote_node, "--model-tags", tags,
+                "--assume-yes"]
+        self._sanitize_std_fds()
+        logger.info("execv 节点完整链重启: %s", " ".join(argv))
+        os.execv(sys.executable, argv)
 
     @staticmethod
     def _restart_windows() -> None:

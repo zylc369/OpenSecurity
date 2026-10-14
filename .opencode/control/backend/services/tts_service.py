@@ -93,7 +93,9 @@ class TtsWorkerClient:
         if self.alive and self._proc is not None:
             return self._proc
         if not self._venv_healthy():
-            self._bootstrap_venv()
+            raise TtsUnavailable(
+                "TTS 引擎依赖缺失——安装职责在启动链(节点: ./start-remote-node.sh; "
+                "主控: 控制台「Python 依赖」页或 install.sh), 运行时不自愈安装")
         _need = ("config.json", "model.safetensors")
         if not all((TTS_MODEL_DIR / f).is_file() for f in _need):
             raise TtsUnavailable(
@@ -137,26 +139,6 @@ class TtsWorkerClient:
                      "import mlx_audio, mlx_audio_plus"],
                     capture_output=True, timeout=60)  # noqa: S603 —— 主 venv 解释器
         return r.returncode == 0
-
-    @staticmethod
-    def _bootstrap_venv() -> None:
-        """TTS 依赖缺失时经唯一清单安装器自愈(detect_py_deps install)。
-
-        依赖清单与安装逻辑唯一来源是 detect_py_deps.py(TTS/质检链在
-        CONSOLE_RUNTIME tag 下)——本方法只做编排。"""
-        logger.info("[tts] plus 依赖缺失 → 唯一清单安装器自愈(console_runtime)")
-        import subprocess as _sp
-        installer = _BACKEND_ROOT / "services" / "detect_py_deps.py"
-        try:
-            r = _sp.run([str(WORKER_VENV_PY), str(installer), "install",
-                         "--tags", "console_runtime"],
-                        capture_output=True, text=True,
-                        timeout=1800)  # noqa: S603 —— 固定项目脚本
-        except FileNotFoundError as e:
-            raise TtsUnavailable(f"自愈安装失败(解释器缺失): {WORKER_VENV_PY}") from e
-        if r.returncode != 0:
-            raise TtsUnavailable(
-                f"TTS 环境自愈安装失败: {r.stdout[-400:]} {r.stderr[-400:]}")
 
     def request(self, payload: "dict[str, Any]") -> WorkerResponse:
         """一发一收（调用方持 TtsService 锁——串行天然成立）。超时杀进程。"""

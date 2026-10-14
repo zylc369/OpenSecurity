@@ -255,6 +255,7 @@ class ConfigManager:
         JULIANG_API_KEY = "JULIANG_API_KEY"
         GITHUB_TOKEN = "GITHUB_TOKEN"
         HF_ENDPOINT = "HF_ENDPOINT"
+        NODE_MODEL_TAGS = "NODE_MODEL_TAGS"
         # 远程模型卸载: 本地侧三键
         REMOTE_CONSOLE_URL = "REMOTE_CONSOLE_URL"
         REMOTE_CONSOLE_TOKEN = "REMOTE_CONSOLE_TOKEN"
@@ -891,6 +892,14 @@ class ConfigManager:
         ConfigField(
             key=Keys.HF_ENDPOINT, label="HuggingFace 端点", type=ConfigFieldType.TEXT,
             hint="国内直连不稳时配置镜像，如 https://hf-mirror.com",
+            required=False,
+            category=ConfigCategory.MODELS,
+            validator=None, default_value="",
+            surfaces=[Surface.CONFIG], readonly=False,
+        ),
+        ConfigField(
+            key=Keys.NODE_MODEL_TAGS, label="节点模型圈选", type=ConfigFieldType.TEXT,
+            hint="remote_node --model-tags 的持久化(节点重启走完整启动链时读回)",
             required=False,
             category=ConfigCategory.MODELS,
             validator=None, default_value="",
