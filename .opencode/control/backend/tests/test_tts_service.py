@@ -49,7 +49,7 @@ def test_synth_default_voice(_fresh_service):
     r = svc.synthesize("你好世界")
     assert r.wav.startswith(b"RIFF")
     assert r.cached is False
-    assert r.voice == "official_female_v4"  # 音色库默认（终审定稿）
+    assert r.voice == "official_female"  # 音色库默认（plus 定稿音色）
     assert len(calls) == 1
     assert calls[0]["ref_text"]  # 音色逐字稿透传 worker
 
