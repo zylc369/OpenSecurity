@@ -118,18 +118,18 @@ const TtsSection: React.FC = () => {
     label: string, channel: string, v: VoiceAssetX,
     extra: React.ReactNode, btnDisabled: boolean,
   ) => (
-    <Space style={{ width: "100%", justifyContent: "space-between" }}>
-      <Space direction="vertical" size={2} style={{ flex: 1, minWidth: 0 }}>
+    <div style={{ display: "flex", width: "100%", alignItems: "flex-start", gap: 12 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1, minWidth: 0 }}>
         <Typography.Text strong style={{ fontSize: 12 }}>{label}</Typography.Text>
         {extra}
-      </Space>
+      </div>
       <Button
         size="small" type="primary" ghost icon={<CaretRightOutlined />}
         disabled={btnDisabled}
         onClick={() => launch(v.id, channel,
           channel === "a" ? DEFAULT_TEXT : channel === "b" ? customText : txtTail)}
       >试听</Button>
-    </Space>
+    </div>
   );
 
   const expandedRow = (v: VoiceAssetX) => {
@@ -141,7 +141,7 @@ const TtsSection: React.FC = () => {
             {DEFAULT_TEXT.slice(0, 60)}…
           </Typography.Text>, !v.available)}
         {renderChannelRow("② 自定义文字", "b", v,
-          <Input.TextArea rows={3} maxLength={2000} showCount
+          <Input.TextArea rows={3} maxLength={2000} showCount style={{ width: "100%" }}
             placeholder="输入要试听的文字（≤2000 字）"
             onChange={(e) => setCustomText(e.target.value)} />,
           !v.available || customText.trim().length === 0)}
