@@ -37,7 +37,7 @@ kill $(ps aux | grep "control/backend/server.py" | grep -v grep | awk '{print $2
 
 **plus 主 venv 依赖状态**: 已装 `mlx-audio==0.2.10` + `mlx-audio-plus==0.1.8`（--no-deps）+ `mlx-lm`（--no-deps）到主 venv（~/bw-security-analysis/.venv）——import 链已验证 OK。另装了 pypinyin、torchcodec、HyperPyYAML、onnxruntime、wetext、modelscope、conformer、diffusers、hydra-core、inflect、lightning、omegaconf、x-transformers、torchaudio、gdown、wget、matplotlib、pyworld、setuptools<81（部分为 torch 栈残留，plus 不全需要）。
 
-**保险基线 venv**: vendor/tts-funaudio/.venv-ttsfun（torch 2.3.1+transformers 4.51.3+mlx 0.32.3——torch 栈完整可用——保留未删）。
+**保险基线 venv**: vendor/tts-funaudio/.venv-ttsfun（torch 2.3.1+transformers 4.51.3+mlx 0.32.3——torch 栈完整可用——保留未删）。若重启 torch 路线注意: 4.51.3 默认 attn 是 SDPA 非 eager（review 验证——勿按"对齐 4.51.3"方向打 eager 补丁（数值差异两版本同样存在。
 
 ## 五、模型文件
 
