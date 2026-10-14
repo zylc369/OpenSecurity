@@ -73,11 +73,9 @@ function ChannelCard({
           {icon}
         </Avatar>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <Space size={8}>
-            <Typography.Text strong style={{ fontSize: 13 }}>
-              <Typography.Text style={{ color: BLUE, fontSize: 12, marginRight: 4 }}>{no}</Typography.Text>
-              {title}
-            </Typography.Text>
+          <Space size={6} align="baseline">
+            <Typography.Text strong style={{ color: BLUE, fontSize: 15 }}>{no}</Typography.Text>
+            <Typography.Text strong style={{ fontSize: 13.5 }}>{title}</Typography.Text>
           </Space>
           <div style={{ marginTop: 2, minWidth: 0 }}>{subtitle}</div>
         </div>
@@ -182,10 +180,11 @@ const TtsSection: React.FC = () => {
       <div style={{ display: "grid", gap: 12, padding: "4px 4px 8px" }}>
         <ChannelCard no="①" title="默认文案" icon={<SoundOutlined />}
           subtitle={
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}
-              ellipsis={{ tooltip: { title: DEFAULT_TEXT, mouseEnterDelay: 0 } } as never}>
-              {DEFAULT_TEXT.slice(0, 60)}…
-            </Typography.Text>
+            <Tooltip title={DEFAULT_TEXT} mouseEnterDelay={0} placement="topLeft">
+              <Typography.Text type="secondary" style={{ fontSize: 12 }} ellipsis>
+                {DEFAULT_TEXT.slice(0, 60)}…
+              </Typography.Text>
+            </Tooltip>
           }
           action={listenBtn(v, "a", DEFAULT_TEXT, !v.available)}
           disabled={!v.available} />
