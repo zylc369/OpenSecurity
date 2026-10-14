@@ -102,11 +102,18 @@ class TtsWorkerClient:
         if self._proc is not None:
             self._kill()
         logger.info("[tts] 启动 worker（模型加载 ~10s）")
+        # worker 需从 HF 拉 8bit 模型目录之外的运行时小组件(campplus.onnx
+        # speaker encoder / BlankEN 配置, 共 ~4MB)。部分部署环境带
+        # HF_HUB_OFFLINE=1 会拦截在线拉取 → 组件 cache 未命中即崩——显式
+        # 覆盖为在线 + 镜像加速(组件首次在线拉取后命中本地 cache)。
+        import os as _os
+        _ep = _os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        env = {**_os.environ, "HF_HUB_OFFLINE": "0", "HF_ENDPOINT": _ep}
         self._proc = subprocess.Popen(  # noqa: S603 —— 固定脚本路径
             [str(WORKER_VENV_PY), str(WORKER_SCRIPT), "--model-dir", str(TTS_MODEL_DIR)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=None,  # 继承主控 stderr（控制台日志文件）——worker 加载/崩溃可诊断
-            text=True, bufsize=1,
+            text=True, bufsize=1, env=env,
         )
         return self._proc
 
