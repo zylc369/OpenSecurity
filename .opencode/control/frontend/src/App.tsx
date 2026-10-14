@@ -62,13 +62,14 @@ const { Header, Content } = Layout;
 
 // ─── 页级 Tab（环境总览 / 运行状态 / 远程资源）── hash 路由 ───────────
 // "#/runtime" → 运行状态页; "#/remote" → 远程资源页; 其余 → 环境总览。
-type PageKey = "overview" | "runtime" | "remote" | "config";
+type PageKey = "overview" | "runtime" | "remote" | "config" | "tts";
 
 function pageFromHash(): PageKey {
   const h = window.location.hash;
   if (h === "#/runtime") return "runtime";
   if (h === "#/remote") return "remote";
   if (h === "#/config") return "config";
+  if (h === "#/tts") return "tts";
   return "overview";
 }
 
@@ -146,7 +147,7 @@ const App: React.FC = () => {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   const switchPage = (key: string) => {
-    if (key === "runtime" || key === "remote" || key === "config") {
+    if (key === "runtime" || key === "remote" || key === "config" || key === "tts") {
       window.location.hash = `#/${key}`; // 触发 hashchange → setPage（幂等）
     } else {
       // 清 hash: 设 hash="" 会残留 "#"，用 replaceState 干净移除（不触发 hashchange，手动 set）
@@ -558,6 +559,7 @@ const App: React.FC = () => {
               { label: "环境总览", value: "overview" },
               { label: "运行状态", value: "runtime" },
               { label: "远程资源", value: "remote" },
+              { label: "TTS 听书", value: "tts" },
               { label: "配置", value: "config" },
             ]}
           />
@@ -807,9 +809,6 @@ const App: React.FC = () => {
                     .catch(() => models.refresh());
                 }}
               />
-              <div style={{ marginTop: 12 }}>
-                <TtsSection />
-              </div>
             </Card>
           </Col>
 
@@ -931,6 +930,12 @@ const App: React.FC = () => {
             </Col>
           </Row>
         </>
+        ) : page === "tts" ? (
+        /* TTS 听书页: 音色管理+段级流式试听深度测试台——独立 TAB(原环境总览内嵌
+           过于局促; 整页给三通道展开与播放器完整空间)。 */
+        <div style={{ maxWidth: 1100, margin: "0 auto", width: "100%" }}>
+          <TtsSection />
+        </div>
         ) : page === "config" ? (
         /* 配置页：服务端分类驱动（surface=config）——独立 TAB，环境总览只留
            完整性状态徽标 + 跳转入口。 */

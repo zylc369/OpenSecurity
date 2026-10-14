@@ -135,13 +135,13 @@ const TtsSection: React.FC = () => {
   const expandedRow = (v: VoiceAssetX) => {
     const isActiveVoice = activeVoice === v.id;
     return (
-      <div style={{ display: "grid", gap: 12 }}>
+      <div style={{ display: "grid", gap: 16, padding: "4px 8px" }}>
         {renderChannelRow(`① 默认文案（${DEFAULT_TEXT.length} 字·覆盖对话/拟声/叹号/省略号）`, "a", v,
           <Typography.Text type="secondary" style={{ fontSize: 11 }} ellipsis>
             {DEFAULT_TEXT.slice(0, 60)}…
           </Typography.Text>, !v.available)}
         {renderChannelRow("② 自定义文字", "b", v,
-          <Input.TextArea rows={2} maxLength={2000} showCount
+          <Input.TextArea rows={3} maxLength={2000} showCount
             placeholder="输入要试听的文字（≤2000 字）"
             onChange={(e) => setCustomText(e.target.value)} />,
           !v.available || customText.trim().length === 0)}
@@ -164,7 +164,7 @@ const TtsSection: React.FC = () => {
             )}
           </Space>, !v.available || txtTail.trim().length === 0)}
         {isActiveVoice && (
-          <div style={{ padding: "8px 12px", background: "#fafafa", borderRadius: 6 }}>
+          <div style={{ padding: "12px 16px", background: "#fafafa", borderRadius: 8 }}>
             <Space style={{ width: "100%", justifyContent: "space-between" }}>
               <Space size={16}>
                 <Typography.Text strong style={{ fontSize: 12 }}>
