@@ -1,36 +1,38 @@
 /**
- * TTS 管理分区（听书深度测试台——重建版）。
+ * TTS 管理分区（听书深度测试台）——Ant Design 组件化 UI。
  *
- * 音色列表 + 行展开三通道试听（a 默认文案 / b 自定义文字 / c 本地 txt+起始索引）
- * + 流式接力播放（段级协议: 分段→预取→顺序播放——与 Legado 同模式）
- * + 默认音色设置（.ai_env 持久化）+ 上传音色。
- * 设计: 需求 2026-10-15-tts-console-rebuild。
+ * 音色列表（Avatar/即时 Tooltip）+ 三通道卡片（①默认文案/②自定义/③txt+起始索引）
+ * + 苹果风播放器（大圆钮/时间轴/指标行）+ 默认音色 + 上传。
+ * 组件库: antd v5（Tooltip mouseEnterDelay=0 替代列 ellipsis 原生 title 的 ~2s 延迟）。
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Button, Form, Input, InputNumber, Modal, Progress, Radio, Space,
-  Table, Tag, Typography, Upload, message,
+  Avatar, Button, Card, Empty, Form, Input, InputNumber, Modal, Progress,
+  Radio, Space, Table, Tag, Tooltip, Typography, Upload, message,
 } from "antd";
 import {
-  CaretRightOutlined, FileTextOutlined, LoadingOutlined, PauseOutlined,
-  SoundOutlined, StarFilled, StopOutlined, UploadOutlined,
+  AudioOutlined, BookOutlined, CaretRightOutlined, EditOutlined,
+  FileTextOutlined, LoadingOutlined, PauseOutlined, SoundOutlined,
+  StarFilled, StopOutlined, UploadOutlined,
 } from "@ant-design/icons";
 import type { VoiceAsset } from "../types";
 import { useTtsPlayer } from "../hooks/useTtsPlayer";
 import { segmentText } from "../utils/segmentText";
 
-/** 通道 a 固定测试文案（128 字——覆盖对话引号/拟声/叹号/省略号/问号全难点） */
+/** 通道 a 固定测试文案（覆盖对话引号/拟声/叹号/省略号/问号） */
 const DEFAULT_TEXT =
   "细那康子们，吃饭了，呜嘞呜嘞呜嘞！" +
   "系着围裙的崔桂英左手端碗，右手握勺，边呼喊边敲打着粥缸边缘。" +
   "\u201C都什么年代了，还怕他们听见？\u201D李维汉没好气地骂道。" +
   "孩子们呼啦一下涌进门来，最大的十六，最小的才三岁\u2026";
 
+const BLUE = "#0071e3";
+
 interface VoiceAssetX extends VoiceAsset {
   is_default?: boolean;
 }
 
-/** mm:ss（听书尺度小时也兜底 h:mm:ss） */
+/** mm:ss（听书尺度小时兜底 h:mm:ss） */
 function fmtSec(sec: number): string {
   const s = Math.floor(sec);
   const h = Math.floor(s / 3600);
@@ -41,7 +43,7 @@ function fmtSec(sec: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
-/** 指标小块（苹果风: 小标签灰 + 值等宽数字） */
+/** 指标小块（小标签灰 + 值等宽数字） */
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div>
@@ -52,6 +54,36 @@ function Metric({ label, value }: { label: string; value: string }) {
         {value}
       </Typography.Text>
     </div>
+  );
+}
+
+/** 通道卡片：序号徽章 + 标题 + 图标 + 右上试听主按钮 */
+function ChannelCard({
+  no, title, icon, subtitle, action, disabled,
+}: {
+  no: string; title: string; icon: React.ReactNode;
+  subtitle: React.ReactNode; action: React.ReactNode; disabled: boolean;
+}) {
+  return (
+    <Card size="small" style={{ borderRadius: 10, opacity: disabled ? 0.55 : 1 }}
+      styles={{ body: { padding: "12px 16px" } }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <Avatar shape="square" size={36}
+          style={{ background: `${BLUE}14`, color: BLUE, fontSize: 16, flexShrink: 0 }}>
+          {icon}
+        </Avatar>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <Space size={8}>
+            <Typography.Text strong style={{ fontSize: 13 }}>
+              <Typography.Text style={{ color: BLUE, fontSize: 12, marginRight: 4 }}>{no}</Typography.Text>
+              {title}
+            </Typography.Text>
+          </Space>
+          <div style={{ marginTop: 2, minWidth: 0 }}>{subtitle}</div>
+        </div>
+        {action}
+      </div>
+    </Card>
   );
 }
 
@@ -66,10 +98,8 @@ const TtsSection: React.FC = () => {
   const [form] = Form.useForm();
   const fileRef = useRef<File | null>(null);
   const player = useTtsPlayer();
-  // 播放中的音色 id + 通道（用于行内高亮）
   const [activeVoice, setActiveVoice] = useState("");
   const bufferedCount = player.state.buffered;
-  
 
   const refresh = useCallback(() => {
     fetch("/api/tts/voices")
@@ -89,6 +119,13 @@ const TtsSection: React.FC = () => {
     player.stop();
     setActiveVoice("");
   };
+
+  const listenBtn = (v: VoiceAssetX, channel: string, text: string, disabled: boolean) => (
+    <Button type="primary" ghost icon={<CaretRightOutlined />}
+      disabled={disabled} onClick={() => launch(v.id, channel, text)}>
+      试听
+    </Button>
+  );
 
   const setDefault = async (voiceId: string) => {
     const resp = await fetch("/api/tts/voices/default", {
@@ -113,7 +150,6 @@ const TtsSection: React.FC = () => {
 
   const txtTail = txtContent.slice(Math.max(0, startIdx));
   const txtSegCount = txtTail ? segmentText(txtTail).length : 0;
-  const txtPreview = txtTail.slice(0, 20);
 
   const submitUpload = async () => {
     const values = await form.validateFields();
@@ -140,74 +176,71 @@ const TtsSection: React.FC = () => {
     refresh();
   };
 
-  const renderChannelRow = (
-    label: string, channel: string, v: VoiceAssetX,
-    extra: React.ReactNode, btnDisabled: boolean,
-  ) => (
-    <div style={{ display: "flex", width: "100%", alignItems: "flex-start", gap: 12 }}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1, minWidth: 0 }}>
-        <Typography.Text strong style={{ fontSize: 13 }}>{label}</Typography.Text>
-        {extra}
-      </div>
-      <Button
-        size="small" type="primary" ghost icon={<CaretRightOutlined />}
-        disabled={btnDisabled}
-        onClick={() => launch(v.id, channel,
-          channel === "a" ? DEFAULT_TEXT : channel === "b" ? customText : txtTail)}
-      >试听</Button>
-    </div>
-  );
-
   const expandedRow = (v: VoiceAssetX) => {
     const isActiveVoice = activeVoice === v.id;
     return (
-      <div style={{ display: "grid", gap: 16, padding: "4px 8px" }}>
-        {renderChannelRow(`① 默认文案（${DEFAULT_TEXT.length} 字·覆盖对话/拟声/叹号/省略号）`, "a", v,
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}
-            ellipsis={{ tooltip: DEFAULT_TEXT }}>
-            {DEFAULT_TEXT.slice(0, 60)}…
-          </Typography.Text>, !v.available)}
-        {renderChannelRow("② 自定义文字", "b", v,
-          <Input.TextArea rows={3} maxLength={2000} showCount style={{ width: "100%" }}
-            placeholder="输入要试听的文字（≤2000 字）"
-            onChange={(e) => setCustomText(e.target.value)} />,
-          !v.available || customText.trim().length === 0)}
-        {renderChannelRow("③ 本地图书模拟（真实听书场景·流式接力）", "c", v,
-          <Space direction="vertical" size={2} style={{ width: "100%" }}>
-            <Space wrap>
-              <Upload accept=".txt,text/plain" showUploadList={false} maxCount={1}
-                beforeUpload={(f) => { void onTxtFile(f); return false; }}>
-                <Button size="small" icon={<FileTextOutlined />}>选择 txt 文件</Button>
-              </Upload>
-              {txtName && <Tag closable onClose={() => { setTxtName(""); setTxtContent(""); }}>
-                {txtName}
-              </Tag>}
-              <InputNumber min={0} max={Math.max(0, txtContent.length - 1)} value={startIdx}
-                onChange={(n) => setStartIdx(Number(n) || 0)} style={{ width: 170 }}
-                addonBefore="起始字符" addonAfter="字" size="small" />
-            </Space>
-            {txtContent && (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                从第 {startIdx} 字「{txtPreview}…」起 · 共 {txtTail.length} 字 · 约 {txtSegCount} 段
-              </Typography.Text>
-            )}
-          </Space>, !v.available || txtTail.trim().length === 0)}
+      <div style={{ display: "grid", gap: 12, padding: "4px 4px 8px" }}>
+        <ChannelCard no="①" title="默认文案" icon={<SoundOutlined />}
+          subtitle={
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}
+              ellipsis={{ tooltip: { title: DEFAULT_TEXT, mouseEnterDelay: 0 } } as never}>
+              {DEFAULT_TEXT.slice(0, 60)}…
+            </Typography.Text>
+          }
+          action={listenBtn(v, "a", DEFAULT_TEXT, !v.available)}
+          disabled={!v.available} />
+
+        <ChannelCard no="②" title="自定义文字" icon={<EditOutlined />}
+          subtitle={
+            <Input.TextArea rows={3} maxLength={2000} showCount
+              style={{ width: "100%" }} placeholder="输入要试听的文字（≤2000 字）"
+              onChange={(e) => setCustomText(e.target.value)} />
+          }
+          action={listenBtn(v, "b", customText, !v.available || customText.trim().length === 0)}
+          disabled={!v.available} />
+
+        <ChannelCard no="③" title="本地图书模拟" icon={<BookOutlined />}
+          subtitle={
+            <div>
+              <Space wrap>
+                <Upload accept=".txt,text/plain" showUploadList={false} maxCount={1}
+                  beforeUpload={(f) => { void onTxtFile(f); return false; }}>
+                  <Button size="small" icon={<FileTextOutlined />}>选择 txt 文件</Button>
+                </Upload>
+                {txtName && (
+                  <Tag closable onClose={() => { setTxtName(""); setTxtContent(""); }}>
+                    {txtName}
+                  </Tag>
+                )}
+                <InputNumber min={0} max={Math.max(0, txtContent.length - 1)} value={startIdx}
+                  onChange={(n) => setStartIdx(Number(n) || 0)} style={{ width: 170 }}
+                  addonBefore="起始字符" addonAfter="字" size="small" />
+              </Space>
+              {txtContent && (
+                <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 6 }}>
+                  从第 {startIdx} 字「{txtTail.slice(0, 20)}…」起 · 共 {txtTail.length} 字 · 约 {txtSegCount} 段
+                </Typography.Text>
+              )}
+            </div>
+          }
+          action={listenBtn(v, "c", txtTail, !v.available || txtTail.trim().length === 0)}
+          disabled={!v.available} />
+
         {isActiveVoice && (
           <div style={{
-            padding: "16px 20px", background: "linear-gradient(180deg, #fbfbfd 0%, #f5f5f7 100%)",
+            padding: "16px 20px",
+            background: "linear-gradient(180deg, #fbfbfd 0%, #f5f5f7 100%)",
             borderRadius: 12, border: "1px solid #e8e8ed",
           }}>
-            {/* 顶部: 状态行 */}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <Space size={8}>
                 {player.state.status === "starting" && (
-                  <LoadingOutlined spin style={{ color: "#0071e3", fontSize: 14 }} />
+                  <LoadingOutlined spin style={{ color: BLUE, fontSize: 14 }} />
                 )}
                 <Typography.Text strong style={{ fontSize: 13 }}>
                   {player.state.status === "starting"
                     ? `正在生成首段… ${(Math.max(0, Date.now() - player.state.startTick) / 1000).toFixed(1)}s`
-                    : player.state.status === "paused" ? "已暂停"
-                    : "正在朗读"}
+                    : player.state.status === "paused" ? "已暂停" : "正在朗读"}
                 </Typography.Text>
                 {player.state.segTotal > 0 && player.state.status !== "starting" && (
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -216,58 +249,53 @@ const TtsSection: React.FC = () => {
                 )}
               </Space>
               {player.state.error && (
-                <Typography.Text type="danger" style={{ fontSize: 12 }}>
-                  {player.state.error}
-                </Typography.Text>
+                <Typography.Text type="danger" style={{ fontSize: 12 }}>{player.state.error}</Typography.Text>
               )}
             </div>
 
-            {/* 中控: 停止(左) + 大圆播放/暂停(中) */}
             <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 28, margin: "14px 0 6px" }}>
-              <Button shape="circle" size="large" danger ghost
-                icon={<StopOutlined style={{ fontSize: 16 }} />}
-                onClick={doStop} title="停止" />
+              <Tooltip title="停止" mouseEnterDelay={0}>
+                <Button shape="circle" size="large" danger ghost
+                  icon={<StopOutlined style={{ fontSize: 16 }} />} onClick={doStop} />
+              </Tooltip>
               {player.state.status === "paused" ? (
-                <div onClick={player.resume} style={{
-                  width: 52, height: 52, borderRadius: "50%",
-                  background: "#0071e3", display: "flex", alignItems: "center",
-                  justifyContent: "center", cursor: "pointer",
-                  boxShadow: "0 4px 14px rgba(0,113,227,.35)",
-                }}>
-                  <CaretRightOutlined style={{ color: "#fff", fontSize: 22, marginLeft: 2 }} />
-                </div>
-              ) : (
-                <div
-                  onClick={player.state.status === "playing" ? player.pause : undefined}
-                  style={{
-                    width: 52, height: 52, borderRadius: "50%",
-                    background: player.state.status === "playing" ? "#0071e3" : "#c7c7cc",
+                <Tooltip title="继续播放" mouseEnterDelay={0}>
+                  <div onClick={player.resume} style={{
+                    width: 52, height: 52, borderRadius: "50%", background: BLUE,
                     display: "flex", alignItems: "center", justifyContent: "center",
-                    cursor: player.state.status === "playing" ? "pointer" : "default",
-                    boxShadow: player.state.status === "playing"
-                      ? "0 4px 14px rgba(0,113,227,.35)" : "none",
-                  }}
-                  title={player.state.status === "playing" ? "暂停" : "生成中…"}
-                >
-                  {player.state.status === "starting"
-                    ? <LoadingOutlined spin style={{ color: "#fff", fontSize: 20 }} />
-                    : <PauseOutlined style={{ color: "#fff", fontSize: 20 }} />}
-                </div>
+                    cursor: "pointer", boxShadow: `0 4px 14px ${BLUE}59`,
+                  }}>
+                    <CaretRightOutlined style={{ color: "#fff", fontSize: 22, marginLeft: 2 }} />
+                  </div>
+                </Tooltip>
+              ) : (
+                <Tooltip title={player.state.status === "playing" ? "暂停" : "生成中…"}
+                  mouseEnterDelay={0}>
+                  <div
+                    onClick={player.state.status === "playing" ? player.pause : undefined}
+                    style={{
+                      width: 52, height: 52, borderRadius: "50%",
+                      background: player.state.status === "playing" ? BLUE : "#c7c7cc",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      cursor: player.state.status === "playing" ? "pointer" : "default",
+                      boxShadow: player.state.status === "playing" ? `0 4px 14px ${BLUE}59` : "none",
+                    }}>
+                    {player.state.status === "starting"
+                      ? <LoadingOutlined spin style={{ color: "#fff", fontSize: 20 }} />
+                      : <PauseOutlined style={{ color: "#fff", fontSize: 20 }} />}
+                  </div>
+                </Tooltip>
               )}
-              {/* 占位保持居中对称 */}
               <div style={{ width: 40 }} />
             </div>
 
-            {/* 进度条 + 时间刻度 */}
             <div>
               <Progress
                 percent={player.state.totalSec > 0
-                  ? Math.min(100, Math.round(
-                      (player.state.elapsedSec / player.state.totalSec) * 100))
+                  ? Math.min(100, Math.round((player.state.elapsedSec / player.state.totalSec) * 100))
                   : 0}
                 showInfo={false} size={["100%", 6]}
-                strokeColor="#0071e3" trailColor="#e8e8ed"
-              />
+                strokeColor={BLUE} trailColor="#e8e8ed" />
               <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2 }}>
                 <Typography.Text type="secondary" style={{ fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
                   {fmtSec(player.state.elapsedSec)}
@@ -278,7 +306,6 @@ const TtsSection: React.FC = () => {
               </div>
             </div>
 
-            {/* 底部指标行 */}
             <div style={{ display: "flex", gap: 18, marginTop: 8, flexWrap: "wrap" }}>
               <Metric label="首段生成" value={player.state.firstSegMs
                 ? `${(player.state.firstSegMs / 1000).toFixed(1)}s` : "…"} />
@@ -299,22 +326,40 @@ const TtsSection: React.FC = () => {
       title: "音色", dataIndex: "name", key: "name",
       render: (name: string, v: VoiceAssetX) => (
         <Space>
-          <span>{name}</span>
-          {v.is_default && <Tag color="gold" icon={<StarFilled />}>默认</Tag>}
+          <Avatar size={32} icon={<AudioOutlined />}
+            style={{ background: v.gender === "female" ? "#eb2f961f" : "#1677ff1f",
+                     color: v.gender === "female" ? "#eb2f96" : "#1677ff" }} />
+          <Space direction="vertical" size={0}>
+            <Space size={6}>
+              <Typography.Text strong>{name}</Typography.Text>
+              {v.is_default && <Tag color="gold" icon={<StarFilled />}
+                style={{ marginInlineEnd: 0 }}>默认</Tag>}
+            </Space>
+          </Space>
         </Space>
       ),
     },
     {
-      title: "性别", dataIndex: "gender", key: "gender", width: 70,
-      render: (g: string) => <Tag color={g === "female" ? "magenta" : "blue"}>{g === "female" ? "女" : "男"}</Tag>,
-    },
-    { title: "描述", dataIndex: "description", key: "description", ellipsis: true },
-    {
-      title: "来源", dataIndex: "source", key: "source", width: 70,
-      render: (s: string) => <Tag>{s === "builtin" ? "内置" : "上传"}</Tag>,
+      title: "性别", dataIndex: "gender", key: "gender", width: 64,
+      render: (g: string) => <Tag color={g === "female" ? "magenta" : "blue"}
+        style={{ marginInlineEnd: 0 }}>{g === "female" ? "女" : "男"}</Tag>,
     },
     {
-      title: "", key: "ops", width: 200,
+      title: "描述", dataIndex: "description", key: "description",
+      render: (desc: string) => (
+        <Tooltip title={desc} mouseEnterDelay={0} placement="topLeft">
+          <Typography.Text type="secondary" style={{ fontSize: 12, maxWidth: 320 }}
+            ellipsis>{desc}</Typography.Text>
+        </Tooltip>
+      ),
+    },
+    {
+      title: "来源", dataIndex: "source", key: "source", width: 64,
+      render: (s: string) => <Tag style={{ marginInlineEnd: 0 }}>
+        {s === "builtin" ? "内置" : "上传"}</Tag>,
+    },
+    {
+      title: "", key: "ops", width: 190,
       render: (_: unknown, v: VoiceAssetX) => (
         <Space>
           {!v.is_default && (
@@ -331,32 +376,43 @@ const TtsSection: React.FC = () => {
   ];
 
   return (
-    <Space direction="vertical" size={8} style={{ width: "100%" }}>
-      <Space style={{ width: "100%", justifyContent: "space-between" }}>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          TTS 管理（段级流式试听——本地深度测试通过后服务手机听书）
-        </Typography.Text>
-        <Button size="small" icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>
-          上传音色
-        </Button>
-      </Space>
-      <Table size="small" rowKey="id" dataSource={voices} columns={columns}
-        pagination={false} loading={voices === undefined}
-        expandable={{
-          expandedRowRender: expandedRow,
-          expandedRowKeys: expandedId ? [expandedId] : [],
-          onExpand: (expanded, v) => setExpandedId(expanded ? v.id : ""),
-        }}
-      />
+    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <Space direction="vertical" size={0}>
+          <Typography.Title level={4} style={{ margin: 0 }}>
+            🎧 TTS 听书
+          </Typography.Title>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            段级流式朗读深度测试台——本地通过即服务手机（Legado 同协议直连）
+          </Typography.Text>
+        </Space>
+        <Button icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>上传音色</Button>
+      </div>
+
+      {voices && voices.length === 0 ? (
+        <Empty description="音色库为空" />
+      ) : (
+        <Table size="middle" rowKey="id" dataSource={voices} columns={columns}
+          pagination={false} loading={voices === undefined}
+          expandable={{
+            expandedRowRender: expandedRow,
+            expandedRowKeys: expandedId ? [expandedId] : [],
+            onExpand: (expanded, v) => setExpandedId(expanded ? v.id : ""),
+            rowExpandable: (v) => v.available,
+          }} />
+      )}
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        上传要求: 3-30 秒清晰人声 + 逐字稿（逐字稿与音频内容一致才能保证克隆质量）
+        上传要求：3-30 秒清晰人声 + 逐字稿（逐字稿与音频内容一致才能保证克隆质量）
       </Typography.Text>
 
-      <Modal title="上传音色" open={uploadOpen} onOk={submitUpload} onCancel={() => setUploadOpen(false)}>
+      <Modal title="上传音色" open={uploadOpen} onOk={submitUpload}
+        onCancel={() => setUploadOpen(false)} okText="入库">
         <Form form={form} layout="vertical" initialValues={{ gender: "female" }}>
           <Form.Item label="音频文件（wav/flac/ogg, 3-30 秒清晰人声）" required>
-            <input type="file" accept="audio/*"
-              onChange={(e) => { fileRef.current = e.target.files?.[0] ?? null; }} />
+            <Upload accept="audio/*" maxCount={1} showUploadList={{ showRemoveIcon: true }}
+              beforeUpload={(f) => { fileRef.current = f; return false; }}>
+              <Button icon={<AudioOutlined />}>选择音频文件</Button>
+            </Upload>
           </Form.Item>
           <Form.Item name="name" label="音色名" rules={[{ required: true, max: 40 }]}>
             <Input placeholder="如: 浑厚男声" />
@@ -365,7 +421,7 @@ const TtsSection: React.FC = () => {
             <Radio.Group options={[{ value: "female", label: "女" }, { value: "male", label: "男" }]} />
           </Form.Item>
           <Form.Item name="ref_text" label="逐字稿（音频里说的原话）" rules={[{ required: true, max: 600 }]}>
-            <Input.TextArea rows={2} />
+            <Input.TextArea rows={3} />
           </Form.Item>
           <Form.Item name="description" label="描述（可选）">
             <Input />
