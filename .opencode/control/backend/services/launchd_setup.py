@@ -75,7 +75,7 @@ class LaunchdManager:
 
     @classmethod
     def _plist_content(cls) -> str:
-        """生成 plist（解释器 + server.py 均绝对路径）。
+        """生成 plist（解释器 + remote_node.py 均绝对路径）。
 
         EnvironmentVariables 必带 OPENCODE_ROOT/OPENSECURITY_HOME: LaunchAgent 无
         shell 环境，缺这两键时 ConfigManager 的 .ai_env 定位回退到相对
@@ -86,7 +86,11 @@ class LaunchdManager:
         from services.runtime_paths import RuntimePaths
         from services.config_manager import ConfigManager
         cm = ConfigManager.get_instance()
-        server_py = Path(__file__).resolve().parents[1] / "server.py"
+        # 自启拉起 remote_node.py(完整启动链: venv/依赖/模型 ensure + kill 旧
+        # 实例 + NODE_LAUNCH 标记)——开机即"装好环境再启动", 与"更新并重启"
+        # 同链; 不经 start-remote-node.sh 薄壳(launchd PATH 极小, 薄壳的
+        # python 定位会失败; git pull 属"更新"职责不属"开机")
+        remote_node_py = Path(__file__).resolve().parent / "remote_node.py"
         log_dir = Path(RuntimePaths.LOGS_DIR)
         oc_root = cm.opencode_root
         opensecurity_home = cm.opensecurity_home
@@ -117,7 +121,7 @@ class LaunchdManager:
     <key>ProgramArguments</key>
     <array>
         <string>{sys.executable}</string>
-        <string>{server_py}</string>
+        <string>{remote_node_py}</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -131,7 +135,7 @@ class LaunchdManager:
         <string>{env_home}</string>
     </dict>
     <key>WorkingDirectory</key>
-    <string>{server_py.parents[1]}</string>
+    <string>{remote_node_py.parents[1]}</string>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>

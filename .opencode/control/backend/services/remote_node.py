@@ -378,11 +378,8 @@ class RemoteNodeBootstrapper:
         # 让旧代码继续跑——git pull 后重启必须生效)。SIGTERM 走 server 优雅
         # 停机(清 IPC/TTS worker); 残留 socket 由 bind 自愈清理。
         self._kill_existing_console(backend_dir)
-        # 持久化 tags(节点内重启走完整启动链时读回) + 注入节点上下文标记
-        # (restart.py 检测此标记 → execv remote_node 而非 execv server)
-        cm = _cm().get_instance()
-        if self._args.model_tags:
-            cm.set_one(key=cm.Keys.NODE_MODEL_TAGS, value=",".join(self._args.model_tags))
+        # 注入节点上下文标记(restart.py 检测此标记 → execv remote_node 完整链)。
+        # tags 持久化在 _parse_args 显式分支做(防止默认/持久值回写覆盖用户圈选)。
         _log("[*] 启动控制台（独立会话）...")
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(f"\n===== remote-node start {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
@@ -467,7 +464,7 @@ def _parse_args(argv: list[str]) -> RemoteNodeArgs:
     parser.add_argument("--relay-psk", default="", help="RELAY_PSK（base64 32B，与 relayd 一致）")
     parser.add_argument("--node-id", default="", help="节点 ID（如 macmini）")
     parser.add_argument("--skip-models", action="store_true", help="跳过模型检查/下载")
-    parser.add_argument("--model-tags", default="security,tts",
+    parser.add_argument("--model-tags", default="",  # 空=未指定(读持久化值或默认)
                         help="模型圈选标签（逗号分隔: security,tts; 空=默认安全组）")
     parser.add_argument("-y", "--assume-yes", action="store_true", help="免交互（当前用于语义显式化）")
     parser.add_argument("--check", action="store_true",
@@ -475,11 +472,30 @@ def _parse_args(argv: list[str]) -> RemoteNodeArgs:
     ns = parser.parse_args(argv)
     from typing import cast
     model_tags_raw = cast("str", ns.model_tags)
+    explicit_tags = tuple(x.strip() for x in model_tags_raw.split(",")
+                          if x.strip()) if model_tags_raw.strip() else ()
+    if explicit_tags:
+        tags = explicit_tags
+        # 显式圈选持久化(重启链/自启读回)——未显式分支不写防覆盖
+        try:
+            from services.config_manager import ConfigManager as _CM0
+            _CM0.get_instance().set_one(
+                key=_CM0.Keys.NODE_MODEL_TAGS, value=",".join(tags))
+        except Exception:  # noqa: BLE001 —— 持久化失败不阻断引导
+            pass
+    else:
+        # 未显式指定: 尊重持久化圈选(NODE_MODEL_TAGS), 仍无则默认全量——
+        # 防止自启/重启链的默认值覆盖用户的窄圈选
+        from services.config_manager import ConfigManager as _CM
+        saved = ((_CM.get_instance().get(_CM.Keys.NODE_MODEL_TAGS) or "")
+                 .strip())
+        tags = (tuple(x.strip() for x in saved.split(",") if x.strip())
+                or ("security", "tts"))
     return RemoteNodeArgs(
         relay_host=cast("str", ns.relay_host), relay_port=cast("str", ns.relay_port),
         relay_psk=cast("str", ns.relay_psk), node_id=cast("str", ns.node_id),
         skip_models=cast("bool", ns.skip_models),
-        model_tags=tuple(t.strip() for t in model_tags_raw.split(",") if t.strip()),
+        model_tags=tags,
         assume_yes=cast("bool", ns.assume_yes), check_only=cast("bool", ns.check),
     )
 
