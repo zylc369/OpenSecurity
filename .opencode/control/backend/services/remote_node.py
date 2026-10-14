@@ -158,7 +158,7 @@ class RemoteNodeBootstrapper:
                 try:
                     r = subprocess.run(  # noqa: S603 —— venv 自身 pip
                         [sys.executable, "-m", "pip", "install", "--no-deps",
-                         "mlx-audio==0.2.10", "mlx-audio-plus==0.1.8", "mlx-lm", "soundfile",
+                         "mlx-audio==0.2.10", "mlx-audio-plus==0.1.8", "mlx-lm", "librosa", "pyloudnorm", "soundfile", "hf_transfer",
                          "-i", "https://mirrors.aliyun.com/pypi/simple/"],
                         timeout=1200, capture_output=True, text=True)
                     tts_installed = r.returncode == 0
