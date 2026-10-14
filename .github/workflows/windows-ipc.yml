@@ -37,7 +37,7 @@ jobs:
           python-version: "3.13"
       - uses: oven-sh/setup-bun@v2
       - name: 安装依赖
-        run: pip install fastapi uvicorn pywin32 httpx
+        run: pip install fastapi uvicorn pywin32 httpx pytest
       - name: 管道 IPC 验证
         env:
           OPENSECURITY_CONTROL_IPC: '\\.\pipe\opensecurity-control-482964'
