@@ -6,7 +6,8 @@
 
 ## 一、当前系统状态（一句话）
 
-**质量门已生产化上线（Paraformer 回验+N 版重试+兜底, commit 23e4f51）+ 泄漏根因已修（ref_text system 前缀, 上游 64685e8 同源）+ plus 服务链已接回（资产 8bit/uv 自愈/remote_node 对齐）**。待办: 用户耳朵终审 prefixfix 三版校准质检阈值; MacMini 唤醒后节点部署。详见 2026-10-14-tts-quality-gate.md。
+**质量门已生产化上线（Paraformer 回验+N 版重试+兜底, commit 23e4f51）+ 泄漏根因已修（ref_text system 前缀, 上游 64685e8 同源）+ plus 服务链已接回（资产 8bit/uv 自愈/remote_node 对齐）**。待办: ①用户耳朵终审(e2e_qc.wav+prefixfix 三版) ②MacMini 侧验证(依赖闭包 63 包已自愈装, P2P 夜间断线挡住远程验证——用户在 MacMini 控制台直接点试听即可验证本地链, 不依赖 P2P)。
+HF_HUB_OFFLINE=1 根因闭环(10-14 深夜): server.py L26 setdefault 离线加速设计 → worker 继承 → MacMini cache 空组件崩。修复=spawn 覆盖 =0(与 2026-08-15 '下载子进程剥离'同一模式)+诊断日志双行铁证。stderr 176KB 二进制污染=HF tqdm 进度条已静音。依赖 --no-deps 漏传递依赖的根治=services/tts_deps.py 63 包钉主控版本闭包。
 
 ## 二、用户环境（不变事实）
 
