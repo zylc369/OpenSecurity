@@ -125,12 +125,16 @@ class TtsWorkerClient:
     @staticmethod
     def _bootstrap_venv() -> None:
         """TTS 依赖缺失时自愈安装到主 venv（vendor 引擎依赖集; 失败抛 TtsUnavailable）。"""
-        logger.info("[tts] plus 依赖缺失 → 自愈安装到主 venv（uv --no-deps）")
+        logger.info("[tts] plus 依赖缺失 → 自愈安装到主 venv（pip --no-deps）")
         import subprocess as _sp
-        r = _sp.run(["uv", "pip", "install", "--python", str(WORKER_VENV_PY),
-                     "--no-deps", "mlx-audio==0.2.10", "mlx-audio-plus==0.1.8",
-                     "mlx-lm"],
-                    capture_output=True, text=True, timeout=900)  # noqa: S603 —— uv pip
+        try:
+            r = _sp.run([str(WORKER_VENV_PY), "-m", "pip", "install", "--no-deps",
+                         "mlx-audio==0.2.10", "mlx-audio-plus==0.1.8", "mlx-lm",
+                         "-i", "https://mirrors.aliyun.com/pypi/simple/"],
+                        capture_output=True, text=True,
+                        timeout=900)  # noqa: S603 —— venv 自身 pip
+        except FileNotFoundError as e:
+            raise TtsUnavailable(f"自愈安装失败(解释器缺失): {WORKER_VENV_PY}") from e
         if r.returncode != 0:
             raise TtsUnavailable(
                 f"TTS 环境自愈安装失败: {r.stdout[-400:]} {r.stderr[-400:]}")
