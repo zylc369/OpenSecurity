@@ -6,7 +6,7 @@
 
 ## 一、当前系统状态（一句话）
 
-**TTS 引擎回归 plus（mlx-audio-plus）+ RAS 采样补丁已验证有效 + 参考句泄漏是随机 bug（有自动切除方案未实施）+ 质量门卡在 ASR 选型（whisper 中文不可用，A/B 方案待用户选）**。服务链路未接回（worker/服务代码是 torch 时代版本，需要切回 plus 配置）。
+**质量门已生产化上线（Paraformer 回验+N 版重试+兜底, commit 23e4f51）+ 泄漏根因已修（ref_text system 前缀, 上游 64685e8 同源）+ plus 服务链已接回（资产 8bit/uv 自愈/remote_node 对齐）**。待办: 用户耳朵终审 prefixfix 三版校准质检阈值; MacMini 唤醒后节点部署。详见 2026-10-14-tts-quality-gate.md。
 
 ## 二、用户环境（不变事实）
 

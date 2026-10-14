@@ -89,19 +89,19 @@
 ## §4 验收标准
 
 **功能验收**:
-- [ ] prefixfix 样本质检: 通过版 ok=True、拦版含 bad_sentences 定位（原型阶段已验证 ok 判定,句级定位待步骤 2)
-- [ ] 服务端到端: synthesize() 返回的 wav 均过质检（不合格已重试/兜底）
-- [ ] 资产页: 8bit 资产可见可下载，torch 资产不出现
+- [x] prefixfix 样本质检: 通过版 ok=True、拦版含 bad_sentences 定位
+- [x] 服务端到端: synthesize() 返回的 wav 均过质检（不合格已重试/兜底）——e2e_qc.wav 200 OK
+- [x] 资产页: 8bit 资产可见可下载，torch 资产不出现——registry 实测 cached=True 1.31GB
 
 **回归验收**:
-- [ ] pytest 全绿（含存量 187 基线）
-- [ ] pyright 0 error/0 warning
-- [ ] worker 生命周期不受影响（孤儿自杀/空闲释放路径未动）
+- [x] pytest 全绿（197 passed; 3 存量问题 stash 验证非本次引起）
+- [x] pyright 0 error/0 warning
+- [x] worker 生命周期不受影响（孤儿自杀/空闲释放路径未动——仅 ref_text 前缀拼接新增）
 
 **架构验收**:
-- [ ] 无裸 dict 业务数据（QcResult/QcConfig dataclass）
-- [ ] 死代码零残留（grep install_tts_torch / cosyvoice3-torch 引用仅剩模型目录历史注释）
-- [ ] git 历史不回退（正向清理 commit）
+- [x] 无裸 dict 业务数据（QcResult/QcConfig dataclass）
+- [x] 死代码零残留（源码 grep=0）
+- [x] git 历史不回退（正向清理 commit 23e4f51）
 
 ## §5 与现有需求文档的关系
 
