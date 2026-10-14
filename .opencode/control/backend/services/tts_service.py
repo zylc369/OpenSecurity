@@ -143,9 +143,10 @@ class TtsWorkerClient:
         """TTS 依赖缺失时自愈安装到主 venv（vendor 引擎依赖集; 失败抛 TtsUnavailable）。"""
         logger.info("[tts] plus 依赖缺失 → 自愈安装到主 venv（pip --no-deps）")
         import subprocess as _sp
+        from services.tts_deps import PLUS_DEPS
         try:
             r = _sp.run([str(WORKER_VENV_PY), "-m", "pip", "install", "--no-deps",
-                         "mlx-audio==0.2.10", "mlx-audio-plus==0.1.8", "mlx-lm", "librosa", "pyloudnorm", "soundfile", "hf_transfer",
+                         *PLUS_DEPS,
                          "-i", "https://mirrors.aliyun.com/pypi/simple/"],
                         capture_output=True, text=True,
                         timeout=900)  # noqa: S603 —— venv 自身 pip
