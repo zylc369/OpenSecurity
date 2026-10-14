@@ -233,16 +233,12 @@ class TtsAsset(ModelAsset):
                 else ModelLoadState.IDLE)
 
     def cache_state(self) -> "ModelCacheState":
-        """目录判定: torch 权重三件齐备才算 cached。"""
-        import os
-        from pathlib import Path as _P
-        home = _P(os.environ.get("OPENSECURITY_HOME",
-                                 str(_P.home() / "bw-security-analysis")))
-        d = home / "models" / "cosyvoice3-torch"
-        need = ("llm.pt", "flow.pt", "speech_tokenizer_v3.onnx")
-        if all((d / f).is_file() for f in need):
-            total = sum((d / f).stat().st_size for f in need)
-            return ModelCacheState(True, str(d), round(total / 1024**3, 2))
+        """目录判定: 8bit 三件套齐备才算 cached（TTS_MODEL_DIR 与引擎一致）。"""
+        from services.tts_service import TTS_MODEL_DIR
+        need = ("model.safetensors", "tokenizer.json", "config.json")
+        if all((TTS_MODEL_DIR / f).is_file() for f in need):
+            total = sum((TTS_MODEL_DIR / f).stat().st_size for f in need)
+            return ModelCacheState(True, str(TTS_MODEL_DIR), round(total / 1024**3, 2))
         return ModelCacheState(False, None, 0.0)
 
     def hub_size_gb(self, registry: "ModelAssetRegistry") -> float:  # noqa: ARG002 —— 签名多态一致
@@ -260,58 +256,11 @@ class TtsAsset(ModelAsset):
         回源——失败时错误信息附局域网 rsync 替代指引（部署主路径）。"""
         def worker(model: ModelAsset) -> None:  # noqa: ARG001 —— 签名一致
             import os
-            import urllib.request
             from services.tts_service import TTS_MODEL_DIR
             TTS_MODEL_DIR.mkdir(parents=True, exist_ok=True)
             # 局域网源模式: TTS_MODEL_SOURCE（如 http://192.168.3.2:8899/）——
             # 主控机 serve 模型目录，节点逐文件直拉（HF 冷门仓库 mirror 308 回源
             # 不可靠，局域网 rsync 级速度是部署主路径）
-            # torch 资产: 逐文件 URL 直下（snapshot_download 的 mirror-API 组合
-            # 在冷门/官方仓库上均不稳; resolve URL 经 308 自动跟随，节点直连
-            # 官方 CDN 实测可达（家用宽带对 hf CDN 的常见状态）
-            _TORCH_FILES = (
-                "llm.pt", "flow.pt", "hift.pt", "campplus.onnx",
-                "speech_tokenizer_v3.onnx", "cosyvoice3.yaml",
-                "config.json", "configuration.json",
-                "CosyVoice-BlankEN/model.safetensors", "CosyVoice-BlankEN/merges.txt",
-                "CosyVoice-BlankEN/vocab.json", "CosyVoice-BlankEN/config.json",
-                "CosyVoice-BlankEN/generation_config.json",
-                "CosyVoice-BlankEN/tokenizer_config.json",
-            )
-            if model.id == "cosyvoice3-torch":
-                import ssl
-                import urllib.request
-                import certifi
-                from typing import BinaryIO, cast as _cast2
-                from services.tts_service import _HOME as _tts_home
-                torch_dir = _tts_home / "models" / "cosyvoice3-torch"
-                torch_dir.mkdir(parents=True, exist_ok=True)
-                base = registry._hf_endpoint().rstrip("/")  # noqa: SLF001 —— 转发层
-                ctx = ssl.create_default_context(cafile=certifi.where())
-                opener = urllib.request.build_opener(
-                    urllib.request.ProxyHandler({}),
-                    urllib.request.HTTPSHandler(context=ctx))
-                for rel in _TORCH_FILES:
-                    dst = torch_dir / rel
-                    if dst.is_file():
-                        continue
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    tmp = dst.with_suffix(dst.suffix + ".part")
-                    url = f"{base}/{model.repo_id}/resolve/main/{rel}"
-                    logger.info("[models] CosyVoice3-torch 下载 %s", rel)
-                    resp = _cast2("BinaryIO", opener.open(url, timeout=60))  # noqa: S310 —— 固定官方源
-                    try:
-                        with open(tmp, "wb") as fh:
-                            while True:
-                                chunk = resp.read(1 << 20)  # pyright: ignore[reportAny]
-                                if not chunk:
-                                    break
-                                fh.write(chunk)
-                    finally:
-                        resp.close()
-                    tmp.rename(dst)
-                logger.info("[models] CosyVoice3-torch 全部文件完成")
-                return
             source = os.environ.get("TTS_MODEL_SOURCE", "").rstrip("/")
             if not source:
                 # git 配置文件源（部署期主控 IP 随代码到节点——节点无 env 写入通道）
@@ -326,6 +275,7 @@ class TtsAsset(ModelAsset):
                 logger.info("[models] CosyVoice3 局域网下载 ← %s", source)
                 import ssl
                 import certifi
+                import urllib.request
                 from typing import BinaryIO, cast as _cast
                 ctx = ssl.create_default_context(cafile=certifi.where())
                 opener = urllib.request.build_opener(
@@ -422,14 +372,14 @@ class ModelAssetRegistry:
             ollama_model="glm-ocr",
         ),
         TtsAsset(
-            id="cosyvoice3-torch",
-            repo_id="FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
+            id="cosyvoice3-8bit",
+            repo_id="mlx-community/Fun-CosyVoice3-0.5B-2512-8bit",
             type=ModelAssetKind.TTS,
-            required_files=("llm.pt",),
-            display="CosyVoice3 (0.5B torch)",
-            purpose="远程朗读语音合成（官方 fp32 栈——听书生产引擎）",
-            min_free_gb=8.0,
-            disk_gb=5.1,
+            required_files=("model.safetensors",),
+            display="CosyVoice3 (0.5B 8bit MLX)",
+            purpose="远程朗读语音合成（mlx-audio-plus 引擎 + 质量门回验）",
+            min_free_gb=4.0,
+            disk_gb=1.3,
             tags=(ModelTag.TTS,),
         ),
     ]

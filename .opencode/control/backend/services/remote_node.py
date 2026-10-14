@@ -150,15 +150,19 @@ class RemoteNodeBootstrapper:
         """fastapi 哨兵探测; 缺则 console_runtime 集安装。Returns: 是否执行了安装。"""
         probe = subprocess.run([sys.executable, "-c", "import fastapi"],
                                capture_output=True)
-        # TTS 依赖（独立 venv .venv-cosy-tts）按 tags 圈选联动——一条龙覆盖
+        # TTS 依赖（plus 引擎, 主 venv uv --no-deps 直装）按 tags 圈选联动
         tts_installed = False
         if "tts" in self._args.model_tags:
-            _root = Path(__file__).resolve().parent.parent
-            installer = _root / "scripts" / "install_tts_torch.sh"
-            if not self._tts_env_ready() and installer.is_file():
-                _log(f"[*] --model-tags tts: TTS 环境缺失——安装 {installer.name}")
-                subprocess.run(["/bin/zsh", str(installer)], timeout=1200)  # noqa: S603,S607
-                tts_installed = True
+            if not self._tts_env_ready():
+                _log("[*] --model-tags tts: plus 依赖缺失——uv 直装主 venv")
+                r = subprocess.run(  # noqa: S603 —— uv pip 固定参数
+                    ["uv", "pip", "install", "--python", sys.executable,
+                     "--no-deps", "mlx-audio==0.2.10", "mlx-audio-plus==0.1.8",
+                     "mlx-lm"], timeout=1200, capture_output=True, text=True)
+                if r.returncode == 0:
+                    tts_installed = True
+                else:
+                    _log(f"[WARN] plus 依赖安装失败: {r.stderr[-200:]}")
         if probe.returncode == 0:
             _log("[+] 依赖齐备（fastapi 可导入），跳过安装")
             return tts_installed
@@ -263,16 +267,10 @@ class RemoteNodeBootstrapper:
         return [m.id for m in _registry().filter_by_tags(list(self._args.model_tags))]
 
     def _tts_env_ready(self) -> bool:
-        """TTS venv 健康探测（--check 计划与 ensure_deps 共用）。"""
-        _root = Path(__file__).resolve().parent.parent
-        venv_py = _root / ".venv-cosy-tts" / "bin" / "python"
-        probe_code = ("import sys; sys.path.insert(0, 'third_party/CosyVoice'); "
-                      "sys.path.insert(0, 'third_party/CosyVoice/third_party/Matcha-TTS'); "
-                      "from cosyvoice.cli.cosyvoice import AutoModel")
-        if not venv_py.is_file():
-            return False
-        r = subprocess.run([str(venv_py), "-c", probe_code],
-                           capture_output=True, cwd=str(_root))
+        """plus 引擎健康探测（--check 计划与 ensure_deps 共用）。"""
+        r = subprocess.run([sys.executable, "-c",
+                            "import mlx_audio, mlx_audio_plus"],
+                           capture_output=True, timeout=60)  # noqa: S603
         return r.returncode == 0
 
     def ensure_models(self) -> list[str]:

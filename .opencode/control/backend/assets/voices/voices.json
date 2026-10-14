@@ -16,5 +16,14 @@
     "wav": "official_female.wav",
     "ref_text": "希望你以后能够做的比我还好呦。",
     "default_speed": 0.9
+  },
+  {
+    "id": "official_female_v5",
+    "name": "官方女声·感情版（plus）",
+    "gender": "female",
+    "description": "cv3_female_s0.92 片段参考——plus 引擎二度锚定",
+    "wav": "official_female_v5.wav",
+    "ref_text": "细那康子们，吃饭了，呜嘞呜嘞呜嘞～系着围裙的崔桂英左手端碗，右手握勺，边呼喊边敲打着粥缸边缘。坐在旁边正给水烟袋装烟叶的李维汉一脚踢在女人大腚上，没好气地骂道：",
+    "default_speed": 1.0
   }
 ]

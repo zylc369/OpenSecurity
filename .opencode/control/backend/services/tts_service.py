@@ -1,7 +1,7 @@
 """TTS 服务（CosyVoice3-8bit @ mlx-audio-plus 引擎，常驻 worker 子进程推理）。
 
 架构:
-  本地: TtsWorkerClient → .venv-cosy-tts python scripts/tts_worker.py（stdin/stdout
+  本地: TtsWorkerClient → 主 venv python scripts/tts_worker.py（stdin/stdout
         行式 JSON 协议; 模型常驻 worker 内; 每请求 mx.clear_cache; 尾部静音
         自动重试; speed<1 ffmpeg atempo 后处理）。
   远程: should_use_remote → P2P → 节点同构 TtsService（失败 fallback 本地）。
@@ -21,7 +21,10 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:  # 质检结果类型(运行时懒 import, 静态检查用)
+    from scripts.tts_qc import QcResult as QcResultT
 
 if TYPE_CHECKING:
     from services.voice_library import VoiceAsset as VoiceAssetT
@@ -30,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 _HOME = Path(os.environ.get("OPENSECURITY_HOME", str(Path.home() / "bw-security-analysis")))
 # CosyVoice3 torch 模型目录（自定义目录非 HF cache——局域网 rsync 部署 + 目录口径检测）
-TTS_MODEL_DIR = _HOME / "models" / "cosyvoice3-torch"
+TTS_MODEL_DIR = _HOME / "models" / "cosyvoice3-8bit"
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 WORKER_SCRIPT = _BACKEND_ROOT / "scripts" / "tts_worker.py"
 # 主 venv 直跑（依赖已并入: torch 2.14/transformers 5.17/numpy 2.5 + TTS 依赖集）
@@ -91,7 +94,7 @@ class TtsWorkerClient:
             return self._proc
         if not self._venv_healthy():
             self._bootstrap_venv()
-        _need = ("llm.pt", "flow.pt")
+        _need = ("config.json", "model.safetensors")
         if not all((TTS_MODEL_DIR / f).is_file() for f in _need):
             raise TtsUnavailable(
                 f"模型未就绪: 在控制台「环境总览→模型」下载，"
@@ -99,41 +102,35 @@ class TtsWorkerClient:
         if self._proc is not None:
             self._kill()
         logger.info("[tts] 启动 worker（模型加载 ~10s）")
-        import os as _os
-        env = {**_os.environ, "PYTORCH_ENABLE_MPS_FALLBACK": "1"}
         self._proc = subprocess.Popen(  # noqa: S603 —— 固定脚本路径
             [str(WORKER_VENV_PY), str(WORKER_SCRIPT), "--model-dir", str(TTS_MODEL_DIR)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=None,  # 继承主控 stderr（控制台日志文件）——worker 加载/崩溃可诊断
-            text=True, bufsize=1, env=env,
+            text=True, bufsize=1,
         )
         return self._proc
 
     @staticmethod
     def _venv_healthy() -> bool:
-        """.venv-cosy-tts 健康检查（非仅存在——半成品 venv（有解释器缺包）
+        """plus 引擎健康检查（import 探测——半安装（解释器在缺包）
         必须触发幂等补装，否则 worker 永远缺包。"""
         if not WORKER_VENV_PY.is_file():
             return False
         import subprocess as _sp
-        _vendor = _BACKEND_ROOT.parents[2] / "vendor" / "tts-funaudio"
-        probe_code = ("import sys; sys.path.insert(0, '" + str(_vendor) + "'); "
-                      "sys.path.insert(0, '" + str(_vendor / "third_party" / "Matcha-TTS") + "'); "
-                      "from cosyvoice.cli.cosyvoice import CosyVoice3")
-        r = _sp.run([str(WORKER_VENV_PY), "-c", probe_code], capture_output=True,
-                    timeout=120)  # noqa: S603 —— 主 venv 解释器
+        r = _sp.run([str(WORKER_VENV_PY), "-c",
+                     "import mlx_audio, mlx_audio_plus"],
+                    capture_output=True, timeout=60)  # noqa: S603 —— 主 venv 解释器
         return r.returncode == 0
 
     @staticmethod
     def _bootstrap_venv() -> None:
         """TTS 依赖缺失时自愈安装到主 venv（vendor 引擎依赖集; 失败抛 TtsUnavailable）。"""
-        installer = _BACKEND_ROOT / "scripts" / "install_tts_torch.sh"
-        if not installer.is_file():
-            raise TtsUnavailable(f"TTS 环境未就绪且缺安装脚本: {installer}")
-        logger.info("[tts] TTS 依赖缺失 → 自愈安装到主 venv（约 2-4 分钟）")
+        logger.info("[tts] plus 依赖缺失 → 自愈安装到主 venv（uv --no-deps）")
         import subprocess as _sp
-        r = _sp.run(["/bin/zsh", str(installer)], capture_output=True, text=True,
-                    timeout=900)  # noqa: S603,S607 —— 固定项目脚本
+        r = _sp.run(["uv", "pip", "install", "--python", str(WORKER_VENV_PY),
+                     "--no-deps", "mlx-audio==0.2.10", "mlx-audio-plus==0.1.8",
+                     "mlx-lm"],
+                    capture_output=True, text=True, timeout=900)  # noqa: S603 —— uv pip
         if r.returncode != 0:
             raise TtsUnavailable(
                 f"TTS 环境自愈安装失败: {r.stdout[-400:]} {r.stderr[-400:]}")
@@ -289,16 +286,25 @@ class TtsService:
                 try:
                     client = RemoteLinkService.get_instance().get_client()
                     wav = client.tts_synth(text, voice_id, speed)
-                    return TtsResult(wav=wav, cached=False,
-                                     gen_ms=(time.monotonic() - t0) * 1000,
-                                     voice=voice_id, speed=speed)
+                    q = self._qc_check(wav, text, voice_asset)
+                    if q is None or q.ok:
+                        return TtsResult(wav=wav, cached=False,
+                                         gen_ms=(time.monotonic() - t0) * 1000,
+                                         voice=voice_id, speed=speed)
+                    logger.warning("远程 tts 质检不合格(%s)，fallback 本地重试",
+                                   q.detail)
+                    try:
+                        RemoteLinkService.get_instance().note_request_failure(
+                            f"tts-qc: {q.detail}")
+                    except Exception:  # noqa: BLE001
+                        pass
                 except RemoteUnavailable as e:
                     try:
                         RemoteLinkService.get_instance().note_request_failure(f"tts: {e}")
                     except Exception:  # noqa: BLE001
                         pass
                     logger.warning("远程 tts 失败，fallback 本地: %s", e)
-            wav, gen_ms = self._synth_local(text, voice_asset, speed)
+            wav, gen_ms = self._synth_qc_local(text, voice_asset, speed)
             self._cache[key] = wav
             self._cache.move_to_end(key)
             while (len(self._cache) > CACHE_LIMIT
@@ -306,6 +312,60 @@ class TtsService:
                 self._cache.popitem(last=False)
         return TtsResult(wav=wav, cached=False, gen_ms=gen_ms,
                          voice=voice_id, speed=speed)
+
+    def _qc_check(self, wav: bytes, text: str,
+                  voice_asset: "VoiceAssetT") -> "QcResultT | None":
+        """ASR 回验（懒加载——首次调用才初始化 Paraformer ~1GB）。
+
+        返回 QcResult;质检系统不可用（funasr 缺失等）返回 None=放行
+        （质量门是增强不是依赖——缺 ASR 不阻断合成）。
+        """
+        import tempfile
+        try:
+            from scripts.tts_qc import TtsQC, QcConfig
+        except Exception as e:  # noqa: BLE001 —— funasr/pypinyin 缺失
+            logger.warning("[tts] 质检模块不可用，放行: %s", e)
+            return None
+        try:
+            qc = TtsQC.instance()
+            cfg = QcConfig()
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp.write(wav)
+                p = tmp.name
+            try:
+                return qc.check(p, text, ref_text=voice_asset.ref_text, cfg=cfg)
+            finally:
+                Path(p).unlink(missing_ok=True)
+        except Exception as e:  # noqa: BLE001 —— 质检崩溃不阻断合成
+            logger.warning("[tts] 质检执行异常，放行: %s", e)
+            return None
+
+    def _synth_qc_local(self, text: str, voice_asset: "VoiceAssetT",
+                        speed: float) -> "tuple[bytes, float]":
+        """本地合成 + 质量门 N 版重试（max_attempts 上限，全不合格兜底
+        取 PER 最小者交付——不空手，日志可追）。QC 模块缺失时退化为单版直出。"""
+        try:
+            from scripts.tts_qc import QcConfig
+            cfg = QcConfig()
+        except Exception as e:  # noqa: BLE001 —— funasr/pypinyin 缺失
+            logger.warning("[tts] 质检模块不可用，跳过质量门: %s", e)
+            return self._synth_local(text, voice_asset, speed)
+        best: "tuple[bytes, float, QcResultT] | None" = None  # (wav, ms, qc)
+        for attempt in range(1, cfg.max_attempts + 1):
+            wav, gen_ms = self._synth_local(text, voice_asset, speed)
+            q = self._qc_check(wav, text, voice_asset)
+            if q is None or q.ok:
+                if attempt > 1:
+                    logger.info("[tts] 质检第 %d 版通过", attempt)
+                return wav, gen_ms
+            logger.warning("[tts] 质检不合格(第 %d/%d 版): %s %s",
+                           attempt, cfg.max_attempts, q.detail,
+                           f"句定位={q.bad_sentences[:3]}" if q.bad_sentences else "")
+            if best is None or q.per < best[2].per:
+                best = (wav, gen_ms, q)
+        logger.warning("[tts] %d 版均未过质检，兜底交付 PER 最小版", cfg.max_attempts)
+        assert best is not None
+        return best[0], best[1]
 
     def _synth_local(self, text: str, voice_asset: "VoiceAssetT", speed: float) -> "tuple[bytes, float]":
         """本地 worker 合成（临时 wav → 字节; 音色文件随请求传递路径）。"""
