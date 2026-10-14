@@ -358,18 +358,19 @@ const TtsSection: React.FC = () => {
         {s === "builtin" ? "内置" : "上传"}</Tag>,
     },
     {
-      title: "", key: "ops", width: 190,
+      title: "默认", key: "default", width: 64, align: "center" as const,
       render: (_: unknown, v: VoiceAssetX) => (
-        <Space>
-          {!v.is_default && (
-            <Button size="small" icon={<StarFilled />} onClick={() => void setDefault(v.id)}>
-              设为默认
-            </Button>
-          )}
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            点击行展开试听 <SoundOutlined />
-          </Typography.Text>
-        </Space>
+        <Tooltip title="设为朗读默认音色" mouseEnterDelay={0}>
+          <Radio checked={!!v.is_default} onChange={() => void setDefault(v.id)} />
+        </Tooltip>
+      ),
+    },
+    {
+      title: "", key: "ops", width: 170,
+      render: () => (
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          点击行展开试听 <SoundOutlined />
+        </Typography.Text>
       ),
     },
   ];
@@ -393,6 +394,15 @@ const TtsSection: React.FC = () => {
       ) : (
         <Table size="middle" rowKey="id" dataSource={voices} columns={columns}
           pagination={false} loading={voices === undefined}
+          onRow={(v) => ({
+            onClick: (e) => {
+              // 排除行内交互元素(按钮/单选/Tag/输入)——点它们不触发展开
+              if ((e.target as HTMLElement).closest(
+                "button, a, .ant-radio, .ant-tag, input, .ant-upload")) return;
+              setExpandedId(expandedId === v.id ? "" : v.id);
+            },
+            style: { cursor: "pointer" },
+          })}
           expandable={{
             expandedRowRender: expandedRow,
             expandedRowKeys: expandedId ? [expandedId] : [],
