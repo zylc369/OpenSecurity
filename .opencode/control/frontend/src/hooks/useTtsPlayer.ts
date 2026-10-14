@@ -79,6 +79,7 @@ export function useTtsPlayer() {
         if (!r.ok) throw new Error(`段 ${idx + 1} 合成失败 HTTP ${r.status}`);
         return await r.blob();
       } catch (e) {
+        if (signal.aborted) throw e; // 停止指令不重试
         // 单次重试(网络抖动)
         const r2 = await fetch("/api/tts", {
           method: "POST",
