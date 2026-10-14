@@ -256,6 +256,7 @@ class ConfigManager:
         GITHUB_TOKEN = "GITHUB_TOKEN"
         HF_ENDPOINT = "HF_ENDPOINT"
         NODE_MODEL_TAGS = "NODE_MODEL_TAGS"
+        TTS_DEFAULT_VOICE = "TTS_DEFAULT_VOICE"
         # 远程模型卸载: 本地侧三键
         REMOTE_CONSOLE_URL = "REMOTE_CONSOLE_URL"
         REMOTE_CONSOLE_TOKEN = "REMOTE_CONSOLE_TOKEN"
@@ -904,6 +905,14 @@ class ConfigManager:
             category=ConfigCategory.MODELS,
             validator=None, default_value="",
             surfaces=[Surface.CONFIG], readonly=False,
+        ),
+        ConfigField(
+            key=Keys.TTS_DEFAULT_VOICE, label="TTS 默认音色", type=ConfigFieldType.TEXT,
+            hint="音色库页面设置(HIDDEN 存储态——不入配置 TAB,专用端点管理)",
+            required=False,
+            category=ConfigCategory.MODELS,
+            validator=None, default_value="",
+            surfaces=[Surface.HIDDEN], readonly=False,
         ),
         ConfigField(
             key=Keys.GITHUB_TOKEN, label="GitHub API 令牌", type=ConfigFieldType.PASSWORD,

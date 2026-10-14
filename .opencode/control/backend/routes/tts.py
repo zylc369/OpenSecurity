@@ -49,14 +49,35 @@ def synthesize(req: TtsRequest,
 
 @router.get("/voices")
 def voices() -> "dict[str, list[dict[str, Any]]]":
-    """音色列表（双源合并——内置在前用户在后; 引擎无关恒可用）。"""
+    """音色列表（双源合并——内置在前用户在后; 含 is_default 标记）。"""
     from dataclasses import asdict
+    lib = VoiceLibrary.get_instance()
+    default_id = lib.default_voice().id if lib.list_voices() else ""
     items: list[dict[str, Any]] = []
-    for v in VoiceLibrary.get_instance().list_voices():
+    for v in lib.list_voices():
         d = dict(asdict(v))  # pyright: ignore[reportAny] —— asdict 存根 Any
-        d["available"] = v.resolved_wav(VoiceLibrary.get_instance()).is_file()
+        d["available"] = v.resolved_wav(lib).is_file()
+        d["is_default"] = v.id == default_id
         items.append(d)  # pyright: ignore[reportUnknownArgumentType] —— asdict Any 收口
     return {"voices": items}
+
+
+class DefaultVoiceRequest(BaseModel):
+    """设置默认音色（HIDDEN 配置的专用端点——不入配置 TAB）。"""
+    voice_id: str = Field(min_length=1, max_length=64)
+
+
+@router.put("/voices/default")
+def set_default_voice(req: DefaultVoiceRequest) -> "dict[str, str]":
+    """设置 TTS 默认音色（持久化 .ai_env; 校验音色存在）。"""
+    from services.config_manager import ConfigManager
+    lib = VoiceLibrary.get_instance()
+    if lib.get(req.voice_id) is None:
+        raise HTTPException(status_code=404, detail=f"音色不存在: {req.voice_id}")
+    ConfigManager.get_instance().set_one(
+        key=ConfigManager.Keys.TTS_DEFAULT_VOICE, value=req.voice_id)
+    logger.info("TTS 默认音色 → %s", req.voice_id)
+    return {"ok": "true", "voice": req.voice_id}
 
 
 @router.post("/voices")

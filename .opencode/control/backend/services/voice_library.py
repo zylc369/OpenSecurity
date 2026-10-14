@@ -95,7 +95,19 @@ class VoiceLibrary:
         return None
 
     def default_voice(self) -> VoiceAsset:
-        """默认音色（清单第一条;空清单=配置错误——启动资产已内置不会发生）。"""
+        """默认音色: TTS_DEFAULT_VOICE 配置(.ai_env 持久化)优先,回退清单第一条。
+
+        配置指向不存在的音色(已删除)时静默回退——朗读不因陈旧配置中断。"""
+        from services.config_manager import ConfigManager
+        voice_id = (ConfigManager.get_instance()
+                    .get(ConfigManager.Keys.TTS_DEFAULT_VOICE) or "").strip()
+        if voice_id:
+            try:
+                hit = self.get(voice_id)
+                if hit is not None:
+                    return hit
+            except VoiceError:
+                pass  # 陈旧配置(音色已删)→回退
         voices = self.list_voices()
         if not voices:
             raise VoiceError("音色库为空（内置资产缺失——检查 assets/voices/）")

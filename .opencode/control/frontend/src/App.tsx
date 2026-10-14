@@ -37,7 +37,7 @@ import {
 import { Popconfirm } from "antd";
 import DockerSection from "./sections/DockerSection";
 import ModelsSection from "./sections/ModelsSection";
-import VoiceSection from "./sections/VoiceSection";
+import TtsSection from "./sections/TtsSection";
 import PythonDepsSection from "./sections/PythonDepsSection";
 import ToolsSection from "./sections/ToolsSection";
 import ConfigPage from "./sections/ConfigPage";
@@ -808,7 +808,7 @@ const App: React.FC = () => {
                 }}
               />
               <div style={{ marginTop: 12 }}>
-                <VoiceSection />
+                <TtsSection />
               </div>
             </Card>
           </Col>
