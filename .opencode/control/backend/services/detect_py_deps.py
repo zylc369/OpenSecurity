@@ -77,6 +77,9 @@ class PyPkgField:
     version_spec: str = ""        # 安装时版本约束后缀（如 "<2"; 独立于 pip_name——
                                   # pip_name 还被 importlib.metadata.version 复用，必须纯包名）
     version_via_import: bool = False  # True: 版本经 import 探测（pip 名与 distribution 不一致特例）
+    no_deps: bool = False             # pip install --no-deps（包自身声明的依赖约束与 venv
+                                      # 已有版本冲突、且实测共存稳定时用——如 mlx-audio 声明
+                                      # transformers<5.0 但 venv 5.17(安全组在用)不能动
 
 
 
@@ -129,6 +132,38 @@ class PyDepsDetector:
         PyPkgField(name="soundfile", pip_name="soundfile", agents=["all"],
             tags=(DepTag.CONSOLE_RUNTIME,),
                    description="音频读写库（TTS 音色库上传转换; libsndfile 轻量包装）"),
+        # ── TTS plus 引擎链(mlx-audio-plus; macOS/MLX 专属) ──
+        PyPkgField(name="mlx_audio", pip_name="mlx-audio", agents=["all"],
+             platforms=("darwin",), tags=(DepTag.CONSOLE_RUNTIME,),
+             version_spec="==0.2.10", no_deps=True,
+             description="TTS plus 引擎核心(MLX)。no_deps: 声明 transformers<5.0 与 "
+                         "venv 5.17(安全组在用)冲突; cosyvoice3 实际仅用 AutoTokenizer"
+                         "(加载 Qwen2 分词器, 该 API 4.x→5.x 稳定), 共存实测稳定。"
+                         "纪律: 升级 transformers 后必须 TTS 冒烟重验"),
+        PyPkgField(name="mlx_audio_plus", pip_name="mlx-audio-plus", agents=["all"],
+             platforms=("darwin",), tags=(DepTag.CONSOLE_RUNTIME,),
+             version_spec="==0.1.8", no_deps=True,
+             description="mlx-audio 的 CosyVoice3 补丁包(8bit 量化支持); 同 no_deps 理由"),
+        PyPkgField(name="mlx_lm", pip_name="mlx-lm", agents=["all"],
+             platforms=("darwin",), tags=(DepTag.CONSOLE_RUNTIME,),
+             no_deps=True,
+             description="MLX 语言模型库(mlx-audio 依赖); 同 no_deps 理由(声明 transformers>=5.7)"),
+        PyPkgField(name="librosa", pip_name="librosa", agents=["all"],
+             platforms=("darwin",), tags=(DepTag.CONSOLE_RUNTIME,),
+             description="音频分析库(mlx-audio load_audio 依赖)"),
+        PyPkgField(name="pyloudnorm", pip_name="pyloudnorm", agents=["all"],
+             platforms=("darwin",), tags=(DepTag.CONSOLE_RUNTIME,),
+             description="响度归一化(mlx-audio 依赖)"),
+        PyPkgField(name="hf_transfer", pip_name="hf_transfer", agents=["all"],
+             platforms=("darwin",), tags=(DepTag.CONSOLE_RUNTIME,),
+             description="HF 高速传输(mlx-audio 依赖)"),
+        # ── TTS 质量门(ASR 回验)链 ──
+        PyPkgField(name="funasr", pip_name="funasr", agents=["all"],
+             tags=(DepTag.CONSOLE_RUNTIME,), version_spec="==1.4.16",
+             description="TTS 质量门 Paraformer ASR(中文专精, CosyVoice 官方评测同源)"),
+        PyPkgField(name="pypinyin", pip_name="pypinyin", agents=["all"],
+             tags=(DepTag.CONSOLE_RUNTIME,), version_spec="==0.55.0",
+             description="TTS 质量门拼音比对(同音容错口径)"),
         PyPkgField(name="pywin32", pip_name="pywin32", agents=["all"],
             tags=(DepTag.CONSOLE_RUNTIME,), platforms=("win32",),
                    description="Windows 命名管道（控制台 IPC 监听 + MCP 管道代理）"),
@@ -691,8 +726,9 @@ def _run_install(dry_run: bool, tags: "list[DepTag] | None" = None,
         pkg = dep.pip_name or dep.name
         if dep.version_spec:
             pkg += dep.version_spec
-        _log(f"[*] pip install {pkg}...")
-        result = subprocess.run([sys.executable, "-m", "pip", "install", pkg])
+        flags = ["--no-deps"] if dep.no_deps else []
+        _log(f"[*] pip install {' '.join(flags)} {pkg}...")
+        result = subprocess.run([sys.executable, "-m", "pip", "install", *flags, pkg])
         if result.returncode != 0:
             _install_fail(f"{dep.name} pip 安装失败")
         _log(f"[+] {dep.name} 安装成功")

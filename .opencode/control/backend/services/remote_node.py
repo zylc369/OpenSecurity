@@ -150,23 +150,14 @@ class RemoteNodeBootstrapper:
         """fastapi 哨兵探测; 缺则 console_runtime 集安装。Returns: 是否执行了安装。"""
         probe = subprocess.run([sys.executable, "-c", "import fastapi"],
                                capture_output=True)
-        # TTS 依赖（plus 引擎, 主 venv uv --no-deps 直装）按 tags 圈选联动
+        # TTS 依赖(plus 引擎链)按 tags 圈选联动——唯一清单安装器
         tts_installed = False
-        if "tts" in self._args.model_tags:
-            if not self._tts_env_ready():
-                _log("[*] --model-tags tts: plus 依赖缺失——uv 直装主 venv")
-                from services.tts_deps import PLUS_DEPS
-                try:
-                    r = subprocess.run(  # noqa: S603 —— venv 自身 pip
-                        [sys.executable, "-m", "pip", "install", "--no-deps",
-                         *PLUS_DEPS,
-                         "-i", "https://mirrors.aliyun.com/pypi/simple/"],
-                        timeout=1200, capture_output=True, text=True)
-                    tts_installed = r.returncode == 0
-                    if r.returncode != 0:
-                        _log(f"[WARN] plus 依赖安装失败: {r.stderr[-200:]}")
-                except FileNotFoundError as e:
-                    _log(f"[WARN] 自愈安装异常(解释器缺失): {e}")
+        if "tts" in self._args.model_tags and not self._tts_env_ready():
+            _log("[*] --model-tags tts: plus 依赖缺失——唯一清单安装器(console_runtime)")
+            from services.detect_py_deps import DepTag, _run_install
+            _run_install(dry_run=False, tags=[DepTag.CONSOLE_RUNTIME],
+                         venv_backend="stdlib")
+            tts_installed = True
         if probe.returncode == 0:
             _log("[+] 依赖齐备（fastapi 可导入），跳过安装")
             return tts_installed
