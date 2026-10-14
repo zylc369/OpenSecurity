@@ -340,14 +340,16 @@ class RemoteNodeBootstrapper:
             return
         import psutil
         me = os.getpid()
-        target = os.path.abspath(backend_dir)
+        # normcase: Windows 大小写/斜杠归一(纯字符串比较在不敏感文件系统上失配)
+        target = os.path.normcase(os.path.abspath(backend_dir))
         for proc in psutil.process_iter(["pid", "cwd", "cmdline"]):
             try:
                 info = proc.info
                 if info["pid"] == me:
                     continue
                 cl: list[str] = list(info["cmdline"] or [])
-                if cl and cl[-1].endswith("server.py") and info["cwd"] == target:
+                cwd = os.path.normcase(str(info["cwd"] or ""))
+                if cl and cl[-1].endswith("server.py") and cwd == target:
                     _log(f"[*] 已有控制台实例(pid={info['pid']})——优雅停机后以新代码重启")
                     proc.terminate()  # noqa: SIM115 —— wait 兜底回收
                     try:
