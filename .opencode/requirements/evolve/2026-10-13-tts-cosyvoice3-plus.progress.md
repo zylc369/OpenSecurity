@@ -121,3 +121,7 @@ tts-shootout/out/                  # 全部试听样本(rasfix_*/seg*/plus_v5_*�
 7. 节点恢复(用户干预)后: 节点 plus 化部署
 8. git commit 当前本地改动(vendor submodule+worker+qc)
 9. 台账更新
+
+## 2026-10-15 凌晨: TTS 控制台重建(听书深度测试台)——完成
+
+详见 2026-10-15-tts-console-rebuild.md。要点: 段级协议(Legado 模式)/segmentText 断句器(12 用例)/useTtsPlayer 流式接力/三通道试听/默认音色 .ai_env/执行期修 3 真 bug(探测 import 名错误/ASR 毒句重试黑洞 73.5s→19.7s/abort 重试)。CI 全绿。待用户晨验: 控制台 TTS 页真实听感 + Legado 直配实测。
