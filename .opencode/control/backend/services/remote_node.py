@@ -263,7 +263,7 @@ class RemoteNodeBootstrapper:
             _log("[+] 使用官方端点直连")
 
     def _selected_model_ids(self) -> list[str]:
-        """tags 圈选（tts tag 当前对应 cosyvoice3-torch 单资产）。"""
+        """tags 圈选（tts tag 当前对应 cosyvoice3-8bit 单资产, plus 引擎）。"""
         return [m.id for m in _registry().filter_by_tags(list(self._args.model_tags))]
 
     def _tts_env_ready(self) -> bool:
