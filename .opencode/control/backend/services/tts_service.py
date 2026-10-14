@@ -130,14 +130,15 @@ class TtsWorkerClient:
 
     @staticmethod
     def _venv_healthy() -> bool:
-        """plus 引擎健康检查（import 探测——半安装（解释器在缺包）
+        """plus 引擎健康检查（mlx_audio import + plus/funasr/pypinyin 元数据探测——
+        mlx-audio-plus 是补丁包无独立模块, 只能按 distribution 探测（
         必须触发幂等补装，否则 worker 永远缺包。"""
         if not WORKER_VENV_PY.is_file():
             return False
         import subprocess as _sp
         r = _sp.run([str(WORKER_VENV_PY), "-c",
-                     "import mlx_audio, mlx_audio_plus"],
-                    capture_output=True, timeout=60)  # noqa: S603 —— 主 venv 解释器
+                     "import mlx_audio; import importlib.metadata as _m; _m.version('mlx-audio-plus'); _m.version('funasr'); _m.version('pypinyin')"],
+                    capture_output=True, timeout=120)  # noqa: S603 —— 主 venv 解释器
         return r.returncode == 0
 
     def request(self, payload: "dict[str, Any]") -> WorkerResponse:
@@ -356,6 +357,7 @@ class TtsService:
             logger.warning("[tts] 质检模块不可用，跳过质量门: %s", e)
             return self._synth_local(text, voice_asset, speed)
         best: "tuple[bytes, float, QcResultT] | None" = None  # (wav, ms, qc)
+        prev_bad: "frozenset[str] | None" = None
         for attempt in range(1, cfg.max_attempts + 1):
             wav, gen_ms = self._synth_local(text, voice_asset, speed)
             q = self._qc_check(wav, text, voice_asset)
@@ -366,6 +368,15 @@ class TtsService:
             logger.warning("[tts] 质检不合格(第 %d/%d 版): %s %s",
                            attempt, cfg.max_attempts, q.detail,
                            f"句定位={q.bad_sentences[:3]}" if q.bad_sentences else "")
+            # 噪声主导提前交付: 连续两版失败句集合一致 → 差异源于 ASR 对
+            # 特定句(方言/生僻)的系统性转写漂移而非随机 TTS 错(真错在 RAS
+            # 补丁后随机分布, 句定位版间不同)——再重试只是浪费时间
+            cur_bad = frozenset(q.bad_sentences[:3])
+            if attempt >= 2 and prev_bad is not None and cur_bad == prev_bad:
+                logger.warning("[tts] 连续两版失败句一致——ASR 噪声主导, 提前交付(省 %d 版重试)",
+                               cfg.max_attempts - attempt)
+                return wav, gen_ms
+            prev_bad = cur_bad
             if best is None or q.per < best[2].per:
                 best = (wav, gen_ms, q)
         logger.warning("[tts] %d 版均未过质检，兜底交付 PER 最小版", cfg.max_attempts)

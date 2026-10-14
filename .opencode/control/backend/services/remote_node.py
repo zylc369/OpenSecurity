@@ -264,8 +264,8 @@ class RemoteNodeBootstrapper:
     def _tts_env_ready(self) -> bool:
         """plus 引擎健康探测（--check 计划与 ensure_deps 共用）。"""
         r = subprocess.run([sys.executable, "-c",
-                            "import mlx_audio, mlx_audio_plus"],
-                           capture_output=True, timeout=60)  # noqa: S603
+                            "import mlx_audio; import importlib.metadata as _m; _m.version('mlx-audio-plus'); _m.version('funasr'); _m.version('pypinyin')"],
+                           capture_output=True, timeout=120)  # noqa: S603
         return r.returncode == 0
 
     def ensure_models(self) -> list[str]:
