@@ -103,12 +103,21 @@ class TtsWorkerClient:
             self._kill()
         logger.info("[tts] 启动 worker（模型加载 ~10s）")
         # worker 需从 HF 拉 8bit 模型目录之外的运行时小组件(campplus.onnx
-        # speaker encoder / BlankEN 配置, 共 ~4MB)。部分部署环境带
-        # HF_HUB_OFFLINE=1 会拦截在线拉取 → 组件 cache 未命中即崩——显式
-        # 覆盖为在线 + 镜像加速(组件首次在线拉取后命中本地 cache)。
+        # speaker encoder / BlankEN 配置, 共 ~4MB)。server.py L26 的全局
+        # 离线加速设计(setdefault HF_HUB_OFFLINE=1)会被 worker 继承 →
+        # 组件 cache 未命中即崩。此处剥离 =1(与历史"下载子进程剥离
+        # HF_HUB_OFFLINE"同一模式): worker 允许在线拉组件 + 镜像加速,
+        # 首次拉取后命中本地 cache。
         import os as _os
         _ep = _os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
-        env = {**_os.environ, "HF_HUB_OFFLINE": "0", "HF_ENDPOINT": _ep}
+        # 诊断: 记录覆盖前 server 进程的原始值(worker 继承的真实来源)
+        _parent_hf = _os.environ.get("HF_HUB_OFFLINE", "<unset>")
+        logger.warning("[tts][诊断] server 环境 HF_HUB_OFFLINE=%s (worker 继承源, 已覆盖为 0)",
+                       _parent_hf)
+        env = {**_os.environ, "HF_HUB_OFFLINE": "0", "HF_ENDPOINT": _ep,
+               "TTS_PARENT_HF_OFFLINE": _parent_hf,
+               # tqdm 进度条转义序列会以二进制污染 stderr 日志——静音
+               "HF_HUB_DISABLE_PROGRESS_BARS": "1", "TQDM_DISABLE": "1"}
         self._proc = subprocess.Popen(  # noqa: S603 —— 固定脚本路径
             [str(WORKER_VENV_PY), str(WORKER_SCRIPT), "--model-dir", str(TTS_MODEL_DIR)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,

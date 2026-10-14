@@ -150,6 +150,11 @@ def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
 
 
 def main() -> int:
+    # 诊断: HF 离线开关的真实来源(spawn 链)。stderr 进控制台日志。
+    import os
+    print(f"[worker][诊断] HF_HUB_OFFLINE 生效值={os.environ.get('HF_HUB_OFFLINE', '<unset>')} "
+          f"父进程原值={os.environ.get('TTS_PARENT_HF_OFFLINE', '<unset>')}",
+          file=sys.stderr, flush=True)
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--model-dir", required=True, help="CosyVoice3 模型目录")
     args = ap.parse_args()
