@@ -35,7 +35,9 @@ _model: Any = None  # 常驻模型实例（首次请求懒加载）
 
 # 默认朗读指令: instruct 模式下由指令控制语速——短文本不再慢(实测 209ms/字,
 # 长文 182ms/字, 跨次方差 ±5%)。ref_text/mode=zero_shot 为可回退路径。
-DEFAULT_INSTRUCT = "请用正常语速朗读接下来的内容。"  # 跨文本长度语速统一(极差5ms/实测)
+DEFAULT_INSTRUCT = "请用正常语速朗读接下来的内容。"  # instruct 模式默认指令(跨文本长度语速统一)
+DEFAULT_MODE = "zero_shot"  # 默认合成模式: zero_shot=参考韵律续写(情感饱满); "instruct"=指令控制
+DEFAULT_SEED = 4            # 默认采样种子(同 seed 同参数输出可复现; 前端可覆盖)
 
 
 def _patch_ras() -> None:
@@ -123,26 +125,31 @@ def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     speed = float(req.get("speed") or 1.0)
     instruct = req.get("instruct")
-    mode = str(req.get("mode") or "").strip()
+    mode = str(req.get("mode") or "").strip() or DEFAULT_MODE
     seed_raw = req.get("seed")
-    seed = int(seed_raw) if seed_raw is not None else 4
+    seed = int(seed_raw) if seed_raw is not None else DEFAULT_SEED
     if seed < 0:  # 0 是合法种子——仅负值回落默认
-        seed = 4
+        seed = DEFAULT_SEED
+    print(f"[worker] 生效参数: mode={mode!r} seed={seed} speed={speed:.2f}", file=sys.stderr, flush=True)
 
     for attempt in (1, 2):  # 静音重试（第二次为补机）
         t0 = time.monotonic()
         ref_audio = load_audio(str(req["wav"]), sample_rate=model.sample_rate)
         kw: dict[str, Any] = dict(text=text, ref_audio=ref_audio)
         ref_text = req.get("ref_text")
-        if mode == "zero_shot" and ref_text:
-            # 回退路径: CosyVoice3 zero-shot 要求参考逐字稿带 system 前缀分隔
-            # 参考区/生成区（缺失时泄漏+重复率上升——上游 commit 64685e8 同源）。
+        if mode == "instruct":
+            # instruct 模式: 指令控制语速/风格（LLM 不接收参考语音 token——
+            # 无韵律传染; 参考音频仍提供音色 embedding 与声学条件）。
+            ins = str(instruct).strip() if instruct else DEFAULT_INSTRUCT
+            kw["instruct_text"] = f"You are a helpful assistant. {ins}"
+        elif ref_text:
+            # 默认 zero-shot: 参考韵律续写（情感饱满）。CosyVoice3 要求参考
+            # 逐字稿带 system 前缀分隔参考区/生成区（缺失时泄漏+重复率上升）。
             SYS_PREFIX = "You are a helpful assistant.<|endofprompt|>"
             rt = str(ref_text)
             kw["ref_text"] = rt if rt.startswith(SYS_PREFIX) else SYS_PREFIX + rt
         else:
-            # 默认 instruct 模式: 指令控制语速（LLM 不接收参考语音 token——
-            # 无韵律传染; 参考音频仍提供音色 embedding 与声学条件）。
+            # zero-shot 但音色无 ref_text → 回退 instruct（防御; 音色库正常均带逐字稿）
             ins = str(instruct).strip() if instruct else DEFAULT_INSTRUCT
             kw["instruct_text"] = f"You are a helpful assistant. {ins}"
 

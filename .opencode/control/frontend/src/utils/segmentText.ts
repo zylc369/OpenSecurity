@@ -84,21 +84,34 @@ function splitOversize(sentence: string, max: number): string[] {
 
 /**
  * 第二遍: 句块贪心合并 → 段数组。
- * 渐进分段（首响优化）: 首段 30 字 ≈3s 出声(生成~2s+质检~0.5s);
- * ramp 30→80→180→300(数学衔接: 每段播放时长 ≥ 下段生成时长——
- * 30字/6s音 → 80字/5s生成 ✓; 80字/16s音 → 180字/12s生成 ✓; …全链无断档)。
+ * 渐进分段（首响优化）: 首段 20 字 ≈2s 出声(生成~1.5-2s);
+ * ramp 20→80→180→300(数学衔接: 每段播放时长 ≥ 下段生成时长——
+ * 20字/5s音 → 80字/5s生成 ✓; 80字/16s音 → 180字/12s生成 ✓; …全链无断档)。
+ * 首句过长时允许在逗号处提前断首段（首响优先——见 cutFirstComma）。
  * @param target 目标段长（默认 300）
  * @param hardMax 单句超此长触发逗号兜底（默认 600）
- * @param firstTargets 前几段的目标长（默认 [60, 150]）
+ * @param firstTargets 前几段的目标长（默认 [20, 80, 180]）
  */
-export const DEFAULT_FIRST_TARGETS: readonly number[] = [30, 80, 180];
+export const DEFAULT_FIRST_LEN = 20;   // 首段字数默认（改这里一处生效全前端）
+export const DEFAULT_NEXT_LEN = 300;   // 常规段字数默认（改这里一处生效全前端）
+export const DEFAULT_FIRST_TARGETS: readonly number[] = [DEFAULT_FIRST_LEN, 80, 180];
+
+/** 首段逗号级切分: 首句超过 goal*1.5 时在 ≥goal 的首个逗号处断（首响优先）。
+ *  返回断点(不含)或 -1=不切。 */
+function cutFirstComma(sentence: string, goal: number): number {
+  if (sentence.length <= goal * 1.5) return -1;
+  for (let i = goal; i < sentence.length; i++) {
+    if (sentence[i] === "，" || sentence[i] === "；") return i + 1;
+  }
+  return -1;
+}
 
 /**
  * 首段字数 → 渐进段长序列（测试台"分段设置"用）。
  * 以首段字数为基准缩放后续两段（保底 80/180, 上限 target）:
  *  f=30 → [30, 81, 180]（≈默认序列）; f=60 → [60, 162, 300]; f=100 → [100, 270, 300]
  */
-export function rampFor(firstLen: number, target = 300): number[] {
+export function rampFor(firstLen: number, target = DEFAULT_NEXT_LEN): number[] {
   const f = Math.max(1, Math.round(firstLen));
   const b = Math.max(Math.round(f * 2.7), 80);
   const c = Math.max(Math.round(f * 5), 180);
@@ -115,6 +128,11 @@ export function segmentText(
   for (const s of sentences) {
     if (s.length > hm) pieces.push(...splitOversize(s, Math.floor(hm / 2)));
     else pieces.push(s);
+  }
+  // 首段逗号级切分: 首句过长时在逗号处提前断（长首句不再拖慢首响）
+  if (pieces.length > 0 && firstTargets.length > 0) {
+    const cut = cutFirstComma(pieces[0], firstTargets[0]);
+    if (cut > 0) pieces.splice(0, 1, pieces[0].slice(0, cut), pieces[0].slice(cut));
   }
   const segs: string[] = [];
   let cur = "";

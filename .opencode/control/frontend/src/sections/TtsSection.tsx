@@ -17,7 +17,7 @@ import {
 } from "@ant-design/icons";
 import type { VoiceAsset } from "../types";
 import { useTtsPlayer } from "../hooks/useTtsPlayer";
-import { segmentText } from "../utils/segmentText";
+import { DEFAULT_FIRST_LEN, DEFAULT_NEXT_LEN, segmentText } from "../utils/segmentText";
 
 /** 通道 a 固定测试文案（覆盖对话引号/拟声/叹号/省略号/问号） */
 const DEFAULT_TEXT =
@@ -150,8 +150,9 @@ const TtsSection: React.FC = () => {
   const [useCustomInstruct, setUseCustomInstruct] = useState(false);
   const [customInstruct, setCustomInstruct] = useState("");
   const [seedVal, setSeedVal] = useState<number | null>(null);
-  const [firstLen, setFirstLen] = useState(30);
-  const [nextLen, setNextLen] = useState(300);
+  const [firstLen, setFirstLen] = useState<number>(DEFAULT_FIRST_LEN);
+  const [nextLen, setNextLen] = useState<number>(DEFAULT_NEXT_LEN);
+  const [engineMode, setEngineMode] = useState<"default" | "instruct">("default");
 
   const refresh = useCallback(() => {
     fetch("/api/tts/voices")
@@ -170,6 +171,7 @@ const TtsSection: React.FC = () => {
       seed: seedVal !== null ? seedVal : -1,  // 0 是合法种子; null(留空)=默认
       firstLen,
       nextLen,
+      mode: engineMode === "instruct" ? "instruct" : "",  // ""=默认 zero_shot 情感饱满
     });
   };
 
@@ -467,10 +469,26 @@ const TtsSection: React.FC = () => {
         <Space wrap size={20} align="start">
           <div>
             <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
-              朗读指令（试听用; 生产走默认"正常语速"）
+              引擎模式
+            </Typography.Text>
+            <Radio.Group value={engineMode} size="small" optionType="button"
+              onChange={(e) => setEngineMode(e.target.value as "default" | "instruct")}>
+              <Radio.Button value="default">默认（情感饱满）</Radio.Button>
+              <Radio.Button value="instruct">指令控制</Radio.Button>
+            </Radio.Group>
+            <Typography.Text type="secondary" style={{ fontSize: 11, display: "block", marginTop: 4, maxWidth: 300 }}>
+              {engineMode === "instruct"
+                ? "指令调语速/方言/情感（语速统一, 情感偏平）"
+                : "参考韵律续写, 情感饱满（语速较自由）"}
+            </Typography.Text>
+          </div>
+          <div>
+            <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
+              朗读指令（仅"指令控制"模式生效）
             </Typography.Text>
             <Select
               value={useCustomInstruct ? "__custom__" : instructSel}
+              disabled={engineMode !== "instruct"}
               style={{ width: 300 }}
               options={INSTRUCT_GROUPS}
               onChange={(v) => {
@@ -507,9 +525,9 @@ const TtsSection: React.FC = () => {
             </Typography.Text>
             <Space>
               <InputNumber addonBefore="首段" min={10} max={500} value={firstLen}
-                style={{ width: 145 }} onChange={(v) => setFirstLen(Number(v) || 30)} />
+                style={{ width: 145 }} onChange={(v) => setFirstLen(Number(v) || DEFAULT_FIRST_LEN)} />
               <InputNumber addonBefore="常规段" min={80} max={1000} value={nextLen}
-                style={{ width: 165 }} onChange={(v) => setNextLen(Number(v) || 300)} />
+                style={{ width: 165 }} onChange={(v) => setNextLen(Number(v) || DEFAULT_NEXT_LEN)} />
             </Space>
           </div>
         </Space>

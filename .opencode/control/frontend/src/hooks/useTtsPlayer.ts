@@ -6,7 +6,7 @@
  * 服务端无状态; 单实例（新 start 自动停旧）; 段失败重试 1 次后停止并报错。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { rampFor, segmentText } from "../utils/segmentText";
+import { DEFAULT_FIRST_LEN, DEFAULT_NEXT_LEN, rampFor, segmentText } from "../utils/segmentText";
 
 export type PlayerStatus = "idle" | "starting" | "playing" | "paused";
 
@@ -41,10 +41,11 @@ const PREFETCH_DEPTH = 1;
 
 /** 试听可选参数(测试台): 朗读指令/采样种子/分段字长 */
 export interface StartOptions {
-  instruct?: string; // 朗读指令(空=引擎默认"请用正常语速朗读接下来的内容。")
+  instruct?: string; // 朗读指令仅 instruct 模式用(空=引擎默认"请用正常语速朗读接下来的内容。")
   seed?: number;     // 采样种子(≤0=默认 4)
-  firstLen?: number; // 首段字数(默认 30)
+  firstLen?: number; // 首段字数(默认 20)
   nextLen?: number;  // 常规段字数(默认 300)
+  mode?: string;     // 合成模式(""=默认 zero_shot 情感饱满; "instruct"=指令控制)
 }
 
 /** 总时长 = 已知段真实时长 + 未生成段按字数估算 */
@@ -117,6 +118,7 @@ export function useTtsPlayer() {
           text, speed: 1.0,
           instruct: optsRef.current.instruct ?? "",
           seed: optsRef.current.seed ?? -1,
+          mode: optsRef.current.mode ?? "",
         });
         const r = await fetch("/api/tts", {
           method: "POST",
@@ -133,6 +135,7 @@ export function useTtsPlayer() {
           text, speed: 1.0,
           instruct: optsRef.current.instruct ?? "",
           seed: optsRef.current.seed ?? -1,
+          mode: optsRef.current.mode ?? "",
         });
         const r2 = await fetch("/api/tts", {
           method: "POST",
@@ -236,8 +239,9 @@ export function useTtsPlayer() {
   const start = useCallback((text: string, opts?: StartOptions) => {
     stop(); // 单实例: 新试听停旧
     optsRef.current = opts ?? {};
-    const nextLen = opts?.nextLen ?? 300;
+    const nextLen = opts?.nextLen ?? DEFAULT_NEXT_LEN;
     const firstTargets = opts?.firstLen ? rampFor(opts.firstLen, nextLen) : undefined;
+    console.log(`[tts] 模式=${opts?.mode || "默认(zero_shot)"} 首段目标=${opts?.firstLen ?? DEFAULT_FIRST_LEN}字 常规段=${nextLen}字`);
     const segs = segmentText(text, nextLen, undefined, firstTargets);
     if (segs.length === 0) {
       setState({ ...INITIAL, error: "文本为空（起始索引超出文件末尾?）" });
