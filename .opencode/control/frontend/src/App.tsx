@@ -454,6 +454,11 @@ const App: React.FC = () => {
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
+          flexWrap: "wrap",
+          rowGap: 6,
+          height: "auto",
+          minHeight: 64,
+          paddingBlock: 8,
           paddingInline: "clamp(16px, 3vw, 40px)",
           position: "sticky",
           top: 0,
@@ -466,7 +471,7 @@ const App: React.FC = () => {
         }}
       >
         {/* 品牌：图标与文字用 flex 精确居中（Space 组件的基线对齐不可控） */}
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", rowGap: 8 }}>
           <div
             style={{
               width: 34,
@@ -564,7 +569,7 @@ const App: React.FC = () => {
             ]}
           />
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", rowGap: 6, justifyContent: "flex-end" }}>
           <Popover
             title={`环境就绪 ${readiness.ok}/${readiness.total}（按分类）`}
             content={

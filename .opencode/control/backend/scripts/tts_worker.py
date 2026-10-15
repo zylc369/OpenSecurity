@@ -35,7 +35,7 @@ _model: Any = None  # 常驻模型实例（首次请求懒加载）
 
 # 默认朗读指令: instruct 模式下由指令控制语速——短文本不再慢(实测 209ms/字,
 # 长文 182ms/字, 跨次方差 ±5%)。ref_text/mode=zero_shot 为可回退路径。
-DEFAULT_INSTRUCT = "请用正常语速说一句话"
+DEFAULT_INSTRUCT = "请用正常语速朗读接下来的内容。"  # 跨文本长度语速统一(极差5ms/实测)
 
 
 def _patch_ras() -> None:
@@ -207,10 +207,19 @@ def main() -> int:
         except json.JSONDecodeError as e:
             print(json.dumps({"id": "", "ok": False, "error": f"协议解析失败: {e}"}), flush=True)
             continue
+        _t_req = time.monotonic()
+        print(f"[worker] 请求 {req.get('id', '?')}: {len(str(req.get('text', '')))}字 "
+              f"mode={req.get('mode', '')!r} seed={req.get('seed', -1)}", file=sys.stderr, flush=True)
         try:
             resp = _synth(req, args.model_dir)
         except Exception as e:  # noqa: BLE001 —— worker 错误统一面（主进程决策重启）
             resp = {"id": req.get("id", ""), "ok": False, "error": f"{type(e).__name__}: {e}"}
+            print(f"[worker] 请求异常: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        _ms = (time.monotonic() - _t_req) * 1000
+        print(f"[worker] 完成: 处理 {_ms:.0f}ms "
+              f"{'ok' if resp.get('ok') else 'FAIL'} "
+              f"音频={resp.get('duration', '?')}s rtf={resp.get('rtf', '?')} "
+              f"{'静音重试' if resp.get('retried') else ''}", file=sys.stderr, flush=True)
         print(json.dumps(resp, ensure_ascii=False), flush=True)
     return 0
 

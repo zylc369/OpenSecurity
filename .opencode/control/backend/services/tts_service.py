@@ -221,7 +221,7 @@ class TtsService:
     _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
-        self._cache: "OrderedDict[tuple[str, float, str, int, str], bytes]" = OrderedDict()
+        self._cache: "OrderedDict[tuple[str, float, str, int, str, str], bytes]" = OrderedDict()
         self._lock = threading.Lock()
         self._worker = TtsWorkerClient()
 
@@ -249,14 +249,16 @@ class TtsService:
 
     def synthesize(self, text: str, voice: str = "",
                    speed: float = DEFAULT_SPEED,
-                   instruct: str = "", seed: int = -1) -> TtsResult:
+                   instruct: str = "", seed: int = -1,
+                   mode: str = "") -> TtsResult:
         """文本 → WAV 字节（LRU 命中标记 cached）。空文本 ValueError。
 
         voice: 音色库 id（空=默认音色）; speed: 1.0 原速, <1 服务端 atempo 减速。
-        instruct: 朗读指令（空=引擎默认"请用正常语速说一句话"——测试台参数）。
+        instruct: 朗读指令（空=引擎默认"请用正常语速朗读接下来的内容。"——测试台参数）。
         seed: 采样种子（≤0=默认 4; 同 seed 同参数输出等效可复现）。
         """
         from services.voice_library import VoiceLibrary, VoiceError
+        t_enter = time.monotonic()
         text = text.strip()
         if not text:
             raise ValueError("文本为空")
@@ -272,16 +274,22 @@ class TtsService:
             raise ValueError(f"未知音色: {voice}（可选: {available}）")
         speed = min(max(speed, 0.5), 3.0)
         voice_id = voice_asset.id
-        key = (voice_id, speed, instruct, seed, text)
+        key = (voice_id, speed, instruct, seed, mode, text)
+        logger.info("[tts] 请求进入: %d字 voice=%s instruct=%r seed=%d mode=%r",
+                    len(text), voice_id, instruct, seed, mode)
         with self._lock:
             hit = self._cache.get(key)
             if hit is not None:
                 self._cache.move_to_end(key)
+                logger.info("[tts] 缓存命中, 直接返回（%.0fms）",
+                            (time.monotonic() - t_enter) * 1000)
                 return TtsResult(wav=hit, cached=True, gen_ms=0.0,
                                  voice=voice_id, speed=speed)
         # 合成全程持锁（远程+本地统一串行）: worker 协议一问一答 + 远程节点
         # 同构串行——并发请求排队; 锁外并发会双打远程/fallback 双 spawn worker
         with self._lock:
+            wait_ms = (time.monotonic() - t_enter) * 1000
+            logger.info("[tts] 获得合成锁（进入后累计 %.0fms，含排队）", wait_ms)
             # 远程路由（四模型统一远程化——与 embed/rerank/ocr 同语义:
             # should_use_remote → 远程推理，失败 fallback 本地; 缓存命中不出本机）
             try:
@@ -295,9 +303,12 @@ class TtsService:
                 try:
                     client = RemoteLinkService.get_instance().get_client()
                     wav = client.tts_synth(text, voice_id, speed,
-                                           instruct=instruct, seed=seed)
+                                           instruct=instruct, seed=seed, mode=mode)
                     q = self._qc_check(wav, text, voice_asset)
                     if q is None or q.ok:
+                        logger.info("[tts] 远程合成完成: %.0fms, 请求总耗时 %.0fms",
+                                    (time.monotonic() - t0) * 1000,
+                                    (time.monotonic() - t_enter) * 1000)
                         return TtsResult(wav=wav, cached=False,
                                          gen_ms=(time.monotonic() - t0) * 1000,
                                          voice=voice_id, speed=speed)
@@ -315,7 +326,9 @@ class TtsService:
                         pass
                     logger.warning("远程 tts 失败，fallback 本地: %s", e)
             wav, gen_ms = self._synth_qc_local(text, voice_asset, speed,
-                                               instruct=instruct, seed=seed)
+                                               instruct=instruct, seed=seed, mode=mode)
+            logger.info("[tts] 本地合成完成: 生成 %.0fms, 请求总耗时 %.0fms",
+                        gen_ms, (time.monotonic() - t_enter) * 1000)
             self._cache[key] = wav
             self._cache.move_to_end(key)
             while (len(self._cache) > CACHE_LIMIT
@@ -353,7 +366,7 @@ class TtsService:
 
     def _synth_qc_local(self, text: str, voice_asset: "VoiceAssetT",
                         speed: float, instruct: str = "",
-                        seed: int = -1) -> "tuple[bytes, float]":
+                        seed: int = -1, mode: str = "") -> "tuple[bytes, float]":
         """本地合成 + 质量门 N 版重试（max_attempts 上限，全不合格兜底
         取 PER 最小者交付——不空手，日志可追）。QC 模块缺失时退化为单版直出。"""
         try:
@@ -362,16 +375,17 @@ class TtsService:
         except Exception as e:  # noqa: BLE001 —— funasr/pypinyin 缺失
             logger.warning("[tts] 质检模块不可用，跳过质量门: %s", e)
             return self._synth_local(text, voice_asset, speed,
-                                     instruct=instruct, seed=seed)
+                                     instruct=instruct, seed=seed, mode=mode)
         best: "tuple[bytes, float, QcResultT] | None" = None  # (wav, ms, qc)
         prev_bad: "frozenset[str] | None" = None
         for attempt in range(1, cfg.max_attempts + 1):
             wav, gen_ms = self._synth_local(text, voice_asset, speed,
-                                            instruct=instruct, seed=seed)
+                                            instruct=instruct, seed=seed, mode=mode)
+            logger.info("[tts] 第 %d 版生成 %.0fms, 开始质检", attempt, gen_ms)
             q = self._qc_check(wav, text, voice_asset)
             if q is None or q.ok:
-                if attempt > 1:
-                    logger.info("[tts] 质检第 %d 版通过", attempt)
+                logger.info("[tts] 交付: 第 %d 版（%s）",
+                            attempt, "首版通过" if attempt == 1 else "重试后通过")
                 return wav, gen_ms
             logger.warning("[tts] 质检不合格(第 %d/%d 版): %s %s",
                            attempt, cfg.max_attempts, q.detail,
@@ -383,6 +397,7 @@ class TtsService:
             if attempt >= 2 and prev_bad is not None and cur_bad == prev_bad:
                 logger.warning("[tts] 连续两版失败句一致——ASR 噪声主导, 提前交付(省 %d 版重试)",
                                cfg.max_attempts - attempt)
+                logger.warning("[tts] 交付: 第 %d 版（噪声提前交付）", attempt)
                 return wav, gen_ms
             prev_bad = cur_bad
             if best is None or q.per < best[2].per:
@@ -392,7 +407,8 @@ class TtsService:
         return best[0], best[1]
 
     def _synth_local(self, text: str, voice_asset: "VoiceAssetT", speed: float,
-                     instruct: str = "", seed: int = -1) -> "tuple[bytes, float]":
+                     instruct: str = "", seed: int = -1,
+                     mode: str = "") -> "tuple[bytes, float]":
         """本地 worker 合成（临时 wav → 字节; 音色文件随请求传递路径）。"""
         import tempfile
         t0 = time.monotonic()
@@ -411,6 +427,7 @@ class TtsService:
                 "speed": speed,
                 "instruct": instruct,
                 "seed": seed,
+                "mode": mode,
             })
             if not resp.ok:
                 raise TtsUnavailable(f"worker 合成失败: {resp.error or '未知'}")

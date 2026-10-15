@@ -114,7 +114,7 @@ function ChannelCard({
   return (
     <Card size="small" style={{ borderRadius: 10, opacity: disabled ? 0.55 : 1 }}
       styles={{ body: { padding: "12px 16px" } }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", rowGap: 8 }}>
         <Avatar shape="square" size={36}
           style={{ background: `${BLUE}14`, color: BLUE, fontSize: 16, flexShrink: 0 }}>
           {icon}
@@ -449,7 +449,7 @@ const TtsSection: React.FC = () => {
 
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
         <Space direction="vertical" size={0}>
           <Typography.Title level={4} style={{ margin: 0 }}>
             🎧 TTS 听书
@@ -519,6 +519,7 @@ const TtsSection: React.FC = () => {
         <Empty description="音色库为空" />
       ) : (
         <Table size="middle" rowKey="id" dataSource={voices} columns={columns}
+          scroll={{ x: "max-content" }}
           pagination={false} loading={voices === undefined}
           onRow={(v) => ({
             onClick: (e) => {
