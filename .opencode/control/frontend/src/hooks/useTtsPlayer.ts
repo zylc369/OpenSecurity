@@ -11,6 +11,7 @@ import { segmentText } from "../utils/segmentText";
 export type PlayerStatus = "idle" | "starting" | "playing" | "paused";
 
 export interface TtsPlayerState {
+  speed: number;        // 播放倍速(1.0=原速——音频文件不改, 播放端保持音高变速)
   status: PlayerStatus;
   segIndex: number;    // 当前播放段（0-based）
   segTotal: number;
@@ -25,6 +26,7 @@ export interface TtsPlayerState {
 }
 
 const INITIAL: TtsPlayerState = {
+  speed: 1.0,
   status: "idle", segIndex: 0, segTotal: 0, buffered: 0, segProgress: 0, error: "",
   elapsedSec: 0, totalSec: 0, firstSegMs: 0, avgGenMs: 0, startTick: 0,
 };
@@ -56,6 +58,7 @@ export function useTtsPlayer() {
   const stoppedRef = useRef(true);
   const urlPool = useRef<string[]>([]);
   const errCount = useRef(0);
+  const speedRef = useRef(1.0);
   const segDurations = useRef<number[]>([]);   // 已知段真实时长
   const elapsedBase = useRef(0);               // 已完成段时长累计
   const genMsList = useRef<number[]>([]);      // 每段生成耗时
@@ -137,6 +140,8 @@ export function useTtsPlayer() {
       const url = URL.createObjectURL(blob);
       urlPool.current.push(url);
       const audio = new Audio(url);
+      audio.preservesPitch = true;   // 变速保音调(标准播放器语义)
+      audio.playbackRate = speedRef.current;
       urlPool.current.push(url);
       audioRef.current = audio;
       const dur = Number.isFinite(audio.duration) ? audio.duration
@@ -225,11 +230,20 @@ export function useTtsPlayer() {
     setState((s) => ({ ...s, status: "paused" }));
   }, []);
 
+  const setSpeed = useCallback((v: number) => {
+    speedRef.current = v;
+    if (audioRef.current) {
+      audioRef.current.preservesPitch = true;
+      audioRef.current.playbackRate = v;
+    }
+    setState((s) => ({ ...s, speed: v }));
+  }, []);
+
   const resume = useCallback(() => {
     pausedRef.current = false;
     void audioRef.current?.play();
     setState((s) => ({ ...s, status: "playing" }));
   }, []);
 
-  return { state, start, pause, resume, stop };
+  return { state, start, pause, resume, stop, setSpeed };
 }

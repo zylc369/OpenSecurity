@@ -305,7 +305,8 @@ const TtsSection: React.FC = () => {
               </div>
             </div>
 
-            <div style={{ display: "flex", gap: 18, marginTop: 8, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8, flexWrap: "wrap", gap: 8 }}>
+              <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
               <Metric label="首段生成" value={player.state.firstSegMs
                 ? `${(player.state.firstSegMs / 1000).toFixed(1)}s` : "…"} />
               <Metric label="平均生成/段" value={player.state.avgGenMs
@@ -313,6 +314,17 @@ const TtsSection: React.FC = () => {
               <Metric label="已缓冲" value={`${bufferedCount} 段`} />
               <Metric label="总时长" value={player.state.totalSec
                 ? `≈${fmtSec(player.state.totalSec)}` : "…"} />
+              </div>
+              <Space size={4}>
+                <Typography.Text type="secondary" style={{ fontSize: 11 }}>倍速</Typography.Text>
+                {[0.9, 1.0, 1.15, 1.3].map((v) => (
+                  <Button key={v} size="small" type={player.state.speed === v ? "primary" : "default"}
+                    style={{ paddingInline: 8, fontSize: 12 }}
+                    onClick={() => player.setSpeed(v)}>
+                    {v === 1.0 ? "原速" : `${v}×`}
+                  </Button>
+                ))}
+              </Space>
             </div>
           </div>
         )}

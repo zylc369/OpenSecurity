@@ -110,7 +110,13 @@ def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
     speed = float(req.get("speed") or 1.0)
     instruct = req.get("instruct")
 
+    import mlx.core as _mx
+
     for attempt in (1, 2):  # 静音重试（第二次为补机）
+        # 固定采样种子: 消除生成时长/韵律的随机方差(±20%——受 PRNG 初始状态
+        # 控制的听到的"忽快忽慢"); 同文本同参数输出完全可复现。
+        # 4: 实测时长分布的快端(~194ms/字 vs 最慢 246)
+        _mx.random.seed(4)
         t0 = time.monotonic()
         ref_audio = load_audio(str(req["wav"]), sample_rate=model.sample_rate)
         kw: dict[str, Any] = dict(text=text, ref_audio=ref_audio)
