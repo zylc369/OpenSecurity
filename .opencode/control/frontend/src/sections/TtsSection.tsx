@@ -209,7 +209,7 @@ const TtsSection: React.FC = () => {
   };
 
   const txtTail = txtContent.slice(Math.max(0, startIdx));
-  const txtSegCount = txtTail ? segmentText(txtTail).length : 0;
+  const txtSegCount = txtTail ? segmentText(txtTail, nextLen).length : 0;
 
   const submitUpload = async () => {
     const values = await form.validateFields();

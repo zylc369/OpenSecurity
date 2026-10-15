@@ -6,8 +6,8 @@
  *  - 强断点: 换行 / 。！？…!? 以及英文句号 .（小数点防误切: 前后皆数字则跳过）
  *  - 句内符号（，、；：——）不作为断点
  *  - 引号内句末标点是合法断点（对话小说必须——不做引号配对保护）
- *  - 贪心合并句块到目标段长（~300 字; 加句后 ≥target 即收段）
- *  - 兜底: 单句超 hardMax（600 字）在逗号/顿号处硬切（韵律小损防超长段）
+ *  - 贪心合并句块到目标段长（DEFAULT_NEXT_LEN; 加句后 ≥target 即收段）
+ *  - 兜底: 单句超 max(target*2, 160) 在逗号/顿号处硬切（韵律小损防超长段）
  */
 
 /** 句末终止字符（英文句号单独处理——小数点防误切） */
@@ -88,13 +88,13 @@ function splitOversize(sentence: string, max: number): string[] {
  * ramp 20→80→180→300(数学衔接: 每段播放时长 ≥ 下段生成时长——
  * 20字/5s音 → 80字/5s生成 ✓; 80字/16s音 → 180字/12s生成 ✓; …全链无断档)。
  * 首句过长时允许在逗号处提前断首段（首响优先——见 cutFirstComma）。
- * @param target 目标段长（默认 300）
- * @param hardMax 单句超此长触发逗号兜底（默认 600）
- * @param firstTargets 前几段的目标长（默认 [20, 80, 180]）
+ * @param target 目标段长（默认 80）
+ * @param hardMax 单句超此长触发逗号兜底（0=自动: max(target*2, 160)）
+ * @param firstTargets 前几段的目标长（默认 [20, min(80), min(180)] 按 target 派生）
  */
 export const DEFAULT_FIRST_LEN = 20;   // 首段字数默认（改这里一处生效全前端）
-export const DEFAULT_NEXT_LEN = 300;   // 常规段字数默认（改这里一处生效全前端）
-export const DEFAULT_FIRST_TARGETS: readonly number[] = [DEFAULT_FIRST_LEN, 80, 180];
+export const DEFAULT_NEXT_LEN = 80;    // 常规段字数默认（改这里一处生效全前端）
+// 注: 前几段目标序列的唯一权威是 rampFor()——不再维护硬编码数组(联动遗漏教训)
 
 /** 首段逗号级切分: 首句超过 goal*1.5 时在 ≥goal 的首个逗号处断（首响优先）。
  *  返回断点(不含)或 -1=不切。 */
@@ -119,10 +119,10 @@ export function rampFor(firstLen: number, target = DEFAULT_NEXT_LEN): number[] {
 }
 
 export function segmentText(
-  text: string, target = 300, hardMax = 600,
-  firstTargets: readonly number[] = DEFAULT_FIRST_TARGETS,
+  text: string, target = DEFAULT_NEXT_LEN, hardMax = 0,
+  firstTargets: readonly number[] = rampFor(DEFAULT_FIRST_LEN, target),
 ): string[] {
-  const hm = Math.max(hardMax, target * 2); // 常规段长放大时同步放宽兜底阈值
+  const hm = hardMax > 0 ? hardMax : Math.max(target * 2, 160); // 兜底阈值随常规段联动
   const sentences = splitSentences(text);
   const pieces: string[] = [];
   for (const s of sentences) {

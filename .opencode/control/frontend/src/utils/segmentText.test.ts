@@ -84,3 +84,38 @@ describe("rampFor 分段设置缩放", () => {
     expect(rampFor(10, 300)).toEqual([10, 80, 180]);
   });
 });
+
+describe("分段参数不变量(联动防回归)", () => {
+  const NOVEL = "这儿孙满堂的甜蜜，两口子还没来得及品砸出味儿来，可家里的米缸眼瞅着就要掏见底了。俗话说半大小子吃垮老子，包括女娃娃在内，都正是长身体的时候，贼能吃，那肚皮个个都跟无底洞似的，崔桂英家开饭主食都得用缸来盛，而且一缸还不够，灶上还温着一锅。两口子虽说早已孙辈成群，可年纪并不算大，且按当下农村规矩，除非你生病卧床失去劳动能力，否则只要你还有力气下田，无论多老，也没资格享受来自儿女的餐饭供奉。“别抢，别抢，饿死鬼投胎啊都是，都给我排好队！”孩子们拿着碗来接，崔桂英负责打粥。最后一个过来的是一个十岁的小男孩，他身穿牛仔吊带裤，脚上是时兴凉鞋，皮肤白嫩，面带腼腆。和周围兄弟姐妹们那种玩得脏兮兮鼻涕吸溜吸溜的模样，有些格格不入。“小远侯，来，给你放这里吃。”";
+
+  it("target=80: 首段≤30 / 中间段≥80 / 每段≤160 / 无损", () => {
+    const segs = segmentText(NOVEL, 80);
+    expect(segs.length).toBeGreaterThanOrEqual(3);
+    expect(segs[0].length).toBeLessThanOrEqual(30);
+    for (const s of segs.slice(1, -1)) expect(s.length).toBeGreaterThanOrEqual(80);
+    for (const s of segs) expect(s.length).toBeLessThanOrEqual(160);
+    expect(segs.join("")).toBe(NOVEL);
+  });
+
+  it("rampFor: 任意 target 下每项不超 max(首段, target)——180 联动回归守卫", () => {
+    for (const t of [80, 120, 300]) {
+      for (const f of [10, 20, 30, 60, 100]) {
+        for (const v of rampFor(f, t)) {
+          expect(v).toBeLessThanOrEqual(Math.max(f, t));
+        }
+      }
+    }
+  });
+
+  it("超长句兜底随 target 联动(单句 300+ 无句号 → 每片 ≤ 2*target)", () => {
+    const long = "第，" + "很长内容".repeat(80) + "。";
+    const segs = segmentText(long, 80);
+    for (const s of segs) expect(s.length).toBeLessThanOrEqual(160);
+  });
+
+  it("首段长句逗号级切分(首响优先)", () => {
+    const t = "这儿孙满堂的甜蜜，两口子还没来得及品砸出味儿来，可家里的米缸眼瞅着就要掏见底了。";
+    const segs = segmentText(t, 80);
+    expect(segs[0]).toBe("这儿孙满堂的甜蜜，两口子还没来得及品砸出味儿来，"); // 逗号级切分: 逗号保留前段尾
+  });
+});

@@ -148,7 +148,7 @@ export function useTtsPlayer() {
       }
     };
     const t0 = performance.now();
-    console.log(`[tts] seg${idx} 合成请求发出`);
+    console.log(`[tts] seg${idx} 合成请求发出（${text.length}字）`);
     p = doFetch().then((b) => {
       const ms = performance.now() - t0;
       console.log(`[tts] seg${idx} 合成返回 +${ms.toFixed(0)}ms`);
@@ -240,7 +240,7 @@ export function useTtsPlayer() {
     stop(); // 单实例: 新试听停旧
     optsRef.current = opts ?? {};
     const nextLen = opts?.nextLen ?? DEFAULT_NEXT_LEN;
-    const firstTargets = opts?.firstLen ? rampFor(opts.firstLen, nextLen) : undefined;
+    const firstTargets = rampFor(opts?.firstLen ?? DEFAULT_FIRST_LEN, nextLen);
     console.log(`[tts] 模式=${opts?.mode || "默认(zero_shot)"} 首段目标=${opts?.firstLen ?? DEFAULT_FIRST_LEN}字 常规段=${nextLen}字`);
     const segs = segmentText(text, nextLen, undefined, firstTargets);
     if (segs.length === 0) {
