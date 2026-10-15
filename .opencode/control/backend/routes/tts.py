@@ -26,6 +26,8 @@ class TtsRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     voice: str = ""
     speed: float = Field(default=DEFAULT_SPEED, ge=0.5, le=3.0)
+    instruct: str = Field(default="", max_length=200)  # 朗读指令(空=默认正常语速)
+    seed: int = Field(default=-1, ge=-1, le=99999)     # 采样种子(≤0=默认 4)
 
 
 def get_tts_service() -> TtsService:
@@ -37,7 +39,8 @@ def get_tts_service() -> TtsService:
 def synthesize(req: TtsRequest,
                svc: TtsService = Depends(get_tts_service)) -> Response:
     try:
-        result = svc.synthesize(req.text, voice=req.voice, speed=req.speed)
+        result = svc.synthesize(req.text, voice=req.voice, speed=req.speed,
+                                instruct=req.instruct, seed=req.seed)
     except TtsUnavailable as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except ValueError as e:

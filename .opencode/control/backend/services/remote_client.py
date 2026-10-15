@@ -199,10 +199,12 @@ class RemoteConsoleClient:
     # (~10s) + 长文合成——推理默认超时不够，单独放宽
     TTS_TIMEOUT_SEC = 600.0
 
-    def tts_synth(self, text: str, voice: str, speed: float) -> bytes:
+    def tts_synth(self, text: str, voice: str, speed: float,
+                  instruct: str = "", seed: int = -1) -> bytes:
         """语音合成（POST /api/tts——WAV 二进制响应，不经 _post_json 的
         JSON 假设; gateway 对非 JSON 响应以原始 bytes 装入 ApiResp.body）。"""
-        payload: dict[str, object] = {"text": text, "voice": voice, "speed": speed}
+        payload: dict[str, object] = {"text": text, "voice": voice, "speed": speed,
+                                      "instruct": instruct, "seed": seed}
         if self._p2p_cfg is not None:
             from services.remote_transport import TransportError
             transport = self._get_transport()

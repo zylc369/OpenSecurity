@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { segmentText, splitSentences } from "./segmentText";
+import { rampFor, segmentText, splitSentences } from "./segmentText";
 
 describe("splitSentences 句末切分", () => {
   it("中文句号/问号/叹号断句", () => {
@@ -69,5 +69,18 @@ describe("segmentText 贪心分段", () => {
     const sents = splitSentences(text);
     expect(sents).toContain(`${LQ}饭好了。${RQ}`);  // 闭引号并入句尾
     expect(sents).toContain(`她说。`);
+  });
+});
+
+describe("rampFor 分段设置缩放", () => {
+  it("首段 30 字 ≈ 默认序列", () => {
+    expect(rampFor(30, 300)).toEqual([30, 81, 180]);
+  });
+  it("首段 60/100 字随比例放大且不超常规段长", () => {
+    expect(rampFor(60, 300)).toEqual([60, 162, 300]);
+    expect(rampFor(100, 300)).toEqual([100, 270, 300]);
+  });
+  it("首段最小值保底 80/180", () => {
+    expect(rampFor(10, 300)).toEqual([10, 80, 180]);
   });
 });

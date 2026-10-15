@@ -8,12 +8,12 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Avatar, Button, Card, Empty, Form, Input, InputNumber, Modal, Progress,
-  Radio, Space, Table, Tag, Tooltip, Typography, Upload, message,
+  Radio, Select, Space, Table, Tag, Tooltip, Typography, Upload, message,
 } from "antd";
 import {
   AudioOutlined, BookOutlined, CaretRightOutlined, EditOutlined,
-  FileTextOutlined, LoadingOutlined, PauseOutlined, SoundOutlined,
-  StarFilled, StopOutlined, UploadOutlined,
+  FileTextOutlined, LoadingOutlined, PauseOutlined, QuestionCircleOutlined,
+  SoundOutlined, StarFilled, StopOutlined, UploadOutlined,
 } from "@ant-design/icons";
 import type { VoiceAsset } from "../types";
 import { useTtsPlayer } from "../hooks/useTtsPlayer";
@@ -27,6 +27,53 @@ const DEFAULT_TEXT =
   "孩子们呼啦一下涌进门来，最大的十六，最小的才三岁\u2026";
 
 const BLUE = "#0071e3";
+
+/** 朗读指令选项（官方 instruct 列表 + 实测档; value=传给引擎的指令文本, ""=默认） */
+const INSTRUCT_GROUPS = [
+  {
+    label: "⭐ 推荐",
+    options: [
+      { value: "", label: "正常语速（默认·生产档）" },
+      { value: "请用较快的语速说一句话。", label: "较快" },
+    ],
+  },
+  {
+    label: "语速（官方）",
+    options: [
+      { value: "请用尽可能快地语速说一句话。", label: "尽可能快" },
+      { value: "请用尽可能慢地语速说一句话。", label: "尽可能慢" },
+    ],
+  },
+  {
+    label: "方言（官方）",
+    options: ["广东话", "四川话", "东北话", "甘肃话", "贵州话",
+      "河南话", "湖北话", "湖南话", "江西话", "闽南话",
+      "宁夏话", "山西话", "陕西话", "山东话", "上海话",
+      "天津话", "云南话"].map((d) => ({
+        value: `请用${d}表达。`, label: d,
+      })),
+  },
+  {
+    label: "情感 / 音量 / 风格",
+    options: [
+      { value: "请非常开心地说一句话。", label: "非常开心" },
+      { value: "请非常伤心地说一句话。", label: "非常伤心" },
+      { value: "请非常生气地说一句话。", label: "非常生气" },
+      { value: "Please say a sentence as loudly as possible.", label: "尽可能大声（官方英文）" },
+      { value: "Please say a sentence in a very soft voice.", label: "轻声细语（官方英文）" },
+      { value: "我想体验一下小猪佩奇风格，可以吗？", label: "小猪佩奇风格" },
+      { value: "你可以尝试用机器人的方式解答吗？", label: "机器人方式" },
+    ],
+  },
+  { label: "自定义", options: [{ value: "__custom__", label: "自定义指令…" }] },
+];
+
+const SEED_HELP = [
+  "随机种子（seed）：控制生成韵律的随机性。",
+  "• 同一段文字 + 同一 seed ≈ 相同输出（时长与韵律一致）",
+  "• 想换一种韵律试试改值（推荐 0~20）",
+  "• 留空使用默认值 4",
+].join("\n");
 
 interface VoiceAssetX extends VoiceAsset {
   is_default?: boolean;
@@ -98,6 +145,13 @@ const TtsSection: React.FC = () => {
   const player = useTtsPlayer();
   const [activeVoice, setActiveVoice] = useState("");
   const bufferedCount = player.state.buffered;
+  // 测试台设置
+  const [instructSel, setInstructSel] = useState("");
+  const [useCustomInstruct, setUseCustomInstruct] = useState(false);
+  const [customInstruct, setCustomInstruct] = useState("");
+  const [seedVal, setSeedVal] = useState<number | null>(null);
+  const [firstLen, setFirstLen] = useState(30);
+  const [nextLen, setNextLen] = useState(300);
 
   const refresh = useCallback(() => {
     fetch("/api/tts/voices")
@@ -110,7 +164,13 @@ const TtsSection: React.FC = () => {
 
   const launch = (voiceId: string, _channel: string, text: string) => {
     setActiveVoice(voiceId);
-    player.start(text);
+    const instruct = useCustomInstruct ? customInstruct.trim() : instructSel;
+    player.start(text, {
+      instruct,
+      seed: seedVal && seedVal > 0 ? seedVal : -1,
+      firstLen,
+      nextLen,
+    });
   };
 
   const doStop = () => {
@@ -400,6 +460,60 @@ const TtsSection: React.FC = () => {
         </Space>
         <Button icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>上传音色</Button>
       </div>
+
+      {/* 测试台设置（试听用; 生产默认"正常语速"不依赖此处） */}
+      <Card size="small" style={{ borderRadius: 10 }}
+        styles={{ body: { padding: "12px 16px" } }}>
+        <Space wrap size={20} align="start">
+          <div>
+            <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
+              朗读指令（试听用; 生产走默认"正常语速"）
+            </Typography.Text>
+            <Select
+              value={useCustomInstruct ? "__custom__" : instructSel}
+              style={{ width: 300 }}
+              options={INSTRUCT_GROUPS}
+              onChange={(v) => {
+                if (v === "__custom__") {
+                  setUseCustomInstruct(true);
+                } else {
+                  setUseCustomInstruct(false);
+                  setInstructSel(v);
+                }
+              }}
+            />
+            {useCustomInstruct && (
+              <Input value={customInstruct} maxLength={200}
+                placeholder="输入自定义指令（推荐短句 ≤60 字）"
+                style={{ width: 300, marginTop: 6 }}
+                onChange={(e) => setCustomInstruct(e.target.value)} />
+            )}
+          </div>
+          <div>
+            <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
+              seed{" "}
+              <Tooltip mouseEnterDelay={0}
+                title={<span style={{ whiteSpace: "pre-line" }}>{SEED_HELP}</span>}>
+                <QuestionCircleOutlined style={{ cursor: "help", color: BLUE }} />
+              </Tooltip>
+            </Typography.Text>
+            <InputNumber value={seedVal} min={0} max={99999}
+              placeholder="默认 4" style={{ width: 120 }}
+              onChange={(v) => setSeedVal(v)} />
+          </div>
+          <div>
+            <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
+              分段设置（字）
+            </Typography.Text>
+            <Space>
+              <InputNumber addonBefore="首段" min={10} max={500} value={firstLen}
+                style={{ width: 145 }} onChange={(v) => setFirstLen(Number(v) || 30)} />
+              <InputNumber addonBefore="常规段" min={80} max={1000} value={nextLen}
+                style={{ width: 165 }} onChange={(v) => setNextLen(Number(v) || 300)} />
+            </Space>
+          </div>
+        </Space>
+      </Card>
 
       {voices && voices.length === 0 ? (
         <Empty description="音色库为空" />

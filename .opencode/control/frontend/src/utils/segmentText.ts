@@ -91,13 +91,29 @@ function splitOversize(sentence: string, max: number): string[] {
  * @param hardMax 单句超此长触发逗号兜底（默认 600）
  * @param firstTargets 前几段的目标长（默认 [60, 150]）
  */
+export const DEFAULT_FIRST_TARGETS: readonly number[] = [30, 80, 180];
+
+/**
+ * 首段字数 → 渐进段长序列（测试台"分段设置"用）。
+ * 以首段字数为基准缩放后续两段（保底 80/180, 上限 target）:
+ *  f=30 → [30, 81, 180]（≈默认序列）; f=60 → [60, 162, 300]; f=100 → [100, 270, 300]
+ */
+export function rampFor(firstLen: number, target = 300): number[] {
+  const f = Math.max(1, Math.round(firstLen));
+  const b = Math.max(Math.round(f * 2.7), 80);
+  const c = Math.max(Math.round(f * 5), 180);
+  return [f, Math.min(b, target), Math.min(c, target)];
+}
+
 export function segmentText(
-  text: string, target = 300, hardMax = 600, firstTargets: readonly number[] = [30, 80, 180],
+  text: string, target = 300, hardMax = 600,
+  firstTargets: readonly number[] = DEFAULT_FIRST_TARGETS,
 ): string[] {
+  const hm = Math.max(hardMax, target * 2); // 常规段长放大时同步放宽兜底阈值
   const sentences = splitSentences(text);
   const pieces: string[] = [];
   for (const s of sentences) {
-    if (s.length > hardMax) pieces.push(...splitOversize(s, Math.floor(hardMax / 2)));
+    if (s.length > hm) pieces.push(...splitOversize(s, Math.floor(hm / 2)));
     else pieces.push(s);
   }
   const segs: string[] = [];

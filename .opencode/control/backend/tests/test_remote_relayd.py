@@ -820,7 +820,7 @@ def test_tts_route_with_stub(monkeypatch: "object") -> None:
     from fastapi import FastAPI
 
     fake = SimpleNamespace()
-    fake.synthesize = lambda text, voice="v", speed=1.0: tts_mod.TtsResult(
+    fake.synthesize = lambda text, voice="v", speed=1.0, instruct="", seed=-1: tts_mod.TtsResult(
         wav=b"RIFFwav", cached=False, gen_ms=1.0, voice=voice, speed=speed)
 
     app = FastAPI()

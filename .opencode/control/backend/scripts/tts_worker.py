@@ -3,7 +3,9 @@
 
 协议（一行 JSON 一条消息）:
   请求: {"id": "...", "op": "synth", "text": "...", "wav": "参考音频路径",
-         "ref_text": "逐字稿", "out": "输出wav路径", "speed": 0.9, "instruct": null}
+         "out": "输出wav路径", "speed": 0.9,
+         "instruct": "朗读指令(默认'请用正常语速说一句话'——instruct 模式)",
+         "seed": 4, "mode": "", "ref_text": "逐字稿(mode=zero_shot 回退时用)"}
   响应: {"id": "...", "ok": true, "path": "...", "duration": 62.4, "rtf": 0.31,
          "retried": false}
         {"id": "...", "ok": false, "error": "..."}
@@ -30,6 +32,10 @@ SILENCE_TAIL_SEC = 10.0
 SILENCE_PEAK_THRESHOLD = 0.02
 
 _model: Any = None  # 常驻模型实例（首次请求懒加载）
+
+# 默认朗读指令: instruct 模式下由指令控制语速——短文本不再慢(实测 209ms/字,
+# 长文 182ms/字, 跨次方差 ±5%)。ref_text/mode=zero_shot 为可回退路径。
+DEFAULT_INSTRUCT = "请用正常语速说一句话"
 
 
 def _patch_ras() -> None:
@@ -68,7 +74,15 @@ def _load(model_dir: str) -> Any:
         from mlx_audio.tts.utils import load_model
         t0 = time.monotonic()
         _model = load_model(model_path=model_dir)
-        print(f"[worker] 模型加载完成 {time.monotonic()-t0:.1f}s", file=sys.stderr, flush=True)
+        # 预加载: Model 为懒构建包装, 首次 generate 才初始化内部子模块——实测该
+        # "混合初始化"路径使首次输出语速慢 30-45%(服务链冷启动后首段必中招)。
+        # 提前初始化(约 1.5s, 在启动期摊掉)后每次生成走稳定路径。
+        try:
+            _model._ensure_model_loaded()  # noqa: SLF001 —— mlx_audio 懒加载包装固定 API
+            _model._ensure_tokenizers_loaded()  # noqa: SLF001
+        except Exception as e:  # noqa: BLE001 —— 预加载失败不阻断（回退懒加载）
+            print(f"[worker] 预加载跳过: {e}", file=sys.stderr, flush=True)
+        print(f"[worker] 模型加载完成(+预加载) {time.monotonic()-t0:.1f}s", file=sys.stderr, flush=True)
     return _model
 
 
@@ -109,26 +123,31 @@ def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     speed = float(req.get("speed") or 1.0)
     instruct = req.get("instruct")
-
-    import mlx.core as _mx
+    mode = str(req.get("mode") or "").strip()
+    seed = int(req.get("seed") or 4)
+    if seed <= 0:
+        seed = 4
 
     for attempt in (1, 2):  # 静音重试（第二次为补机）
-        # 固定采样种子: 消除生成时长/韵律的随机方差(±20%——受 PRNG 初始状态
-        # 控制的听到的"忽快忽慢"); 同文本同参数输出完全可复现。
-        # 4: 实测时长分布的快端(~194ms/字 vs 最慢 246)
-        _mx.random.seed(4)
         t0 = time.monotonic()
         ref_audio = load_audio(str(req["wav"]), sample_rate=model.sample_rate)
         kw: dict[str, Any] = dict(text=text, ref_audio=ref_audio)
         ref_text = req.get("ref_text")
-        if instruct:
-            kw["instruct_text"] = f"You are a helpful assistant. {instruct}"
-        elif ref_text:
-            # CosyVoice3 zero-shot 要求: 参考逐字稿必须带 system 前缀分隔参考区/生成区。
-            # 缺失时模型把参考文本念出来(泄漏)且重复率上升——上游修复 commit 64685e8 同源。
+        if mode == "zero_shot" and ref_text:
+            # 回退路径: CosyVoice3 zero-shot 要求参考逐字稿带 system 前缀分隔
+            # 参考区/生成区（缺失时泄漏+重复率上升——上游 commit 64685e8 同源）。
             SYS_PREFIX = "You are a helpful assistant.<|endofprompt|>"
             rt = str(ref_text)
             kw["ref_text"] = rt if rt.startswith(SYS_PREFIX) else SYS_PREFIX + rt
+        else:
+            # 默认 instruct 模式: 指令控制语速（LLM 不接收参考语音 token——
+            # 无韵律传染; 参考音频仍提供音色 embedding 与声学条件）。
+            ins = str(instruct).strip() if instruct else DEFAULT_INSTRUCT
+            kw["instruct_text"] = f"You are a helpful assistant. {ins}"
+
+        # 采样种子: 默认 4（实测分布快端; 同 seed 同文本输出可复现）;
+        # 请求可传任意 >0 值覆盖（前端测试台调节用）。
+        mx.random.seed(seed)
         chunks: list[Any] = []
         for result in model.generate(**kw):
             audio = getattr(result, "audio", None)

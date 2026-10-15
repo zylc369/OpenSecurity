@@ -6,7 +6,7 @@
  * 服务端无状态; 单实例（新 start 自动停旧）; 段失败重试 1 次后停止并报错。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { segmentText } from "../utils/segmentText";
+import { rampFor, segmentText } from "../utils/segmentText";
 
 export type PlayerStatus = "idle" | "starting" | "playing" | "paused";
 
@@ -36,6 +36,14 @@ const SEC_PER_CHAR = 0.2;
 
 const PREFETCH = 3; // in-flight 上限(服务端锁串行, 此值只控制客户端并发挂起量)
 
+/** 试听可选参数(测试台): 朗读指令/采样种子/分段字长 */
+export interface StartOptions {
+  instruct?: string; // 朗读指令(空=引擎默认"请用正常语速说一句话")
+  seed?: number;     // 采样种子(≤0=默认 4)
+  firstLen?: number; // 首段字数(默认 30)
+  nextLen?: number;  // 常规段字数(默认 300)
+}
+
 /** 总时长 = 已知段真实时长 + 未生成段按字数估算 */
 function computeTotalOf(segs: readonly string[], durations: readonly number[]): number {
   let total = 0;
@@ -59,6 +67,7 @@ export function useTtsPlayer() {
   const urlPool = useRef<string[]>([]);
   const errCount = useRef(0);
   const speedRef = useRef(1.0);
+  const optsRef = useRef<StartOptions>({});
   const segDurations = useRef<number[]>([]);   // 已知段真实时长
   const elapsedBase = useRef(0);               // 已完成段时长累计
   const genMsList = useRef<number[]>([]);      // 每段生成耗时
@@ -97,10 +106,15 @@ export function useTtsPlayer() {
     const text = segsRef.current[idx];
     const doFetch = async (): Promise<Blob> => {
       try {
+        const body = JSON.stringify({
+          text, speed: 1.0,
+          instruct: optsRef.current.instruct ?? "",
+          seed: optsRef.current.seed ?? -1,
+        });
         const r = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, speed: 1.0 }),
+          body,
           signal,
         });
         if (!r.ok) throw new Error(`段 ${idx + 1} 合成失败 HTTP ${r.status}`);
@@ -108,10 +122,15 @@ export function useTtsPlayer() {
       } catch (e) {
         if (signal.aborted) throw e; // 停止指令不重试
         // 单次重试(网络抖动)
+        const body = JSON.stringify({
+          text, speed: 1.0,
+          instruct: optsRef.current.instruct ?? "",
+          seed: optsRef.current.seed ?? -1,
+        });
         const r2 = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, speed: 1.0 }),
+          body,
           signal,
         });
         if (!r2.ok) throw new Error(`段 ${idx + 1} 合成失败 HTTP ${r2.status}`);
@@ -190,9 +209,12 @@ export function useTtsPlayer() {
     });
   }, [fetchSeg, stop]);
 
-  const start = useCallback((text: string) => {
+  const start = useCallback((text: string, opts?: StartOptions) => {
     stop(); // 单实例: 新试听停旧
-    const segs = segmentText(text);
+    optsRef.current = opts ?? {};
+    const nextLen = opts?.nextLen ?? 300;
+    const firstTargets = opts?.firstLen ? rampFor(opts.firstLen, nextLen) : undefined;
+    const segs = segmentText(text, nextLen, undefined, firstTargets);
     if (segs.length === 0) {
       setState({ ...INITIAL, error: "文本为空（起始索引超出文件末尾?）" });
       return;
