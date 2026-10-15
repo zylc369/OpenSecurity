@@ -124,8 +124,9 @@ def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
     speed = float(req.get("speed") or 1.0)
     instruct = req.get("instruct")
     mode = str(req.get("mode") or "").strip()
-    seed = int(req.get("seed") or 4)
-    if seed <= 0:
+    seed_raw = req.get("seed")
+    seed = int(seed_raw) if seed_raw is not None else 4
+    if seed < 0:  # 0 是合法种子——仅负值回落默认
         seed = 4
 
     for attempt in (1, 2):  # 静音重试（第二次为补机）

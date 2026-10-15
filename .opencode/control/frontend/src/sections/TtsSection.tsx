@@ -167,7 +167,7 @@ const TtsSection: React.FC = () => {
     const instruct = useCustomInstruct ? customInstruct.trim() : instructSel;
     player.start(text, {
       instruct,
-      seed: seedVal && seedVal > 0 ? seedVal : -1,
+      seed: seedVal !== null ? seedVal : -1,  // 0 是合法种子; null(留空)=默认
       firstLen,
       nextLen,
     });
