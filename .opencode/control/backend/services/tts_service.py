@@ -273,14 +273,22 @@ class TtsService:
 
     # ── 合成 ─────────────────────────────────────────
 
-    def warmup(self) -> None:
+    def warmup(self, force_local: bool = False) -> None:
         """预热: 完整合成一次极短文本（worker 模型 + 质检链路就绪）。
 
         节点预载用（server --model-preload cosyvoice3-8bit）; 失败不抛出
         （懒加载路径兜底——首请求自愈）。
+        force_local=True 绕过远程路由直接预热本地 worker（远程降级接管前用——
+        否则远程在线时预热走远程, 本地 worker 不会启动）。
         """
         try:
-            self.synthesize("好。")
+            if force_local:
+                from services.voice_library import VoiceLibrary
+                self._synth_local("好。",
+                                  VoiceLibrary.get_instance().default_voice(),
+                                  DEFAULT_SPEED)
+            else:
+                self.synthesize("好。")
         except Exception as e:  # noqa: BLE001 —— 预热失败不致命
             logger.warning("[tts] 预热失败（懒加载兜底）: %s", e)
 

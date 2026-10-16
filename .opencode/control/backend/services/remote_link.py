@@ -319,7 +319,7 @@ class RemoteLinkService:
                     self._unload_due_at = None
                     return
                 self._unload_due_at = None
-            logger.info("远程稳定 %ds，卸载本地三模型（释放内存）", delay)
+            logger.info("远程稳定 %ds，卸载本地模型（embedder/reranker/OCR/TTS——释放内存）", delay)
             try:
                                 self._model_inference().release_all_local()
             except Exception:  # noqa: BLE001
@@ -329,6 +329,11 @@ class RemoteLinkService:
                 OcrService.get_instance().release_sync()
             except Exception:  # noqa: BLE001
                 logger.exception("OCR 卸载异常")
+            try:
+                from services.tts_service import TtsService
+                TtsService.get_instance().release()
+            except Exception:  # noqa: BLE001
+                logger.exception("TTS 卸载异常")
 
         timer = threading.Timer(delay, _do_unload)
         timer.daemon = True

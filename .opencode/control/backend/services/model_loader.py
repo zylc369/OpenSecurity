@@ -332,13 +332,16 @@ class ModelInferenceService:
         self._reranker_managed.release()
 
     def preload_all_models_background(self) -> None:
-        """后台线程预热三模型（远程降级 / 节点模式用）。"""
+        """后台线程预热本地模型（embedder/reranker/OCR/TTS——远程降级接管前用）。"""
         def _warm():
             try:
                 self._embedder_managed.ensure_loaded()
                 self._reranker_managed.ensure_loaded()
                 from services.ocr_service import OcrService
                 OcrService.get_instance().warm_up_sync()
+                from services.tts_service import TtsService
+                # 强制本地: 降级瞬间远程可能仍被判可用, 直接预热本地 worker
+                TtsService.get_instance().warmup(force_local=True)
             except Exception:  # noqa: BLE001 —— 预热失败不致命（懒加载路径兜底）
                 logger.exception("模型预热失败（懒加载路径兜底）")
 
