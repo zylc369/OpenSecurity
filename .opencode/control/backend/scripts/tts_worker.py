@@ -30,6 +30,8 @@ from typing import Any, cast
 # 尾部静音判定: 最后 10s 的峰值振幅 < 0.02（16bit 满摆幅归一后）视为合成中断
 SILENCE_TAIL_SEC = 10.0
 SILENCE_PEAK_THRESHOLD = 0.02
+EDGE_HEAD_KEEP_SEC = 0.20   # 头尾静音整理: 段首保留(呼吸感/起音自然)
+EDGE_TAIL_KEEP_SEC = 0.12   # 头尾静音整理: 段尾保留(收音完整)
 
 _model: Any = None  # 常驻模型实例（首次请求懒加载）
 
@@ -113,6 +115,37 @@ def _atempo(wav_path: Path, speed: float) -> None:
     tmp.replace(wav_path)
 
 
+def _trim_edges(wav_path: Path) -> None:
+    """头尾静音整理: 裁掉超量的段首/段尾静音, 治理段级拼接的接缝停顿。
+
+    生成音频自带头 0.4-0.9s / 尾 0.1-0.3s 静音, 段间接缝叠加 0.6-0.8s 明显
+    停顿; 裁到短余量(头 EDGE_HEAD_KEEP_SEC / 尾 EDGE_TAIL_KEEP_SEC)后,
+    接缝降至 ~0.3s 自然换气级。帧级 RMS 检测(峰值 2% 阈值), 原地原子替换。
+    """
+    import numpy as np
+    import soundfile as sf
+    data, sr = sf.read(str(wav_path), dtype="float32")
+    frame = int(0.02 * sr)
+    n = len(data) // frame
+    if n < 3:
+        return
+    rms = np.sqrt(np.mean(data[: n * frame].reshape(n, frame) ** 2, axis=1))
+    th = max(float(np.max(rms)) * 0.02, 1e-5)
+    idx = np.where(rms > th)[0]
+    if len(idx) == 0:
+        return  # 全静音异常: 不裁(交由尾部静音检测链路处置)
+    first = int(idx[0]) * frame
+    last = min(len(data), (int(idx[-1]) + 1) * frame)
+    head_cut = max(0, first - int(EDGE_HEAD_KEEP_SEC * sr))
+    tail_cut = max(0, len(data) - last - int(EDGE_TAIL_KEEP_SEC * sr))
+    if head_cut == 0 and tail_cut == 0:
+        return
+    trimmed = data[head_cut: len(data) - tail_cut if tail_cut else len(data)]
+    tmp = wav_path.with_suffix(".trim.wav")
+    sf.write(str(tmp), trimmed, sr, subtype="PCM_16")
+    tmp.replace(wav_path)
+
+
 def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
     import numpy as np
     import soundfile as sf
@@ -176,8 +209,9 @@ def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
     retried = attempt == 2
     if speed < 0.99:
         _atempo(out_path, speed)
-        info = sf.info(str(out_path))
-        duration = float(info.duration)
+    _trim_edges(out_path)  # 头尾静音整理(接缝停顿治理, 作用于最终输出)
+    info = sf.info(str(out_path))
+    duration = float(info.duration)
     return {"id": req.get("id", ""), "ok": True, "path": str(out_path),
             "duration": round(duration, 2), "rtf": round(rtf, 3), "retried": retried}
 

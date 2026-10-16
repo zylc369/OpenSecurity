@@ -146,6 +146,17 @@ export function segmentText(
       cur = "";
     }
   }
-  if (cur.trim()) segs.push(cur);
+  if (cur.trim()) {
+    // 短尾段并回前段(防"孤尾"): 尾段不足目标一半且合并后不超兜底上界时并入
+    const tail = cur;
+    const prev = segs[segs.length - 1];
+    const mergeLimit = Math.max(target * 2, 160);
+    if (prev !== undefined && tail.length < target * 0.5
+        && prev.length + tail.length <= mergeLimit) {
+      segs[segs.length - 1] = prev + tail;
+    } else {
+      segs.push(tail);
+    }
+  }
   return segs;
 }
