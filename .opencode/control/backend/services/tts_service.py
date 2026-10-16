@@ -87,6 +87,7 @@ class TtsWorkerClient:
         self._lock = threading.Lock()
         self._last_active = 0.0
         self._idle_watchdog: threading.Timer | None = None
+        self._idle_check_interval_sec: float = 60.0  # 空闲检查周期秒（单测注入小值）
 
     @property
     def alive(self) -> bool:
@@ -207,7 +208,7 @@ class TtsWorkerClient:
             if self._proc is not None:
                 self._ensure_idle_watchdog()
 
-        timer = threading.Timer(60.0, _check)
+        timer = threading.Timer(self._idle_check_interval_sec, _check)
         timer.daemon = True
         timer.start()
         self._idle_watchdog = timer
