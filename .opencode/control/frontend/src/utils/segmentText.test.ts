@@ -74,14 +74,14 @@ describe("segmentText 贪心分段", () => {
 
 describe("rampFor 分段设置缩放", () => {
   it("首段 30 字 ≈ 默认序列", () => {
-    expect(rampFor(30, 300)).toEqual([30, 81, 180]);
+    expect(rampFor(30, 300)).toEqual([30, 60, 120]);
   });
   it("首段 60/100 字随比例放大且不超常规段长", () => {
-    expect(rampFor(60, 300)).toEqual([60, 162, 300]);
-    expect(rampFor(100, 300)).toEqual([100, 270, 300]);
+    expect(rampFor(60, 300)).toEqual([60, 120, 240]);
+    expect(rampFor(100, 300)).toEqual([100, 200, 300]);
   });
-  it("首段最小值保底 80/180", () => {
-    expect(rampFor(10, 300)).toEqual([10, 80, 180]);
+  it("首段最小值保底 40/80", () => {
+    expect(rampFor(10, 300)).toEqual([10, 40, 80]);
   });
 });
 
@@ -136,7 +136,7 @@ describe("短尾段并回(防孤尾)", () => {
     const S44 = "独立的尾巴内容这一段比较长会被保留下来作为单独的一段哦。";
     const t = S13.repeat(2) + S19.repeat(5) + S44.repeat(2);
     const segs = segmentText(t, 80);
-    expect(segs.map((s) => s.length)).toEqual([28, 85, 56]); // 尾 56(>=40) 保留独立
+    expect(segs.map((s) => s.length)).toEqual([28, 51, 90]); // 尾 56(>=40) 保留独立
   });
 });
 

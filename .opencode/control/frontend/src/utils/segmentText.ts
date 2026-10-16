@@ -108,13 +108,16 @@ function cutFirstComma(sentence: string, goal: number): number {
 
 /**
  * 首段字数 → 渐进段长序列（测试台"分段设置"用）。
- * 以首段字数为基准缩放后续两段（保底 80/180, 上限 target）:
- *  f=30 → [30, 81, 180]（≈默认序列）; f=60 → [60, 162, 300]; f=100 → [100, 270, 300]
+ * 爬坡约束: 第 N 段播放时长 ≥ 第 N+1 段生成时长（否则段界断档等待）。
+ * 速度模型: 音频 ≈ 0.17-0.24s/字（短段偏慢）; 生成+质检 ≈ 0.07-0.08s/字 + 0.7s
+ *  → 下段字数上限 ≈ (本段字数×0.2 − 0.7) / 0.07 ≈ 本段字数×2.3 − 10。
+ * 取整为: 第二段 max(2f, 40), 第三段 max(4f, 80)（均封顶 target）。
+ *  f=20 → [20, 40, 80]（默认）; f=30 → [30, 60, 80]; f=60 → [60, 80, 80]
  */
 export function rampFor(firstLen: number, target = DEFAULT_NEXT_LEN): number[] {
   const f = Math.max(1, Math.round(firstLen));
-  const b = Math.max(Math.round(f * 2.7), 80);
-  const c = Math.max(Math.round(f * 5), 180);
+  const b = Math.max(Math.round(f * 2), 40);
+  const c = Math.max(Math.round(f * 4), 80);
   return [f, Math.min(b, target), Math.min(c, target)];
 }
 
@@ -136,12 +139,20 @@ export function segmentText(
   }
   const segs: string[] = [];
   let cur = "";
+  const goalNow = () => segs.length < firstTargets.length
+    ? firstTargets[segs.length]
+    : target;
   for (const p of pieces) {
+    // 预检收段（防贪心拖拽超长）: 当前段已接近目标（≥75%）且吞下此句会
+    // 显著超标（>135%）时先收——超长段生成慢会拖垮"下段生成 ≤ 本段播放"的
+    // 无缝链（如 76 字差 4 字吞 55 字句 → 131 字 → 生成 7.5s > 首段 5.8s 播放）
+    if (cur.length > 0 && cur.length >= goalNow() * 0.75
+        && cur.length + p.length > goalNow() * 1.35) {
+      segs.push(cur);
+      cur = "";
+    }
     cur += p;
-    const goal = segs.length < firstTargets.length
-      ? firstTargets[segs.length]
-      : target;
-    if (cur.length >= goal) {
+    if (cur.length >= goalNow()) {
       segs.push(cur);
       cur = "";
     }

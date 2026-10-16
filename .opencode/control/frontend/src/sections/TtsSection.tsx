@@ -17,7 +17,7 @@ import {
 } from "@ant-design/icons";
 import type { VoiceAsset } from "../types";
 import { useTtsPlayer } from "../hooks/useTtsPlayer";
-import { DEFAULT_FIRST_LEN, DEFAULT_NEXT_LEN, segmentText } from "../utils/segmentText";
+import { DEFAULT_FIRST_LEN, DEFAULT_NEXT_LEN, rampFor, segmentText } from "../utils/segmentText";
 
 /** 通道 a 固定测试文案（覆盖对话引号/拟声/叹号/省略号/问号） */
 const DEFAULT_TEXT =
@@ -209,7 +209,9 @@ const TtsSection: React.FC = () => {
   };
 
   const txtTail = txtContent.slice(Math.max(0, startIdx));
-  const txtSegCount = txtTail ? segmentText(txtTail, nextLen).length : 0;
+  const txtSegCount = txtTail
+    ? segmentText(txtTail, nextLen, undefined, rampFor(firstLen, nextLen)).length
+    : 0;
 
   const submitUpload = async () => {
     const values = await form.validateFields();
