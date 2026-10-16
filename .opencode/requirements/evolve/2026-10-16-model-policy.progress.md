@@ -38,3 +38,11 @@
 
 - **新增**: `services/model_policy.py`、`services/model_ops.py`、`tests/test_model_policy.py`、`requirements/evolve/2026-10-16-model-policy-and-manual-load.md`（需求）、本台账
 - **修改**: `server.py`、`services/{tts_service,ocr_service,model_loader,model_assets,remote_node}.py`、`routes/{models,ocr}.py`、`tests/{test_control,test_remote_relayd}.py`、`frontend/src/{sections/ModelsSection.tsx,App.tsx}`
+
+## 附加批次（2026-10-17 凌晨）: code review 修复
+
+- #7 TTS 空闲 watchdog one-shot 不重排（1800s 永不触发）→ 链式重排; 实测 `--model-idle-sec cosyvoice3-8bit=70` 120s 触发释放 ✓
+- #8 节点在线时"加载 TTS"误报 500（warmup 走远程、engine_loaded=False）→ `TtsService.ready`（本地或远程就绪）统一判定, model_ops/model_assets 消费
+- #9 `--model-idle-sec bge-m3=…` 校验通过但不生效 → bge/reranker 接入 ManagedModel reaper; 实测 70s 阈值触发卸载 ✓
+- #3 重试派生子种子（worker 静音重试 + 服务端质检重试）——同 seed 输出实测仅 ±1 LSB 浮点抖（等效可复现）, 原重试产同版无效
+- #4 mode/注释同步 6 处（routes/tts、segmentText、useTtsPlayer）

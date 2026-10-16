@@ -7,7 +7,9 @@
  *  - 句内符号（，、；：——）不作为断点
  *  - 引号内句末标点是合法断点（对话小说必须——不做引号配对保护）
  *  - 贪心合并句块到目标段长（DEFAULT_NEXT_LEN; 加句后 ≥target 即收段）
- *  - 兜底: 单句超 max(target*2, 160) 在逗号/顿号处硬切（韵律小损防超长段）
+ *  - 预检收段: 当前段 ≥半目标且吞下句会超 150% 目标时先收（防超长拖拽）
+ *  - 兜底: 单句超 max(target*1.5, 120) 在逗号/顿号处硬切（韵律小损防超长段——
+ *    超长句生成时长会突破前段播放窗口, 是无缝链的最大威胁）
  */
 
 /** 句末终止字符（英文句号单独处理——小数点防误切） */
@@ -84,13 +86,13 @@ function splitOversize(sentence: string, max: number): string[] {
 
 /**
  * 第二遍: 句块贪心合并 → 段数组。
- * 渐进分段（首响优化）: 首段 20 字 ≈2s 出声(生成~1.5-2s);
- * ramp 20→80→180→300(数学衔接: 每段播放时长 ≥ 下段生成时长——
- * 20字/5s音 → 80字/5s生成 ✓; 80字/16s音 → 180字/12s生成 ✓; …全链无断档)。
+ * 渐进分段（首响优化）: 首段 20 字 ≈3.5s 出声;
+ * ramp 20→40→80(数学衔接: 每段播放时长 ≥ 下段生成时长——
+ * 20字/3.5s音 → 40字/3.5s生成 ✓; 40字/9s音 → 80字/6s生成 ✓; …全链无断档)。
  * 首句过长时允许在逗号处提前断首段（首响优先——见 cutFirstComma）。
  * @param target 目标段长（默认 80）
- * @param hardMax 单句超此长触发逗号兜底（0=自动: max(target*2, 160)）
- * @param firstTargets 前几段的目标长（默认 [20, min(80), min(180)] 按 target 派生）
+ * @param hardMax 单句超此长触发逗号兜底（0=自动: max(target*1.5, 120)）
+ * @param firstTargets 前几段的目标长（默认 rampFor 派生，如 [20, 40, 80]）
  */
 export const DEFAULT_FIRST_LEN = 20;   // 首段字数默认（改这里一处生效全前端）
 export const DEFAULT_NEXT_LEN = 80;    // 常规段字数默认（改这里一处生效全前端）
@@ -125,7 +127,7 @@ export function segmentText(
   text: string, target = DEFAULT_NEXT_LEN, hardMax = 0,
   firstTargets: readonly number[] = rampFor(DEFAULT_FIRST_LEN, target),
 ): string[] {
-  const hm = hardMax > 0 ? hardMax : Math.max(target * 2, 160); // 兜底阈值随常规段联动
+  const hm = hardMax > 0 ? hardMax : Math.max(target * 1.5, 120); // 兜底阈值随常规段联动
   const sentences = splitSentences(text);
   const pieces: string[] = [];
   for (const s of sentences) {
@@ -143,11 +145,13 @@ export function segmentText(
     ? firstTargets[segs.length]
     : target;
   for (const p of pieces) {
-    // 预检收段（防贪心拖拽超长）: 当前段已接近目标（≥75%）且吞下此句会
-    // 显著超标（>135%）时先收——超长段生成慢会拖垮"下段生成 ≤ 本段播放"的
-    // 无缝链（如 76 字差 4 字吞 55 字句 → 131 字 → 生成 7.5s > 首段 5.8s 播放）
-    if (cur.length > 0 && cur.length >= goalNow() * 0.75
-        && cur.length + p.length > goalNow() * 1.35) {
+    // 预检收段（防贪心拖拽超长）: 当前段已过半目标（拆出它不算碎段）且
+    // 吞下此句会显著超目标（>150%）时先收——超长段生成慢会拖垮
+    // "下段生成 ≤ 本段播放"的无缝链（如 76 字差 4 字吞 55 字句 → 131 字）。
+    // 小 cur（<半目标）不拆: 拆出小段反而拖垮后续（14+14→14|14 劣于 28）。
+    const g = goalNow();
+    if (cur.length > 0 && cur.length >= g * 0.5
+        && cur.length + p.length > g * 1.5) {
       segs.push(cur);
       cur = "";
     }

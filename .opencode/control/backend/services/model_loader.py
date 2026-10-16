@@ -86,6 +86,7 @@ class ModelInferenceService:
             logger.warning("reranker 释放异常: %s", e)
 
     def _init_once(self) -> None:
+        from services import model_policy
         # 裸引用（_embedder/_reranker）仅在 ManagedModel worker 线程写
         # （load 设置 / unload 清空）; 读方动态查找（壳 encode 路径）。
         self._embedder: "SentenceTransformer | None" = None
@@ -97,10 +98,12 @@ class ModelInferenceService:
         self._infer_lock = threading.Lock()
         self._embedder_managed = ManagedModel(
             name="bge-m3", load_fn=self._load_embedder_impl,
-            unload_fn=self._unload_embedder_impl)
+            unload_fn=self._unload_embedder_impl,
+            idle_timeout_sec=model_policy.release_sec_of("bge-m3"))
         self._reranker_managed = ManagedModel(
             name="bge-reranker-v2-m3", load_fn=self._load_reranker_impl,
-            unload_fn=self._unload_reranker_impl)
+            unload_fn=self._unload_reranker_impl,
+            idle_timeout_sec=model_policy.release_sec_of("bge-reranker-v2-m3"))
 
     # ─── 线程安全包装（串行不变量的唯一落点）────────────────
 

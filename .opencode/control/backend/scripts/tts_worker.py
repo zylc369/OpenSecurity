@@ -186,9 +186,11 @@ def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
             ins = str(instruct).strip() if instruct else DEFAULT_INSTRUCT
             kw["instruct_text"] = f"You are a helpful assistant. {ins}"
 
-        # 采样种子: 默认 4（实测分布快端; 同 seed 同文本输出可复现）;
-        # 请求可传任意 >0 值覆盖（前端测试台调节用）。
-        mx.random.seed(seed)
+        # 采样种子: 默认 4; 请求可传任意 >0 值覆盖（前端测试台调节用）。
+        # 同 seed 输出等效可复现（±1 LSB 浮点抖）——故重试必须派生子种子
+        # （seed+attempt-1），否则 attempt 2 产出与 attempt 1 实质相同,
+        # 尾部静音/坏采样救不回来, 重试纯属浪费。
+        mx.random.seed(seed + attempt - 1)
         chunks: list[Any] = []
         for result in model.generate(**kw):
             audio = getattr(result, "audio", None)
@@ -202,7 +204,8 @@ def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
         duration = float(len(full) / model.sample_rate)
         rtf = (time.monotonic() - t0) / max(duration, 0.01)
         if attempt == 1 and _tail_is_silent(out_path):
-            print(f"[worker] 尾部静音检出 → 重试（{duration:.1f}s）", file=sys.stderr, flush=True)
+            print(f"[worker] 尾部静音检出 → 重试（{duration:.1f}s, 派生 seed={seed + 1}）",
+                  file=sys.stderr, flush=True)
             continue
         break
 

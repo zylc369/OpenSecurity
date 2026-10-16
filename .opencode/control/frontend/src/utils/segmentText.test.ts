@@ -107,6 +107,17 @@ describe("分段参数不变量(联动防回归)", () => {
     }
   });
 
+  it("预检收段: 小句累积遇超长句不拖拽(219 级超长段防回归)", () => {
+    const S20 = "甲".repeat(19) + "。";     // 整句 20 字
+    const S19 = "乙".repeat(18) + "。";     // 整句 19 字
+    const LONG = "丙".repeat(159) + "。";   // 单句 160 字（超 hm=120 → 兜底切 60/60/40）
+    const t = S20.repeat(5) + S19 + LONG;
+    const segs = segmentText(t, 80);
+    // 预检: 59 字遇超长片(60)不拖成 119+ 超长合并——切后片按目标合并
+    expect(segs.map((s) => s.length)).toEqual([20, 40, 119, 100]);
+    expect(segs.join("")).toBe(t);
+  });
+
   it("超长句兜底随 target 联动(单句 300+ 无句号 → 每片 ≤ 2*target)", () => {
     const long = "第，" + "很长内容".repeat(80) + "。";
     const segs = segmentText(long, 80);

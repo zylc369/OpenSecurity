@@ -201,6 +201,11 @@ class TtsWorkerClient:
                 logger.info("[tts] 空闲 %.0fs → 释放 worker（内存归还; 下次请求冷启动 ~10s）",
                             release_sec)
                 self._kill()
+                return
+            # 未达阈值且 worker 存活 → 重排下一次检查（周期链式续期——
+            # one-shot 不重排会导致阈值永达不到）
+            if self._proc is not None:
+                self._ensure_idle_watchdog()
 
         timer = threading.Timer(60.0, _check)
         timer.daemon = True
@@ -251,6 +256,20 @@ class TtsService:
     def engine_loaded(self) -> bool:
         """worker 存活即已加载（模型常驻 worker 内——懒启动语义）。"""
         return self._worker.alive
+
+    @property
+    def ready(self) -> bool:
+        """TTS 就绪（本地 worker 存活 或 远程链路可用）——生命周期/UI 判定统一入口。
+
+        合成请求远程优先: 远程在线时本地 worker 本就不启动, 但功能可用。
+        """
+        if self.engine_loaded:
+            return True
+        try:
+            from services.remote_link import RemoteLinkService
+            return RemoteLinkService.get_instance().should_use_remote()
+        except Exception:  # noqa: BLE001 —— remote_link 未就绪 → 按本地判定
+            return False
 
     # ── 合成 ─────────────────────────────────────────
 
@@ -397,8 +416,11 @@ class TtsService:
         best: "tuple[bytes, float, QcResultT] | None" = None  # (wav, ms, qc)
         prev_bad: "frozenset[str] | None" = None
         for attempt in range(1, cfg.max_attempts + 1):
+            # 每版派生子种子: 同 seed 输出实质可复现（±浮点抖）, 不派生则
+            # 重试产同版、质检永远无新样本可检（-1 也会因 +1 变非负而派生）
             wav, gen_ms = self._synth_local(text, voice_asset, speed,
-                                            instruct=instruct, seed=seed, mode=mode)
+                                            instruct=instruct,
+                                            seed=seed + attempt - 1, mode=mode)
             logger.info("[tts] 第 %d 版生成 %.0fms, 开始质检", attempt, gen_ms)
             q = self._qc_check(wav, text, voice_asset)
             if q is None or q.ok:

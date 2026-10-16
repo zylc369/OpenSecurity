@@ -1,9 +1,10 @@
 /**
  * TTS 听书播放器 hook（段级协议客户端——Legado 业内模式）。
  *
- * 职责: 分段(segmentText) → 逐段 POST /api/tts（预取, ≤3 in-flight）
- *      → Audio 顺序接力播放 → 暂停/恢复/停止。
- * 服务端无状态; 单实例（新 start 自动停旧）; 段失败重试 1 次后停止并报错。
+ * 职责: 分段(segmentText) → 逐段 POST /api/tts（播放驱动预取, 深度 1:
+ *      播第 N 段时挂出第 N+1 段） → Audio 顺序接力播放 → 暂停/恢复/停止。
+ * 服务端无状态; 单实例（新 start 自动停旧）; 单段网络失败重试 1 次,
+ * 仍失败跳过该段继续, 累计 3 段失败停止并报错。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DEFAULT_FIRST_LEN, DEFAULT_NEXT_LEN, rampFor, segmentText } from "../utils/segmentText";
@@ -41,10 +42,11 @@ const PREFETCH_DEPTH = 1;
 
 /** 试听可选参数(测试台): 朗读指令/采样种子/分段字长 */
 export interface StartOptions {
+  voice?: string;    // 音色库 id(空=服务端默认音色)
   instruct?: string; // 朗读指令仅 instruct 模式用(空=引擎默认"请用正常语速朗读接下来的内容。")
   seed?: number;     // 采样种子(≤0=默认 4)
   firstLen?: number; // 首段字数(默认 20)
-  nextLen?: number;  // 常规段字数(默认 300)
+  nextLen?: number;  // 常规段字数(默认 80)
   mode?: string;     // 合成模式(""=默认 zero_shot 情感饱满; "instruct"=指令控制)
 }
 
@@ -112,14 +114,17 @@ export function useTtsPlayer() {
     let p = blobPromises.current.get(idx);
     if (p) return p;
     const text = segsRef.current[idx];
+    // 合成请求体统一构造(与重试共用——省字段漂移)
+    const buildBody = (): string => JSON.stringify({
+      text, speed: 1.0,
+      voice: optsRef.current.voice ?? "",
+      instruct: optsRef.current.instruct ?? "",
+      seed: optsRef.current.seed ?? -1,
+      mode: optsRef.current.mode ?? "",
+    });
     const doFetch = async (): Promise<Blob> => {
       try {
-        const body = JSON.stringify({
-          text, speed: 1.0,
-          instruct: optsRef.current.instruct ?? "",
-          seed: optsRef.current.seed ?? -1,
-          mode: optsRef.current.mode ?? "",
-        });
+        const body = buildBody();
         const r = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -131,12 +136,7 @@ export function useTtsPlayer() {
       } catch (e) {
         if (signal.aborted) throw e; // 停止指令不重试
         // 单次重试(网络抖动)
-        const body = JSON.stringify({
-          text, speed: 1.0,
-          instruct: optsRef.current.instruct ?? "",
-          seed: optsRef.current.seed ?? -1,
-          mode: optsRef.current.mode ?? "",
-        });
+        const body = buildBody();
         const r2 = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -166,6 +166,10 @@ export function useTtsPlayer() {
 
   const playSeg = useCallback((idx: number, signal: AbortSignal) => {
     if (stoppedRef.current || idx >= segsRef.current.length) {
+      if (idx >= segsRef.current.length) {  // 自然播完(非 stop 指令)
+        stoppedRef.current = true;          // 标记后预取轮询自查清退
+        console.log("[tts] 全部段播放完成");
+      }
       setState((s) => ({ ...s, status: "idle" }));
       return;
     }
@@ -177,7 +181,9 @@ export function useTtsPlayer() {
       const audio = new Audio(url);
       audio.preservesPitch = true;   // 变速保音调(标准播放器语义)
       audio.playbackRate = speedRef.current;
-      urlPool.current.push(url);
+      audio.onloadedmetadata = () => {  // 元数据就绪后回填真实时长(创建时通常 NaN)
+        if (Number.isFinite(audio.duration)) segDurations.current[idx] = audio.duration;
+      };
       audioRef.current = audio;
       const dur = Number.isFinite(audio.duration) ? audio.duration
         : segsRef.current[idx].length * SEC_PER_CHAR;
@@ -228,7 +234,7 @@ export function useTtsPlayer() {
       const msg = e instanceof Error ? e.message : String(e);
       if (errCount.current >= 3) {
         stop();
-        setState((s) => ({ ...s, error: `${msg}（连续失败已停止）` }));
+        setState((s) => ({ ...s, error: `${msg}（累计失败 3 次已停止）` }));
       } else {
         setState((s) => ({ ...s, error: `${msg}（跳过）` }));
         playSeg(idx + 1, signal); // 跳过坏段继续

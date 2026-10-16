@@ -5,7 +5,7 @@
  * + 苹果风播放器（大圆钮/时间轴/指标行）+ 默认音色 + 上传。
  * 组件库: antd v5（Tooltip mouseEnterDelay=0 替代列 ellipsis 原生 title 的 ~2s 延迟）。
  */
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Avatar, Button, Card, Empty, Form, Input, InputNumber, Modal, Progress,
   Radio, Select, Space, Table, Tag, Tooltip, Typography, Upload, message,
@@ -167,6 +167,7 @@ const TtsSection: React.FC = () => {
     setActiveVoice(voiceId);
     const instruct = useCustomInstruct ? customInstruct.trim() : instructSel;
     player.start(text, {
+      voice: voiceId,  // 试听=用该行音色(空串走服务端默认)
       instruct,
       seed: seedVal !== null ? seedVal : -1,  // 0 是合法种子; null(留空)=默认
       firstLen,
@@ -179,6 +180,19 @@ const TtsSection: React.FC = () => {
     player.stop();
     setActiveVoice("");
   };
+
+  // 自然播完（idle）→ 清理行高亮（播放卡随 activeVoice 收起）
+  useEffect(() => {
+    if (player.state.status === "idle") setActiveVoice("");
+  }, [player.state.status]);
+
+  // 首段生成秒表: starting 期间本地 200ms tick 驱动读数刷新（startTick 不变）
+  const [, setGenTick] = useState(0);
+  useEffect(() => {
+    if (player.state.status !== "starting") return;
+    const timer = window.setInterval(() => setGenTick((x) => x + 1), 200);
+    return () => window.clearInterval(timer);
+  }, [player.state.status]);
 
   const listenBtn = (v: VoiceAssetX, channel: string, text: string, disabled: boolean) => (
     <Button type="primary" ghost icon={<CaretRightOutlined />}
@@ -208,10 +222,12 @@ const TtsSection: React.FC = () => {
     setTxtContent(await f.text());
   };
 
-  const txtTail = txtContent.slice(Math.max(0, startIdx));
-  const txtSegCount = txtTail
+  // 大文件 tail 全量分段成本高——memo 到输入变化才重算（无关 state 渲染不触发）
+  const txtTail = useMemo(
+    () => txtContent.slice(Math.max(0, startIdx)), [txtContent, startIdx]);
+  const txtSegCount = useMemo(() => (txtTail
     ? segmentText(txtTail, nextLen, undefined, rampFor(firstLen, nextLen)).length
-    : 0;
+    : 0), [txtTail, nextLen, firstLen]);
 
   const submitUpload = async () => {
     const values = await form.validateFields();
@@ -303,7 +319,8 @@ const TtsSection: React.FC = () => {
                 <Typography.Text strong style={{ fontSize: 13 }}>
                   {player.state.status === "starting"
                     ? `正在生成首段… ${(Math.max(0, Date.now() - player.state.startTick) / 1000).toFixed(1)}s`
-                    : player.state.status === "paused" ? "已暂停" : "正在朗读"}
+                    : player.state.status === "paused" ? "已暂停"
+                      : player.state.status === "idle" ? "已播完" : "正在朗读"}
                 </Typography.Text>
                 {player.state.segTotal > 0 && player.state.status !== "starting" && (
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>

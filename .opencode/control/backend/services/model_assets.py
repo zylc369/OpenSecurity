@@ -227,9 +227,9 @@ class TtsAsset(ModelAsset):
     冷门仓库 308 回源不可靠。目录由 tts_service.TTS_MODEL_DIR 定型。"""
 
     def local_state(self) -> str:
-        # engine_loaded = worker 存活真实态（懒加载）; 文件就绪是 cached 维度
+        # ready = 本地 worker 存活 或 远程链路可用（懒加载）; 文件就绪是 cached 维度
         from services.tts_service import TtsService
-        return (ModelLoadState.READY if TtsService.get_instance().engine_loaded
+        return (ModelLoadState.READY if TtsService.get_instance().ready
                 else ModelLoadState.IDLE)
 
     def cache_state(self) -> "ModelCacheState":

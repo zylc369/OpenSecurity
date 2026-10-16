@@ -21,7 +21,7 @@ def load(model_id: str) -> None:
         from services.tts_service import TtsService
         svc = TtsService.get_instance()
         svc.warmup()
-        if not svc.engine_loaded:
+        if not svc.ready:
             raise RuntimeError("TTS 引擎未就绪（依赖/模型缺失? 见日志）")
     else:
         raise KeyError(model_id)
