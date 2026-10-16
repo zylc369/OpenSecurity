@@ -32,7 +32,7 @@ class OcrReleaseResult:
     ok: bool
     backend: str
     state: str
-    idle_release_sec: int
+    idle_release_sec: float | None
     last_activity_at: "float | None"
     error: "str | None"
     mlx_ready: bool

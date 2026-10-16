@@ -58,6 +58,13 @@ def _registry() -> "ModelAssetRegistry":
 BOOTSTRAP_ENV = "_REMOTE_NODE_BOOTSTRAPPED"
 MODEL_WAIT_TIMEOUT_SEC = 3600  # 全部模型下载等待上限（官方直连慢网络实测 30min 不够）
 
+# 节点场景 server 启动参数（差异唯一落点——想改直接改这一行; 语义见 server.py argparse）:
+#   TTS 预载 + 常驻（不空闲释放）——听书节点零冷启动
+NODE_SERVER_ARGS: list[str] = [
+    "--model-preload", "cosyvoice3-8bit",
+    "--model-idle-sec", "cosyvoice3-8bit=0",
+]
+
 
 @dataclass(frozen=True)
 class RemoteNodeArgs:
@@ -385,7 +392,7 @@ class RemoteNodeBootstrapper:
             fh.write(f"\n===== remote-node start {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
             env_node = {**os.environ, "OPENSECURITY_NODE_LAUNCH": "1"}
             proc = subprocess.Popen(
-                [sys.executable, "-u", "server.py"], cwd=backend_dir,
+                [sys.executable, "-u", "server.py", *NODE_SERVER_ARGS], cwd=backend_dir,
                 stdin=subprocess.DEVNULL,  # stdin 免疫终端关闭（坏 fd 0 会在
                                            # execv 重启时 Fatal: init_sys_streams）
                 stdout=fh, stderr=fh, start_new_session=True, env=env_node)
@@ -430,7 +437,7 @@ class RemoteNodeBootstrapper:
                              if (cm.get(key) or "").strip() != val}
                             if relay.complete() else {}),
             model_ids=ids,
-            launch_cmd=[venv_python, "server.py"],
+            launch_cmd=[venv_python, "server.py", *NODE_SERVER_ARGS],
         )
 
     def run(self) -> None:

@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import sys
@@ -268,6 +269,24 @@ def _detach_session() -> None:
         pass
 
 
+def _start_preload_background(model_ids: "list[str]", log: "logging.Logger") -> None:
+    """后台线程串行预载（不阻塞启动; 逐项失败日志不致命——懒加载兜底）。
+
+    加载原语统一走 services.model_ops（与 /api/models load 同一实现）。
+    """
+    def _run() -> None:
+        from services import model_ops
+        for mid in model_ids:
+            try:
+                log.info("预载模型: %s", mid)
+                model_ops.load(mid)
+            except Exception:  # noqa: BLE001 —— 预载失败不致命
+                log.exception("预载失败: %s（懒加载路径兜底）", mid)
+
+    import threading as _threading
+    _threading.Thread(target=_run, name="model-preloader", daemon=True).start()
+
+
 def main() -> None:
     """控制台主入口。
 
@@ -288,6 +307,48 @@ def main() -> None:
     log.info("=" * 50)
     log.info("控制台启动（pid=%d, pgid=%d, platform=%s）",
              os.getpid(), os.getpgrp(), sys.platform)
+
+    # 启动参数（场景差异唯一入口; 默认=现状行为。改需求优先级: 代码常量表 >
+    # 本参数覆盖——见 services/model_policy.py）:
+    #   --model-preload <id[,id...]>     启动即预载（可重复/逗号分隔）
+    #   --model-idle-sec <id=sec[,...]>  空闲释放秒数覆盖（0=常驻; 可重复/逗号分隔）
+    import argparse
+
+    from services import model_policy as _mp
+    _parser = argparse.ArgumentParser(add_help=True)
+    _parser.add_argument("--model-preload", action="append", default=[], metavar="ID",
+                         help="启动即预载的模型 id（可重复或逗号分隔）")
+    _parser.add_argument("--model-idle-sec", action="append", default=[], metavar="ID=SEC",
+                         help="空闲释放秒数覆盖（0=常驻; 可重复或逗号分隔）")
+    _args = _parser.parse_args()
+
+    def _flat_csv(values: "list[str]") -> "list[str]":
+        return [x.strip() for v in values for x in v.split(",") if x.strip()]
+
+    _preload_explicit = _flat_csv(cast("list[str]", _args.model_preload))
+    _known = sorted(_mp.known_ids())
+    for _mid in _preload_explicit:
+        if _mid not in _mp.known_ids():
+            _parser.error(f"未知模型 id: {_mid}（已知: {_known}）")
+    _idle_items = _flat_csv(cast("list[str]", _args.model_idle_sec))
+    for _item in _idle_items:
+        _id, _sep, _sec = _item.partition("=")
+        _mid = _id.strip()
+        if not _mid or not _sep:
+            _parser.error(f"--model-idle-sec 需 id=sec 格式: {_item!r}")
+        if _mid not in _mp.known_ids():
+            _parser.error(f"未知模型 id: {_mid}（已知: {_known}）")
+        try:
+            _sec_val = float(_sec)
+        except ValueError:
+            _parser.error(f"非法秒数: {_item!r}")
+        try:
+            _mp.apply_idle_override(_mid, _sec_val)
+        except ValueError as _e:
+            _parser.error(str(_e))
+    if _preload_explicit or _idle_items:
+        log.info("启动参数生效: preload=%s idle_overrides=%s",
+                 _preload_explicit, _idle_items)
 
     from services.config_manager import ConfigManager
     from services.frontend_port import FrontendPortRegistry
@@ -362,13 +423,19 @@ def main() -> None:
     _cm = ConfigManager.get_instance()
     _api_key = (_cm.get(_cm.Keys.CONTROL_API_KEY) or "").strip()
     _remote_on = _cm.p2p_settings().transport_mode is not None  # mode 即开关
+    _preload_ids: "list[str]" = []
     if _api_key:
         log.info("节点模式（CONTROL_API_KEY 已配置）: 预加载全部三模型")
-        ModelInferenceService.get_instance().preload_all_models_background()
+        _preload_ids = ["bge-m3", "bge-reranker-v2-m3", "glm-ocr"]
     elif _remote_on:
         log.info("远程模型已启用: 跳过本地预加载（心跳判定后再决定加载）")
     else:
-        ModelInferenceService.get_instance().preload_embedder_background()
+        _preload_ids = ["bge-m3"]
+    for _mid in _preload_explicit:  # 启动参数显式预载: 无条件追加（场景条件之外）
+        if _mid not in _preload_ids:
+            _preload_ids.append(_mid)
+    if _preload_ids:
+        _start_preload_background(_preload_ids, log)
 
     # 步骤 6: 启动 uvicorn（用预绑定的 socket；uvicorn 日志并入 root → 同文件）
     import uvicorn

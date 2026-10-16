@@ -1668,11 +1668,10 @@ def test_ocr_concurrent_load_failure():
 
 @test("ocr: reaper 纯空闲超时——ready 且空闲超窗 → 自动卸载")
 def test_ocr_reaper_idle_release():
-    from services import ocr_service as mod
+    from services import model_policy
     from services.ocr_service import OcrService
 
-    orig_release = mod.IDLE_RELEASE_SEC
-    mod.IDLE_RELEASE_SEC = 0  # 立即超窗（ManagedModel 构造时读取该值）
+    model_policy.apply_idle_override("glm-ocr", 0.001)  # 近似立即超窗（策略层 0=常驻, 取极小正数）
     svc = OcrService._reset_for_tests() or OcrService()
     fake = FakeMlxEngine()
     svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
@@ -1690,7 +1689,7 @@ def test_ocr_reaper_idle_release():
     try:
         asyncio.run(main())
     finally:
-        mod.IDLE_RELEASE_SEC = orig_release
+        model_policy.clear_override("glm-ocr")
         asyncio.run(svc.force_release())
 
 

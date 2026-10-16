@@ -320,6 +320,14 @@ class ModelInferenceService:
         self._embedder_managed.release()
         self._reranker_managed.release()
 
+    def release_embedder(self) -> None:
+        """释放 embedder（手动卸载; 下次使用自动重载）。"""
+        self._embedder_managed.release()
+
+    def release_reranker(self) -> None:
+        """释放 reranker（手动卸载; 下次使用自动重载）。"""
+        self._reranker_managed.release()
+
     def preload_all_models_background(self) -> None:
         """后台线程预热三模型（远程降级 / 节点模式用）。"""
         def _warm():

@@ -9,7 +9,7 @@
   • 状态机/单飞加载/排队卸载/空闲 reaper 全部由 ManagedModel 提供
     （本模块只做平台分支 + 两阶段 extract 编排 + 状态拼装）
   • extract(...):  未就绪自动懒加载（首图 ~1.6s）; 推理刷新活跃时间
-  • 空闲超时卸载: READY 且空闲 >IDLE_RELEASE_SEC(600) → 卸载（还内存）
+  • 空闲超时卸载: READY 且空闲超策略表阈值（glm-ocr 默认 600s）→ 卸载（还内存）
   • force_release(): 前端停止按钮（推理在途则排队等其完成）
 
 并发安全（ManagedModel worker FIFO + 预处理并发）:
@@ -34,12 +34,11 @@ import platform
 import time
 from dataclasses import dataclass
 
+from services import model_policy
 from services.model_lifecycle import ManagedModel
 from services.ocr_engines import MlxEngine, OllamaEngine
 
 logger = logging.getLogger(__name__)
-
-IDLE_RELEASE_SEC = 600     # 纯空闲自动卸载窗口（用户确认 10 分钟）
 
 
 @dataclass
@@ -48,7 +47,7 @@ class OcrStatus:
 
     backend: str                  # mlx / ollama
     state: str                    # idle / starting / ready / stopping
-    idle_release_sec: int
+    idle_release_sec: float | None
     last_activity_at: float | None
     error: str | None
     mlx_ready: bool               # 主环境可 import mlx_vlm（原 mlx_env_ready）
@@ -117,7 +116,7 @@ class OcrService:
                 name="glm-ocr",
                 load_fn=self._load_mlx,
                 unload_fn=self._mlx.unload,
-                idle_timeout_sec=IDLE_RELEASE_SEC,
+                idle_timeout_sec=model_policy.release_sec_of("glm-ocr"),
             )
         return self._managed
 
@@ -194,7 +193,7 @@ class OcrService:
             return OcrStatus(
                 backend="mlx",
                 state=m.state if m else ManagedModel.STATE_IDLE,
-                idle_release_sec=IDLE_RELEASE_SEC,
+                idle_release_sec=model_policy.release_sec_of("glm-ocr"),
                 last_activity_at=None,  # 精确活动时刻不再单独追踪（idle_sec 提供口径）
                 error=m.error if m else None,
                 mlx_ready=MlxEngine.mlx_available(),
@@ -203,7 +202,7 @@ class OcrService:
         return OcrStatus(
             backend="ollama",
             state=ManagedModel.STATE_READY,
-            idle_release_sec=IDLE_RELEASE_SEC,
+            idle_release_sec=model_policy.release_sec_of("glm-ocr"),
             last_activity_at=None,
             error=None,
             mlx_ready=MlxEngine.mlx_available(),

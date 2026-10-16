@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TYPE_CHECKING, Any, cast
 
+from services import model_policy
+
 if TYPE_CHECKING:  # 质检结果类型(运行时懒 import, 静态检查用)
     from scripts.tts_qc import QcResult as QcResultT
 
@@ -45,8 +47,8 @@ CACHE_LIMIT = 2048
 CACHE_BYTES_LIMIT = 256 * 1024 * 1024  # 256MiB 字节预算（大 WAV 防撑爆内存）
 MAX_TEXT_LEN = 2000
 WORKER_TIMEOUT_SEC = 300.0  # 单请求上限（368 字实测 ~30s; 长文+冷启动余量）
-# 空闲自动释放（对齐 OCR 的 idle 模式; TTS 模型加载重（冷 ~10s）→ 阈值比 OCR(600s) 长）
-WORKER_IDLE_SEC = float(os.environ.get("TTS_WORKER_IDLE_SEC", "1800"))
+# 空闲自动释放阈值统一由 services/model_policy.py 策略表提供
+# （cosyvoice3-8bit 默认 1800s; 节点场景经启动参数 --model-idle-sec ...=0 设常驻）
 
 
 class TtsUnavailable(RuntimeError):
@@ -75,8 +77,9 @@ class WorkerResponse:
 class TtsWorkerClient:
     """worker 子进程生命周期 + 行协议收发（线程安全——TtsService 全局锁内使用）。
 
-    空闲自动释放: 每分钟检查 last_active，超 WORKER_IDLE_SEC 无请求 → kill
-    （内存全归还; 下次请求冷启动 ~10s——听书间歇场景的内存/延迟平衡点）。
+    空闲自动释放: 每分钟检查 last_active，超策略表阈值无请求 → kill
+    （内存全归还; 下次请求冷启动 ~10s——听书间歇场景的内存/延迟平衡点;
+    release_sec=None（常驻策略）时看门狗不启用）。
     """
 
     def __init__(self) -> None:
@@ -181,18 +184,22 @@ class TtsWorkerClient:
         )
 
     def _ensure_idle_watchdog(self) -> None:
-        """单例看门狗（1min 周期; daemon 线程不阻退出）。"""
+        """单例看门狗（1min 周期; daemon 线程不阻退出）。空闲释放阈值读
+        策略表（None=常驻 → 不启用看门狗）。"""
         if self._idle_watchdog is not None:
             return
+        release_sec = model_policy.release_sec_of("cosyvoice3-8bit")
+        if release_sec is None:
+            return  # 常驻策略: 不做空闲释放
 
         def _check() -> None:
             # 无锁读（60s 粒度检查; 竞态窗口≈检查点与请求更新 last_active 的
             # 微秒级交叠——即便误杀，请求侧 broken-pipe 自愈重启，无数据损失）
             self._idle_watchdog = None
             if (self._proc is not None and self._last_active > 0
-                    and time.monotonic() - self._last_active > WORKER_IDLE_SEC):
+                    and time.monotonic() - self._last_active > release_sec):
                 logger.info("[tts] 空闲 %.0fs → 释放 worker（内存归还; 下次请求冷启动 ~10s）",
-                            WORKER_IDLE_SEC)
+                            release_sec)
                 self._kill()
 
         timer = threading.Timer(60.0, _check)
@@ -246,6 +253,17 @@ class TtsService:
         return self._worker.alive
 
     # ── 合成 ─────────────────────────────────────────
+
+    def warmup(self) -> None:
+        """预热: 完整合成一次极短文本（worker 模型 + 质检链路就绪）。
+
+        节点预载用（server --model-preload cosyvoice3-8bit）; 失败不抛出
+        （懒加载路径兜底——首请求自愈）。
+        """
+        try:
+            self.synthesize("好。")
+        except Exception as e:  # noqa: BLE001 —— 预热失败不致命
+            logger.warning("[tts] 预热失败（懒加载兜底）: %s", e)
 
     def synthesize(self, text: str, voice: str = "",
                    speed: float = DEFAULT_SPEED,

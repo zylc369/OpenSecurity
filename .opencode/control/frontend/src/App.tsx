@@ -813,6 +813,30 @@ const App: React.FC = () => {
                     .then(() => models.refresh())
                     .catch(() => models.refresh());
                 }}
+                onLoadModel={async (id) => {
+                  try {
+                    const r = await fetch(`/api/models/${id}/load`, { method: "POST" });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) throw new Error((d as { detail?: string }).detail ?? String(r.status));
+                    message.success(`已加载: ${id}`);
+                  } catch (e) {
+                    message.error(`加载失败: ${e instanceof Error ? e.message : String(e)}`);
+                  } finally {
+                    models.refresh();
+                  }
+                }}
+                onUnloadModel={async (id) => {
+                  try {
+                    const r = await fetch(`/api/models/${id}/unload`, { method: "POST" });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) throw new Error((d as { detail?: string }).detail ?? String(r.status));
+                    message.success(`已卸载: ${id}`);
+                  } catch (e) {
+                    message.error(`卸载失败: ${e instanceof Error ? e.message : String(e)}`);
+                  } finally {
+                    models.refresh();
+                  }
+                }}
               />
             </Card>
           </Col>

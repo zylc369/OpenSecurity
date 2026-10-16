@@ -90,3 +90,56 @@ async def ingest_chunk(model_id: str, chunk: IngestChunk) -> "dict[str, object]"
         part.replace(dst)
     return {"ok": True, "name": name, "received": part.stat().st_size
             if part.exists() else dst.stat().st_size}
+
+
+# ─────────────────────────── 手动加载/卸载（生命周期控制） ───────────────────────────
+
+
+@dataclass
+class ModelLoadAck:
+    """load/unload 响应（loaded=操作后的目标状态）。"""
+    ok: bool
+    model_id: str
+    loaded: bool
+
+
+def _load_model(model_id: str) -> None:
+    """手动加载（委托 model_ops——阻塞至真实可用）。"""
+    from services import model_ops
+    model_ops.load(model_id)
+
+
+def _unload_model(model_id: str) -> None:
+    """手动卸载（委托 model_ops）。"""
+    from services import model_ops
+    model_ops.unload(model_id)
+
+
+def _require_known(model_id: str) -> None:
+    from services import model_policy
+    if model_id not in model_policy.known_ids():
+        raise HTTPException(status_code=404, detail=f"未知模型 id: {model_id}")
+
+
+@router.post("/{model_id}/load")
+async def load_model(model_id: str) -> ModelLoadAck:
+    """手动加载模型（阻塞至就绪——预热推理确保真实可用）。"""
+    _require_known(model_id)
+    import asyncio
+    try:
+        await asyncio.to_thread(_load_model, model_id)
+    except Exception as e:  # noqa: BLE001 —— 加载失败面 500（前端 message.error）
+        raise HTTPException(status_code=500, detail=f"加载失败: {e}") from e
+    return ModelLoadAck(ok=True, model_id=model_id, loaded=True)
+
+
+@router.post("/{model_id}/unload")
+async def unload_model(model_id: str) -> ModelLoadAck:
+    """手动卸载模型（释放内存; 下次使用自动重载）。"""
+    _require_known(model_id)
+    import asyncio
+    try:
+        await asyncio.to_thread(_unload_model, model_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"卸载失败: {e}") from e
+    return ModelLoadAck(ok=True, model_id=model_id, loaded=False)

@@ -11,7 +11,7 @@
  *  - 硬件评估不逐模型显示（三个模型需求值相同导致重复）——汇总行在
  *    板块标题旁（App.tsx 传入 hardwareSummary）
  */
-import React from "react";
+import React, { useState } from "react";
 import { Card, Tag, Button, Progress, Typography, Space, Alert, Row, Col, Tooltip } from "antd";
 import { CloudDownloadOutlined, CheckCircleOutlined, PoweroffOutlined } from "@ant-design/icons";
 import type { ModelAsset } from "../types";
@@ -20,13 +20,19 @@ import { fmtDuration } from "../utils/format";
 interface Props {
   models: ModelAsset[] | undefined;
   onDownload: (id: string) => void;
-  onRelease: () => void;   // OCR 强制释放（停止按钮）
+  onRelease: () => void;   // OCR 强制释放（停止按钮——旧链路保留）
+  onLoadModel: (id: string) => Promise<void>;    // 手动加载（阻塞至就绪）
+  onUnloadModel: (id: string) => Promise<void>;  // 手动卸载（释放内存）
 }
 
 const ellipsis = { tooltip: true } as const;
 
-const ModelBlock: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; onRelease: () => void }> = ({ m, onDownload, onRelease }) => {
+const ModelBlock: React.FC<{
+  m: ModelAsset; onDownload: (id: string) => void; onRelease: () => void;
+  onLoadModel: (id: string) => Promise<void>; onUnloadModel: (id: string) => Promise<void>;
+}> = ({ m, onDownload, onRelease, onLoadModel, onUnloadModel }) => {
   const dl = m.download;
+  const [busy, setBusy] = useState(false);
 
   return (
     <Card size="small" style={{ height: "100%" }} bodyStyle={{ padding: "10px 12px" }}>
@@ -98,12 +104,29 @@ const ModelBlock: React.FC<{ m: ModelAsset; onDownload: (id: string) => void; on
             </Button>
           </div>
         )}
+
+        {/* 手动加载/卸载（生命周期控制） */}
+        {m.cached && dl.status !== "downloading" && (
+          <div>
+            {!m.loaded ? (
+              <Button size="small" type="primary" ghost loading={busy}
+                onClick={() => { setBusy(true); void onLoadModel(m.id).finally(() => setBusy(false)); }}>
+                加载
+              </Button>
+            ) : (
+              <Button size="small" type="text" danger loading={busy}
+                onClick={() => { setBusy(true); void onUnloadModel(m.id).finally(() => setBusy(false)); }}>
+                卸载
+              </Button>
+            )}
+          </div>
+        )}
       </Space>
     </Card>
   );
 };
 
-const ModelsSection: React.FC<Props> = ({ models, onDownload, onRelease }) => {
+const ModelsSection: React.FC<Props> = ({ models, onDownload, onRelease, onLoadModel, onUnloadModel }) => {
   if (!models) return <Typography.Text type="secondary">加载中…</Typography.Text>;
 
   // 统一网格（tag 语义在卡片角标显示——紧凑与场景辨识兼得）
@@ -111,7 +134,8 @@ const ModelsSection: React.FC<Props> = ({ models, onDownload, onRelease }) => {
     <Row gutter={[8, 8]}>
       {models.map((m) => (
         <Col key={m.id} xs={24} md={12}>
-          <ModelBlock m={m} onDownload={onDownload} onRelease={onRelease} />
+          <ModelBlock m={m} onDownload={onDownload} onRelease={onRelease}
+            onLoadModel={onLoadModel} onUnloadModel={onUnloadModel} />
         </Col>
       ))}
     </Row>

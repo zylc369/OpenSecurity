@@ -79,7 +79,7 @@ class ModelAssetStatus:
     size_gb: float
     loaded: bool
     idle_sec: float | None            # OCR 专用: 已空闲秒数（其他模型 None）
-    idle_timeout_sec: int | None      # OCR 专用: 空闲自动卸载阈值（其他模型 None）
+    idle_timeout_sec: float | None    # OCR 专用: 空闲自动卸载阈值（其他模型 None）
     download: DownloadView
 
 
@@ -145,7 +145,7 @@ class ModelAsset:
         """缓存检测（HF 快照完整性; OcrAsset 覆写平台差异）。"""
         return ModelAssetRegistry.get_instance()._is_cached(self.repo_id)  # noqa: SLF001
 
-    def idle_info(self) -> "tuple[float | None, int | None]":
+    def idle_info(self) -> "tuple[float | None, float | None]":
         """（已空闲秒, 自动卸载阈值）——OCR 专用，其余 (None, None)。"""
         return (None, None)
 
@@ -200,7 +200,7 @@ class OcrAsset(ModelAsset):
     def cache_state(self) -> "ModelCacheState":
         return ModelAssetRegistry.get_instance()._ocr_cache_state(self)  # noqa: SLF001
 
-    def idle_info(self) -> "tuple[float | None, int | None]":
+    def idle_info(self) -> "tuple[float | None, float | None]":
         from services.ocr_service import OcrService
         st = OcrService.get_instance().status()
         return (OcrService.get_instance().idle_sec(), st.idle_release_sec)
