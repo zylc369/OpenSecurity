@@ -276,6 +276,7 @@ class ConfigManager:
         REMOTE_FAIL_THRESHOLD = "REMOTE_FAIL_THRESHOLD"
         REMOTE_RECOVER_THRESHOLD = "REMOTE_RECOVER_THRESHOLD"
         REMOTE_UNLOAD_DELAY_SEC = "REMOTE_UNLOAD_DELAY_SEC"
+        REMOTE_TTS_WARMUP_THROTTLE_SEC = "REMOTE_TTS_WARMUP_THROTTLE_SEC"
         REMOTE_INFER_TIMEOUT_SEC = "REMOTE_INFER_TIMEOUT_SEC"
         REMOTE_PROBE_TIMEOUT_SEC = "REMOTE_PROBE_TIMEOUT_SEC"
         # 心跳协议可调参数
@@ -327,6 +328,7 @@ class ConfigManager:
         fail_threshold: int = 2  # 连续失败→降级
         recover_threshold: int = 3  # 连续成功→恢复
         unload_delay_sec: float = 300.0  # 恢复后稳定期
+        warmup_throttle_sec: float = 300.0  # 进入 REMOTE 后 TTS 预热节流窗
         infer_timeout_sec: float = 30.0  # 推理请求超时
         probe_timeout_sec: float = 3.0  # 健康探测超时
         punch_timeout_sec: float = 5.0  # P2P 打洞窗口（弱网 NAT 映射建立慢;protocol.md §9）
@@ -714,6 +716,8 @@ class ConfigManager:
             fail_threshold=self._read_num(vals, k.REMOTE_FAIL_THRESHOLD, d.fail_threshold, True),
             recover_threshold=self._read_num(vals, k.REMOTE_RECOVER_THRESHOLD, d.recover_threshold, True),
             unload_delay_sec=self._read_num(vals, k.REMOTE_UNLOAD_DELAY_SEC, d.unload_delay_sec, False),
+            warmup_throttle_sec=self._read_num(vals, k.REMOTE_TTS_WARMUP_THROTTLE_SEC,
+                                               d.warmup_throttle_sec, False),
             infer_timeout_sec=self._read_num(vals, k.REMOTE_INFER_TIMEOUT_SEC, d.infer_timeout_sec, False),
             probe_timeout_sec=self._read_num(vals, k.REMOTE_PROBE_TIMEOUT_SEC, d.probe_timeout_sec, False),
             punch_timeout_sec=self._read_num(vals, "P2P_PUNCH_TIMEOUT_SEC", d.punch_timeout_sec, False),

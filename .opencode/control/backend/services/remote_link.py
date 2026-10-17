@@ -156,6 +156,7 @@ class RemoteLinkService:
         self._last_health: "RemoteHealthInfo | None" = None
         self._unload_timer: "threading.Timer | None" = None
         self._unload_due_at: "float | None" = None
+        self._last_remote_warmup_at: float = 0.0
         self._task: "asyncio.Task[None] | None" = None
         # 校验进行中标志: switch_transport 探测期间（不持锁），心跳/reload 的
         # _sync_client_locked 不得重建 client——存量配置视角（mode 未写）会误判
@@ -187,6 +188,16 @@ class RemoteLinkService:
     def should_use_remote(self) -> bool:
         with self._lock:
             return self._state == self.STATE_REMOTE
+
+    @property
+    def is_remote_active(self) -> bool:
+        """无锁只读判定（状态采集等"可能已持本服务锁"的路径专用）。
+
+        防非重入锁自死锁: status() 持锁采集模型态, 模型态又可能问远程可用性
+        ——此路径不得走 should_use_remote（重复获锁即自死锁）。
+        state 为 str 单次读（原子）, 无锁一致。
+        """
+        return self._state == self.STATE_REMOTE
 
     def get_client(self) -> RemoteConsoleClient:
         with self._lock:
@@ -278,6 +289,7 @@ class RemoteLinkService:
                 self._state = self.STATE_REMOTE
                 logger.info("远程初始评估成功 → REMOTE（url=%s, 延迟 %.1fms）",
                             self._client_url, info.latency_ms)
+                self._schedule_remote_tts_warmup_locked()
             elif (self._state == self.STATE_DEGRADED
                   and self._recover_streak >= _tunables().recover_threshold):
                 self._state = self.STATE_REMOTE
@@ -285,6 +297,7 @@ class RemoteLinkService:
                 logger.info("远程恢复（连续 %d 次成功）→ REMOTE；%ds 稳定期后卸载本地模型",
                             self._recover_streak, delay)
                 self._schedule_unload_locked()
+                self._schedule_remote_tts_warmup_locked()
 
     def _register_failure(self, reason: str) -> None:
         with self._lock:
@@ -345,6 +358,29 @@ class RemoteLinkService:
             self._unload_timer.cancel()
             self._unload_timer = None
         self._unload_due_at = None
+
+    def _schedule_remote_tts_warmup_locked(self) -> None:
+        """进入 REMOTE 后预热节点 TTS（防首听吃节点全链冷启动）。
+
+        节流窗（warmup_throttle_sec, 默认 300s）: 心跳抖动反复
+        DEGRADED↔REMOTE 时不重复轰节点。文本用"好。"（与节点预载 warmup
+        同串）——冷节点缓存 miss 真合成焐 worker; 热节点缓存命中 0ms,
+        命中即 worker 活着, 预热目的已达成。
+        """
+        now = time.monotonic()
+        if now - self._last_remote_warmup_at < _tunables().warmup_throttle_sec:
+            return
+        self._last_remote_warmup_at = now
+        threading.Thread(target=self._warm_remote_tts,
+                         name="remote-tts-warmup", daemon=True).start()
+
+    def _warm_remote_tts(self) -> None:
+        try:
+            client = self.get_client()
+            client.tts_synth("好。", "", 1.0)
+            logger.info("节点 TTS 预热完成（远程首听免节点冷启动）")
+        except Exception as e:  # noqa: BLE001 —— 预热失败不影响主流程
+            logger.warning("节点 TTS 预热失败（首听可能吃冷启动）: %s", e)
 
     # ── 切换操作（routes/remote.py 调用）──────────────────
 
@@ -408,6 +444,7 @@ class RemoteLinkService:
             self._last_ok_at = time.time()
             self._last_health = info
             self._schedule_unload_locked()
+            self._schedule_remote_tts_warmup_locked()
         logger.info("切换远程成功（url=%s, warnings=%d）", url, len(warnings))
         return SwitchResult(ok=True, warnings=warnings)
 
@@ -503,12 +540,14 @@ class RemoteLinkService:
         url, enabled, token = self._read_config()
         mode = ConfigManager.get_instance().p2p_settings().transport_mode
         local_fp = code_fingerprint_str()  # 文件系统 IO（glob+内容哈希）——锁外执行
+        # 模型态采集在锁外: 单项采集可跨服务（如 TTS.ready → 远程可用性判定）
+        # ——锁内调用会与非重入 status 锁自死锁（曾致 /api/models 全挂）
+        from services.model_assets import ModelAssetRegistry, ModelLoadState
+        local_models = [
+            LocalModelState(id=m.id, display=m.display, state=_safe_state(m))
+            for m in ModelAssetRegistry.MODELS
+        ]
         with self._lock:
-            from services.model_assets import ModelAssetRegistry, ModelLoadState
-            local_models = [
-                LocalModelState(id=m.id, display=m.display, state=_safe_state(m))
-                for m in ModelAssetRegistry.MODELS
-            ]
             countdown: float | None = None
             if self._unload_due_at is not None:
                 countdown = max(0.0, self._unload_due_at - time.monotonic())

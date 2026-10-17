@@ -8,6 +8,7 @@
   5. switch_to_local: OFF + 本地模型不卸载
   6. reload_config: 重建 client
   7. 独立日志文件（remote-link.log）且不进 control.log
+  8. 进入 REMOTE 后台预热节点 TTS（含节流窗——防首听吃节点冷启动）
 
 运行方式:
   cd .opencode/control/backend
@@ -337,3 +338,50 @@ if __name__ == "__main__":
             if not ok:
                 print(f"  ✗ {_n}: {_msg}")
         sys.exit(1)
+
+
+class _FakeTtsClient:
+    """伪造远程 client（记录 tts_synth 调用文本）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def tts_synth(self, text, voice, speed, instruct="", seed=-1, mode=""):
+        self.calls.append(text)
+        return b"wav"
+
+
+def _wait_until(cond, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
+@test("remote_link: 进入 REMOTE → 后台预热节点 TTS（防首听吃冷启动）")
+def test_remote_tts_warmup_on_enter():
+    async def run():
+        fake = _FakeTtsClient()
+        svc = _mk_service()
+        svc.get_client = lambda: fake  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]  (测试 fake 注入)
+        _set_probe(svc, [_ok_info()])
+        await _pump(svc, 1)
+        assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE)
+        _wait_until(lambda: bool(fake.calls))  # 预热在后台线程
+        assert_true(fake.calls == ["好。"],
+                    f"进入 REMOTE 应预热一次（文本与节点预载同串），实际 {fake.calls}")
+    asyncio.run(run())
+
+
+@test("remote_link: 预热节流——节流窗内再进入 REMOTE 不重复预热")
+def test_remote_tts_warmup_throttled():
+    async def run():
+        fake = _FakeTtsClient()
+        svc = _mk_service()
+        svc.get_client = lambda: fake  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]  (测试 fake 注入)
+        svc._last_remote_warmup_at = time.monotonic()  # noqa: SLF001 —— 模拟刚预热过
+        _set_probe(svc, [_ok_info()])
+        await _pump(svc, 1)
+        assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE)
+        time.sleep(0.2)  # 若绕过节流会在此窗口内触发
+        assert_true(fake.calls == [], f"节流窗内不应再预热，实际 {fake.calls}")
+    asyncio.run(run())

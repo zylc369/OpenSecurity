@@ -268,7 +268,9 @@ class TtsService:
             return True
         try:
             from services.remote_link import RemoteLinkService
-            return RemoteLinkService.get_instance().should_use_remote()
+            # 无锁只读: 本属性会被 status() 等"已持远程锁"的采集路径调用,
+            # 走加锁接口会自死锁（非重入锁）
+            return RemoteLinkService.get_instance().is_remote_active
         except Exception:  # noqa: BLE001 —— remote_link 未就绪 → 按本地判定
             return False
 

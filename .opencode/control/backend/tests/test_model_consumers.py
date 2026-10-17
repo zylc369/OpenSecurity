@@ -161,3 +161,24 @@ def test_unknown_id_rejected() -> None:
         model_ops.load("nope")
     with pytest.raises(KeyError):
         model_ops.unload("nope")
+
+
+def test_tts_ready_avoids_locked_remote_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ready 的远程判定必须走无锁属性。
+
+    真实故障形态: status() 持远程锁采集模型态 → TTS.ready → 加锁判定接口
+    重复获同一把非重入锁 → 自死锁（/api/models 轮询全挂, TTS worker 不活时必现）。
+    """
+    from services import remote_link as rl
+    locked_called: list[int] = []
+
+    def _spy_locked(self: rl.RemoteLinkService) -> bool:
+        locked_called.append(1)
+        return False
+
+    monkeypatch.setattr(rl.RemoteLinkService, "should_use_remote", _spy_locked)
+    monkeypatch.setattr(rl.RemoteLinkService, "is_remote_active",
+                        property(lambda self: True))  # pyright: ignore[reportArgumentType,reportAny]  (测试属性注入)
+    svc = TtsService()  # worker 不活（未启动）
+    assert svc.ready is True  # 经无锁属性判定远程可用
+    assert locked_called == [], "ready 走了加锁判定（status 锁内自死锁回归）"
