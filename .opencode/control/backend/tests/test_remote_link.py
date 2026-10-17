@@ -156,11 +156,19 @@ def test_recover_and_unload():
         released = []
         from services.model_loader import ModelInferenceService
         from services.ocr_service import OcrService
+        from services.tts_service import TtsService
         _svc = ModelInferenceService.get_instance()
         _osvc = OcrService.get_instance()
+        _tsvc = TtsService.get_instance()
         orig_ml, orig_ocr = _svc.release_all_local, _osvc.release_sync
+        orig_tts = _tsvc.release
         _svc.release_all_local = lambda: released.append("ml")  # type: ignore[method-assign]
         _osvc.release_sync = lambda: released.append("ocr")  # type: ignore[method-assign]
+        _tsvc.release = lambda: released.append("tts")  # type: ignore[method-assign]
+        # 降级预热同防泄漏: 真 preload 会起后台线程真加载模型（毒化进程）
+        _warm_stub = type("StubMI", (), {"preload_all_models_background": staticmethod(lambda: None)})()
+        _orig_mi = rl_module.RemoteLinkService.__dict__["_model_inference"]
+        rl_module.RemoteLinkService._model_inference = staticmethod(lambda: _warm_stub)  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]  (测试桩注入)
         try:
             svc = _mk_service()
             _set_probe(svc, ["f1", "f2"])
@@ -175,11 +183,13 @@ def test_recover_and_unload():
                         "稳定期倒计时已安排")
 
             await asyncio.sleep(0.7)  # 等稳定期（0.5s）到期执行卸载
-            assert_eq(released, ["ml", "ocr"], "稳定期后卸载三模型")
+            assert_eq(released, ["ml", "ocr", "tts"], "稳定期后卸载三模型（含 TTS）")
             assert_true(svc.status().unload_countdown_sec is None, "卸载后无倒计时")
         finally:
             _svc.release_all_local = orig_ml
             _osvc.release_sync = orig_ocr
+            _tsvc.release = orig_tts
+            rl_module.RemoteLinkService._model_inference = _orig_mi  # noqa: SLF001
     asyncio.run(run())
 
 
@@ -194,6 +204,9 @@ def test_cancel_unload_on_redegrade():
         orig_ml, orig_ocr = _svc.release_all_local, _osvc.release_sync
         _svc.release_all_local = lambda: released.append("ml")  # type: ignore[method-assign]
         _osvc.release_sync = lambda: released.append("ocr")  # type: ignore[method-assign]
+        _warm_stub = type("StubMI", (), {"preload_all_models_background": staticmethod(lambda: None)})()
+        _orig_mi = rl_module.RemoteLinkService.__dict__["_model_inference"]
+        rl_module.RemoteLinkService._model_inference = staticmethod(lambda: _warm_stub)  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]  (测试桩注入)
         try:
             svc = _mk_service()
             _set_probe(svc, ["f1", "f2"])
@@ -213,6 +226,7 @@ def test_cancel_unload_on_redegrade():
         finally:
             _svc.release_all_local = orig_ml
             _osvc.release_sync = orig_ocr
+            rl_module.RemoteLinkService._model_inference = _orig_mi  # noqa: SLF001
     asyncio.run(run())
 
 
@@ -291,6 +305,12 @@ def test_switch_to_local():
     _cmi = cs.ConfigManager.get_instance()
     orig_write = _cmi.set_one
     _cmi.set_one = lambda k, v: written.update({k: v}) or {}  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+    from services.ocr_service import OcrService
+    from services.tts_service import TtsService
+    _osvc, _tsvc = OcrService.get_instance(), TtsService.get_instance()
+    orig_ocr, orig_tts = _osvc.release_sync, _tsvc.release
+    _osvc.release_sync = lambda: None  # type: ignore[method-assign]  (防延迟卸载竞态真跑)
+    _tsvc.release = lambda: None  # type: ignore[method-assign]
     try:
         svc = _mk_service()
         svc._state = rl_module.RemoteLinkService.STATE_REMOTE  # noqa: SLF001
@@ -302,6 +322,8 @@ def test_switch_to_local():
         assert_true(svc.status().unload_countdown_sec is None, "卸载被取消")
     finally:
         _cmi.set_one = orig_write
+        _osvc.release_sync = orig_ocr
+        _tsvc.release = orig_tts
 
 
 @test("remote_link: reload_config 重建 client + 计数清零")

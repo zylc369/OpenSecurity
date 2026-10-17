@@ -245,7 +245,11 @@ class TtsService:
 
     def __init__(self) -> None:
         self._cache: "OrderedDict[tuple[str, float, str, int, str, str], tuple[bytes, str]]" = OrderedDict()
-        self._lock = threading.Lock()
+        # 并发结构（按资源分域）: 缓存细锁 / 本地容量 1 队列 / 远程独立。
+        # 本地域语义为信号量（队列取号）——容量 1 由 GPU 单实例决定;
+        # 远程等待（网络 IO）不占本地域（transport 并发安全, 节点侧自排队）。
+        self._cache_lock = threading.Lock()          # 只包缓存读写（微秒级）
+        self._local_sem = threading.Semaphore(1)     # 本地推理域（含 fallback）
         self._worker = TtsWorkerClient()
 
     @classmethod
@@ -297,9 +301,10 @@ class TtsService:
         try:
             if force_local:
                 from services.voice_library import VoiceLibrary
-                self._synth_local("好。",
-                                  VoiceLibrary.get_instance().default_voice(),
-                                  DEFAULT_SPEED)
+                with self._local_sem:  # 本地域取号（与合成/卸载互斥）
+                    self._synth_local("好。",
+                                      VoiceLibrary.get_instance().default_voice(),
+                                      DEFAULT_SPEED)
             else:
                 self.synthesize("好。")
         except Exception as e:  # noqa: BLE001 —— 预热失败不致命
@@ -335,7 +340,7 @@ class TtsService:
         key = (voice_id, speed, instruct, seed, mode, text)
         logger.info("[tts] 请求进入: %d字 voice=%s instruct=%r seed=%d mode=%r",
                     len(text), voice_id, instruct, seed, mode)
-        with self._lock:
+        with self._cache_lock:
             hit = self._cache.get(key)
             if hit is not None:
                 self._cache.move_to_end(key)
@@ -343,51 +348,56 @@ class TtsService:
                             (time.monotonic() - t_enter) * 1000)
                 return TtsResult(wav=hit[0], cached=True, gen_ms=0.0,
                                  voice=voice_id, speed=speed, source=hit[1])
-        # 合成全程持锁（远程+本地统一串行）: worker 协议一问一答 + 远程节点
-        # 同构串行——并发请求排队; 锁外并发会双打远程/fallback 双 spawn worker
-        with self._lock:
-            wait_ms = (time.monotonic() - t_enter) * 1000
-            logger.info("[tts] 获得合成锁（进入后累计 %.0fms，含排队）", wait_ms)
-            # 远程路由（四模型统一远程化——与 embed/rerank/ocr 同语义:
-            # should_use_remote → 远程推理，失败 fallback 本地; 缓存命中不出本机）
+        # 远程域（独立于本地域）: 远程等待为网络 IO, 不占本地队列
+        # （四模型统一远程化——should_use_remote → 远程推理, 失败 fallback 本地;
+        #  缓存命中不出本机）
+        try:
+            from services.remote_link import RemoteLinkService
+            use_remote = RemoteLinkService.get_instance().should_use_remote()
+        except Exception:  # noqa: BLE001 —— remote_link 未就绪 → 本地
+            use_remote = False
+        if use_remote:
+            from services.remote_client import RemoteUnavailable
+            t0 = time.monotonic()
             try:
-                from services.remote_link import RemoteLinkService
-                use_remote = RemoteLinkService.get_instance().should_use_remote()
-            except Exception:  # noqa: BLE001 —— remote_link 未就绪 → 本地
-                use_remote = False
-            if use_remote:
-                from services.remote_client import RemoteUnavailable
-                t0 = time.monotonic()
+                client = RemoteLinkService.get_instance().get_client()
+                wav = client.tts_synth(text, voice_id, speed,
+                                       instruct=instruct, seed=seed, mode=mode)
+                q = self._qc_check(wav, text, voice_asset)
+                if q is None or q.ok:
+                    logger.info("[tts] 远程合成完成: %.0fms, 请求总耗时 %.0fms",
+                                (time.monotonic() - t0) * 1000,
+                                (time.monotonic() - t_enter) * 1000)
+                    return TtsResult(wav=wav, cached=False,
+                                     gen_ms=(time.monotonic() - t0) * 1000,
+                                     voice=voice_id, speed=speed,
+                                     source="remote")
+                logger.warning("远程 tts 质检不合格(%s)，fallback 本地重试",
+                               q.detail)
                 try:
-                    client = RemoteLinkService.get_instance().get_client()
-                    wav = client.tts_synth(text, voice_id, speed,
-                                           instruct=instruct, seed=seed, mode=mode)
-                    q = self._qc_check(wav, text, voice_asset)
-                    if q is None or q.ok:
-                        logger.info("[tts] 远程合成完成: %.0fms, 请求总耗时 %.0fms",
-                                    (time.monotonic() - t0) * 1000,
-                                    (time.monotonic() - t_enter) * 1000)
-                        return TtsResult(wav=wav, cached=False,
-                                         gen_ms=(time.monotonic() - t0) * 1000,
-                                         voice=voice_id, speed=speed,
-                                         source="remote")
-                    logger.warning("远程 tts 质检不合格(%s)，fallback 本地重试",
-                                   q.detail)
-                    try:
-                        RemoteLinkService.get_instance().note_request_failure(
-                            f"tts-qc: {q.detail}")
-                    except Exception:  # noqa: BLE001
-                        pass
-                except RemoteUnavailable as e:
-                    try:
-                        RemoteLinkService.get_instance().note_request_failure(f"tts: {e}")
-                    except Exception:  # noqa: BLE001
-                        pass
-                    logger.warning("远程 tts 失败，fallback 本地: %s", e)
+                    RemoteLinkService.get_instance().note_request_failure(
+                        f"tts-qc: {q.detail}")
+                except Exception:  # noqa: BLE001
+                    pass
+            except RemoteUnavailable as e:
+                try:
+                    RemoteLinkService.get_instance().note_request_failure(f"tts: {e}")
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning("远程 tts 失败，fallback 本地: %s", e)
+        # 本地域（容量 1 队列——本地路径与 fallback 统一入口）:
+        # worker 协议一问一答不交错由容量 1 保证; 多个 fallback 天然排队（背压）
+        t_wait = time.monotonic()
+        with self._local_sem:
+            logger.info("[tts] 本地队列等待 %.0fms（进入后累计 %.0fms）",
+                        (time.monotonic() - t_wait) * 1000,
+                        (time.monotonic() - t_enter) * 1000)
             wav, gen_ms = self._synth_qc_local(text, voice_asset, speed,
-                                               instruct=instruct, seed=seed, mode=mode)
-            logger.info("[tts] 本地合成完成: 生成 %.0fms, 请求总耗时 %.0fms",
-                        gen_ms, (time.monotonic() - t_enter) * 1000)
+                                               instruct=instruct, seed=seed,
+                                               mode=mode)
+        logger.info("[tts] 本地合成完成: 生成 %.0fms, 请求总耗时 %.0fms",
+                    gen_ms, (time.monotonic() - t_enter) * 1000)
+        with self._cache_lock:
             self._cache[key] = (wav, "local")
             self._cache.move_to_end(key)
             while (len(self._cache) > CACHE_LIMIT
@@ -509,13 +519,18 @@ class TtsService:
             Path(out_path).unlink(missing_ok=True)
 
     def cache_size(self) -> int:
-        with self._lock:
+        with self._cache_lock:
             return len(self._cache)
 
     def release(self) -> None:
-        """释放 worker 与缓存（模型目录变更后重载用）。"""
-        with self._lock:
+        """释放 worker 与缓存（模型目录变更后重载用）。
+
+        先经本地域取号（等在途本地合成完成后才关 worker——卸载排队语义）;
+        缓存清理走缓存锁。
+        """
+        with self._local_sem:
             self._worker.shutdown()
+        with self._cache_lock:
             self._cache.clear()
 
 

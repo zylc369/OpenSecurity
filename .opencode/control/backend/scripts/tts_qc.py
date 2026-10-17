@@ -89,6 +89,8 @@ def _sentences(text: str) -> "list[str]":
 
 
 class TtsQC:
+    _check_lock = threading.Lock()  # check 全程串行——funasr/Paraformer 单实例
+    # 访问不变量（拆合成锁前由大锁顺带保证; 现显式——并发 check 会引入 ASR 竞态）
     _inst: "TtsQC | None" = None
     _lock = threading.Lock()
 
@@ -124,6 +126,12 @@ class TtsQC:
 
     def check(self, wav_path: str, orig_text: str, ref_text: str = "",
               cfg: QcConfig | None = None) -> QcResult:
+        with self._check_lock:
+            return self._check_locked(wav_path, orig_text, ref_text, cfg)
+
+    def _check_locked(self, wav_path: str, orig_text: str,
+                      ref_text: str = "",
+                      cfg: QcConfig | None = None) -> QcResult:
         cfg = cfg or QcConfig()
         text, _segs = self._transcribe(wav_path)
         orig_py = _py(orig_text)
