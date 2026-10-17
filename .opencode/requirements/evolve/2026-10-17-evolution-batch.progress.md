@@ -19,16 +19,17 @@
    stub（`_model_inference` 预热 / TTS / OCR 卸载——真调用会真起模型线程毒化进程）
 4. ★ 测试上游接管（`get_instance` 桩对象——绕开前序文件遗留的类/单例绑定状态）
 
-## 二、惰性分段（前端，含正文选词朗读）—— ⏳ 进行中
+## 二、惰性分段（前端，含正文选词朗读）—— ✅ 已完成（真机复听待用户）
 
-按 `2026-10-17-tts-lazy-segmentation.md` §3.1 七步：
-1. ⏳ `scanSentence` 抽取 + `createSegmentFeeder` 实现（等价性单测）
-2. ⏳ feeder 独立单测（惰性: 791 万字 next() 首调 <5ms）
-3. ⏳ 播放器切换（数组→游标; 删 segTotal/totalSec）
-4. ⏳ UI 简化（"已读 N 段"）
-5. ⏳ 正文阅读视图（窗口化渲染）
-6. ⏳ 选中文字→右键→朗读
-7. ⏳ 全量回归 + 真机 + 提交
+| 步骤 | 内容 | 验证 |
+|---|---|---|
+| 1 | `scanSentence` 抽取（splitSentences 共享——句边界逐字符一致）+ `createSegmentFeeder`（延迟交付 lookahead1 实现尾段并回） | 原 22 项分段测试全过 |
+| 2 | feeder 等价性（11 组语料逐段 === 全量版）+ 参数变体 + 惰性（791 万字首调 <5ms 实测） | 14 项全过 |
+| 3 | 播放器切换（段源数组→feeder 游标; ensureSegment 惰性喂段; 窗口回收 O(窗口); 删 segTotal/totalSec/computeTotalOf） | hook 7 项过 |
+| 4 | UI 简化（"已读 N 段"; 段内进度条; 删总时长 Metric） | tsc/build |
+| 5 | 正文阅读视图（3000 字/块窗口化渲染 + 触底续加） | tsc/build |
+| 6 | 选中→右键→"从选中处朗读"（选区→全文偏移→新起点起播） | tsc/build |
+| 7 | 全量回归 | **87 passed** + build ✓；真机复听待用户 |
 
 ## 三、抢速量化实测 —— ⏳ 待做（所有代码改完后）
 

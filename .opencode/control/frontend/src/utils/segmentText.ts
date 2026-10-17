@@ -24,13 +24,17 @@ function isDigit(ch: string | undefined): boolean {
 }
 
 /**
- * 第一遍: 全文 → 句块数组（每块以句末标点（可带闭引号收尾）。
+ * 从 pos 扫描一个句块（惰性原语——splitSentences 与 SegmentFeeder 共享，
+ * 保证两条路径的句边界逐字符一致）。
  * 句末符后的连续同类收尾（!!!/？？？/……）与闭引号并入当前句;
- * 段首尾空白丢弃（TTS 不读空白）。 */
-export function splitSentences(text: string): string[] {
-  const raw: string[] = [];
+ * 纯空白块内部消化（不返回）; 无更多内容返回 null。
+ * 返回的 sent 已 trim。 */
+export function scanSentence(
+  text: string, pos: number,
+): { sent: string; nextPos: number } | null {
+  if (pos >= text.length) return null;
   let cur = "";
-  let i = 0;
+  let i = pos;
   while (i < text.length) {
     const ch = text[i];
     cur += ch;
@@ -52,15 +56,31 @@ export function splitSentences(text: string): string[] {
           break;
         }
       }
-      raw.push(cur);
-      cur = "";
+      const sent = cur.trim();
+      if (sent.length > 0) return { sent, nextPos: j };
+      cur = "";  // 纯空白块（如连续换行）→ 继续扫下一块
       i = j;
-    } else {
-      i++;
+      continue;
     }
+    i++;
   }
-  if (cur.trim()) raw.push(cur);
-  return raw.map((s) => s.trim()).filter((s) => s.length > 0);
+  const sent = cur.trim();
+  return sent.length > 0 ? { sent, nextPos: text.length } : null;
+}
+
+/**
+ * 第一遍: 全文 → 句块数组（每块以句末标点（可带闭引号收尾）——scanSentence 循环）。
+ * 段首尾空白丢弃（TTS 不读空白）。 */
+export function splitSentences(text: string): string[] {
+  const raw: string[] = [];
+  let pos = 0;
+  for (;;) {
+    const sc = scanSentence(text, pos);
+    if (sc === null) break;
+    raw.push(sc.sent);
+    pos = sc.nextPos;
+  }
+  return raw;
 }
 
 /** 超长句兜底: 在逗号/顿号处切成 ≤max 的片（保持标点在片尾）。 */
@@ -174,4 +194,114 @@ export function segmentText(
     }
   }
   return segs;
+}
+
+/**
+ * 惰性分段器（真实听书场景: 选起点 → 向后连续读——"总数"概念不存在）。
+ *
+ * 与 segmentText 全量版共享全部子步骤（scanSentence/贪心/预检/cutFirstComma/
+ * splitOversize），段序列逐段一致（等价性由测试断言）。
+ *
+ * 实现要点——"延迟交付（lookahead 1）": 尾段并回只可能修改"最后一段"，
+ * 故每段确定后先留在 settled（≤1 个未冻结段），出现更晚段时即冻结交付;
+ * 文本结束时对尾段执行并回后再全部交付。内存 O(窗口)，永不回看全文。
+ */
+export interface SegmentFeeder {
+  /** 产出下一段（null=文本结束）。惰性: 只扫描到本段所需的文本。 */
+  next(): string | null;
+  /** 已产出（交付给调用方）的段数——纯增量语义。 */
+  readonly producedCount: number;
+}
+
+export function createSegmentFeeder(
+  text: string, target = DEFAULT_NEXT_LEN, hardMax = 0,
+  firstTargets: readonly number[] = rampFor(DEFAULT_FIRST_LEN, target),
+): SegmentFeeder {
+  const hm = hardMax > 0 ? hardMax : Math.max(target * 1.5, 120);
+  let pos = 0;
+  const pendingPieces: string[] = [];  // 超长切分/首段 cut 产生的片队列
+  let firstCutDone = false;            // 首片逗号级切分仅一次（对齐全量版 pieces[0]）
+  let sentenceDone = false;            // 句子源耗尽
+  let cur = "";                        // 正在累积的段
+  const settled: string[] = [];        // 已确定但"最后一段"仍可能被尾并回修改
+  let settledCount = 0;                // ≈ 全量版 segs.length（goal 档位依据）
+  const outbox: string[] = [];         // 冻结段（不可再变）——next() 出口
+  let delivered = 0;                   // 已交付段数
+
+  const goalNow = (): number => settledCount < firstTargets.length
+    ? firstTargets[settledCount]
+    : target;
+
+  const settle = (seg: string): void => {
+    settled.push(seg);
+    settledCount++;
+    // 出现更晚的段 → 更早段不可再被尾并回修改 → 冻结交付
+    while (settled.length >= 2) outbox.push(settled.shift() as string);
+  };
+
+  const nextPiece = (): string | null => {
+    for (;;) {
+      if (pendingPieces.length > 0) return pendingPieces.shift() as string;
+      if (sentenceDone) return null;
+      const sc = scanSentence(text, pos);
+      if (sc === null) { sentenceDone = true; return null; }
+      pos = sc.nextPos;
+      let pieces = sc.sent.length > hm
+        ? splitOversize(sc.sent, Math.floor(hm / 2))
+        : [sc.sent];
+      if (!firstCutDone && firstTargets.length > 0) {
+        firstCutDone = true;
+        const cut = cutFirstComma(pieces[0], firstTargets[0]);
+        if (cut > 0) pieces = [pieces[0].slice(0, cut), pieces[0].slice(cut)];
+      }
+      pendingPieces.push(...pieces);
+    }
+  };
+
+  const finishTail = (): void => {
+    if (cur.trim()) {
+      // 短尾段并回前段（防孤尾）——与全量版同规则
+      const tail = cur;
+      const prev = settled[settled.length - 1];
+      const mergeLimit = Math.max(target * 2, 160);
+      if (prev !== undefined && tail.length < target * 0.5
+          && prev.length + tail.length <= mergeLimit) {
+        settled[settled.length - 1] = prev + tail;
+      } else {
+        settled.push(tail);
+        settledCount++;
+      }
+    }
+    cur = "";
+    while (settled.length > 0) outbox.push(settled.shift() as string);
+  };
+
+  return {
+    next(): string | null {
+      while (outbox.length === 0) {
+        const p = nextPiece();
+        if (p === null) { finishTail(); break; }
+        // 贪心 + 预检（逐行复刻 segmentText 第二遍——含 goalNow 动态档位）
+        const g = goalNow();
+        if (cur.length > 0 && cur.length >= g * 0.5
+            && cur.length + p.length > g * 1.5) {
+          settle(cur);
+          cur = "";
+        }
+        cur += p;
+        if (cur.length >= goalNow()) {
+          settle(cur);
+          cur = "";
+        }
+      }
+      if (outbox.length > 0) {
+        delivered++;
+        return outbox.shift() as string;
+      }
+      return null;
+    },
+    get producedCount(): number {
+      return delivered;
+    },
+  };
 }

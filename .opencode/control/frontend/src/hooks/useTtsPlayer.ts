@@ -7,20 +7,19 @@
  * 仍失败跳过该段继续, 累计 3 段失败停止并报错。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { DEFAULT_FIRST_LEN, DEFAULT_NEXT_LEN, rampFor, segmentText } from "../utils/segmentText";
+import { DEFAULT_FIRST_LEN, DEFAULT_NEXT_LEN, createSegmentFeeder, rampFor,
+  type SegmentFeeder } from "../utils/segmentText";
 
 export type PlayerStatus = "idle" | "starting" | "playing" | "paused";
 
 export interface TtsPlayerState {
   speed: number;        // 播放倍速(1.0=原速——音频文件不改, 播放端保持音高变速)
   status: PlayerStatus;
-  segIndex: number;    // 当前播放段（0-based）
-  segTotal: number;
+  segIndex: number;    // 当前播放段（0-based——"已读 N 段"= segIndex+1）
   buffered: number;    // 已下载完成、尚未播放的段数
   segProgress: number; // 当前段内播放进度 0~1
   error: string;
-  elapsedSec: number;  // 已播放时长（已完成段 + 当前段进度）
-  totalSec: number;    // 总时长（已知段 duration + 未生成段按 0.2s/字估算）
+  elapsedSec: number;  // 已播放时长（已完成段 + 当前段进度——纯增量语义）
   firstSegMs: number;  // 首段生成耗时（完成即定格——首响指标）
   avgGenMs: number;    // 平均每段生成耗时
   startTick: number;   // start() 时刻（starting 计时, ms）
@@ -30,8 +29,8 @@ export interface TtsPlayerState {
 
 const INITIAL: TtsPlayerState = {
   speed: 1.0,
-  status: "idle", segIndex: 0, segTotal: 0, buffered: 0, segProgress: 0, error: "",
-  elapsedSec: 0, totalSec: 0, firstSegMs: 0, avgGenMs: 0, startTick: 0,
+  status: "idle", segIndex: 0, buffered: 0, segProgress: 0, error: "",
+  elapsedSec: 0, firstSegMs: 0, avgGenMs: 0, startTick: 0,
   segSource: "", firstSegSource: "",
 };
 
@@ -53,19 +52,13 @@ export interface StartOptions {
   mode?: string;     // 合成模式(""=默认 zero_shot 情感饱满; "instruct"=指令控制)
 }
 
-/** 总时长 = 已知段真实时长 + 未生成段按字数估算 */
-function computeTotalOf(segs: readonly string[], durations: readonly number[]): number {
-  let total = 0;
-  for (let i = 0; i < segs.length; i++) {
-    total += durations[i] ?? segs[i].length * SEC_PER_CHAR;
-  }
-  return total;
-}
-
 export function useTtsPlayer() {
   const [state, setState] = useState<TtsPlayerState>(INITIAL);
 
-  const segsRef = useRef<string[]>([]);
+  const feederRef = useRef<SegmentFeeder | null>(null);
+  const producedRef = useRef<Map<number, string>>(new Map());  // 段文本窗口（播过即回收）
+  const producedCountRef = useRef(0);   // feeder 已喂出段数（单调递增的段游标）
+  const finishedRef = useRef(false);    // feeder 耗尽（文本结束）
   const blobPromises = useRef<Map<number, Promise<Blob>>>(new Map());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -96,6 +89,10 @@ export function useTtsPlayer() {
     segDurations.current = [];
     elapsedBase.current = 0;
     genMsList.current = [];
+    producedRef.current = new Map();
+    producedCountRef.current = 0;
+    finishedRef.current = false;
+    feederRef.current = null;
     segSourceRef.current = [];
     nextPlayRef.current = 0;
     nextFetchRef.current = 0;
@@ -115,10 +112,21 @@ export function useTtsPlayer() {
 
   useEffect(() => stop, [stop]); // 卸载即停
 
+  /** 惰性喂段: 确保第 idx 段文本已从 feeder 取出; undefined=再无更多（文本结束）。 */
+  const ensureSegment = useCallback((idx: number): string | undefined => {
+    while (producedCountRef.current <= idx && !finishedRef.current) {
+      const s = feederRef.current?.next() ?? null;
+      if (s === null) { finishedRef.current = true; break; }
+      producedRef.current.set(producedCountRef.current, s);
+      producedCountRef.current++;
+    }
+    return producedRef.current.get(idx);
+  }, []);
+
   const fetchSeg = useCallback((idx: number, signal: AbortSignal): Promise<Blob> => {
     let p = blobPromises.current.get(idx);
     if (p) return p;
-    const text = segsRef.current[idx];
+    const text = producedRef.current.get(idx) ?? "";
     // 合成请求体统一构造(与重试共用——省字段漂移)
     const buildBody = (): string => JSON.stringify({
       text, speed: 1.0,
@@ -172,15 +180,22 @@ export function useTtsPlayer() {
   const pumpRef = useRef<() => void>(() => { /* start() 内替换 */ });
 
   const playSeg = useCallback((idx: number, signal: AbortSignal) => {
-    if (stoppedRef.current || idx >= segsRef.current.length) {
-      if (idx >= segsRef.current.length) {  // 自然播完(非 stop 指令)
-        stoppedRef.current = true;          // 标记后预取轮询自查清退
-        console.log("[tts] 全部段播放完成");
-      }
+    if (stoppedRef.current) {
+      setState((s) => ({ ...s, status: "idle" }));
+      return;
+    }
+    const text = ensureSegment(idx);
+    if (text === undefined) {   // 自然播完(非 stop 指令——feeder 耗尽)
+      stoppedRef.current = true; // 标记后预取轮询自查清退
+      console.log("[tts] 全部段播放完成");
       setState((s) => ({ ...s, status: "idle" }));
       return;
     }
     nextPlayRef.current = idx;
+    // 窗口回收: 段文本只保留播放位附近（内存 O(窗口)）
+    for (const k of Array.from(producedRef.current.keys())) {
+      if (k < idx - 1) producedRef.current.delete(k);
+    }
     fetchSeg(idx, signal).then((blob) => {
       if (stoppedRef.current || signal.aborted) return;
       const url = URL.createObjectURL(blob);
@@ -193,12 +208,12 @@ export function useTtsPlayer() {
       };
       audioRef.current = audio;
       const dur = Number.isFinite(audio.duration) ? audio.duration
-        : segsRef.current[idx].length * SEC_PER_CHAR;
+        : text.length * SEC_PER_CHAR;
       segDurations.current[idx] = dur;
       const gens = genMsList.current.filter((x) => x > 0);
       setState((s) => ({
         ...s, status: "playing", segIndex: idx,
-        segTotal: segsRef.current.length, error: "",
+        error: "",
         segSource: segSourceRef.current[idx] ?? "",
         firstSegSource: segSourceRef.current[0] ?? s.firstSegSource,
         firstSegMs: genMsList.current[0] ?? s.firstSegMs,
@@ -213,7 +228,6 @@ export function useTtsPlayer() {
               segProgress: audio.duration
                 ? audio.currentTime / audio.duration : 0,
               elapsedSec: elapsedBase.current + audio.currentTime,
-              totalSec: computeTotalOf(segsRef.current, segDurations.current),
             }
           : s);
       };
@@ -249,7 +263,7 @@ export function useTtsPlayer() {
         playSeg(idx + 1, signal); // 跳过坏段继续
       }
     });
-  }, [fetchSeg, stop]);
+  }, [ensureSegment, fetchSeg, stop]);
 
   const start = useCallback((text: string, opts?: StartOptions) => {
     stop(); // 单实例: 新试听停旧
@@ -257,27 +271,28 @@ export function useTtsPlayer() {
     const nextLen = opts?.nextLen ?? DEFAULT_NEXT_LEN;
     const firstTargets = rampFor(opts?.firstLen ?? DEFAULT_FIRST_LEN, nextLen);
     console.log(`[tts] 模式=${opts?.mode || "默认(zero_shot)"} 首段目标=${opts?.firstLen ?? DEFAULT_FIRST_LEN}字 常规段=${nextLen}字`);
-    const segs = segmentText(text, nextLen, undefined, firstTargets);
-    if (segs.length === 0) {
+    // 惰性分段: 不预切全文——播放路径只依赖"下一段"（真实听书场景: 选起点向后连读）
+    feederRef.current = createSegmentFeeder(text, nextLen, undefined, firstTargets);
+    producedRef.current = new Map();
+    producedCountRef.current = 0;
+    finishedRef.current = false;
+    if (ensureSegment(0) === undefined) {
       setState({ ...INITIAL, error: "文本为空（起始索引超出文件末尾?）" });
       return;
     }
-    segsRef.current = segs;
     stoppedRef.current = false;
     pausedRef.current = false;
     const ac = new AbortController();
     abortRef.current = ac;
-    setState({ ...INITIAL, status: "starting", segTotal: segs.length,
-      startTick: Date.now(), totalSec: segs.reduce(
-        (a, s) => a + s.length * SEC_PER_CHAR, 0) });
+    setState({ ...INITIAL, status: "starting", startTick: Date.now() });
     // 播放驱动预取: 播放未开始前不挂任何后续段(点击后先让首段可用);
     // 开播后由 playSeg 每次推进时调用 pump——挂到 nextPlay+PREFETCH_DEPTH。
     const pump = () => {
       if (!playingStartedRef.current) return;
       while (!stoppedRef.current
-             && nextFetchRef.current < segs.length
              && nextFetchRef.current <= nextPlayRef.current + PREFETCH_DEPTH) {
         const i = nextFetchRef.current;
+        if (ensureSegment(i) === undefined) break;  // feeder 耗尽
         console.log(`[tts] seg${i} 预取发出（播放点 seg${nextPlayRef.current}）`);
         fetchSeg(i, ac.signal).catch(() => { /* playSeg 侧统一处理 */ });
         nextFetchRef.current += 1;
@@ -292,7 +307,7 @@ export function useTtsPlayer() {
     fetchSeg(0, ac.signal).catch(() => { /* playSeg 侧统一处理 */ });
     nextFetchRef.current = 1; // 游标与已请求区间同步(预取从 seg1 起, 避免假挂起)
     playSeg(0, ac.signal);
-  }, [fetchSeg, playSeg, stop]);
+  }, [ensureSegment, fetchSeg, playSeg, stop]);
 
   const pause = useCallback(() => {
     pausedRef.current = true;

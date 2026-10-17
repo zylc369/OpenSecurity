@@ -105,6 +105,83 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 /** 通道卡片：序号徽章 + 标题 + 图标 + 右上试听主按钮 */
+const READER_BLOCK_CHARS = 3000;  // 正文视图块大小（窗口化渲染粒度）
+
+/** 正文阅读视图（窗口化渲染——791 万字不全量 DOM; 选中→右键→从选中处朗读）。 */
+const ReaderView: React.FC<{
+  text: string;
+  readFrom: (offset: number) => void;
+}> = ({ text, readFrom }) => {
+  const [blocks, setBlocks] = useState(1);   // 已渲染块数（触底续加）
+  const [menu, setMenu] = useState<{ x: number; y: number; offset: number } | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const totalBlocks = Math.max(1, Math.ceil(text.length / READER_BLOCK_CHARS));
+
+  useEffect(() => { setBlocks(1); setMenu(null); }, [text]);  // 换书重置视图
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 240 && blocks < totalBlocks) {
+      setBlocks((b) => Math.min(totalBlocks, b + 1));
+    }
+  };
+
+  /** 选区起点 → 全文字符偏移（块 data-offset + 块内文本偏移）。null=无有效选区。 */
+  const selectionOffset = (): number | null => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+    const range = sel.getRangeAt(0);
+    const node = range.startContainer;
+    const holder = (node.nodeType === Node.ELEMENT_NODE
+      ? (node as Element) : node.parentElement)?.closest("[data-offset]");
+    if (!holder) return null;
+    const base = Number(holder.getAttribute("data-offset") ?? "0");
+    const pre = document.createRange();
+    pre.selectNodeContents(holder);
+    pre.setEnd(node, range.startOffset);
+    return base + pre.toString().length;
+  };
+
+  const onContextMenu = (e: React.MouseEvent) => {
+    const off = selectionOffset();
+    if (off === null) return;  // 无选中 → 原生菜单不干扰
+    e.preventDefault();
+    setMenu({ x: e.clientX, y: e.clientY, offset: off });
+  };
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div ref={scrollRef} onScroll={onScroll} onContextMenu={onContextMenu}
+        style={{
+          maxHeight: 360, overflowY: "auto", border: "1px solid #e8e8ed",
+          borderRadius: 8, padding: "10px 14px", fontSize: 14, lineHeight: 1.9,
+          background: "#fffdfa", whiteSpace: "pre-wrap", wordBreak: "break-all",
+        }}>
+        {Array.from({ length: blocks }, (_, i) => (
+          <span key={i} data-offset={i * READER_BLOCK_CHARS}>{
+            text.slice(i * READER_BLOCK_CHARS,
+                       Math.min(text.length, (i + 1) * READER_BLOCK_CHARS))
+          }</span>
+        ))}
+      </div>
+      {menu && (
+        <>
+          <div style={{ position: "fixed", inset: 0, zIndex: 999 }}
+            onClick={() => setMenu(null)}
+            onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />
+          <Button size="small" type="primary"
+            style={{ position: "fixed", left: menu.x, top: menu.y, zIndex: 1000 }}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => { const off = menu.offset; setMenu(null); readFrom(off); }}>
+            从选中处朗读
+          </Button>
+        </>
+      )}
+    </div>
+  );
+};
+
 function ChannelCard({
   no, title, icon, subtitle, action, disabled,
 }: {
@@ -174,6 +251,14 @@ const TtsSection: React.FC = () => {
       nextLen,
       mode: engineMode === "instruct" ? "instruct" : "",  // ""=默认 zero_shot 情感饱满
     });
+  };
+
+  /** 正文选词朗读: 以选中处为新起点重新起播（整段源文本切片——惰性分段自然衔接）。 */
+  const readFromOffset = (offset: number) => {
+    const list = voices ?? [];
+    const def = list.find((v) => v.is_default) ?? list[0];
+    if (!def) { void message.warning("音色库为空，无法朗读"); return; }
+    launch(def.id, "选词", txtContent.slice(offset));
   };
 
   const doStop = () => {
@@ -300,6 +385,7 @@ const TtsSection: React.FC = () => {
                   从第 {startIdx} 字「{txtTail.slice(0, 20)}…」起 · 共 {txtTail.length} 字 · 约 {txtSegCount} 段
                 </Typography.Text>
               )}
+              {txtContent && <ReaderView text={txtContent} readFrom={readFromOffset} />}
             </div>
           }
           action={listenBtn(v, "c", txtTail, !v.available || txtTail.trim().length === 0)}
@@ -322,9 +408,10 @@ const TtsSection: React.FC = () => {
                     : player.state.status === "paused" ? "已暂停"
                       : player.state.status === "idle" ? "已播完" : "正在朗读"}
                 </Typography.Text>
-                {player.state.segTotal > 0 && player.state.status !== "starting" && (
+                {(player.state.status === "playing" || player.state.status === "paused"
+                  || player.state.status === "idle") && player.state.segIndex > 0 && (
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    第 {player.state.segIndex + 1} / {player.state.segTotal} 段
+                    已读 {player.state.segIndex + 1} 段
                   </Typography.Text>
                 )}
               </Space>
@@ -370,18 +457,14 @@ const TtsSection: React.FC = () => {
             </div>
 
             <div>
+              {/* 段内进度（真实听书场景: 不预设全书总账本, 无全局进度/剩余时长） */}
               <Progress
-                percent={player.state.totalSec > 0
-                  ? Math.min(100, Math.round((player.state.elapsedSec / player.state.totalSec) * 100))
-                  : 0}
+                percent={Math.min(100, Math.round(player.state.segProgress * 100))}
                 showInfo={false} size={["100%", 6]}
                 strokeColor={BLUE} trailColor="#e8e8ed" />
               <div style={{ display: "flex", justifyContent: "space-between", marginTop: 2 }}>
                 <Typography.Text type="secondary" style={{ fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
                   {fmtSec(player.state.elapsedSec)}
-                </Typography.Text>
-                <Typography.Text type="secondary" style={{ fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
-                  -{fmtSec(Math.max(0, player.state.totalSec - player.state.elapsedSec))}
                 </Typography.Text>
               </div>
             </div>
@@ -396,8 +479,6 @@ const TtsSection: React.FC = () => {
               <Metric label="平均生成/段" value={player.state.avgGenMs
                 ? `${(player.state.avgGenMs / 1000).toFixed(1)}s` : "…"} />
               <Metric label="已缓冲" value={`${bufferedCount} 段`} />
-              <Metric label="总时长" value={player.state.totalSec
-                ? `≈${fmtSec(player.state.totalSec)}` : "…"} />
               </div>
               <Space size={4}>
                 <Typography.Text type="secondary" style={{ fontSize: 11 }}>倍速</Typography.Text>
