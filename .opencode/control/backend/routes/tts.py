@@ -49,7 +49,8 @@ def synthesize(req: TtsRequest,
         raise HTTPException(status_code=400, detail=str(e)) from e
     logger.debug("TTS %dB cached=%s %.0fms voice=%s",
                  len(result.wav), result.cached, result.gen_ms, result.voice)
-    return Response(content=result.wav, media_type="audio/wav")
+    return Response(content=result.wav, media_type="audio/wav",
+                    headers={"X-Tts-Source": result.source})
 
 
 @router.get("/voices")

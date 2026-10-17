@@ -24,12 +24,15 @@ export interface TtsPlayerState {
   firstSegMs: number;  // 首段生成耗时（完成即定格——首响指标）
   avgGenMs: number;    // 平均每段生成耗时
   startTick: number;   // start() 时刻（starting 计时, ms）
+  segSource: string;   // 当前段生成来源（"remote"/"local"——服务端 X-Tts-Source）
+  firstSegSource: string;  // 首段生成来源（首响指标配套）
 }
 
 const INITIAL: TtsPlayerState = {
   speed: 1.0,
   status: "idle", segIndex: 0, segTotal: 0, buffered: 0, segProgress: 0, error: "",
   elapsedSec: 0, totalSec: 0, firstSegMs: 0, avgGenMs: 0, startTick: 0,
+  segSource: "", firstSegSource: "",
 };
 
 /** 中文朗读估速（秒/字）——未生成段总时长估算用 */
@@ -79,6 +82,7 @@ export function useTtsPlayer() {
   const segDurations = useRef<number[]>([]);   // 已知段真实时长
   const elapsedBase = useRef(0);               // 已完成段时长累计
   const genMsList = useRef<number[]>([]);      // 每段生成耗时
+  const segSourceRef = useRef<string[]>([]);   // 每段来源（响应头 X-Tts-Source）
 
   const cleanup = useCallback(() => {
     if (audioRef.current) {
@@ -92,6 +96,7 @@ export function useTtsPlayer() {
     segDurations.current = [];
     elapsedBase.current = 0;
     genMsList.current = [];
+    segSourceRef.current = [];
     nextPlayRef.current = 0;
     nextFetchRef.current = 0;
     errCount.current = 0;
@@ -132,6 +137,7 @@ export function useTtsPlayer() {
           signal,
         });
         if (!r.ok) throw new Error(`段 ${idx + 1} 合成失败 HTTP ${r.status}`);
+        segSourceRef.current[idx] = r.headers.get("X-Tts-Source") ?? "";
         return await r.blob();
       } catch (e) {
         if (signal.aborted) throw e; // 停止指令不重试
@@ -144,6 +150,7 @@ export function useTtsPlayer() {
           signal,
         });
         if (!r2.ok) throw new Error(`段 ${idx + 1} 合成失败 HTTP ${r2.status}`);
+        segSourceRef.current[idx] = r2.headers.get("X-Tts-Source") ?? "";
         return await r2.blob();
       }
     };
@@ -192,6 +199,8 @@ export function useTtsPlayer() {
       setState((s) => ({
         ...s, status: "playing", segIndex: idx,
         segTotal: segsRef.current.length, error: "",
+        segSource: segSourceRef.current[idx] ?? "",
+        firstSegSource: segSourceRef.current[0] ?? s.firstSegSource,
         firstSegMs: genMsList.current[0] ?? s.firstSegMs,
         avgGenMs: gens.length
           ? Math.round(gens.reduce((a, b) => a + b, 0) / gens.length) : s.avgGenMs,

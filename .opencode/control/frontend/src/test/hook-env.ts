@@ -50,14 +50,20 @@ export interface TtsEnv {
   calls: { url: string; body: Record<string, unknown> }[];
   /** >0 时接下来的 N 次 fetch 返回 HTTP 500（失败路径测试用）。 */
   failNextTimes: number;
+  /** 响应头 X-Tts-Source 值（"local"/"remote"——来源标识测试用）。 */
+  source: string;
   /** revokeObjectURL 调用记录。 */
   revokeMock: ReturnType<typeof vi.fn>;
 }
 
-function mkResp(status: number, blob: Blob | null): unknown {
+function mkResp(status: number, blob: Blob | null, source: string): unknown {
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: {
+      get: (k: string): string | null =>
+        k.toLowerCase() === "x-tts-source" ? source : null,
+    },
     blob: async (): Promise<Blob> => blob ?? new Blob([]),
   };
 }
@@ -66,7 +72,7 @@ function mkResp(status: number, blob: Blob | null): unknown {
 export function installTtsEnv(): TtsEnv {
   FakeAudio.reset();
   const calls: TtsEnv["calls"] = [];
-  const state = { failNextTimes: 0 };
+  const state = { failNextTimes: 0, source: "local" };
   const revokeMock = vi.fn();
 
   const fetchMock = vi.fn<FetchMock>(async (url: string, init?: FetchInit) => {
@@ -76,9 +82,10 @@ export function installTtsEnv(): TtsEnv {
     });
     if (state.failNextTimes > 0) {
       state.failNextTimes -= 1;
-      return mkResp(500, null);
+      return mkResp(500, null, "");
     }
-    return mkResp(200, new Blob([new Uint8Array([1, 2])], { type: "audio/wav" }));
+    return mkResp(200, new Blob([new Uint8Array([1, 2])], { type: "audio/wav" }),
+                  state.source);
   });
 
   vi.stubGlobal("fetch", fetchMock);
@@ -90,6 +97,8 @@ export function installTtsEnv(): TtsEnv {
     get calls() { return calls; },
     get failNextTimes() { return state.failNextTimes; },
     set failNextTimes(v: number) { state.failNextTimes = v; },
+    get source() { return state.source; },
+    set source(v: string) { state.source = v; },
     revokeMock,
   };
 }

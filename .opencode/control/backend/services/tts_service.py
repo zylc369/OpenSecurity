@@ -63,6 +63,7 @@ class TtsResult:
     gen_ms: float
     voice: str
     speed: float
+    source: str = "local"  # 生成来源（"remote"/"local"——缓存命中为生成时来源）
 
 
 @dataclass
@@ -234,7 +235,7 @@ class TtsService:
     _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
-        self._cache: "OrderedDict[tuple[str, float, str, int, str, str], bytes]" = OrderedDict()
+        self._cache: "OrderedDict[tuple[str, float, str, int, str, str], tuple[bytes, str]]" = OrderedDict()
         self._lock = threading.Lock()
         self._worker = TtsWorkerClient()
 
@@ -331,8 +332,8 @@ class TtsService:
                 self._cache.move_to_end(key)
                 logger.info("[tts] 缓存命中, 直接返回（%.0fms）",
                             (time.monotonic() - t_enter) * 1000)
-                return TtsResult(wav=hit, cached=True, gen_ms=0.0,
-                                 voice=voice_id, speed=speed)
+                return TtsResult(wav=hit[0], cached=True, gen_ms=0.0,
+                                 voice=voice_id, speed=speed, source=hit[1])
         # 合成全程持锁（远程+本地统一串行）: worker 协议一问一答 + 远程节点
         # 同构串行——并发请求排队; 锁外并发会双打远程/fallback 双 spawn worker
         with self._lock:
@@ -359,7 +360,8 @@ class TtsService:
                                     (time.monotonic() - t_enter) * 1000)
                         return TtsResult(wav=wav, cached=False,
                                          gen_ms=(time.monotonic() - t0) * 1000,
-                                         voice=voice_id, speed=speed)
+                                         voice=voice_id, speed=speed,
+                                         source="remote")
                     logger.warning("远程 tts 质检不合格(%s)，fallback 本地重试",
                                    q.detail)
                     try:
@@ -377,13 +379,13 @@ class TtsService:
                                                instruct=instruct, seed=seed, mode=mode)
             logger.info("[tts] 本地合成完成: 生成 %.0fms, 请求总耗时 %.0fms",
                         gen_ms, (time.monotonic() - t_enter) * 1000)
-            self._cache[key] = wav
+            self._cache[key] = (wav, "local")
             self._cache.move_to_end(key)
             while (len(self._cache) > CACHE_LIMIT
-                   or sum(len(v) for v in self._cache.values()) > CACHE_BYTES_LIMIT):
+                   or sum(len(v[0]) for v in self._cache.values()) > CACHE_BYTES_LIMIT):
                 self._cache.popitem(last=False)
         return TtsResult(wav=wav, cached=False, gen_ms=gen_ms,
-                         voice=voice_id, speed=speed)
+                         voice=voice_id, speed=speed, source="local")
 
     def _qc_check(self, wav: bytes, text: str,
                   voice_asset: "VoiceAssetT") -> "QcResultT | None":

@@ -389,7 +389,10 @@ const TtsSection: React.FC = () => {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 8, flexWrap: "wrap", gap: 8 }}>
               <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
               <Metric label="首段生成" value={player.state.firstSegMs
-                ? `${(player.state.firstSegMs / 1000).toFixed(1)}s` : "…"} />
+                ? `${(player.state.firstSegMs / 1000).toFixed(1)}s${
+                    player.state.firstSegSource === "remote" ? "·远程"
+                    : player.state.firstSegSource === "local" ? "·本地" : ""}`
+                : "…"} />
               <Metric label="平均生成/段" value={player.state.avgGenMs
                 ? `${(player.state.avgGenMs / 1000).toFixed(1)}s` : "…"} />
               <Metric label="已缓冲" value={`${bufferedCount} 段`} />

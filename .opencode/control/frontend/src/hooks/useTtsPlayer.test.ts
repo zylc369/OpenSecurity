@@ -101,6 +101,15 @@ describe("useTtsPlayer 协议与状态机", () => {
     expect(result.current.state.segIndex).toBe(1); // 播放点确实前进到 seg1
   });
 
+  it("来源标识回填（X-Tts-Source: remote → firstSegSource）", async () => {
+    env.source = "remote";
+    const { result } = renderHook(() => useTtsPlayer());
+    act(() => { result.current.start(TEXT2); });
+    await waitFor(() => expect(FakeAudio.instances.length).toBe(1));
+    expect(result.current.state.firstSegSource).toBe("remote");
+    expect(result.current.state.segSource).toBe("remote");
+  });
+
   it("stop 清场: 状态回 idle 且已 revoke 对象 URL", async () => {
     const { result } = renderHook(() => useTtsPlayer());
     act(() => { result.current.start(TEXT2); });
