@@ -116,13 +116,16 @@ describe("useTtsPlayer 协议与状态机", () => {
     const { result } = renderHook(() => useTtsPlayer());
     act(() => { result.current.start(TEXT4); });
     expect(expectedSegCount(TEXT4)).toBe(4);
-    for (let i = 0; i < 3; i++) {   // 播到第 3 段起播（idx=2 → 第 0 段应被回收）
+    for (let i = 0; i < 3; i++) {   // 播完 seg0..seg2 → 第 4 段（idx=3）起播
       await waitFor(() => expect(FakeAudio.instances.length).toBe(i + 1));
       await act(async () => { FakeAudio.instances[i].finish(1); });
     }
-    expect(env.revokeMock).toHaveBeenCalled();   // 播过段已释放
-    // 剩余播放与自然收尾不受影响
-    await act(async () => { FakeAudio.instances[2].finish(1); });
+    // 窗口回收（k < idx-1 = {0,1}）: 恰好 revoke seg0/seg1 的 URL; 窗口内不误杀
+    expect(env.revokeMock).toHaveBeenCalledTimes(2);
+    expect(env.revokeMock).toHaveBeenCalledWith("blob:mock-1");
+    expect(env.revokeMock).toHaveBeenCalledWith("blob:mock-2");
+    expect(env.revokeMock).not.toHaveBeenCalledWith("blob:mock-3");
+    // 收尾播放与自然结束不受影响
     await act(async () => { FakeAudio.instances[3].finish(1); });
     await waitFor(() => expect(result.current.state.status).toBe("idle"));
   });

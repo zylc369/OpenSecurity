@@ -90,7 +90,8 @@ export function installTtsEnv(): TtsEnv {
 
   vi.stubGlobal("fetch", fetchMock);
   vi.stubGlobal("Audio", FakeAudio);
-  URL.createObjectURL = vi.fn((_b: Blob | MediaSource): string => "blob:mock");
+  let urlSeq = 0;  // 自增 URL（测试可精确断言回收了哪些段）
+  URL.createObjectURL = vi.fn((_b: Blob | MediaSource): string => `blob:mock-${++urlSeq}`);
   URL.revokeObjectURL = revokeMock as unknown as typeof URL.revokeObjectURL;
 
   return {

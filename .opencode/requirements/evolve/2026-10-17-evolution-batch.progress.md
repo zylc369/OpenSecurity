@@ -58,3 +58,6 @@
 - 测试补: hook 长文本全播放不重不漏（段请求序列 join === 原文）
 - 文档: lock-split §2.2 伪码与缓存语义对齐（远程不入缓存; 本地域内写缓存）
 - ~~遗留: blobPromises/urlPool 每段 Blob 常驻至 stop~~ → **已销账**（播过段音频资源窗口回收: segUrlRef+blobPromises 同点释放+revoke）
+- [三轮 review 修复] playSeg 守卫只退出不改状态（防旧会话 setState 错打新会话）;
+  回收覆盖失败段（blobPromises 独立窗口）; 同段旧 URL 防重入; 测试删多余 finish +
+  URL 自增精确断言（恰好回收 seg0/seg1）

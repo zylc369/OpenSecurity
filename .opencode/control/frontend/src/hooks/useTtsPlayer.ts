@@ -178,10 +178,9 @@ export function useTtsPlayer() {
   const pumpRef = useRef<() => void>(() => { /* start() 内替换 */ });
 
   const playSeg = useCallback((idx: number, signal: AbortSignal) => {
-    if (stoppedRef.current || signal.aborted) {  // aborted=旧会话回调 (防打进新会话)
-      setState((s) => ({ ...s, status: "idle" }));
-      return;
-    }
+    // stop 指令/旧会话回调: 只退出不改状态（idle 落态由 stop() 与
+    // feeder 耗尽分支负责——旧会话的 setState 会错打在新会话上）
+    if (stoppedRef.current || signal.aborted) return;
     const text = ensureSegment(idx);
     if (text === undefined) {   // 自然播完(非 stop 指令——feeder 耗尽)
       stoppedRef.current = true; // 标记后预取轮询自查清退
@@ -199,12 +198,16 @@ export function useTtsPlayer() {
       if (k < idx - 1) {
         URL.revokeObjectURL(segUrlRef.current.get(k) as string);
         segUrlRef.current.delete(k);
-        blobPromises.current.delete(k);
       }
+    }
+    for (const k of Array.from(blobPromises.current.keys())) {
+      if (k < idx - 1) blobPromises.current.delete(k);  // 失败段（无 URL）同样窗口化
     }
     fetchSeg(idx, signal).then((blob) => {
       if (stoppedRef.current || signal.aborted) return;
       const url = URL.createObjectURL(blob);
+      const oldUrl = segUrlRef.current.get(idx);
+      if (oldUrl) URL.revokeObjectURL(oldUrl);  // 防重入兜底（同段二次路径）
       segUrlRef.current.set(idx, url);
       const audio = new Audio(url);
       audio.preservesPitch = true;   // 变速保音调(标准播放器语义)
