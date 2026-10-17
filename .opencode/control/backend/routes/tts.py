@@ -29,6 +29,7 @@ class TtsRequest(BaseModel):
     instruct: str = Field(default="", max_length=200)  # 朗读指令(空=默认正常语速)
     seed: int = Field(default=-1, ge=-1, le=99999)     # 采样种子(≤0=默认 4)
     mode: str = Field(default="", max_length=16)       # ""=zero_shot(默认 情感饱满); "instruct"=指令控制
+    no_cache: bool = False  # 预热专用: 跳过缓存读写（强制真合成——穿透假命中）
 
 
 def get_tts_service() -> TtsService:
@@ -42,7 +43,7 @@ def synthesize(req: TtsRequest,
     try:
         result = svc.synthesize(req.text, voice=req.voice, speed=req.speed,
                                 instruct=req.instruct, seed=req.seed,
-                                mode=req.mode)
+                                mode=req.mode, no_cache=req.no_cache)
     except TtsUnavailable as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except ValueError as e:

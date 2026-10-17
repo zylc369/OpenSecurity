@@ -22,6 +22,7 @@ class NodeEntry:
     writer: asyncio.StreamWriter
     session: SessionCrypto          # gateway 信令会话（下发 punch_hint 用）
     ep: "tuple[str, int] | None" = None      # 最新 update_ep（UDP 公网映射）
+    lan_ep: "tuple[str, int] | None" = None  # gateway 自报 LAN 端点（同 LAN 打洞候选）
     last_seen: float = field(default_factory=time.monotonic)
 
 
@@ -38,9 +39,11 @@ class Registry:
     # ── 节点表 ────────────────────────────────────────
 
     def register(self, node: str, writer: asyncio.StreamWriter,
-                 session: SessionCrypto) -> None:
+                 session: SessionCrypto,
+                 lan_ep: "tuple[str, int] | None" = None) -> None:
         """register/重连覆盖旧条目（旧连接由对端断开自然失效）。"""
-        self._nodes[node] = NodeEntry(node=node, writer=writer, session=session)
+        self._nodes[node] = NodeEntry(node=node, writer=writer, session=session,
+                                      lan_ep=lan_ep)
 
     def heartbeat(self, node: str) -> bool:
         entry = self._nodes.get(node)
@@ -49,11 +52,14 @@ class Registry:
         entry.last_seen = self._clock()
         return True
 
-    def update_ep(self, node: str, ep: "tuple[str, int]") -> bool:
+    def update_ep(self, node: str, ep: "tuple[str, int]",
+                  lan_ep: "tuple[str, int] | None" = None) -> bool:
         entry = self._nodes.get(node)
         if entry is None:
             return False
         entry.ep = ep
+        if lan_ep is not None:  # None=本次未探测到——不覆盖旧值
+            entry.lan_ep = lan_ep
         entry.last_seen = self._clock()
         return True
 

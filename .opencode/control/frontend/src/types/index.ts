@@ -334,6 +334,10 @@ export interface RemoteLinkStatusView {
   transport: null | "p2p" | "http";
   /** 本机代码指纹（与 remote_health.code_fingerprint 对齐检测） */
   local_code_fingerprint: string;
+  /** P2P 传输路径: direct/relay/""（空=未建/非 P2P） */
+  path: string;
+  /** 最近一次直连尝试失败原因（空=无失败/已恢复） */
+  direct_last_error: string;
   /** 本轮离线期累计探测次数（成功后清零——"后端在持续建联"的证据） */
   probe_attempts: number;
   probe_interval_sec: number;

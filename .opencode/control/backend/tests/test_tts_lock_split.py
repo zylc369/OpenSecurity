@@ -25,7 +25,8 @@ class _FakeClient:
     on_call: "object"  # callable
 
     def tts_synth(self, text: str, voice: str, speed: float,
-                  instruct: str = "", seed: int = -1, mode: str = "") -> bytes:
+                  instruct: str = "", seed: int = -1, mode: str = "",
+                  no_cache: bool = False) -> bytes:
         return self.on_call(text)  # type: ignore[operator]  (测试桩)
 
 

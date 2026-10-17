@@ -607,6 +607,17 @@ const RemoteSection: React.FC = () => {
               borderRadius: 8,
             }}
           >
+            <Descriptions.Item label="传输链路">
+              {status?.path === "direct"
+                ? "直连（P2P 打洞）"
+                : status?.path === "relay"
+                  ? `中继（自动升级中${
+                      status.direct_last_error
+                        ? `；上次失败: ${status.direct_last_error}`
+                        : ""
+                    }）`
+                  : "—"}
+            </Descriptions.Item>
             <Descriptions.Item label="心跳延迟">
               {health ? (
                 `${health.latency_ms} ms`

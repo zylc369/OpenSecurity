@@ -135,6 +135,22 @@ class RemoteConsoleClient:
             self._transport = transport
         return self._transport
 
+    # ─── 传输路径可见性（远程资源卡数据源）─────────────
+
+    def transport_path(self) -> str:
+        """当前 P2P 传输路径（direct/relay/""——transport 未建时空）。"""
+        transport = self._transport
+        if transport is None:
+            return ""
+        return transport.current_path or ""
+
+    def direct_last_error(self) -> str:
+        """最近一次直连尝试失败原因（空 = 无失败/非 P2P/未启动）。"""
+        transport = self._transport
+        if transport is None:
+            return ""
+        return transport.direct_last_error
+
     def _p2p_call(self, method: str, path: str,
                   payload: "dict[str, object] | None",
                   timeout: float | None = None) -> "dict[str, object]":
@@ -200,11 +216,14 @@ class RemoteConsoleClient:
     TTS_TIMEOUT_SEC = 600.0
 
     def tts_synth(self, text: str, voice: str, speed: float,
-                  instruct: str = "", seed: int = -1, mode: str = "") -> bytes:
+                  instruct: str = "", seed: int = -1, mode: str = "",
+                  no_cache: bool = False) -> bytes:
         """语音合成（POST /api/tts——WAV 二进制响应，不经 _post_json 的
-        JSON 假设; gateway 对非 JSON 响应以原始 bytes 装入 ApiResp.body）。"""
+        JSON 假设; gateway 对非 JSON 响应以原始 bytes 装入 ApiResp.body）。
+        no_cache: 预热专用——节点侧跳过缓存读写（强制真合成）。"""
         payload: dict[str, object] = {"text": text, "voice": voice, "speed": speed,
-                                      "instruct": instruct, "seed": seed, "mode": mode}
+                                      "instruct": instruct, "seed": seed, "mode": mode,
+                                      "no_cache": no_cache}
         if self._p2p_cfg is not None:
             from services.remote_transport import TransportError
             transport = self._get_transport()

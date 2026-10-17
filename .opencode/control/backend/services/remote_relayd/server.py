@@ -203,7 +203,8 @@ class RelayServer:
                          node: "str | None") -> "dict[str, object] | None":
         t = str(msg.get("t", ""))
         if t == "register":
-            self.registry.register(_node_id(msg), writer, session)
+            self.registry.register(_node_id(msg), writer, session,
+                                   lan_ep=_parse_ep(msg.get("lan_ep")))
             return {"t": "registered", "heartbeat_sec": 30}
         if t == "heartbeat":
             if node is None or not self.registry.heartbeat(node):
@@ -213,7 +214,8 @@ class RelayServer:
             ep = _parse_ep(msg.get("ep"))
             if node is None or ep is None:
                 return {"t": "error", "code": "proto_error", "msg": "update_ep 参数非法"}
-            ok = self.registry.update_ep(node, ep)
+            ok = self.registry.update_ep(node, ep,
+                                         lan_ep=_parse_ep(msg.get("lan_ep")))
             return None if ok else {"t": "error", "code": "proto_error",
                                     "msg": "未注册即更新端点"}
         if t == "lookup":
@@ -268,6 +270,7 @@ class RelayServer:
             return {"t": "endpoints", "ok": False, "error": "node_offline"}
         return {"t": "endpoints", "ok": True,
                 "gw": [entry.ep[0], entry.ep[1]] if entry.ep else ["", 0],
+                "gw_lan": [entry.lan_ep[0], entry.lan_ep[1]] if entry.lan_ep else ["", 0],
                 "sid": sid}
 
     def _tcp_peer_ep(self, writer: asyncio.StreamWriter) -> list[object]:

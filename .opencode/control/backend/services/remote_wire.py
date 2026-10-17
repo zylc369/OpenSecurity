@@ -52,9 +52,10 @@ class PongMsg(WireMsg):
 
 @dataclass(frozen=True)
 class SignalRegister(WireMsg):
-    """gateway → relayd: 节点注册。"""
+    """gateway → relayd: 节点注册（lan_ep: 自报 LAN 端点——同 LAN 打洞候选）。"""
     node: str
     ver: int
+    lan_ep: "tuple[str, int] | None" = None
 
 
 @dataclass(frozen=True)
@@ -64,8 +65,9 @@ class SignalHeartbeat(WireMsg):
 
 @dataclass(frozen=True)
 class SignalUpdateEp(WireMsg):
-    """gateway → relayd: 端点刷新（NAT 前缀变化）。"""
+    """gateway → relayd: 端点刷新（NAT 前缀变化; lan_ep 同步刷新）。"""
     ep: "tuple[str, int]"
+    lan_ep: "tuple[str, int] | None" = None
 
 
 @dataclass(frozen=True)
@@ -100,11 +102,12 @@ class LookupMsg(WireMsg):
 
 @dataclass(frozen=True)
 class LookupResp(WireMsg):
-    """relayd → client: 查询结果（gw 端点 + 会话 id）。"""
+    """relayd → client: 查询结果（gw 端点 + 会话 id + gw LAN 候选）。"""
     ok: bool
     error: str
     gw: "tuple[str, int]"
     sid: str
+    gw_lan: "tuple[str, int]" = ("", 0)
 
 
 @dataclass(frozen=True)
@@ -172,10 +175,14 @@ def encode(m: WireMsg) -> bytes:
                   "body": m.body})
     elif isinstance(m, SignalRegister):
         d.update({"t": "register", "node": m.node, "ver": m.ver})
+        if m.lan_ep is not None:
+            d["lan_ep"] = [m.lan_ep[0], m.lan_ep[1]]
     elif isinstance(m, SignalHeartbeat):
         d["t"] = "heartbeat"
     elif isinstance(m, SignalUpdateEp):
         d.update({"t": "update_ep", "ep": [m.ep[0], m.ep[1]]})
+        if m.lan_ep is not None:
+            d["lan_ep"] = [m.lan_ep[0], m.lan_ep[1]]
     elif isinstance(m, RelayJoin):
         d.update({"t": "relay_join", "sid": m.sid})
     elif isinstance(m, LookupMsg):
@@ -225,10 +232,15 @@ def decode(data: bytes) -> WireMsg:
         gw_host = gw_items[0] if gw_items and isinstance(gw_items[0], str) else ""
         gw_port = gw_items[1] if len(gw_items) > 1 and isinstance(gw_items[1], int) else 0
         err = d.get("error")
+        lan = d.get("gw_lan")
+        lan_items = cast("list[object]", lan) if isinstance(lan, list) else []
+        lan_host = lan_items[0] if lan_items and isinstance(lan_items[0], str) else ""
+        lan_port = lan_items[1] if len(lan_items) > 1 and isinstance(lan_items[1], int) else 0
         return LookupResp(
             msg_id=msg_id, ok=bool(ok_raw),
             error=err if isinstance(err, str) else "",
-            gw=(gw_host, gw_port), sid=str(d.get("sid", "")))
+            gw=(gw_host, gw_port), sid=str(d.get("sid", "")),
+            gw_lan=(lan_host, lan_port))
     if tag == "registered":
         return Registered(msg_id=msg_id)
     if tag == "heartbeat_ack":

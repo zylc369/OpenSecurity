@@ -658,10 +658,11 @@ def test_transport_request_direct_and_relay() -> None:
             # ② probe
             assert await loop.run_in_executor(None, transport.probe)
 
-            # ③ 强制中继: 把 gateway 的公网 ep 指到不可达地址 → 打洞必超时 → 落中继
+            # ③ 强制中继: 公网与 LAN 候补均指到不可达地址 → 两段打洞均超时 → 落中继
             entry = server.registry.get("macmini")
             assert entry is not None
             entry.ep = ("203.0.113.1", 9)  # TEST-NET-3 不可达
+            entry.lan_ep = ("203.0.113.9", 9)  # 同步打掉 LAN 候选（本地回环场景会真打通）
             # 丢弃现有会话（经 transport 自己的 loop 调度——跨 loop 操作 task 是非法的）
             assert transport._loop is not None  # noqa: SLF001 —— 测试触达
             asyncio.run_coroutine_threadsafe(
@@ -824,7 +825,7 @@ def test_tts_route_with_stub(monkeypatch: "object") -> None:
     from fastapi import FastAPI
 
     fake = SimpleNamespace()
-    fake.synthesize = lambda text, voice="v", speed=1.0, instruct="", seed=-1, mode="": tts_mod.TtsResult(
+    fake.synthesize = lambda text, voice="v", speed=1.0, instruct="", seed=-1, mode="", no_cache=False: tts_mod.TtsResult(
         wav=b"RIFFwav", cached=False, gen_ms=1.0, voice=voice, speed=speed)
 
     app = FastAPI()

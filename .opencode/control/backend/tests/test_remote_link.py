@@ -374,7 +374,8 @@ class _FakeTtsClient:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def tts_synth(self, text, voice, speed, instruct="", seed=-1, mode=""):
+    def tts_synth(self, text, voice, speed, instruct="", seed=-1, mode="",
+                  no_cache=False):
         self.calls.append(text)
         return b"wav"
 
@@ -397,7 +398,11 @@ def test_remote_tts_warmup_on_enter():
         _wait_until(lambda: bool(fake.calls))  # 预热在后台线程
         assert_true(fake.calls == ["好。"],
                     f"进入 REMOTE 应预热一次（文本与节点预载同串），实际 {fake.calls}")
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    finally:
+        # 实例属性注入（get_client）随单例存活——收尾复位防跨测试文件泄漏
+        rl_module.RemoteLinkService._reset_for_tests()
 
 
 @test("remote_link: 预热节流——节流窗内再进入 REMOTE 不重复预热")
@@ -412,4 +417,8 @@ def test_remote_tts_warmup_throttled():
         assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE)
         time.sleep(0.2)  # 若绕过节流会在此窗口内触发
         assert_true(fake.calls == [], f"节流窗内不应再预热，实际 {fake.calls}")
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    finally:
+        # 实例属性注入（get_client）随单例存活——收尾复位防跨测试文件泄漏
+        rl_module.RemoteLinkService._reset_for_tests()

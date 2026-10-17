@@ -102,6 +102,8 @@ class RemoteLinkStatus:
     probe_interval_sec: float = 5.0   # 探测周期（前端倒计时用）
     next_probe_in_sec: float = 0.0    # 距下次探测秒数（0=即将/进行中）
     local_code_fingerprint: str = ""  # 本机代码指纹（与 remote_health.code_fingerprint 对齐检测）
+    path: str = ""                    # P2P 传输路径: direct/relay/""（可见性）
+    direct_last_error: str = ""       # 最近一次直连尝试失败原因（空=无/非 P2P）
 
 
 
@@ -377,7 +379,7 @@ class RemoteLinkService:
     def _warm_remote_tts(self) -> None:
         try:
             client = self.get_client()
-            client.tts_synth("好。", "", 1.0)
+            client.tts_synth("好。", "", 1.0, no_cache=True)  # 穿透缓存真烧模型
             logger.info("节点 TTS 预热完成（远程首听免节点冷启动）")
         except Exception as e:  # noqa: BLE001 —— 预热失败不影响主流程
             logger.warning("节点 TTS 预热失败（首听可能吃冷启动）: %s", e)
@@ -551,6 +553,15 @@ class RemoteLinkService:
             countdown: float | None = None
             if self._unload_due_at is not None:
                 countdown = max(0.0, self._unload_due_at - time.monotonic())
+            client = self._client
+            path = ""
+            direct_err = ""
+            if client is not None:  # 纯属性读（无回调/无阻塞——锁内安全）
+                try:
+                    path = client.transport_path()
+                    direct_err = client.direct_last_error()
+                except Exception:  # noqa: BLE001 —— 可见性字段不阻断状态快照
+                    pass
             return RemoteLinkStatus(
                 enabled=enabled,
                 url=url,
@@ -559,6 +570,8 @@ class RemoteLinkService:
                 state=self._state,
                 transport=mode,
                 local_code_fingerprint=local_fp,
+                path=path,
+                direct_last_error=direct_err,
                 fail_streak=self._fail_streak,
                 recover_streak=self._recover_streak,
                 last_ok_at=self._last_ok_at,

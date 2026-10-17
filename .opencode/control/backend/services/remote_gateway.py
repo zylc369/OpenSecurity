@@ -30,6 +30,7 @@ from services.remote_crypto import (
     decode_msg,
     encode_msg,
 )
+from services import remote_netutil
 from services import remote_wire
 from services.remote_signal import SignalClient
 
@@ -175,6 +176,18 @@ class RemoteGateway:
             return None
         return cast("tuple[str, int]", self._udp.transport.get_extra_info("sockname"))
 
+    def _lan_ep(self) -> "tuple[str, int] | None":
+        """自报 LAN 端点（同 LAN 打洞候选）: 探测 IP + 固定 UDP socket 端口。
+
+        端口取固定 socket——与打洞/STUN 同一映射; 探测或 socket 缺失 → None
+        （relayd/client 回退公网映射候选，不劣化）。
+        """
+        lan = remote_netutil.probe_lan_ip()
+        addr = self.udp_local_addr
+        if lan is None or addr is None:
+            return None
+        return (lan, addr[1])
+
     async def _ensure_udp(self) -> None:
         """建立固定 UDP socket（幂等; local_addr 绑定任意端口）。"""
         if self._udp is not None and self._udp.transport is not None:
@@ -235,7 +248,8 @@ class RemoteGateway:
                 client = await SignalClient.connect(
                     self._relay_host, self._relay_port, self._psk)
                 from services.remote_wire import SignalRegister
-                await client.send(SignalRegister(msg_id=0, node=self._node_id, ver=1))
+                await client.send(SignalRegister(msg_id=0, node=self._node_id, ver=1,
+                                                 lan_ep=self._lan_ep()))
                 ack = await client.recv(timeout=10.0)
                 if not isinstance(ack, remote_wire.Registered):
                     raise ConnectionError(f"注册应答异常: {ack}")
@@ -274,7 +288,8 @@ class RemoteGateway:
                 if new_ep is not None and new_ep != ep:
                     ep = new_ep
                     from services.remote_wire import SignalUpdateEp
-                    await client.send(SignalUpdateEp(msg_id=0, ep=(ep[0], ep[1])))
+                    await client.send(SignalUpdateEp(msg_id=0, ep=(ep[0], ep[1]),
+                                                     lan_ep=self._lan_ep()))
                 last_stun = now
             try:
                 msg = await client.recv(timeout=1.0)
@@ -491,7 +506,7 @@ class RemoteGateway:
         try:
             return await asyncio.wait_for(self._stun_fut, timeout=3.0)
         except (OSError, asyncio.TimeoutError) as e:
-            logger.warning("STUN 探测失败: %s", e)
+            logger.warning("STUN 探测失败: %r", e)
             return None
         finally:
             self._stun_fut = None

@@ -31,9 +31,39 @@ from services.remote_crypto import (
     encode_msg,
 )
 from services.remote_signal import SignalClient
+from services import remote_netutil
 from services import remote_wire
 
 logger = logging.getLogger(__name__)
+
+RETIRED_CLOSE_SEC = 90.0  # 退役连接延迟回收（3×默认 api_timeout——在途请求完成余量）
+
+
+def resolve_udp_ep(local: "tuple[str, int]") -> "tuple[str, int]":
+    """上报前修正 socket 本地地址: 通配/空 → 默认出站接口探测值。
+
+    绑定 ("0.0.0.0", 0) 的 socket sockname 恒为 0.0.0.0（macOS 等）——
+    上报这样的无效地址会让 gateway 打洞互射打空（历史缺省行为）。
+    探测失败时保持原值（relayd 有 TCP 源地址兜底，行为不劣化）。
+    """
+    if local[0] and local[0] not in ("0.0.0.0", "::"):
+        return local
+    probed = remote_netutil.probe_lan_ip()
+    if probed:
+        return (probed, local[1])
+    return local
+
+
+def build_punch_candidates(*eps: "tuple[str, int]") -> "list[tuple[str, int]]":
+    """打洞候选序列: 按给出顺序过滤/去重（LAN 端点优先 → 公网映射兜底）。
+
+    无效端点（空 host/端口 <= 0）丢弃; 空结果由调用方判为"endpoints 响应畸形"。
+    """
+    out: "list[tuple[str, int]]" = []
+    for ep in eps:
+        if ep[0] and ep[1] > 0 and ep not in out:
+            out.append(ep)
+    return out
 
 
 class TransportError(RuntimeError):
@@ -138,8 +168,9 @@ class DirectConnector:
         transport, proto = await loop.create_datagram_endpoint(
             _ClientUdpProtocol, local_addr=("0.0.0.0", 0))
         try:
-            # ① 信令 lookup（携带自身 UDP 映射——回环/锥形 NAT 下即本地址）
-            local = proto.local_addr()
+            # ① 信令 lookup（携带自身 UDP 可达地址——通配地址经探测修正，
+            #    否则 gateway 互射打空；见 resolve_udp_ep）
+            local = resolve_udp_ep(proto.local_addr())
             sig = await SignalClient.connect(self._relay_host, self._relay_port,
                                              self._psk)
             try:
@@ -152,40 +183,53 @@ class DirectConnector:
                 raise TransportError(f"lookup 应答异常: {type(resp).__name__}")
             if not resp.ok:
                 raise TransportError(f"节点不可达: {resp.error}")
-            if not (resp.gw[0] and resp.gw[1] > 0 and resp.sid):
+            if not resp.sid:
                 raise TransportError("endpoints 响应畸形")
-            gw_ep = resp.gw
+            # 打洞候选: LAN 端点优先（同 LAN 直达），公网映射兜底
+            # （hairpin/回环依赖）；均无效 → 响应畸形。
+            candidates = build_punch_candidates(resp.gw_lan, resp.gw)
+            if not candidates:
+                raise TransportError("endpoints 响应畸形")
             sid = resp.sid
 
-            # ② 打洞互射 + Noise 握手（并行等待 msg2）
+            # ② 打洞互射（LAN 候选优先——两段式，总预算 punch_timeout）
+            #    + Noise 握手（段内并行等待 msg2；命中候选即定会话回包地址）
             punch_pkt = (json.dumps({"t": "punch", "sid": sid,
                                      "mac": self._punch_auth.mac(sid)}) + "\n").encode()
             initiator = NoiseHandshake(initiator=True, psk=self._psk)
             msg1 = initiator.write_message()
             assert proto.transport is not None
-            for _ in range(self._punch_burst):
-                proto.transport.sendto(punch_pkt, gw_ep)
-            proto.transport.sendto(msg1, gw_ep)
             deadline = time.monotonic() + self._punch_timeout
+            segment = self._punch_timeout / len(candidates)
+            chosen_ep = candidates[0]
             got_msg2 = False
-            while time.monotonic() < deadline:
-                try:
-                    data, _ = await asyncio.wait_for(
-                        proto.inbox.get(), timeout=max(0.05, deadline - time.monotonic()))
-                except asyncio.TimeoutError:
-                    break
-                if data.startswith(b"{"):
-                    continue  # gateway 的 punch 回包（洞通旁证）
-                if len(data) == 48:
-                    initiator.read_message(data)
-                    got_msg2 = True
+            for cand in candidates:
+                for _ in range(self._punch_burst):
+                    proto.transport.sendto(punch_pkt, cand)
+                proto.transport.sendto(msg1, cand)
+                seg_deadline = min(deadline, time.monotonic() + segment)
+                while time.monotonic() < seg_deadline:
+                    try:
+                        data, _ = await asyncio.wait_for(
+                            proto.inbox.get(),
+                            timeout=max(0.05, seg_deadline - time.monotonic()))
+                    except asyncio.TimeoutError:
+                        break
+                    if data.startswith(b"{"):
+                        continue  # gateway 的 punch 回包（洞通旁证）
+                    if len(data) == 48:
+                        initiator.read_message(data)
+                        chosen_ep = cand
+                        got_msg2 = True
+                        break
+                if got_msg2:
                     break
             if not got_msg2:
                 raise TransportError(f"打洞超时（{self._punch_timeout}s）")
             i_send, i_recv = initiator.split()
             session = UdpClientSession(SessionCrypto(i_send, i_recv),
                                        lambda d, a: proto.transport.sendto(d, a)  # type: ignore[union-attr]
-                                       if proto.transport else None, gw_ep, msg_handler)
+                                       if proto.transport else None, chosen_ep, msg_handler)
             # 排空互射期间的残留 punch 包（避免喂给会话分发循环）
             DirectConnection._drain_inbox(proto.inbox)
             return session, proto  # 调用方包装为 DirectConnection 并 start_pump
@@ -394,6 +438,7 @@ class TransportConfig:
     relay_timeout_sec: float = 5.0
     api_timeout_sec: float = 30.0
     idle_close_sec: float = 60.0
+    direct_upgrade_interval_sec: float = 10.0  # 中继态后台直连升级间隔
 
 
 class RemoteTransport:
@@ -413,6 +458,9 @@ class RemoteTransport:
         self._pending: "dict[int, asyncio.Future[remote_wire.WireMsg]]" = {}
         self._next_id = 1
         self._last_active = 0.0
+        self._upgrade_task: "asyncio.Task[None] | None" = None
+        self._direct_last_error: str = ""
+        self._retired: "list[tuple[DirectConnection | RelayConnection, float]]" = []
 
     # ── 生命周期 ──────────────────────────────────────
 
@@ -427,6 +475,7 @@ class RemoteTransport:
     def _run_loop(self) -> None:
         assert self._loop is not None
         asyncio.set_event_loop(self._loop)
+        self._upgrade_task = self._loop.create_task(self._upgrade_loop())
         self._loop.run_forever()
 
     async def aclose(self) -> None:
@@ -436,6 +485,24 @@ class RemoteTransport:
 
     def stop(self) -> None:
         if self._loop is not None:
+            task = self._upgrade_task
+            if task is not None:
+                try:
+                    self._loop.call_soon_threadsafe(task.cancel)
+                except RuntimeError:
+                    pass
+                self._upgrade_task = None
+            # 尽力回收退役连接（loop 停前排队；来不及则随 loop.close 释放）
+            retired = self._retired
+            self._retired = []
+            if retired:
+                def _close_retired() -> None:
+                    for conn, _deadline in retired:
+                        asyncio.ensure_future(conn.aclose())
+                try:
+                    self._loop.call_soon_threadsafe(_close_retired)
+                except RuntimeError:
+                    pass
             # 先取消全部在途请求（future 置异常 → _handle_job 立即失败返回，
             # 而非挂死到 api_timeout+15 兜底——任何 close 场景的等待方立即感知）
             def _fail_pending() -> None:
@@ -554,9 +621,11 @@ class RemoteTransport:
             conn = DirectConnection(session, proto)
             conn.start_pump()
             self._conn = conn
+            self._direct_last_error = ""
             logger.info("transport 会话建立: 直连")
             return conn
         except TransportError as e:
+            self._direct_last_error = str(e)
             logger.info("直连失败（落中继）: %s", e)
         # ② 中继
         conn = await RelayConnection.establish(
@@ -566,6 +635,82 @@ class RemoteTransport:
         self._conn = conn
         logger.info("transport 会话建立: 中继")
         return conn
+
+    # ── 直连升级（中继态 → 后台尝试直连; 只试直连、不碰中继会话）──
+
+    async def _upgrade_loop(self) -> None:
+        """每 direct_upgrade_interval_sec 尝试一次; 失败记录原因下轮重试。
+
+        升级成功前现有中继会话不受影响（独立建连——新 socket/新握手）。
+        """
+        while True:
+            try:
+                await asyncio.sleep(self._cfg.direct_upgrade_interval_sec)
+            except asyncio.CancelledError:
+                raise
+            try:
+                await self._cleanup_retired()
+                if isinstance(self._conn, RelayConnection) and not self._conn.broken:
+                    await self._try_direct_upgrade()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 —— 升级/回收异常不终结升级循环
+                logger.warning("直连升级异常: %r", e)
+
+    async def _try_direct_upgrade(self) -> None:
+        """独立建连尝试（不触碰现有中继会话）; 成功才原子切换。"""
+        async with self._session_lock:
+            # 等锁期间可能已被重建/已切换——复查
+            if not (isinstance(self._conn, RelayConnection)
+                    and not self._conn.broken):
+                return
+            try:
+                connector = DirectConnector(
+                    self._cfg.psk, self._cfg.relay_host, self._cfg.relay_port,
+                    punch_timeout=self._cfg.punch_timeout_sec)
+                session, proto = await connector.connect(self._cfg.node_id,
+                                                         self._on_msg)
+            except TransportError as e:
+                self._direct_last_error = str(e)
+                logger.info("直连升级尝试失败（保持中继）: %s", e)
+                return
+            old = self._conn
+            new_conn = DirectConnection(session, proto)
+            new_conn.start_pump()
+            self._conn = new_conn
+            self._direct_last_error = ""
+            if old is not None:
+                self._retired.append((old, time.monotonic() + RETIRED_CLOSE_SEC))
+            logger.info("直连升级成功: 中继 → 直连（旧会话延迟回收）")
+
+    async def _cleanup_retired(self) -> None:
+        """回收到期退役连接（升级切换后的旧会话——在途请求已自然完成）。"""
+        now = time.monotonic()
+        keep: "list[tuple[DirectConnection | RelayConnection, float]]" = []
+        for conn, deadline in self._retired:
+            if now >= deadline:
+                try:
+                    await conn.aclose()
+                except (ConnectionError, OSError) as e:
+                    logger.debug("退役连接回收异常（忽略）: %s", e)
+            else:
+                keep.append((conn, deadline))
+        self._retired = keep
+
+    @property
+    def current_path(self) -> "str | None":
+        """当前传输路径（worker 线程安全——单变量原子读）。"""
+        conn = self._conn
+        if isinstance(conn, DirectConnection):
+            return "direct"
+        if isinstance(conn, RelayConnection):
+            return "relay"
+        return None
+
+    @property
+    def direct_last_error(self) -> str:
+        """最近一次直连尝试失败原因（空 = 无失败/已恢复）。"""
+        return self._direct_last_error
 
     async def _drop_session(self) -> None:
         if self._conn is not None:
