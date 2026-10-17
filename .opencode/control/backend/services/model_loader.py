@@ -340,8 +340,8 @@ class ModelInferenceService:
                 from services.ocr_service import OcrService
                 OcrService.get_instance().warm_up_sync()
                 from services.tts_service import TtsService
-                # 强制本地: 降级瞬间远程可能仍被判可用, 直接预热本地 worker
-                TtsService.get_instance().warmup(force_local=True)
+                # 降级预热: 预热本地 worker 全池（warmup 即本地语义——全池覆盖）
+                TtsService.get_instance().warmup()
             except Exception:  # noqa: BLE001 —— 预热失败不致命（懒加载路径兜底）
                 logger.exception("模型预热失败（懒加载路径兜底）")
 

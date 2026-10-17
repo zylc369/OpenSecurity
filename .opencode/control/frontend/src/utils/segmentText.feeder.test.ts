@@ -73,7 +73,7 @@ describe("SegmentFeeder 等价性（与全量版逐段一致）", () => {
 });
 
 describe("SegmentFeeder 惰性", () => {
-  it("791 万字: next() 首调不扫全文（<5ms）", () => {
+  it("791 万字: next() 首调不扫全文（阈值 50ms——CI 余量 10×）", () => {
     const big = (NOVEL + "\n").repeat(Math.ceil(7_910_000 / NOVEL.length));
     const feeder = createSegmentFeeder(big);
     const t0 = performance.now();
@@ -81,6 +81,8 @@ describe("SegmentFeeder 惰性", () => {
     const dt = performance.now() - t0;
     expect(first).toBeTruthy();
     expect(first!.length).toBeLessThanOrEqual(32);  // 首段 ≈20 字档
-    expect(dt).toBeLessThan(5);
+    // 防"首调 O(n) 全扫"回归: 全扫 791 万字为百 ms 级; 本机基线 <5ms,
+    // CI 共享 runner 波动（实测 6.9ms）——阈值取 50ms 留 10× 环境余量。
+    expect(dt).toBeLessThan(50);
   });
 });

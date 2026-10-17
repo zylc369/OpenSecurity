@@ -384,12 +384,12 @@ class TtsService:
                     n, self._worker.size)
         return n
 
-    def warmup(self, force_local: bool = False) -> None:
+    def warmup(self) -> None:
         """预热: 全池本地 worker 各一次最短合成（模型加载 + 首跑编译）。
 
-        force_local 保留兼容（历史调用: 降级接管前预热本地）; 两条路径统一走
-        warm_local_workers——覆盖池内全部 worker（与池大小永不脱节）。节点预载
-        （--model-preload）经 model_ops.load 调用本方法。失败不抛（懒加载兜底）。
+        调用方: 节点预载（--model-preload → model_ops.load）/降级接管
+        （model_loader 预热线程）。覆盖范围由 warm_local_workers→池 warm_all
+        保证（池大小变化自动跟随）。失败不抛（懒加载兜底——首请求自愈）。
         """
         try:
             self.warm_local_workers()

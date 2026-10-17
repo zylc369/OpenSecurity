@@ -411,6 +411,29 @@ def test_remote_tts_warmup_on_enter():
         rl_module.RemoteLinkService._reset_for_tests()
 
 
+@test("remote_link: 旧节点（warm 端点缺失）→ 回退双发兼容路径")
+def test_remote_tts_warmup_fallback_legacy_node():
+    async def run():
+        fake = _FakeTtsClient()
+
+        def _no_warm() -> int:
+            raise RuntimeError("legacy node: /api/tts/warm 404")
+
+        fake.tts_warm = _no_warm  # type: ignore[method-assign]  # 旧节点模拟
+        svc = _mk_service()
+        svc.get_client = lambda: fake  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]  (测试 fake 注入)
+        _set_probe(svc, [_ok_info()])
+        await _pump(svc, 1)
+        assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE)
+        _wait_until(lambda: bool(fake.calls))  # 回退双发在后台线程
+        assert_true(fake.calls == ["好。", "很。"],
+                    f"旧节点应回退双发兼容路径，实际 {fake.calls}")
+    try:
+        asyncio.run(run())
+    finally:
+        rl_module.RemoteLinkService._reset_for_tests()
+
+
 @test("remote_link: 预热节流——节流窗内再进入 REMOTE 不重复预热")
 def test_remote_tts_warmup_throttled():
     async def run():

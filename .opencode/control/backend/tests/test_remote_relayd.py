@@ -827,6 +827,7 @@ def test_tts_route_with_stub(monkeypatch: "object") -> None:
     fake = SimpleNamespace()
     fake.synthesize = lambda text, voice="v", speed=1.0, instruct="", seed=-1, mode="", no_cache=False: tts_mod.TtsResult(
         wav=b"RIFFwav", cached=False, gen_ms=1.0, voice=voice, speed=speed)
+    fake.warm_local_workers = lambda: 2  # 预热契约（warm_all 覆盖数）
 
     app = FastAPI()
     app.include_router(router)
@@ -836,6 +837,10 @@ def test_tts_route_with_stub(monkeypatch: "object") -> None:
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("audio/wav")
     assert r.content == b"RIFFwav"
+    rw = client.post("/api/tts/warm")
+    assert rw.status_code == 200
+    wdata = cast("dict[str, object]", rw.json())
+    assert wdata["ok"] is True and wdata["warmed"] == 2
     r2 = client.get("/api/tts/voices")
     voices_list = cast("list[dict[str, object]]", r2.json()["voices"])
     # 音色库语义: 双源合并的 VoiceAsset 字典（默认音质 v4 恒在首位）

@@ -157,6 +157,42 @@ def test_pool_warm_all_targets_each_worker() -> None:
     assert all(c.calls == 1 for c in stubs)   # 两桩各一次（真覆盖, 非重试单桩）
 
 
+def test_pool_warm_all_tolerates_single_failure() -> None:
+    """warm_all: 单 worker 失败不阻塞其余（懒加载兜底——返回成功数）。"""
+    pool, stubs = _pool_with_stubs(2)
+
+    def _boom(payload: dict) -> WorkerResponse:
+        raise RuntimeError("boom")
+
+    stubs[0].request = _boom  # type: ignore[method-assign]  # 测试注入
+    n = pool.warm_all(lambda i: {"op": "synth", "out": f"/tmp/w{i}"})
+    assert n == 1               # 第一个失败不拖累第二个
+    assert stubs[1].calls == 1
+
+
+def test_pool_warm_all_voice_library_failure_returns_zero(monkeypatch) -> None:
+    """warm_local_workers: 音色库不可用 → 0（不抛——不触发 worker 请求）。"""
+    import services.voice_library as vl
+    from services.tts_service import TtsService
+
+    TtsService._reset_for_tests()
+    svc = TtsService.get_instance()
+    pool, stubs = _pool_with_stubs(2)
+    svc._worker = pool  # type: ignore[assignment]  # 测试注入
+
+    class _BrokenLib:
+        def default_voice(self) -> object:
+            raise vl.VoiceError("no voice")
+
+    monkeypatch.setattr(vl.VoiceLibrary, "get_instance",
+                        classmethod(lambda cls: _BrokenLib()))
+    try:
+        assert svc.warm_local_workers() == 0
+        assert all(c.calls == 0 for c in stubs)
+    finally:
+        TtsService._reset_for_tests()
+
+
 def test_service_warm_local_workers() -> None:
     """服务级: warm_local_workers 全池预热（唯一入口——节点预载/远程促热共用）。"""
     from services.tts_service import TtsService
