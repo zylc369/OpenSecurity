@@ -362,12 +362,12 @@ class RemoteLinkService:
         self._unload_due_at = None
 
     def _schedule_remote_tts_warmup_locked(self) -> None:
-        """进入 REMOTE 后预热节点 TTS（防首听吃节点全链冷启动）。
+        """进入 REMOTE 后预热节点 TTS（防首听吃节点冷启动）。
 
         节流窗（warmup_throttle_sec, 默认 300s）: 心跳抖动反复
-        DEGRADED↔REMOTE 时不重复轰节点。文本用"好。"（与节点预载 warmup
-        同串）——冷节点缓存 miss 真合成焐 worker; 热节点缓存命中 0ms,
-        命中即 worker 活着, 预热目的已达成。
+        DEGRADED↔REMOTE 时不重复轰节点。促热路径: 优先节点 warm 端点
+        （/api/tts/warm——池全池 + 质检链路, 覆盖范围由节点保证）;
+        旧节点/超时 → 回退双发合成。
         """
         now = time.monotonic()
         if now - self._last_remote_warmup_at < _tunables().warmup_throttle_sec:
@@ -387,10 +387,10 @@ class RemoteLinkService:
             except Exception:  # noqa: BLE001 —— 旧节点 404/网络异常 → 回退
                 warmed = 0
             if warmed <= 0:
-                # 回退（旧节点）: 双发不同文本覆盖 2 worker（与池大小对齐）
+                # 回退（旧节点/端点缺失/超时）: 双发不同文本覆盖 2 worker
                 client.tts_synth("好。", "", 1.0, no_cache=True)
                 client.tts_synth("很。", "", 1.0, no_cache=True)
-                logger.info("节点 TTS 预热完成（兼容路径——节点未提供 warm 端点）")
+                logger.info("节点 TTS 预热完成（兼容路径——warm 端点不可用或超时）")
             else:
                 logger.info("节点 TTS 预热完成（全池 %d 个 worker——远程首听免冷启动）",
                             warmed)

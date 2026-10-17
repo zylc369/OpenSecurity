@@ -1,6 +1,7 @@
 """远端 TTS 路由（经 P2P transport 或节点本机 HTTP 调用，同一语义）。
 
 POST /api/tts        {text, voice?, speed?} → audio/wav（bytes body）
+POST /api/tts/warm   预热本地 worker 池 + 质检链路 → {"ok": bool, "warmed": int}
 GET  /api/tts/voices → {"voices": [VoiceAsset 字典...]}
 POST /api/tts/voices → 上传新音色（multipart: wav + 表单字段）——无删除端点
 失败: TtsUnavailable → 503; 文本/音色非法 → 400。

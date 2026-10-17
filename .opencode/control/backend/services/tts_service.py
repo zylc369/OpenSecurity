@@ -278,15 +278,16 @@ class TtsWorkerPool:
 
         "预热覆盖范围"的唯一实现点: 池大小变化时本方法自动覆盖新容量
         （调用方无需知道 worker 数）。make_payload(i) 生成第 i 个 worker 的
-        请求体（不同文本避免同文本重复路径依赖）。返回成功数; 失败不抛
-        （懒加载兜底）。
+        请求体。返回成功数（ok=false 不计）; 失败不抛（懒加载兜底）。
         """
         ok = 0
         n = len(self._clients)
         for i in range(n):
             client = self._free.get()
             try:
-                client.request(make_payload(i))
+                resp = client.request(make_payload(i))
+                if not resp.ok:  # worker 合成失败（ok=false 响应）不计成功
+                    raise RuntimeError(f"worker 预热失败: {resp.error or '未知'}")
                 ok += 1
             except Exception as e:  # noqa: BLE001 —— 单 worker 失败不阻塞其余
                 logger.warning("[tts] worker 预热失败（第 %d/%d 个）: %r", i + 1, n, e)
@@ -354,11 +355,14 @@ class TtsService:
     # ── 合成 ─────────────────────────────────────────
 
     def warm_local_workers(self) -> int:
-        """预热全部本地 worker（池内每 worker 各一次最短合成——预热唯一入口）。
+        """预热全部本地 worker 与质检链路（预热唯一入口）。
 
         节点预载（--model-preload）/降级接管/远程促热（/api/tts/warm）共用。
-        覆盖范围由池保证（warm_all——池大小变化自动跟随, 不再与 worker 数脱节;
-        worker 层无缓存概念, 天然真烧）。返回成功数; 失败不抛（懒加载兜底）。
+        覆盖范围: ① worker 池全量（warm_all——池大小变化自动跟随）
+        ② 质检链路（收尾全链短合成触发 TtsQC/funasr 初始化——池预热只覆盖
+        worker 进程, ASR ~1GB 懒加载在此提前烧掉）。全程持本地域许可（与
+        合成/卸载互斥——不会被 release 半路杀; release 取满许可会等本预热完）。
+        返回成功 worker 数; 失败不抛（懒加载兜底）。
         """
         import tempfile
 
@@ -372,15 +376,31 @@ class TtsService:
             logger.warning("[tts] 预热跳过（音色库不可用）: %s", e)
             return 0
 
+        outs: "list[str]" = []
+
         def _mk(i: int) -> "dict[str, Any]":
             out = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+            outs.append(out)
             return {"id": f"warm-{i}-{time.monotonic_ns()}", "op": "synth",
                     "text": "好。", "wav": wav_path, "ref_text": ref_text,
                     "out": out, "speed": DEFAULT_SPEED, "instruct": "",
                     "seed": -1, "mode": ""}
 
-        n = self._worker.warm_all(_mk)
-        logger.info("[tts] 本地 worker 预热完成: %d/%d（模型加载+首跑编译）",
+        n = 0
+        try:
+            with self._local_sem:  # 与合成/卸载互斥（release 取满许可等本预热完）
+                n = self._worker.warm_all(_mk)
+                # 质检链路预热: 全链短合成一次（触发 TtsQC/funasr 初始化）
+                try:
+                    self._synth_qc_local("好。", va, DEFAULT_SPEED)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "[tts] 质检链路预热失败（首听可能吃 ASR 冷加载）: %s", e)
+        finally:
+            for p in outs:
+                Path(p).unlink(missing_ok=True)
+
+        logger.info("[tts] 本地预热完成: worker %d/%d + 质检链路",
                     n, self._worker.size)
         return n
 

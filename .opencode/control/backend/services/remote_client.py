@@ -254,9 +254,10 @@ class RemoteConsoleClient:
 
         返回预热 worker 数; 节点版本旧（404）/响应不符 → 抛 RemoteUnavailable
         （调用方回退"双发合成"兼容路径）。覆盖范围由节点池保证（与 worker 数
-        永不脱节）。
+        永不脱节）。超时用 TTS 级（冷节点全池顺序预热可达 20-30s+, 推理默认
+        超时会误杀成"回退"）。
         """
-        data = self._post_json("/api/tts/warm", {})
+        data = self._post_json("/api/tts/warm", {}, timeout=self.TTS_TIMEOUT_SEC)
         if not isinstance(data, dict):
             raise RemoteUnavailable("warm 响应非对象")
         warmed = data.get("warmed")

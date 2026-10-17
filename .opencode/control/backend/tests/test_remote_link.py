@@ -434,6 +434,25 @@ def test_remote_tts_warmup_fallback_legacy_node():
         rl_module.RemoteLinkService._reset_for_tests()
 
 
+@test("remote_link: warm 端点返回 0（异常响应）→ 回退双发")
+def test_remote_tts_warmup_zero_warmed_falls_back():
+    async def run():
+        fake = _FakeTtsClient()
+        fake.tts_warm = lambda: 0  # 有效响应但 0 个 worker——同样回退
+        svc = _mk_service()
+        svc.get_client = lambda: fake  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]  (测试 fake 注入)
+        _set_probe(svc, [_ok_info()])
+        await _pump(svc, 1)
+        assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE)
+        _wait_until(lambda: bool(fake.calls))
+        assert_true(fake.calls == ["好。", "很。"],
+                    f"warmed=0 应回退双发，实际 {fake.calls}")
+    try:
+        asyncio.run(run())
+    finally:
+        rl_module.RemoteLinkService._reset_for_tests()
+
+
 @test("remote_link: 预热节流——节流窗内再进入 REMOTE 不重复预热")
 def test_remote_tts_warmup_throttled():
     async def run():

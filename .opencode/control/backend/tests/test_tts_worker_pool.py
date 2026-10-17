@@ -193,19 +193,78 @@ def test_pool_warm_all_voice_library_failure_returns_zero(monkeypatch) -> None:
         TtsService._reset_for_tests()
 
 
-def test_service_warm_local_workers() -> None:
-    """服务级: warm_local_workers 全池预热（唯一入口——节点预载/远程促热共用）。"""
+def test_service_warm_local_workers(monkeypatch) -> None:
+    """服务级: warm_local_workers 全池预热 + 质检链路（唯一入口语义）。"""
     from services.tts_service import TtsService
 
     TtsService._reset_for_tests()
     svc = TtsService.get_instance()
     pool, stubs = _pool_with_stubs(2)
     svc._worker = pool  # type: ignore[assignment]  # 测试注入
+    monkeypatch.setattr(svc, "_qc_check", lambda *a, **k: None)  # 不加载真 ASR
     try:
         n = svc.warm_local_workers()
         assert n == 2
-        assert all(c.calls == 1 for c in stubs)
+        # 池 warm 2 次 + 质检链全链合成 1 次（多取 1 个 worker）
+        assert all(c.calls >= 1 for c in stubs), "全池每个 worker 至少烧一次"
+        assert sum(c.calls for c in stubs) == 3
     finally:
+        TtsService._reset_for_tests()
+
+
+def test_pool_warm_all_ok_false_not_counted() -> None:
+    """warm_all: worker 返回 ok=false（合成失败）不计成功。"""
+    pool, stubs = _pool_with_stubs(2)
+
+    def _fail_resp(payload: dict) -> WorkerResponse:
+        return WorkerResponse(ok=False, error="synth boom", path="", duration=0.0)
+
+    stubs[0].request = _fail_resp  # type: ignore[method-assign]  # 测试注入
+    n = pool.warm_all(lambda i: {"op": "synth", "out": f"/tmp/w{i}"})
+    assert n == 1                # 失败不计（对比 _synth_local 的 ok 检查）
+    assert stubs[1].calls == 1
+
+
+def test_release_waits_warm(monkeypatch) -> None:
+    """warm 持域许可: release 在 warm 在途时阻塞（卸载不半路杀预热）。"""
+    from services.tts_service import TtsService
+
+    TtsService._reset_for_tests()
+    svc = TtsService.get_instance()
+    entered = threading.Event()
+    finish = threading.Event()
+
+    class _SlowStub(_StubClient):
+        def request(self, payload: dict) -> WorkerResponse:
+            entered.set()
+            finish.wait(timeout=5)
+            return super().request(payload)
+
+    pool = TtsWorkerPool(size=1)
+    for c in pool._clients:
+        c.shutdown()
+    slow = _SlowStub()
+    pool._clients = [slow]  # type: ignore[assignment]
+    pool._free = _queue.Queue()
+    pool._free.put(slow)  # type: ignore[arg-type]  # 桩替代真实 client
+    svc._worker = pool  # type: ignore[assignment]
+    monkeypatch.setattr(svc, "_synth_qc_local", lambda *a, **k: (b"wav", 1.0))
+
+    warm_done = threading.Event()
+    tw = threading.Thread(target=lambda: (svc.warm_local_workers(), warm_done.set()))
+    tw.start()
+    assert entered.wait(timeout=2)          # warm 已进入 worker 请求（持域许可）
+    rel_done = threading.Event()
+    tr = threading.Thread(target=lambda: (svc.release(), rel_done.set()))
+    tr.start()
+    try:
+        assert not rel_done.wait(timeout=0.3), "release 不应在 warm 在途时返回"
+        finish.set()
+        tw.join(timeout=5)
+        tr.join(timeout=5)
+        assert warm_done.is_set() and rel_done.is_set()
+    finally:
+        finish.set()
         TtsService._reset_for_tests()
 
 
