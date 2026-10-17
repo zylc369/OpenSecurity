@@ -281,8 +281,8 @@ class TtsService:
 
     def __init__(self) -> None:
         self._cache: "OrderedDict[tuple[str, float, str, int, str, str], tuple[bytes, str]]" = OrderedDict()
-        # 并发结构（按资源分域）: 缓存细锁 / 本地容量 1 队列 / 远程独立。
-        # 本地域语义为信号量（队列取号）——容量 1 由 GPU 单实例决定;
+        # 并发结构（按资源分域）: 缓存细锁 / 本地信号量（容量=worker 池大小）/
+        # 远程独立。本地域并发度由并行 worker 数决定（GPU 双实例实测平衡点）;
         # 远程等待（网络 IO）不占本地域（transport 并发安全, 节点侧自排队）。
         self._cache_lock = threading.Lock()          # 只包缓存读写（微秒级）
         # 本地推理域（含 fallback——统一入口）: 并发度=池大小（双 worker 并行）
@@ -420,8 +420,8 @@ class TtsService:
                 except Exception:  # noqa: BLE001
                     pass
                 logger.warning("远程 tts 失败，fallback 本地: %s", e)
-        # 本地域（容量 1 队列——本地路径与 fallback 统一入口）:
-        # worker 协议一问一答不交错由容量 1 保证; 多个 fallback 天然排队（背压）
+        # 本地域（容量=池大小——本地路径与 fallback 统一入口）:
+        # 单 client 内一问一答由池取用语义保证; 超出并发度的请求排队（背压）
         t_wait = time.monotonic()
         with self._local_sem:
             logger.info("[tts] 本地队列等待 %.0fms（进入后累计 %.0fms）",
@@ -564,13 +564,19 @@ class TtsService:
     def release(self) -> None:
         """释放 worker 与缓存（模型目录变更后重载用）。
 
-        先经本地域取号（等在途本地合成完成后才关 worker——卸载排队语义）;
-        缓存清理走缓存锁。
+        先取满本地域全部许可（等在途本地合成全部完成后才关 worker——卸载
+        排队语义; 池化后须取满容量, 取 1 只能挡住并发中的一路）; 缓存清理
+        走缓存锁（取满后域内无在途写——清后无回写残留）。
         """
-        with self._local_sem:
+        for _ in range(LOCAL_WORKER_POOL_SIZE):
+            self._local_sem.acquire()
+        try:
             self._worker.shutdown()
-        with self._cache_lock:
-            self._cache.clear()
+            with self._cache_lock:
+                self._cache.clear()
+        finally:
+            for _ in range(LOCAL_WORKER_POOL_SIZE):
+                self._local_sem.release()
 
 
 def _smoke_main(argv: "list[str]") -> int:

@@ -1,8 +1,9 @@
 /**
  * TTS 听书播放器 hook（段级协议客户端——Legado 业内模式）。
  *
- * 职责: 分段(segmentText) → 逐段 POST /api/tts（播放驱动预取, 深度 1:
- *      播第 N 段时挂出第 N+1 段） → Audio 顺序接力播放 → 暂停/恢复/停止。
+ * 职责: 分段(segmentText) → 逐段 POST /api/tts（播放驱动预取, 缓冲目标 2:
+ *      首段请求发出即激活, 队列恒保有 2 段未完成——为并行 worker 供料） →
+ *      Audio 顺序接力播放 → 暂停/恢复/停止。
  * 服务端无状态; 单实例（新 start 自动停旧）; 单段网络失败重试 1 次,
  * 仍失败跳过该段继续, 累计 3 段失败停止并报错。
  */
@@ -72,7 +73,7 @@ export function useTtsPlayer() {
   const errCount = useRef(0);
   const speedRef = useRef(1.0);
   const optsRef = useRef<StartOptions>({});
-  const playingStartedRef = useRef(false);     // 首段音频就绪开播后才允许预取
+  const playingStartedRef = useRef(false);     // 首段请求发出即激活预取(缓冲目标 2)
   const waitStartRef = useRef<number | null>(null);  // 段间缓冲等待起点(performance.now)
   const elapsedBase = useRef(0);               // 已完成段时长累计
   const genMsList = useRef<number[]>([]);      // 每段生成耗时
@@ -176,7 +177,7 @@ export function useTtsPlayer() {
     return p;
   }, []);
 
-  // 播放驱动预取: 保证 nextPlay+1 已挂起(经 pumpRef 供 playSeg 调用)
+  // 播放驱动预取: 保证挂至 nextPlay+PREFETCH_DEPTH(经 pumpRef 供 playSeg 调用)
   const pumpRef = useRef<() => void>(() => { /* start() 内替换 */ });
 
   const playSeg = useCallback((idx: number, signal: AbortSignal) => {
@@ -251,7 +252,7 @@ export function useTtsPlayer() {
         setState((s) => ({ ...s, error: `段 ${idx + 1} 播放失败` }));
       };
       void audio.play();
-      // 播放驱动预取: 开播后挂下一段(以及首播时激活预取管道)
+      // 播放推进即续泵（缓冲目标恒 PREFETCH_DEPTH 段未完成）
       playingStartedRef.current = true;
       if (waitStartRef.current !== null) {
         console.log(`[tts] seg${idx} 开始播放（缓冲等待 ${(performance.now() - waitStartRef.current).toFixed(0)}ms）`);

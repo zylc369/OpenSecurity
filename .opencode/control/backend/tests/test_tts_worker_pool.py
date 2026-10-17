@@ -147,3 +147,50 @@ def test_service_level_concurrent_synthesize(monkeypatch) -> None:
         assert elapsed < 0.28                      # 串行需 0.30+
     finally:
         TtsService._reset_for_tests()
+
+
+def test_release_waits_inflight_and_clears_cache(monkeypatch) -> None:
+    """release: 取满域许可——等全部在途完成（不杀请求）后关 worker + 缓存零残留。
+
+    容量 1→2 后取单票只能挡住一路在途（本用例为池化配套回归防线）。
+    """
+    import services.remote_link as rl
+    from services.tts_service import TtsService
+
+    TtsService._reset_for_tests()
+    svc = TtsService.get_instance()
+    monkeypatch.setattr(rl.RemoteLinkService, "should_use_remote",
+                        lambda self: False)
+    started = threading.Event()
+    finish = threading.Event()
+
+    def _slow_local(*_a: object, **_k: object) -> "tuple[bytes, float]":
+        started.set()
+        finish.wait(timeout=5)  # 挂住"在途"
+        return b"wav-slow", 1.0
+
+    monkeypatch.setattr(svc, "_synth_qc_local", _slow_local)
+    results = []
+    t = threading.Thread(target=lambda: results.append(svc.synthesize("在途文本")))
+    t.start()
+    assert started.wait(timeout=2)
+    done = threading.Event()
+
+    def _rel() -> None:
+        svc.release()
+        done.set()
+
+    tr = threading.Thread(target=_rel)
+    tr.start()
+    try:
+        assert not done.wait(timeout=0.3), "release 不应在在途完成前返回（取满语义）"
+        finish.set()
+        tr.join(timeout=5)
+        t.join(timeout=5)
+        assert done.is_set()
+        assert len(results) == 1                     # 在途请求未被杀（正常返回）
+        with svc._cache_lock:                        # type: ignore[attr-defined]
+            assert len(svc._cache) == 0              # 卸载后缓存零残留
+    finally:
+        finish.set()
+        TtsService._reset_for_tests()
