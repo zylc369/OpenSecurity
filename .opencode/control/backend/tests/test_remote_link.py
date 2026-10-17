@@ -48,7 +48,13 @@ from services.remote_client import RemoteHealthInfo, ModelFingerprint  # noqa: E
 
 
 def _mk_service(url="http://fake.remote:1", enabled=True, token="tok123"):
-    """构造隔离的 RemoteLinkService（fake 配置 + 可控探测）。"""
+    """构造隔离的 RemoteLinkService（fake 配置 + 可控探测）。
+
+    用前重置单例: 先前用例对单例的补丁/状态（_read_config/REMOTE 态等）
+    不泄漏进本用例——也防文件末态污染后续测试文件（如 relayd 的 TTS 用例
+    曾因单例残留 REMOTE 态而误走远程分支）。
+    """
+    rl_module.RemoteLinkService._reset_for_tests()
     svc = rl_module.RemoteLinkService()
     rl_module.RemoteLinkService.get_instance()._read_config = lambda: (url, enabled, token)  # noqa: F811 —— 测试注入
     svc.reload_config()

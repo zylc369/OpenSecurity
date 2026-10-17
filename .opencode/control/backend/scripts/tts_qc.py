@@ -36,7 +36,8 @@ class QcResult:
     coverage: float                 # 转写拼音长度 / 原文拼音长度
     leak_cut: bool                  # 是否执行了泄漏兜底切除
     repeat: bool                    # n-gram 循环检出(豁免原文自重复后)
-    bad_sentences: "list[str]" = field(default_factory=list)  # 错误定位(句级摘要)
+    bad_sentences: "list[str]" = field(default_factory=list)  # 错误定位(句级摘要, 含 per——日志展示)
+    bad_keys: "tuple[str, ...]" = ()  # 稳定键(去 per 的句摘要——版间一致性比较用)
     detail: str = ""
 
 
@@ -146,6 +147,7 @@ class TtsQC:
 
         # 句级定位(错误摘要)
         bad: "list[str]" = []
+        bad_keys: "list[str]" = []
         if not leak_cut:
             cursor = 0
             for sent in _sentences(orig_text):
@@ -157,6 +159,8 @@ class TtsQC:
                 if p > cfg.per_limit * 1.5:
                     head_txt = re.sub(r'^["”“\s]+|["”\s]+$', "", sent)[:12]
                     bad.append(f"{head_txt}…(per={p:.0%})")
+                    if len(bad_keys) < 3:
+                        bad_keys.append(head_txt)  # 稳定键: 不含浮动 per
                 cursor += len(sp)
 
         per = _per(orig_py, tp_full)
@@ -165,6 +169,6 @@ class TtsQC:
               and not repeat)
         return QcResult(ok=ok, per=round(per, 4), coverage=round(coverage, 3),
                         leak_cut=leak_cut, repeat=repeat,
-                        bad_sentences=bad,
+                        bad_sentences=bad, bad_keys=tuple(bad_keys),
                         detail=f"per={per:.1%} cov={coverage:.0%} "
                                f"leak={'切' if leak_cut else '无'} rep={repeat}")

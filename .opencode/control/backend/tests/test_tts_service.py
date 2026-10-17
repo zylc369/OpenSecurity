@@ -40,6 +40,9 @@ def _fresh_service(monkeypatch, tmp_path):
 
     monkeypatch.setattr(svc._worker, "request", _FakeWorker().request)
     monkeypatch.setattr(svc._worker, "_ensure", lambda: None)
+    # 质检纯化: 协议单测不起真 ASR——否则"其它测试文件先加载了 funasr"
+    # 时本文件行为漂移（假 wav 走真质检→判败→4 版重试, calls 断言翻车）
+    monkeypatch.setattr(svc, "_qc_check", lambda *a, **k: None)
     yield svc, calls
     _reset_for_tests()
 

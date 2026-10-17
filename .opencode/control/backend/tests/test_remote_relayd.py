@@ -788,6 +788,10 @@ def test_tts_service_error_facets(monkeypatch: "object") -> None:
     import pathlib, tempfile
     _empty = pathlib.Path(tempfile.mkdtemp())
     monkeypatch.setattr(tts_mod, "TTS_MODEL_DIR", _empty / "no-model")  # type: ignore[attr-defined]
+    # 锁死本地路径: synthesize 的远程路由取决于全局单例状态（受其它测试文件
+    # 影响）——本用例只验本地错误面, 强制 should_use_remote=False
+    from services.remote_link import RemoteLinkService
+    monkeypatch.setattr(RemoteLinkService, "should_use_remote", lambda self: False)  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]  (测试动态 patch)
 
     svc = TtsService()
     try:

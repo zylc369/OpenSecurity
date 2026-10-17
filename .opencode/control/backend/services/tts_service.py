@@ -33,6 +33,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _ascii_alnum_ratio(text: str) -> float:
+    """ASCII 字母/数字字符占比（高风险文本检测——ASR 对字母数字串转写天然
+    随机, 质检必然误报; 音频本身无缺陷）。"""
+    if not text:
+        return 0.0
+    n = sum(1 for c in text if c.isascii() and c.isalnum())
+    return n / len(text)
+
 _HOME = Path(os.environ.get("OPENSECURITY_HOME", str(Path.home() / "bw-security-analysis")))
 # CosyVoice3 torch 模型目录（自定义目录非 HF cache——局域网 rsync 部署 + 目录口径检测）
 TTS_MODEL_DIR = _HOME / "models" / "cosyvoice3-8bit"
@@ -393,7 +402,14 @@ class TtsService:
 
         返回 QcResult;质检系统不可用（funasr 缺失等）返回 None=放行
         （质量门是增强不是依赖——缺 ASR 不阻断合成）。
+        高字母数字占比文本（如站点广告串）跳过质检: 参考含字母数字时 ASR
+        转写为汉字/拼音变体, PER 必然超限——属质检不适用而非音频缺陷。
         """
+        ratio = _ascii_alnum_ratio(text)
+        if ratio > 0.25:
+            logger.info("[tts] 高风险文本（字母数字占比 %.0f%%）, 跳过质检放行: %.20s…",
+                        ratio * 100, text)
+            return None
         import tempfile
         try:
             from scripts.tts_qc import TtsQC, QcConfig
@@ -446,7 +462,10 @@ class TtsService:
             # 噪声主导提前交付: 连续两版失败句集合一致 → 差异源于 ASR 对
             # 特定句(方言/生僻)的系统性转写漂移而非随机 TTS 错(真错在 RAS
             # 补丁后随机分布, 句定位版间不同)——再重试只是浪费时间
-            cur_bad = frozenset(q.bad_sentences[:3])
+            # 失败句集合比较用稳定键（去浮动 per——含 per 则每版必不相等,
+            # 提前交付永不命中）; 旧字段兜底兼容
+            cur_bad = frozenset(q.bad_keys if q.bad_keys
+                                else tuple(s.split("…")[0] for s in q.bad_sentences[:3]))
             if attempt >= 2 and prev_bad is not None and cur_bad == prev_bad:
                 logger.warning("[tts] 连续两版失败句一致——ASR 噪声主导, 提前交付(省 %d 版重试)",
                                cfg.max_attempts - attempt)
