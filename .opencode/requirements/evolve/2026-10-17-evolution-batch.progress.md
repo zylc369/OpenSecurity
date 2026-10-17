@@ -57,4 +57,4 @@
 - [低] 死状态清理: segDurations 移除（只写不读）; SEC_PER_CHAR/PREFETCH_DEPTH 注释更新
 - 测试补: hook 长文本全播放不重不漏（段请求序列 join === 原文）
 - 文档: lock-split §2.2 伪码与缓存语义对齐（远程不入缓存; 本地域内写缓存）
-- 遗留（后续项）: blobPromises/urlPool 每段 Blob 常驻至 stop（长书线性内存——非本批范围）
+- ~~遗留: blobPromises/urlPool 每段 Blob 常驻至 stop~~ → **已销账**（播过段音频资源窗口回收: segUrlRef+blobPromises 同点释放+revoke）

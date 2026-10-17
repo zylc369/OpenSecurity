@@ -66,7 +66,7 @@ export function useTtsPlayer() {
   const nextFetchRef = useRef(0);
   const pausedRef = useRef(false);
   const stoppedRef = useRef(true);
-  const urlPool = useRef<string[]>([]);
+  const segUrlRef = useRef<Map<number, string>>(new Map());  // 段→objectURL（仅播放窗口内保留）
   const errCount = useRef(0);
   const speedRef = useRef(1.0);
   const optsRef = useRef<StartOptions>({});
@@ -82,8 +82,8 @@ export function useTtsPlayer() {
       audioRef.current.src = "";
       audioRef.current = null;
     }
-    for (const u of urlPool.current) URL.revokeObjectURL(u);
-    urlPool.current = [];
+    for (const u of segUrlRef.current.values()) URL.revokeObjectURL(u);
+    segUrlRef.current = new Map();
     blobPromises.current = new Map();
     elapsedBase.current = 0;
     genMsList.current = [];
@@ -190,14 +190,22 @@ export function useTtsPlayer() {
       return;
     }
     nextPlayRef.current = idx;
-    // 窗口回收: 段文本只保留播放位附近（内存 O(窗口)）
+    // 窗口回收: 段文本与音频资源只保留播放位附近（内存 O(窗口)——
+    // 长书连续听不再线性增长; 收听模型为"向后连读、无回退", 播过即安全释放）
     for (const k of Array.from(producedRef.current.keys())) {
       if (k < idx - 1) producedRef.current.delete(k);
+    }
+    for (const k of Array.from(segUrlRef.current.keys())) {
+      if (k < idx - 1) {
+        URL.revokeObjectURL(segUrlRef.current.get(k) as string);
+        segUrlRef.current.delete(k);
+        blobPromises.current.delete(k);
+      }
     }
     fetchSeg(idx, signal).then((blob) => {
       if (stoppedRef.current || signal.aborted) return;
       const url = URL.createObjectURL(blob);
-      urlPool.current.push(url);
+      segUrlRef.current.set(idx, url);
       const audio = new Audio(url);
       audio.preservesPitch = true;   // 变速保音调(标准播放器语义)
       audio.playbackRate = speedRef.current;

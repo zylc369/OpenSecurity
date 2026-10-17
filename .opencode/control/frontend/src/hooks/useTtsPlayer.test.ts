@@ -110,6 +110,23 @@ describe("useTtsPlayer 协议与状态机", () => {
     expect(result.current.state.segSource).toBe("remote");
   });
 
+  it("窗口回收: 播过的段释放对象 URL（长会话内存 O(窗口)）", async () => {
+    const TEXT4 = "甲".repeat(20) + "。" + "乙".repeat(60) + "。"
+      + "丙".repeat(80) + "。" + "丁".repeat(60) + "。";
+    const { result } = renderHook(() => useTtsPlayer());
+    act(() => { result.current.start(TEXT4); });
+    expect(expectedSegCount(TEXT4)).toBe(4);
+    for (let i = 0; i < 3; i++) {   // 播到第 3 段起播（idx=2 → 第 0 段应被回收）
+      await waitFor(() => expect(FakeAudio.instances.length).toBe(i + 1));
+      await act(async () => { FakeAudio.instances[i].finish(1); });
+    }
+    expect(env.revokeMock).toHaveBeenCalled();   // 播过段已释放
+    // 剩余播放与自然收尾不受影响
+    await act(async () => { FakeAudio.instances[2].finish(1); });
+    await act(async () => { FakeAudio.instances[3].finish(1); });
+    await waitFor(() => expect(result.current.state.status).toBe("idle"));
+  });
+
   it("长文本全播放: 段请求序列不重不漏（拼接回原文）", async () => {
     const { result } = renderHook(() => useTtsPlayer());
     act(() => { result.current.start(TEXT3); });
