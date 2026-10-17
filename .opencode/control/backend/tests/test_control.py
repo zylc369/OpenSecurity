@@ -2388,6 +2388,28 @@ def test_restart_schedule_and_route():
         restart_mod.perform = _orig_perform
 
 
+@test("restart: 节点重启链路 execv 目标真实存在（防 services/services 拼错回归）")
+def test_restart_via_remote_node_target_exists():
+    import os as _os_mod
+    import services.restart as restart_py
+    r = restart_py.ConsoleRestarter.get_instance()
+    captured = {}
+
+    def _fake_execv(_exe, argv):
+        captured["argv"] = list(argv)
+
+    _orig = restart_py.os.execv
+    restart_py.os.execv = _fake_execv
+    try:
+        r._restart_via_remote_node()
+    finally:
+        restart_py.os.execv = _orig
+    target = captured["argv"][1]
+    assert_true(_os_mod.path.isfile(target),
+                f"execv 目标不存在（节点重启必死）: {target}")
+    assert_true(target.endswith("remote_node.py"), "目标应为 remote_node.py")
+
+
 @test("model_loader: LockedEmbedder/LockedReranker 并发互斥（串行不变量的构造保证）")
 def test_locked_wrapper_mutex():
     import threading

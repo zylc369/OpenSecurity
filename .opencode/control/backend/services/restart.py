@@ -137,7 +137,10 @@ class ConsoleRestarter:
     def _restart_via_remote_node(self) -> None:
         """节点重启: execv remote_node.py(完整启动链——依赖/模型 ensure)。"""
         from services.config_manager import ConfigManager
-        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        # restart.py 位于 backend/services/——两层 dirname 才到 backend 根。
+        # 曾少一层: 拼出 services/services/remote_node.py——节点"更新并重启"
+        # 时 execv 找不到文件, 旧进程已停、新进程未起 = 节点静默死亡。
+        backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         remote_node = os.path.join(backend_dir, "services", "remote_node.py")
         cm = ConfigManager.get_instance()
         tags = (cm.get(cm.Keys.NODE_MODEL_TAGS) or "security,tts").strip()
