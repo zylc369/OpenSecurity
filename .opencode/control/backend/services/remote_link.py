@@ -379,8 +379,11 @@ class RemoteLinkService:
     def _warm_remote_tts(self) -> None:
         try:
             client = self.get_client()
-            client.tts_synth("好。", "", 1.0, no_cache=True)  # 穿透缓存真烧模型
-            logger.info("节点 TTS 预热完成（远程首听免节点冷启动）")
+            # 双预热（不同文本 + 穿透缓存）: 覆盖双 worker 池——单发只烧一个
+            # worker（池另一个仍冷, 首听二段吃 ~10s 冷加载）。
+            client.tts_synth("好。", "", 1.0, no_cache=True)
+            client.tts_synth("很。", "", 1.0, no_cache=True)
+            logger.info("节点 TTS 预热完成（双 worker——远程首听免节点冷启动）")
         except Exception as e:  # noqa: BLE001 —— 预热失败不影响主流程
             logger.warning("节点 TTS 预热失败（首听可能吃冷启动）: %s", e)
 

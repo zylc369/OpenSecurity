@@ -396,8 +396,8 @@ def test_remote_tts_warmup_on_enter():
         await _pump(svc, 1)
         assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE)
         _wait_until(lambda: bool(fake.calls))  # 预热在后台线程
-        assert_true(fake.calls == ["好。"],
-                    f"进入 REMOTE 应预热一次（文本与节点预载同串），实际 {fake.calls}")
+        assert_true(fake.calls == ["好。", "很。"],
+                    f"进入 REMOTE 应双预热一次（覆盖双 worker 池），实际 {fake.calls}")
     try:
         asyncio.run(run())
     finally:
