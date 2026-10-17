@@ -37,13 +37,14 @@
 查缓存（_cache_lock）→ 命中直接返回
 use_remote?
   ├─ True: 试远程（无主锁——transport 层并发安全, 节点侧自排队）
-  │         ├─ 成功且质检过 → 写缓存（_cache_lock）→ 返回
+  │         ├─ 成功且质检过 → 返回（远程结果不入缓存——既有语义保持）
   │         └─ 失败/质检不过 → note_request_failure → 落本地
   └─ False → 落本地
 本地（本地路径与 fallback 统一入口）:
   with _local_sem:            # 排队取号; 同一时刻只有一人在与 worker 对话
       wav = _synth_qc_local(...)
-  写缓存（_cache_lock）→ 返回
+      with _cache_lock: 写缓存   # 域内写: release"取号→清缓存"原子性依赖
+  返回
 ```
 
 ### §2.3 不变量保持清单

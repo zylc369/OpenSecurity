@@ -395,14 +395,16 @@ class TtsService:
             wav, gen_ms = self._synth_qc_local(text, voice_asset, speed,
                                                instruct=instruct, seed=seed,
                                                mode=mode)
-        logger.info("[tts] 本地合成完成: 生成 %.0fms, 请求总耗时 %.0fms",
-                    gen_ms, (time.monotonic() - t_enter) * 1000)
-        with self._cache_lock:
-            self._cache[key] = (wav, "local")
-            self._cache.move_to_end(key)
-            while (len(self._cache) > CACHE_LIMIT
-                   or sum(len(v[0]) for v in self._cache.values()) > CACHE_BYTES_LIMIT):
-                self._cache.popitem(last=False)
+            logger.info("[tts] 本地合成完成: 生成 %.0fms, 请求总耗时 %.0fms",
+                        gen_ms, (time.monotonic() - t_enter) * 1000)
+            # 缓存写入保持在域内: release() 的"取号→清缓存"原子性依赖
+            # "域内无在途写"——写放域外会被卸载清空后回写（卸载残留旧条目）
+            with self._cache_lock:
+                self._cache[key] = (wav, "local")
+                self._cache.move_to_end(key)
+                while (len(self._cache) > CACHE_LIMIT
+                       or sum(len(v[0]) for v in self._cache.values()) > CACHE_BYTES_LIMIT):
+                    self._cache.popitem(last=False)
         return TtsResult(wav=wav, cached=False, gen_ms=gen_ms,
                          voice=voice_id, speed=speed, source="local")
 

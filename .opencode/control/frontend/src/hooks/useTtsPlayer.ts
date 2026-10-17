@@ -34,11 +34,11 @@ const INITIAL: TtsPlayerState = {
   segSource: "", firstSegSource: "",
 };
 
-/** 中文朗读估速（秒/字）——未生成段总时长估算用 */
+/** 中文朗读估速（秒/字）——当前段真实时长未就绪时的兜底估算 */
 const SEC_PER_CHAR = 0.2;
 
 // 播放驱动预取深度: 播第 N 段时最多挂到第 N+PREFETCH_DEPTH 段。
-// 服务端合成串行(全局锁)——多挂无收益且挤占队列; 生成耗时≈播放时长×0.3(RTF),
+// 本地合成为单 GPU 串行队列(远程独立)——多挂无收益; 生成耗时≈播放时长×0.3(RTF),
 // 深度 1 正常富余 3 倍, 停播时最多浪费 1 段。
 const PREFETCH_DEPTH = 1;
 
@@ -72,7 +72,6 @@ export function useTtsPlayer() {
   const optsRef = useRef<StartOptions>({});
   const playingStartedRef = useRef(false);     // 首段音频就绪开播后才允许预取
   const waitStartRef = useRef<number | null>(null);  // 段间缓冲等待起点(performance.now)
-  const segDurations = useRef<number[]>([]);   // 已知段真实时长
   const elapsedBase = useRef(0);               // 已完成段时长累计
   const genMsList = useRef<number[]>([]);      // 每段生成耗时
   const segSourceRef = useRef<string[]>([]);   // 每段来源（响应头 X-Tts-Source）
@@ -86,7 +85,6 @@ export function useTtsPlayer() {
     for (const u of urlPool.current) URL.revokeObjectURL(u);
     urlPool.current = [];
     blobPromises.current = new Map();
-    segDurations.current = [];
     elapsedBase.current = 0;
     genMsList.current = [];
     producedRef.current = new Map();
@@ -180,7 +178,7 @@ export function useTtsPlayer() {
   const pumpRef = useRef<() => void>(() => { /* start() 内替换 */ });
 
   const playSeg = useCallback((idx: number, signal: AbortSignal) => {
-    if (stoppedRef.current) {
+    if (stoppedRef.current || signal.aborted) {  // aborted=旧会话回调 (防打进新会话)
       setState((s) => ({ ...s, status: "idle" }));
       return;
     }
@@ -203,13 +201,9 @@ export function useTtsPlayer() {
       const audio = new Audio(url);
       audio.preservesPitch = true;   // 变速保音调(标准播放器语义)
       audio.playbackRate = speedRef.current;
-      audio.onloadedmetadata = () => {  // 元数据就绪后回填真实时长(创建时通常 NaN)
-        if (Number.isFinite(audio.duration)) segDurations.current[idx] = audio.duration;
-      };
       audioRef.current = audio;
       const dur = Number.isFinite(audio.duration) ? audio.duration
         : text.length * SEC_PER_CHAR;
-      segDurations.current[idx] = dur;
       const gens = genMsList.current.filter((x) => x > 0);
       setState((s) => ({
         ...s, status: "playing", segIndex: idx,

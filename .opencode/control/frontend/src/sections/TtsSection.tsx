@@ -17,7 +17,7 @@ import {
 } from "@ant-design/icons";
 import type { VoiceAsset } from "../types";
 import { useTtsPlayer } from "../hooks/useTtsPlayer";
-import { DEFAULT_FIRST_LEN, DEFAULT_NEXT_LEN, rampFor, segmentText } from "../utils/segmentText";
+import { DEFAULT_FIRST_LEN, DEFAULT_NEXT_LEN } from "../utils/segmentText";
 
 /** 通道 a 固定测试文案（覆盖对话引号/拟声/叹号/省略号/问号） */
 const DEFAULT_TEXT =
@@ -253,12 +253,10 @@ const TtsSection: React.FC = () => {
     });
   };
 
-  /** 正文选词朗读: 以选中处为新起点重新起播（整段源文本切片——惰性分段自然衔接）。 */
-  const readFromOffset = (offset: number) => {
-    const list = voices ?? [];
-    const def = list.find((v) => v.is_default) ?? list[0];
-    if (!def) { void message.warning("音色库为空，无法朗读"); return; }
-    launch(def.id, "选词", txtContent.slice(offset));
+  /** 正文选词朗读: 以选中处为新起点重新起播（整段源文本切片——惰性分段自然衔接）。
+   *  音色=所在展开行的音色（与行内试听按钮一致）。 */
+  const readFromOffset = (voiceId: string, offset: number) => {
+    launch(voiceId, "选词", txtContent.slice(offset));
   };
 
   const doStop = () => {
@@ -307,12 +305,9 @@ const TtsSection: React.FC = () => {
     setTxtContent(await f.text());
   };
 
-  // 大文件 tail 全量分段成本高——memo 到输入变化才重算（无关 state 渲染不触发）
+  // tail 切片 memo（无段数估算——去总账本；惰性分段不预扫全文）
   const txtTail = useMemo(
     () => txtContent.slice(Math.max(0, startIdx)), [txtContent, startIdx]);
-  const txtSegCount = useMemo(() => (txtTail
-    ? segmentText(txtTail, nextLen, undefined, rampFor(firstLen, nextLen)).length
-    : 0), [txtTail, nextLen, firstLen]);
 
   const submitUpload = async () => {
     const values = await form.validateFields();
@@ -382,10 +377,12 @@ const TtsSection: React.FC = () => {
               </Space>
               {txtContent && (
                 <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 6 }}>
-                  从第 {startIdx} 字「{txtTail.slice(0, 20)}…」起 · 共 {txtTail.length} 字 · 约 {txtSegCount} 段
+                  从第 {startIdx} 字「{txtTail.slice(0, 20)}…」起 · 共 {txtTail.length} 字
                 </Typography.Text>
               )}
-              {txtContent && <ReaderView text={txtContent} readFrom={readFromOffset} />}
+              {txtContent && (
+                <ReaderView text={txtContent} readFrom={(off) => readFromOffset(v.id, off)} />
+              )}
             </div>
           }
           action={listenBtn(v, "c", txtTail, !v.available || txtTail.trim().length === 0)}

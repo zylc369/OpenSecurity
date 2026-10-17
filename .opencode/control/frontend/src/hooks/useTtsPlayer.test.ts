@@ -110,6 +110,20 @@ describe("useTtsPlayer 协议与状态机", () => {
     expect(result.current.state.segSource).toBe("remote");
   });
 
+  it("长文本全播放: 段请求序列不重不漏（拼接回原文）", async () => {
+    const { result } = renderHook(() => useTtsPlayer());
+    act(() => { result.current.start(TEXT3); });
+    const segCount = expectedSegCount(TEXT3);
+    for (let i = 0; i < segCount; i++) {
+      await waitFor(() => expect(FakeAudio.instances.length).toBe(i + 1));
+      await act(async () => { FakeAudio.instances[i].finish(1); });
+    }
+    await waitFor(() => expect(result.current.state.status).toBe("idle"));
+    const texts = env.calls.map((c) => c.body.text as string);
+    expect(texts.length).toBe(segCount);   // 不重
+    expect(texts.join("")).toBe(TEXT3);    // 不漏（分段无损）
+  });
+
   it("stop 清场: 状态回 idle 且已 revoke 对象 URL", async () => {
     const { result } = renderHook(() => useTtsPlayer());
     act(() => { result.current.start(TEXT2); });
