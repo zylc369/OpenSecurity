@@ -149,6 +149,30 @@ def test_service_level_concurrent_synthesize(monkeypatch) -> None:
         TtsService._reset_for_tests()
 
 
+def test_pool_warm_all_targets_each_worker() -> None:
+    """warm_all: 池内每个 worker 各被烧一次（覆盖范围=池容量——与池大小不脱节）。"""
+    pool, stubs = _pool_with_stubs(2)
+    n = pool.warm_all(lambda i: {"op": "synth", "out": f"/tmp/warm{i}"})
+    assert n == 2
+    assert all(c.calls == 1 for c in stubs)   # 两桩各一次（真覆盖, 非重试单桩）
+
+
+def test_service_warm_local_workers() -> None:
+    """服务级: warm_local_workers 全池预热（唯一入口——节点预载/远程促热共用）。"""
+    from services.tts_service import TtsService
+
+    TtsService._reset_for_tests()
+    svc = TtsService.get_instance()
+    pool, stubs = _pool_with_stubs(2)
+    svc._worker = pool  # type: ignore[assignment]  # 测试注入
+    try:
+        n = svc.warm_local_workers()
+        assert n == 2
+        assert all(c.calls == 1 for c in stubs)
+    finally:
+        TtsService._reset_for_tests()
+
+
 def test_release_waits_inflight_and_clears_cache(monkeypatch) -> None:
     """release: 取满域许可——等全部在途完成（不杀请求）后关 worker + 缓存零残留。
 

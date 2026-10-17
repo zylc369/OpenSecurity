@@ -37,6 +37,16 @@ def get_tts_service() -> TtsService:
     return TtsService.get_instance()
 
 
+@router.post("/warm")
+def warm(svc: TtsService = Depends(get_tts_service)) -> "dict[str, object]":
+    """预热本地 worker 池（幂等短合成——给覆盖范围由池保证）。
+
+    节点预载/远程促热（主控 REMOTE 进入时）共用; 返回已预热 worker 数。
+    """
+    n = svc.warm_local_workers()
+    return {"ok": n > 0, "warmed": n}
+
+
 @router.post("")
 def synthesize(req: TtsRequest,
                svc: TtsService = Depends(get_tts_service)) -> Response:

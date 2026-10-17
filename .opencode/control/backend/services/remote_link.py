@@ -379,11 +379,21 @@ class RemoteLinkService:
     def _warm_remote_tts(self) -> None:
         try:
             client = self.get_client()
-            # 双预热（不同文本 + 穿透缓存）: 覆盖双 worker 池——单发只烧一个
-            # worker（池另一个仍冷, 首听二段吃 ~10s 冷加载）。
-            client.tts_synth("好。", "", 1.0, no_cache=True)
-            client.tts_synth("很。", "", 1.0, no_cache=True)
-            logger.info("节点 TTS 预热完成（双 worker——远程首听免节点冷启动）")
+            # 首选: 节点侧全池预热（POST /api/tts/warm——覆盖范围由节点池保证,
+            # 池大小变化自动跟随; 与节点预载同一实现）。
+            warmed = 0
+            try:
+                warmed = client.tts_warm()
+            except Exception:  # noqa: BLE001 —— 旧节点 404/网络异常 → 回退
+                warmed = 0
+            if warmed <= 0:
+                # 回退（旧节点）: 双发不同文本覆盖 2 worker（与池大小对齐）
+                client.tts_synth("好。", "", 1.0, no_cache=True)
+                client.tts_synth("很。", "", 1.0, no_cache=True)
+                logger.info("节点 TTS 预热完成（兼容路径——节点未提供 warm 端点）")
+            else:
+                logger.info("节点 TTS 预热完成（全池 %d 个 worker——远程首听免冷启动）",
+                            warmed)
         except Exception as e:  # noqa: BLE001 —— 预热失败不影响主流程
             logger.warning("节点 TTS 预热失败（首听可能吃冷启动）: %s", e)
 

@@ -22,7 +22,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, TYPE_CHECKING, Any, Callable, cast
 
 from services import model_policy
 
@@ -268,6 +268,32 @@ class TtsWorkerPool:
     def alive(self) -> bool:
         return any(c.alive for c in self._clients)
 
+    @property
+    def size(self) -> int:
+        """池容量（预热覆盖范围/诊断用）。"""
+        return len(self._clients)
+
+    def warm_all(self, make_payload: "Callable[[int], dict[str, Any]]") -> int:
+        """对池内每个 worker 各烧一次（取空闲+FIFO——启动无并发下逐一命中）。
+
+        "预热覆盖范围"的唯一实现点: 池大小变化时本方法自动覆盖新容量
+        （调用方无需知道 worker 数）。make_payload(i) 生成第 i 个 worker 的
+        请求体（不同文本避免同文本重复路径依赖）。返回成功数; 失败不抛
+        （懒加载兜底）。
+        """
+        ok = 0
+        n = len(self._clients)
+        for i in range(n):
+            client = self._free.get()
+            try:
+                client.request(make_payload(i))
+                ok += 1
+            except Exception as e:  # noqa: BLE001 —— 单 worker 失败不阻塞其余
+                logger.warning("[tts] worker 预热失败（第 %d/%d 个）: %r", i + 1, n, e)
+            finally:
+                self._free.put(client)
+        return ok
+
     def shutdown(self) -> None:
         for c in self._clients:
             c.shutdown()
@@ -327,23 +353,46 @@ class TtsService:
 
     # ── 合成 ─────────────────────────────────────────
 
-    def warmup(self, force_local: bool = False) -> None:
-        """预热: 完整合成一次极短文本（worker 模型 + 质检链路就绪）。
+    def warm_local_workers(self) -> int:
+        """预热全部本地 worker（池内每 worker 各一次最短合成——预热唯一入口）。
 
-        节点预载用（server --model-preload cosyvoice3-8bit）; 失败不抛出
-        （懒加载路径兜底——首请求自愈）。
-        force_local=True 绕过远程路由直接预热本地 worker（远程降级接管前用——
-        否则远程在线时预热走远程, 本地 worker 不会启动）。
+        节点预载（--model-preload）/降级接管/远程促热（/api/tts/warm）共用。
+        覆盖范围由池保证（warm_all——池大小变化自动跟随, 不再与 worker 数脱节;
+        worker 层无缓存概念, 天然真烧）。返回成功数; 失败不抛（懒加载兜底）。
+        """
+        import tempfile
+
+        from services.voice_library import VoiceLibrary
+        try:
+            lib = VoiceLibrary.get_instance()
+            va = lib.default_voice()
+            wav_path = str(va.resolved_wav(lib))
+            ref_text = va.ref_text
+        except Exception as e:  # noqa: BLE001 —— 音色库不可用时放弃预热
+            logger.warning("[tts] 预热跳过（音色库不可用）: %s", e)
+            return 0
+
+        def _mk(i: int) -> "dict[str, Any]":
+            out = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+            return {"id": f"warm-{i}-{time.monotonic_ns()}", "op": "synth",
+                    "text": "好。", "wav": wav_path, "ref_text": ref_text,
+                    "out": out, "speed": DEFAULT_SPEED, "instruct": "",
+                    "seed": -1, "mode": ""}
+
+        n = self._worker.warm_all(_mk)
+        logger.info("[tts] 本地 worker 预热完成: %d/%d（模型加载+首跑编译）",
+                    n, self._worker.size)
+        return n
+
+    def warmup(self, force_local: bool = False) -> None:
+        """预热: 全池本地 worker 各一次最短合成（模型加载 + 首跑编译）。
+
+        force_local 保留兼容（历史调用: 降级接管前预热本地）; 两条路径统一走
+        warm_local_workers——覆盖池内全部 worker（与池大小永不脱节）。节点预载
+        （--model-preload）经 model_ops.load 调用本方法。失败不抛（懒加载兜底）。
         """
         try:
-            if force_local:
-                from services.voice_library import VoiceLibrary
-                with self._local_sem:  # 本地域取号（与合成/卸载互斥）
-                    self._synth_local("好。",
-                                      VoiceLibrary.get_instance().default_voice(),
-                                      DEFAULT_SPEED)
-            else:
-                self.synthesize("好。")
+            self.warm_local_workers()
         except Exception as e:  # noqa: BLE001 —— 预热失败不致命
             logger.warning("[tts] 预热失败（懒加载兜底）: %s", e)
 

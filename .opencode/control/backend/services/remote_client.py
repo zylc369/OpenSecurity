@@ -249,6 +249,21 @@ class RemoteConsoleClient:
                 f"远程 /api/tts {r.status_code}: {r.text[:120]}")
         return r.content
 
+    def tts_warm(self) -> int:
+        """请求节点预热本地 worker 全池（POST /api/tts/warm——幂等）。
+
+        返回预热 worker 数; 节点版本旧（404）/响应不符 → 抛 RemoteUnavailable
+        （调用方回退"双发合成"兼容路径）。覆盖范围由节点池保证（与 worker 数
+        永不脱节）。
+        """
+        data = self._post_json("/api/tts/warm", {})
+        if not isinstance(data, dict):
+            raise RemoteUnavailable("warm 响应非对象")
+        warmed = data.get("warmed")
+        if not isinstance(warmed, int) or isinstance(warmed, bool):
+            raise RemoteUnavailable("warm 响应异常（缺 warmed 计数）")
+        return warmed
+
     # ─── 健康探测 ─────────────────────────────────────────
 
     def probe_health(self) -> RemoteHealthInfo:

@@ -369,15 +369,20 @@ if __name__ == "__main__":
 
 
 class _FakeTtsClient:
-    """伪造远程 client（记录 tts_synth 调用文本）。"""
+    """伪造远程 client（记录 tts_synth 调用文本 + warm 端点调用）。"""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.warm_calls = 0
 
     def tts_synth(self, text, voice, speed, instruct="", seed=-1, mode="",
                   no_cache=False):
         self.calls.append(text)
         return b"wav"
+
+    def tts_warm(self) -> int:
+        self.warm_calls += 1
+        return 2
 
 
 def _wait_until(cond, timeout=2.0):
@@ -395,9 +400,10 @@ def test_remote_tts_warmup_on_enter():
         _set_probe(svc, [_ok_info()])
         await _pump(svc, 1)
         assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE)
-        _wait_until(lambda: bool(fake.calls))  # 预热在后台线程
-        assert_true(fake.calls == ["好。", "很。"],
-                    f"进入 REMOTE 应双预热一次（覆盖双 worker 池），实际 {fake.calls}")
+        _wait_until(lambda: bool(fake.warm_calls) or bool(fake.calls))  # 预热在后台线程
+        assert_true(fake.warm_calls == 1 and fake.calls == [],
+                    f"进入 REMOTE 应走全池 warm 端点（覆盖范围由节点池保证），"
+                    f"实际 warm={fake.warm_calls} synth={fake.calls}")
     try:
         asyncio.run(run())
     finally:
