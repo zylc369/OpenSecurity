@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -156,7 +157,8 @@ class TtsWorkerClient:
         return r.returncode == 0
 
     def request(self, payload: "dict[str, Any]") -> WorkerResponse:
-        """一发一收（调用方持 TtsService 锁——串行天然成立）。超时杀进程。"""
+        """一发一收（单 client 内一问一答由池取用语义保证——同一时刻至多
+        一个调用方; 串行天然成立）。超时杀进程。"""
         proc = self._ensure()
         self._last_active = time.monotonic()
         self._ensure_idle_watchdog()
@@ -237,6 +239,40 @@ class TtsWorkerClient:
             self._kill()
 
 
+LOCAL_WORKER_POOL_SIZE = 2  # 本地并行 worker 数（内存/GPU 平衡点: 每实例 ~1.3G 模型）
+
+
+class TtsWorkerPool:
+    """并行 worker 池: N 个独立 worker 进程 + 空闲取用（阻塞排队=背压）。
+
+    接口与单 TtsWorkerClient 相同（request/alive/shutdown）——调用方与测试
+    mock 零感知（`svc._worker.request` patch 点不变）。每 client 的空闲释放
+    看门狗独立生效（闲者自清，下次请求冷启动自愈）。
+    """
+
+    def __init__(self, size: int = LOCAL_WORKER_POOL_SIZE) -> None:
+        self._clients = [TtsWorkerClient() for _ in range(size)]
+        self._free: "queue.Queue[TtsWorkerClient]" = queue.Queue()
+        for c in self._clients:
+            self._free.put(c)
+
+    def request(self, payload: "dict[str, Any]") -> WorkerResponse:
+        """取空闲 worker 一发一收（无空闲则阻塞排队——天然背压）。"""
+        client = self._free.get()
+        try:
+            return client.request(payload)
+        finally:
+            self._free.put(client)
+
+    @property
+    def alive(self) -> bool:
+        return any(c.alive for c in self._clients)
+
+    def shutdown(self) -> None:
+        for c in self._clients:
+            c.shutdown()
+
+
 class TtsService:
     """TTS 合成（缓存/远程路由/worker 本地推理三件套，全局单例）。"""
 
@@ -249,8 +285,9 @@ class TtsService:
         # 本地域语义为信号量（队列取号）——容量 1 由 GPU 单实例决定;
         # 远程等待（网络 IO）不占本地域（transport 并发安全, 节点侧自排队）。
         self._cache_lock = threading.Lock()          # 只包缓存读写（微秒级）
-        self._local_sem = threading.Semaphore(1)     # 本地推理域（含 fallback）
-        self._worker = TtsWorkerClient()
+        # 本地推理域（含 fallback——统一入口）: 并发度=池大小（双 worker 并行）
+        self._local_sem = threading.Semaphore(LOCAL_WORKER_POOL_SIZE)
+        self._worker = TtsWorkerPool()
 
     @classmethod
     def get_instance(cls) -> "TtsService":

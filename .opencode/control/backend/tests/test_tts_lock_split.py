@@ -89,8 +89,8 @@ def test_slow_remote_does_not_block_local(monkeypatch: pytest.MonkeyPatch) -> No
     assert results[0].source == "remote"  # type: ignore[union-attr]
 
 
-def test_local_semaphore_serializes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """本地域容量 1: 并发本地请求下, worker 对话并发峰值 = 1（不交错）。"""
+def test_local_semaphore_concurrency_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本地域容量=池大小(2): 并发峰值 ≤2（阀门语义）; 超容请求排队。"""
     svc = TtsService()
     monkeypatch.setattr(RemoteLinkService, "should_use_remote",
                         lambda self: False)
@@ -110,10 +110,14 @@ def test_local_semaphore_serializes(monkeypatch: pytest.MonkeyPatch) -> None:
     results: "list[object]" = []
     threads = [threading.Thread(
         target=lambda i=i: results.append(svc.synthesize(f"本地文本{i}")))
-        for i in range(2)]
+        for i in range(4)]
+    start = time.monotonic()
     for th in threads:
         th.start()
     for th in threads:
         th.join(timeout=5)
-    assert active["max"] == 1, f"本地域并发峰应=1, 实际 {active['max']}"
-    assert len(results) == 2
+    elapsed = time.monotonic() - start
+    assert active["max"] == 2, f"本地域并发峰应=2（池大小）, 实际 {active['max']}"
+    assert len(results) == 4
+    # 4 请求 × 0.15s, 容量 2 → 至少两轮（容量不足时排队可见）
+    assert elapsed >= 0.25, f"超容应排队（两轮）——实际 {elapsed:.2f}s"

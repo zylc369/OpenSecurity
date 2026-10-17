@@ -405,6 +405,11 @@ const TtsSection: React.FC = () => {
                     : player.state.status === "paused" ? "已暂停"
                       : player.state.status === "idle" ? "已播完" : "正在朗读"}
                 </Typography.Text>
+                {player.state.status === "playing" && player.state.waiting && (
+                  <Tag color="processing" style={{ marginInlineEnd: 0 }}>
+                    等待下一段…
+                  </Tag>
+                )}
                 {(player.state.status === "playing" || player.state.status === "paused"
                   || player.state.status === "idle") && player.state.segIndex > 0 && (
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>

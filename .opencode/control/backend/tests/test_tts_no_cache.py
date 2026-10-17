@@ -36,7 +36,6 @@ def _fresh_service(monkeypatch, tmp_path):
             return WorkerResponse(ok=True, path=str(out), duration=1.0)
 
     monkeypatch.setattr(svc._worker, "request", _FakeWorker().request)
-    monkeypatch.setattr(svc._worker, "_ensure", lambda: None)
     monkeypatch.setattr(svc, "_qc_check", lambda *a, **k: None)
     yield svc, calls
     _reset_for_tests()

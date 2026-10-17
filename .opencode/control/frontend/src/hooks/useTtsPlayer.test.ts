@@ -56,14 +56,27 @@ describe("useTtsPlayer 协议与状态机", () => {
     expect(String(body.text).length).toBeGreaterThan(0);
   });
 
-  it("播放驱动预取: 起播前只发 seg0, 起播后恰好预取 seg1（深度 1 不超前）", async () => {
+  it("预取缓冲目标 2: 起播前即挂出 seg0+seg1+seg2, 不超前 seg3", async () => {
     const { result } = renderHook(() => useTtsPlayer());
     act(() => { result.current.start(TEXT3); });
-    await waitFor(() => expect(env.calls.length).toBe(1));           // 点击只发 seg0
+    await waitFor(() => expect(env.calls.length).toBe(3));           // seg0+seg1+seg2
     await waitFor(() => expect(FakeAudio.instances.length).toBe(1)); // seg0 起播
-    await waitFor(() => expect(env.calls.length).toBe(2));           // 起播后预取 seg1
     await new Promise((r) => setTimeout(r, 600));                    // 跑满一个 500ms 保底周期
-    expect(env.calls.length).toBe(2);                                // 不超前 seg2（含保底轮询）
+    expect(env.calls.length).toBe(3);                                // 不超前 seg3（含保底轮询）
+  });
+
+  it("段间等待: 下段未就绪 waiting=true, 就绪起播后清除", async () => {
+    const { result } = renderHook(() => useTtsPlayer());
+    env.holdText = "乙";  // seg1（乙段）挂起——制造未就绪等待窗口
+    act(() => { result.current.start(TEXT3); });
+    await waitFor(() => expect(FakeAudio.instances.length).toBe(1)); // seg0 起播（甲段正常）
+    expect(result.current.state.waiting).toBe(false);
+    await act(async () => { FakeAudio.instances[0].finish(1); });    // seg0 播完 → 等 seg1
+    await waitFor(() => expect(result.current.state.waiting).toBe(true));
+    expect(FakeAudio.instances.length).toBe(1);                      // seg1 未就绪，尚未起播
+    await act(async () => { env.release(); });                       // 放行 seg1
+    await waitFor(() => expect(FakeAudio.instances.length).toBe(2)); // seg1 起播
+    expect(result.current.state.waiting).toBe(false);
   });
 
   it("顺序接力播放; 末段播完 status=idle（自然播完标记）", async () => {
@@ -84,18 +97,20 @@ describe("useTtsPlayer 协议与状态机", () => {
   it("网络失败自动重试一次后成功", async () => {
     env.failNextTimes = 1;
     const { result } = renderHook(() => useTtsPlayer());
-    act(() => { result.current.start(TEXT2); });
+    act(() => { result.current.start(TEXT3); });
     await waitFor(() => expect(FakeAudio.instances.length).toBe(1));
-    expect(env.calls.length).toBe(3); // seg0 首发 + seg0 重试 + 起播后 seg1 预取
-    expect(env.calls[0].body.text).toBe(env.calls[1].body.text); // 重试=同段同参
+    expect(env.calls.length).toBe(4); // seg0 首发 + 立即预取 seg1/seg2 + seg0 重试（与预取并发，排在最后）
+    const texts = env.calls.map((c) => c.body.text);
+    expect(texts.filter((t) => t === texts[0]).length).toBe(2); // seg0 首发+重试（同段同参）
   });
 
   it("单段两次失败跳过继续（坏段不卡死）", async () => {
-    env.failNextTimes = 2;
+    env.failText = "甲";       // 定向失败：并发预取时序下 failNextTimes 会被无关请求消耗
+    env.failTextTimes = 2;
     const { result } = renderHook(() => useTtsPlayer());
     act(() => { result.current.start(TEXT3); });
     await waitFor(() => expect(FakeAudio.instances.length).toBe(1)); // 起播的是 seg1（跳过 seg0）
-    // seg0 首发 + seg0 重试 + seg1 + seg2（跳过使播放点前移，预取链随之到播放点+1）
+    // seg0 首发 + seg1 + seg2 + seg0 重试（两次全败 → 跳过；跳过补泵 seg3=feeder 耗尽不发）
     expect(env.calls.length).toBe(4);
     expect(env.calls[2].body.text).not.toBe(env.calls[0].body.text); // 后续为下一段
     expect(result.current.state.segIndex).toBe(1); // 播放点确实前进到 seg1

@@ -54,6 +54,14 @@ export interface TtsEnv {
   source: string;
   /** revokeObjectURL 调用记录。 */
   revokeMock: ReturnType<typeof vi.fn>;
+  /** 命中该子串的请求挂起（不返回）——release() 放行，制造"未就绪等待窗口"。 */
+  holdText: string;
+  /** 放行全部挂起请求（依次 resolve）。 */
+  release: () => void;
+  /** 命中该子串的请求按 failTextTimes 计数失败（定向失败——并发预取下
+   *  failNextTimes 会被无关请求消耗，无法精确打在目标段上）。 */
+  failText: string;
+  failTextTimes: number;
 }
 
 function mkResp(status: number, blob: Blob | null, source: string): unknown {
@@ -72,17 +80,28 @@ function mkResp(status: number, blob: Blob | null, source: string): unknown {
 export function installTtsEnv(): TtsEnv {
   FakeAudio.reset();
   const calls: TtsEnv["calls"] = [];
-  const state = { failNextTimes: 0, source: "local" };
+  const state = { failNextTimes: 0, source: "local", holdText: "",
+                  failText: "", failTextTimes: 0 };
+  let held: (() => void)[] = [];
   const revokeMock = vi.fn();
 
   const fetchMock = vi.fn<FetchMock>(async (url: string, init?: FetchInit) => {
-    calls.push({
-      url,
-      body: JSON.parse(String(init?.body)) as Record<string, unknown>,
-    });
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    calls.push({ url, body });
     if (state.failNextTimes > 0) {
       state.failNextTimes -= 1;
       return mkResp(500, null, "");
+    }
+    if (state.failText && state.failTextTimes > 0
+        && String(body.text).includes(state.failText)) {
+      state.failTextTimes -= 1;
+      return mkResp(500, null, "");
+    }
+    if (state.holdText && String(body.text).includes(state.holdText)) {
+      const b = new Blob([new Uint8Array([1, 2])], { type: "audio/wav" });
+      return new Promise<unknown>((resolve) => {
+        held.push(() => resolve(mkResp(200, b, state.source)));
+      });
     }
     return mkResp(200, new Blob([new Uint8Array([1, 2])], { type: "audio/wav" }),
                   state.source);
@@ -100,6 +119,13 @@ export function installTtsEnv(): TtsEnv {
     set failNextTimes(v: number) { state.failNextTimes = v; },
     get source() { return state.source; },
     set source(v: string) { state.source = v; },
+    get holdText() { return state.holdText; },
+    set holdText(v: string) { state.holdText = v; },
+    get failText() { return state.failText; },
+    set failText(v: string) { state.failText = v; },
+    get failTextTimes() { return state.failTextTimes; },
+    set failTextTimes(v: number) { state.failTextTimes = v; },
+    release: () => { const h = held; held = []; h.forEach((f) => f()); },
     revokeMock,
   };
 }

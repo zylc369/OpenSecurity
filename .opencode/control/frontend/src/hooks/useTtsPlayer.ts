@@ -25,22 +25,24 @@ export interface TtsPlayerState {
   startTick: number;   // start() 时刻（starting 计时, ms）
   segSource: string;   // 当前段生成来源（"remote"/"local"——服务端 X-Tts-Source）
   firstSegSource: string;  // 首段生成来源（首响指标配套）
+  waiting: boolean;    // 段间缓冲等待中（上段播完、下段未就绪——UI 提示用）
 }
 
 const INITIAL: TtsPlayerState = {
   speed: 1.0,
   status: "idle", segIndex: 0, buffered: 0, segProgress: 0, error: "",
   elapsedSec: 0, firstSegMs: 0, avgGenMs: 0, startTick: 0,
-  segSource: "", firstSegSource: "",
+  segSource: "", firstSegSource: "", waiting: false,
 };
 
 /** 中文朗读估速（秒/字）——当前段真实时长未就绪时的兜底估算 */
 const SEC_PER_CHAR = 0.2;
 
 // 播放驱动预取深度: 播第 N 段时最多挂到第 N+PREFETCH_DEPTH 段。
-// 本地合成为单 GPU 串行队列(远程独立)——多挂无收益; 生成耗时≈播放时长×0.3(RTF),
-// 深度 1 正常富余 3 倍, 停播时最多浪费 1 段。
-const PREFETCH_DEPTH = 1;
+// 深度 2 = 缓冲目标 2: 为并行 worker 供料 + 吸收单次"生成+传输"波动
+// （实测: 深度 1 时"短段接长段"必停——26字播 8s 装不下 91 字的 14.3s 处理）。
+// 停播时最多浪费 2 段（abort 取消在途; 节点已生成的会进节点缓存, 无真实损失）。
+const PREFETCH_DEPTH = 2;
 
 /** 试听可选参数(测试台): 朗读指令/采样种子/分段字长 */
 export interface StartOptions {
@@ -218,6 +220,7 @@ export function useTtsPlayer() {
       const gens = genMsList.current.filter((x) => x > 0);
       setState((s) => ({
         ...s, status: "playing", segIndex: idx,
+        waiting: false,  // 起播即清（就绪段与置位同批次——界面不闪）
         error: "",
         segSource: segSourceRef.current[idx] ?? "",
         firstSegSource: segSourceRef.current[0] ?? s.firstSegSource,
@@ -241,6 +244,7 @@ export function useTtsPlayer() {
         console.log(`[tts] seg${idx} 播放结束`);
         waitStartRef.current = performance.now();  // 若下一段未就绪, 记录等待起点
         elapsedBase.current += dur;
+        setState((s) => ({ ...s, waiting: true })); // 下段就绪起播即清（同批次不闪）
         playSeg(idx + 1, signal);
       };
       audio.onerror = () => {
@@ -290,8 +294,8 @@ export function useTtsPlayer() {
     const ac = new AbortController();
     abortRef.current = ac;
     setState({ ...INITIAL, status: "starting", startTick: Date.now() });
-    // 播放驱动预取: 播放未开始前不挂任何后续段(点击后先让首段可用);
-    // 开播后由 playSeg 每次推进时调用 pump——挂到 nextPlay+PREFETCH_DEPTH。
+    // 播放驱动预取: 首段请求发出即激活（不再等首播）; 每次播放推进再调用
+    // pump 续泵——缓冲目标恒为 2 段未完成（起播前即挂出 seg1+seg2）。
     const pump = () => {
       if (!playingStartedRef.current) return;
       while (!stoppedRef.current
@@ -311,6 +315,9 @@ export function useTtsPlayer() {
     // 只发首段; 后续段在播放点到达时续发(惰性预取)
     fetchSeg(0, ac.signal).catch(() => { /* playSeg 侧统一处理 */ });
     nextFetchRef.current = 1; // 游标与已请求区间同步(预取从 seg1 起, 避免假挂起)
+    // 立即激活预取(不再等首播): 首段生成期即挂出 seg1+seg2——缓冲目标 2
+    playingStartedRef.current = true;
+    pump();
     playSeg(0, ac.signal);
   }, [ensureSegment, fetchSeg, playSeg, stop]);
 
