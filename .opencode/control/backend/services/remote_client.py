@@ -212,8 +212,10 @@ class RemoteConsoleClient:
         return text
 
     # TTS 请求级超时: 节点首请求含自愈装依赖（幂等 ~20s）+ worker 冷启
-    # (~10s) + 长文合成——推理默认超时不够，单独放宽
-    TTS_TIMEOUT_SEC = 600.0
+    # (~10s) + 长文合成——推理默认超时不够，单独放宽。
+    # 上限收敛: 90s 对最长单段（分段器每段 ≤ ~80 字 ≈ 20s 音频）留 4 倍余量;
+    # 更大值会放大"链路故障时的静默等待"（transport 侧另有在途看门狗兜底）。
+    TTS_TIMEOUT_SEC = 90.0
 
     def tts_synth(self, text: str, voice: str, speed: float,
                   instruct: str = "", seed: int = -1, mode: str = "") -> bytes:

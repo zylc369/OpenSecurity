@@ -439,6 +439,8 @@ class TransportConfig:
     api_timeout_sec: float = 30.0
     idle_close_sec: float = 60.0
     direct_upgrade_interval_sec: float = 10.0  # 中继态后台直连升级间隔
+    watchdog_sec: float = 12.0   # 在途请求看门狗间隔（无响应超此秒数触发连接探测）
+    probe_wait_sec: float = 5.0  # 看门狗探测等待（ping 响应超时）
 
 
 class RemoteTransport:
@@ -581,23 +583,54 @@ class RemoteTransport:
         fut: "asyncio.Future[WireMsg]" = \
             asyncio.get_running_loop().create_future()
         self._pending[msg_id] = fut
+        t_send = 0.0  # 发送完成时刻（消息级跟踪的往返耗时基准）
         try:
             if isinstance(job, ApiJob):
                 await conn.send_msg(ApiReq(msg_id=msg_id, method=job.method,
                                            path=job.path, body=job.body,
                                            token=job.token or None))
-                logger.debug("api.req %s %s（id=%s 路径=%s）", job.method, job.path, msg_id,
-                             "直连" if isinstance(conn, DirectConnection) else "中继")
-            else:  # PingJob
+                t_send = time.monotonic()
+                logger.info("api.req 已发送: %s %s（id=%d, 路径=%s, 等待响应）",
+                            job.method, job.path, msg_id,
+                            "直连" if isinstance(conn, DirectConnection) else "中继")
+            else:  # PingJob（内部探测——保持静默，避免高频噪音）
                 await conn.send_msg(PingMsg(msg_id=msg_id))
             # 返回 WireMsg（ApiResp 或 PongMsg）; api 窄化在 request()——
             # probe 的 pong 在此通过（此前误置于此导致 probe 恒失败）
-            return await asyncio.wait_for(
-                fut,
-                timeout=(job.timeout_sec if isinstance(job, ApiJob) and job.timeout_sec > 0
-                         else self._cfg.api_timeout_sec))
+            # 分段等待 + 看门狗（ApiJob）: "发出后无人响应"不再静默等满总超时
+            # （600s 灾难的根治——等待期间周期探测连接，异常即中止）。
+            is_api = isinstance(job, ApiJob)
+            total = (job.timeout_sec if isinstance(job, ApiJob) and job.timeout_sec > 0
+                     else self._cfg.api_timeout_sec)
+            t_wait0 = time.monotonic()
+            while True:
+                remaining = total - (time.monotonic() - t_wait0)
+                if remaining <= 0:
+                    raise ConnectionError("请求超时（等待 %.0fs 无响应）" % total)
+                try:
+                    got = await asyncio.wait_for(
+                        asyncio.shield(fut),
+                        timeout=min(self._cfg.watchdog_sec, remaining))
+                    break
+                except asyncio.TimeoutError:
+                    if fut.done():  # 恰好完成（分段边界——完成与超时同帧竞争）
+                        got = fut.result()
+                        break
+                    if is_api and not await self._probe_conn():
+                        logger.warning(
+                            "看门狗: id=%d 等待 %.0fs 无响应且连接探测失败",
+                            msg_id, time.monotonic() - t_wait0)
+                        raise ConnectionError("连接无响应（看门狗探测失败）")
+                    # 连接健康（慢响应）→ 继续等剩余时间
+            if is_api:
+                logger.info("api.resp 已收到: id=%d（往返 %.0fms）",
+                            msg_id, (time.monotonic() - t_send) * 1000)
+            return got
         except (ConnectionError, OSError, asyncio.TimeoutError, CryptoError,
                 ValueError) as e:
+            if isinstance(job, ApiJob):
+                logger.warning("api.req 失败: id=%d（等待 %.0fms, %r）",
+                               msg_id, (time.monotonic() - t_send) * 1000 if t_send else 0.0, e)
             await self._drop_session()
             raise TransportError(f"请求失败: {e}") from e
         finally:
@@ -719,6 +752,30 @@ class RemoteTransport:
             except (ConnectionError, OSError) as e:
                 logger.debug("会话 close 异常（忽略）: %s", e)
             self._conn = None
+
+    async def _probe_conn(self) -> bool:
+        """看门狗连接探测: 只用当前会话直发 ping（不重建、不递归 _handle_job）。
+
+        区别 probe(): probe() 走 _submit 跨线程提交（无会话时会触发重建），
+        本方法探测的语义是"现有连接是否活着"——失败即让调用方快速失败。
+        """
+        conn = self._conn
+        if conn is None or conn.broken:
+            return False
+        from services.remote_wire import PingMsg
+        pid = self._next_id
+        self._next_id += 1
+        fut: "asyncio.Future[remote_wire.WireMsg]" = \
+            asyncio.get_running_loop().create_future()
+        self._pending[pid] = fut
+        try:
+            await conn.send_msg(PingMsg(msg_id=pid))
+            await asyncio.wait_for(fut, timeout=self._cfg.probe_wait_sec)
+            return True
+        except (ConnectionError, OSError, asyncio.TimeoutError, CryptoError):
+            return False
+        finally:
+            self._pending.pop(pid, None)
 
     async def _on_msg(self, msg: "object") -> None:
         """会话入站分发: ApiResp/PongMsg → future（同池，msg_id 对应）; 其他忽略。"""
