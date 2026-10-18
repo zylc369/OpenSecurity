@@ -114,7 +114,7 @@ def create_app() -> FastAPI:
     app.add_middleware(AuditMiddleware)
 
     # 路由
-    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, system, ocr, \
+    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, logs, system, ocr, \
         processes, knowledge, events, heartbeat, proxy, remote, vision
     from routes import tts as tts_route
     app.include_router(tts_route.router)
@@ -133,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(fs.router)
     app.include_router(models.router)
     app.include_router(system.router)
+    app.include_router(logs.router)
     app.include_router(knowledge.router)
     app.include_router(events.router)
     app.include_router(proxy.router)

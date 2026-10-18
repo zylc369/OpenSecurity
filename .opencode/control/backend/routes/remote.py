@@ -9,6 +9,7 @@
   • GET  /api/remote/health      轻量健康 + 三模型指纹
   • GET/PUT /api/remote/node-config  节点三 KEY（RESIDENT/AUTOSTART/API_KEY）
   • GET/POST /api/remote/autostart   LaunchAgent 安装/卸载/状态
+  • POST /api/remote/node-logs/query 节点日志查询（转发节点 /api/logs/query）
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from dataclasses import asdict, dataclass, field
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from services.config_manager import ConfigManager
 from services.remote_client import (
@@ -305,3 +306,36 @@ async def set_autostart(req: AutostartRequest, node: str = Query(default="local"
         return JSONResponse(content=asdict(result))
     except RuntimeError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+
+class NodeLogsQueryReq(BaseModel):
+    """节点日志查询请求（字段与节点侧 `/api/logs/query` 的 LogQueryRequest 一致）。"""
+
+    file: str = Field(min_length=1, max_length=128)
+    pattern: str = Field(default="", max_length=1000)
+    is_regex: bool = True
+    limit: int = Field(default=200, ge=1, le=5000)
+
+
+@router.post("/node-logs/query")
+async def query_node_logs(req: NodeLogsQueryReq, node: str = Query(default="local")) -> JSONResponse:
+    """日志查询（local=本机 / remote=经远程链路转发节点）。"""
+    client = _forward_or_local(node)
+    if client is not None:
+        return JSONResponse(content=await _forward_call(
+            client._post_json, "/api/logs/query", req.model_dump()))  # noqa: SLF001 —— 转发通道
+    import asyncio
+    import re
+    from pathlib import Path
+    from services.log_query import query_log
+    from services.runtime_paths import RuntimePaths
+    try:
+        result = await asyncio.to_thread(
+            query_log, Path(RuntimePaths.LOGS_DIR), req.file, req.pattern, req.is_regex, req.limit)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"日志文件不存在: {req.file}")
+    except re.error as e:
+        raise HTTPException(status_code=422, detail=f"非法正则: {e}")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return JSONResponse(content=asdict(result))
