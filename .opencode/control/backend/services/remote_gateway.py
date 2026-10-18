@@ -40,6 +40,7 @@ SESSION_IDLE_CLOSE_SEC = 60.0  # 会话空闲关闭（protocol.md §9）
 HEARTBEAT_SEC = 30.0
 _RELAY_INFLIGHT_MAX = 32  # 中继会话处理并发上限（资源保护线——业务并发由后端决定）
 STUN_REFRESH_SEC = 60.0
+SIGNAL_DEAD_SEC = 2 * HEARTBEAT_SEC  # 信令活性判死阈值（无任何收包超此值→重建，覆盖换网死连接）
 RECONNECT_MIN_SEC = 1.0
 RECONNECT_MAX_SEC = 30.0
 PUNCH_BURST = 3
@@ -226,11 +227,17 @@ class RemoteGateway:
             task.cancel()
         if self._join_tasks:
             await asyncio.gather(*self._join_tasks, return_exceptions=True)
-        if self._udp is not None and self._udp.transport is not None:
-            self._udp.transport.close()
-        self._udp = None
+        self._close_udp()
         self._sessions.clear()
         self._punched.clear()
+
+    def _close_udp(self) -> None:
+        """关闭固定 UDP socket（幂等——重建/停止双路径收口）。"""
+        if self._udp is not None:
+            transport = self._udp.transport
+            if transport is not None:
+                transport.close()
+            self._udp = None
 
     async def _close_client(self) -> None:
         if self._client is not None:
@@ -265,16 +272,25 @@ class RemoteGateway:
             except Exception as e:  # noqa: BLE001 —— 重连循环统一面
                 logger.warning("信令断开（%.2fs 后重连）: %s", backoff, e)
                 await self._close_client()
+                self._close_udp()  # 换网场景: 旧 UDP socket 绑定失效——重建绑新网络
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, RECONNECT_MAX_SEC)
 
     async def _signal_steady(self, client: SignalClient) -> None:
-        """注册成功后的信令维持: 心跳 + STUN 刷新 + 服务端下行消息分派。"""
+        """注册成功后的信令维持: 心跳 + STUN 刷新 + 服务端下行消息分派。
+
+        活性检测: 超过 SIGNAL_DEAD_SEC 无任何收包 → 判连接死亡抛错重建
+        （覆盖换网/网络黑洞——死连接上 send 不报错、recv 永远超时）。
+        """
         last_hb = 0.0
         last_stun = 0.0
+        last_rx = time.monotonic()
         ep: "tuple[str, int] | None" = None
         while self._running:
             now = time.monotonic()
+            if now - last_rx > SIGNAL_DEAD_SEC:
+                raise ConnectionError(
+                    f"信令静默超时（{SIGNAL_DEAD_SEC:.0f}s 无收包）——重建注册")
             if now - last_hb >= HEARTBEAT_SEC:
                 from services.remote_wire import SignalHeartbeat
                 await client.send(SignalHeartbeat(msg_id=0))
@@ -297,6 +313,7 @@ class RemoteGateway:
                 msg = await client.recv(timeout=1.0)
             except asyncio.TimeoutError:
                 continue
+            last_rx = time.monotonic()  # 任何收包（含 heartbeat_ack）刷新活性
             await self._dispatch(msg, client)
 
     async def _dispatch(self, msg: "remote_wire.WireMsg",
