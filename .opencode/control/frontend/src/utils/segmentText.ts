@@ -14,6 +14,8 @@
 
 /** 句末终止字符（英文句号单独处理——小数点防误切） */
 const SENT_ENDERS = new Set(["。", "！", "？", "…", "!", "?", "\n"]);
+/** 软标点（句内停顿——累计超"段目标+首段长"时可作段边界；数字间隙防误切） */
+const SOFT_PUNCT = new Set(["，", "、", "；", "：", ",", ";", ":"]);
 /** 句末符后可并入当前句的收尾符（闭引号/闭书名号——"饭好了。"的引号不劈开） */
 // 注意只含「闭」引号——U+201C(“)是开引号不能并入(会把下句开头吞进上句);
 // ASCII 直引号(" ')开闭歧义, 保守不含
@@ -105,6 +107,35 @@ function splitOversize(sentence: string, max: number): string[] {
 }
 
 /**
+ * 超限守门（v2）：源片 p 的超软/硬限裁切点（p 内下标，切点前含）。
+ * cv=当前段已积累长度；soft=软限（当段目标+首段）；hard=硬限（首段×2+当段目标）。
+ * 返回 null=整吞；否则 cur+p.slice(0,cut) 收段、p.slice(cut) 继续处理。
+ * 软断点若超出硬限 → 视为未找到（走硬切，保证段长 ≤ 硬限）。
+ */
+function overflowCut(p: string, cv: number, soft: number, hard: number): number | null {
+  if (cv + p.length <= soft) return null;
+  const limit = Math.min(p.length, hard - cv);
+  const softStart = Math.max(0, soft - cv);
+  // ① 超限点之后的软标点（语义首选——"超限后遇到即断"）
+  for (let i = softStart; i < limit; i++) {
+    const ch = p[i];
+    if (SOFT_PUNCT.has(ch) && !(isDigit(p[i - 1]) && isDigit(p[i + 1]))) {
+      return i + 1;
+    }
+  }
+  // ② 回落到"本片内、超限点之前"最近的软标点（宁可略早断，保段长受控）
+  for (let i = Math.min(softStart, p.length) - 1; i >= 0; i--) {
+    const ch = p[i];
+    if (SOFT_PUNCT.has(ch) && !(isDigit(p[i - 1]) && isDigit(p[i + 1]))) {
+      return i + 1;
+    }
+  }
+  // ③ 硬结束（无软标点且超硬限）
+  if (cv + p.length > hard) return Math.max(1, limit);
+  return null;
+}
+
+/**
  * 第二遍: 句块贪心合并 → 段数组。
  * 渐进分段（首响优化）: 首段 20 字 ≈3.5s 出声;
  * ramp 20→40→80(数学衔接: 每段播放时长 ≥ 下段生成时长——
@@ -129,18 +160,41 @@ function cutFirstComma(sentence: string, goal: number): number {
 }
 
 /**
- * 首段字数 → 渐进段长序列（测试台"分段设置"用）。
+ * 首段字数 → 渐进段长序列（梯形爬坡，测试台"分段设置"用）。
  * 爬坡约束: 第 N 段播放时长 ≥ 第 N+1 段生成时长（否则段界断档等待）。
  * 速度模型: 音频 ≈ 0.17-0.24s/字（短段偏慢）; 生成+质检 ≈ 0.07-0.08s/字 + 0.7s
  *  → 下段字数上限 ≈ (本段字数×0.2 − 0.7) / 0.07 ≈ 本段字数×2.3 − 10。
- * 取整为: 第二段 max(2f, 40), 第三段 max(4f, 80)（均封顶 target）。
- *  f=20 → [20, 40, 80]（默认）; f=30 → [30, 60, 80]; f=60 → [60, 80, 80]
+ * 取整为: 第 n 段 min(n×f, target)（梯形渐进，封顶 target）。
+ *  f=20 → [20, 40, 60, 80]（默认）; f=30 → [30, 60, 80]; f=60 → [60, 80]
  */
 export function rampFor(firstLen: number, target = DEFAULT_NEXT_LEN): number[] {
   const f = Math.max(1, Math.round(firstLen));
-  const b = Math.max(Math.round(f * 2), 40);
-  const c = Math.max(Math.round(f * 4), 80);
-  return [f, Math.min(b, target), Math.min(c, target)];
+  const out: number[] = [];
+  for (let n = 1; n <= 100; n++) {
+    const v = Math.min(f * n, target);
+    out.push(v);
+    if (v >= target) break;
+  }
+  return out;
+}
+
+/** 阶梯序列规范化（用户输入/参数 → 合法序列）：正整数、≤8 档、升序去重；非法回 null。 */
+export function normalizeStairs(input: readonly number[] | undefined | null): number[] | null {
+  if (!input || input.length === 0) return null;
+  const cleaned: number[] = [];
+  for (const v of input) {
+    if (!Number.isFinite(v) || v <= 0) return null;
+    const r = Math.round(v);
+    if (!cleaned.includes(r)) cleaned.push(r);
+  }
+  cleaned.sort((a, b) => a - b);
+  if (cleaned.length === 0 || cleaned.length > 8) return null;
+  return cleaned;
+}
+
+/** 解析"20,40,60,80"文本 → 阶梯序列（逗号/顿号/分号/空白分隔）；非法回 null。 */
+export function parseStairs(text: string): number[] | null {
+  return normalizeStairs(text.split(/[,，、;\s]+/).filter(Boolean).map(Number));
 }
 
 export function segmentText(
@@ -161,32 +215,48 @@ export function segmentText(
   }
   const segs: string[] = [];
   let cur = "";
+  // 首段目标（尾并回阈值/软硬限的动态基准——防 firstTargets 为空）
+  const firstGoal = firstTargets.length > 0 ? firstTargets[0] : DEFAULT_FIRST_LEN;
   const goalNow = () => segs.length < firstTargets.length
     ? firstTargets[segs.length]
     : target;
-  for (const p of pieces) {
-    // 预检收段（防贪心拖拽超长）: 当前段已过半目标（拆出它不算碎段）且
-    // 吞下此句会显著超目标（>150%）时先收——超长段生成慢会拖垮
-    // "下段生成 ≤ 本段播放"的无缝链（如 76 字差 4 字吞 55 字句 → 131 字）。
-    // 小 cur（<半目标）不拆: 拆出小段反而拖垮后续（14+14→14|14 劣于 28）。
-    const g = goalNow();
-    if (cur.length > 0 && cur.length >= g * 0.5
-        && cur.length + p.length > g * 1.5) {
-      segs.push(cur);
-      cur = "";
-    }
-    cur += p;
-    if (cur.length >= goalNow()) {
-      segs.push(cur);
-      cur = "";
+  for (const p0 of pieces) {
+    // v2 守门可能对同一源片多次裁切（余部继续）——队列消解
+    const queue: string[] = [p0];
+    while (queue.length > 0) {
+      const p = queue.shift() as string;
+      // 预检收段（防贪心拖拽超长）: 当前段已过半目标（拆出它不算碎段）且
+      // 吞下此句会显著超目标（>150%）时先收——超长段生成慢会拖垮
+      // "下段生成 ≤ 本段播放"的无缝链（如 76 字差 4 字吞 55 字句 → 131 字）。
+      // 小 cur（<半目标）不拆: 拆出小段反而拖垮后续（14+14→14|14 劣于 28）。
+      const g = goalNow();
+      if (cur.length > 0 && cur.length >= g * 0.5
+          && cur.length + p.length > g * 1.5) {
+        segs.push(cur);
+        cur = "";
+      }
+      // v2 超限守门: 软标点断（超软限）/ 硬结束（超硬限）——见 overflowCut
+      const cut = overflowCut(p, cur.length, g + firstGoal, 2 * firstGoal + g);
+      if (cut !== null) {
+        segs.push(cur + p.slice(0, cut));
+        cur = "";
+        const rest = p.slice(cut);
+        if (rest) queue.unshift(rest);
+        continue;
+      }
+      cur += p;
+      if (cur.length >= goalNow()) {
+        segs.push(cur);
+        cur = "";
+      }
     }
   }
   if (cur.trim()) {
-    // 短尾段并回前段(防"孤尾"): 尾段不足目标一半且合并后不超兜底上界时并入
+    // 短尾段并回前段(防"孤尾"): 尾段不足首段长且合并后不超兜底上界时并入
     const tail = cur;
     const prev = segs[segs.length - 1];
     const mergeLimit = Math.max(target * 2, 160);
-    if (prev !== undefined && tail.length < target * 0.5
+    if (prev !== undefined && tail.length < firstGoal
         && prev.length + tail.length <= mergeLimit) {
       segs[segs.length - 1] = prev + tail;
     } else {
@@ -260,11 +330,12 @@ export function createSegmentFeeder(
 
   const finishTail = (): void => {
     if (cur.trim()) {
-      // 短尾段并回前段（防孤尾）——与全量版同规则
+      // 短尾段并回前段（防孤尾）——与全量版同规则（阈值=首段长，v2）
       const tail = cur;
       const prev = settled[settled.length - 1];
       const mergeLimit = Math.max(target * 2, 160);
-      if (prev !== undefined && tail.length < target * 0.5
+      const firstGoal = firstTargets.length > 0 ? firstTargets[0] : DEFAULT_FIRST_LEN;
+      if (prev !== undefined && tail.length < firstGoal
           && prev.length + tail.length <= mergeLimit) {
         settled[settled.length - 1] = prev + tail;
       } else {
@@ -279,19 +350,32 @@ export function createSegmentFeeder(
   return {
     next(): string | null {
       while (outbox.length === 0) {
-        const p = nextPiece();
-        if (p === null) { finishTail(); break; }
-        // 贪心 + 预检（逐行复刻 segmentText 第二遍——含 goalNow 动态档位）
-        const g = goalNow();
-        if (cur.length > 0 && cur.length >= g * 0.5
-            && cur.length + p.length > g * 1.5) {
-          settle(cur);
-          cur = "";
-        }
-        cur += p;
-        if (cur.length >= goalNow()) {
-          settle(cur);
-          cur = "";
+        const p0 = nextPiece();
+        if (p0 === null) { finishTail(); break; }
+        // 贪心 + 预检 + v2 守门（逐行复刻 segmentText 第二遍——含 goalNow 动态档位）
+        const firstGoal = firstTargets.length > 0 ? firstTargets[0] : DEFAULT_FIRST_LEN;
+        const queue: string[] = [p0];
+        while (queue.length > 0) {
+          const p = queue.shift() as string;
+          const g = goalNow();
+          if (cur.length > 0 && cur.length >= g * 0.5
+              && cur.length + p.length > g * 1.5) {
+            settle(cur);
+            cur = "";
+          }
+          const cut = overflowCut(p, cur.length, g + firstGoal, 2 * firstGoal + g);
+          if (cut !== null) {
+            settle(cur + p.slice(0, cut));
+            cur = "";
+            const rest = p.slice(cut);
+            if (rest) queue.unshift(rest);
+            continue;
+          }
+          cur += p;
+          if (cur.length >= goalNow()) {
+            settle(cur);
+            cur = "";
+          }
         }
       }
       if (outbox.length > 0) {

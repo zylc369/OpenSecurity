@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rampFor, segmentText, splitSentences } from "./segmentText";
+import { normalizeStairs, parseStairs, rampFor, segmentText, splitSentences } from "./segmentText";
 
 describe("splitSentences 句末切分", () => {
   it("中文句号/问号/叹号断句", () => {
@@ -72,27 +72,30 @@ describe("segmentText 贪心分段", () => {
   });
 });
 
-describe("rampFor 分段设置缩放", () => {
-  it("首段 30 字 ≈ 默认序列", () => {
-    expect(rampFor(30, 300)).toEqual([30, 60, 120]);
+describe("rampFor 分段设置缩放(v2: 梯形 n×f 封顶 target)", () => {
+  it("首段 30 字梯形序列", () => {
+    expect(rampFor(30, 300)).toEqual([30, 60, 90, 120, 150, 180, 210, 240, 270, 300]);
   });
-  it("首段 60/100 字随比例放大且不超常规段长", () => {
-    expect(rampFor(60, 300)).toEqual([60, 120, 240]);
+  it("首段 60/100 字梯形序列", () => {
+    expect(rampFor(60, 300)).toEqual([60, 120, 180, 240, 300]);
     expect(rampFor(100, 300)).toEqual([100, 200, 300]);
   });
-  it("首段最小值保底 40/80", () => {
-    expect(rampFor(10, 300)).toEqual([10, 40, 80]);
+  it("首段 10 字 → 10 步进全档; 默认 20→[20,40,60,80]", () => {
+    const r = rampFor(10, 300);
+    expect(r[0]).toBe(10);
+    expect(r[r.length - 1]).toBe(300);
+    expect(r.length).toBe(30);
+    expect(rampFor(20, 80)).toEqual([20, 40, 60, 80]);
   });
 });
 
 describe("分段参数不变量(联动防回归)", () => {
   const NOVEL = "这儿孙满堂的甜蜜，两口子还没来得及品砸出味儿来，可家里的米缸眼瞅着就要掏见底了。俗话说半大小子吃垮老子，包括女娃娃在内，都正是长身体的时候，贼能吃，那肚皮个个都跟无底洞似的，崔桂英家开饭主食都得用缸来盛，而且一缸还不够，灶上还温着一锅。两口子虽说早已孙辈成群，可年纪并不算大，且按当下农村规矩，除非你生病卧床失去劳动能力，否则只要你还有力气下田，无论多老，也没资格享受来自儿女的餐饭供奉。“别抢，别抢，饿死鬼投胎啊都是，都给我排好队！”孩子们拿着碗来接，崔桂英负责打粥。最后一个过来的是一个十岁的小男孩，他身穿牛仔吊带裤，脚上是时兴凉鞋，皮肤白嫩，面带腼腆。和周围兄弟姐妹们那种玩得脏兮兮鼻涕吸溜吸溜的模样，有些格格不入。“小远侯，来，给你放这里吃。”";
 
-  it("target=80: 首段≤30 / 中间段≥80 / 每段≤160 / 无损", () => {
+  it("target=80: 首段≤30 / 每段≤160 / 无损 (v2: 软断允许中间段 <80)", () => {
     const segs = segmentText(NOVEL, 80);
     expect(segs.length).toBeGreaterThanOrEqual(3);
     expect(segs[0].length).toBeLessThanOrEqual(30);
-    for (const s of segs.slice(1, -1)) expect(s.length).toBeGreaterThanOrEqual(80);
     for (const s of segs) expect(s.length).toBeLessThanOrEqual(160);
     expect(segs.join("")).toBe(NOVEL);
   });
@@ -107,14 +110,14 @@ describe("分段参数不变量(联动防回归)", () => {
     }
   });
 
-  it("预检收段: 小句累积遇超长句不拖拽(219 级超长段防回归)", () => {
+  it("预检+守门: 小句累积遇超长句不拖拽(v2 防回归)", () => {
     const S20 = "甲".repeat(19) + "。";     // 整句 20 字
     const S19 = "乙".repeat(18) + "。";     // 整句 19 字
     const LONG = "丙".repeat(159) + "。";   // 单句 160 字（超 hm=120 → 兜底切 60/60/40）
     const t = S20.repeat(5) + S19 + LONG;
     const segs = segmentText(t, 80);
-    // 预检: 59 字遇超长片(60)不拖成 119+ 超长合并——切后片按目标合并
-    expect(segs.map((s) => s.length)).toEqual([20, 40, 119, 100]);
+    // v2: 59 字后遇超长片在硬限处断(120)——不再出现 119+ 合并超长
+    expect(segs.map((s) => s.length)).toEqual([20, 40, 59, 120, 40]);
     expect(segs.join("")).toBe(t);
   });
 
@@ -134,20 +137,70 @@ describe("分段参数不变量(联动防回归)", () => {
   });
 });
 
-describe("短尾段并回(防孤尾)", () => {
-  it("短尾(<半目标)并入前段", () => {
-    // NOVEL 尾部 15 字孤尾 -> 应并入前段 93 -> 108
+describe("阶梯输入解析(normalizeStairs/parseStairs)", () => {
+  it("解析与规范化(排序去重)", () => {
+    expect(parseStairs("20,40,60,80")).toEqual([20, 40, 60, 80]);
+    expect(parseStairs("80, 20，40")).toEqual([20, 40, 80]); // 全角逗号/乱序 → 排序去重
+    expect(parseStairs("20,,40")).toEqual([20, 40]);
+    expect(normalizeStairs([30, 60])).toEqual([30, 60]);
+  });
+  it("非法输入回 null(UI 回退安全)", () => {
+    expect(parseStairs("")).toBeNull();
+    expect(parseStairs("abc")).toBeNull();
+    expect(parseStairs("20,-5")).toBeNull();
+    expect(normalizeStairs([])).toBeNull();
+    expect(normalizeStairs([1, 2, 3, 4, 5, 6, 7, 8, 9])).toBeNull(); // >8 档
+  });
+});
+
+describe("尾并回(v2: 阈值=首段分段字数)", () => {
+  it("<首段值(20)的尾段并入前段 / 中间 31 字段独立", () => {
     const segs = segmentText(NOVEL_FIXTURE, 80);
-    expect(segs.map((s) => s.length)).toEqual([24, 94, 100, 108]);
+    expect(segs.map((s) => s.length)).toEqual([24, 63, 31, 100, 108]);
     expect(segs.join("")).toBe(NOVEL_FIXTURE);
   });
-  it("长尾(>=半目标)保留独立", () => {
+  it(">=首段值的尾段保留独立", () => {
     const S13 = "够二十字的第一句内容哦哦哦。";
     const S19 = "凑八十字段的内容内容内容内容内容。";
     const S44 = "独立的尾巴内容这一段比较长会被保留下来作为单独的一段哦。";
     const t = S13.repeat(2) + S19.repeat(5) + S44.repeat(2);
     const segs = segmentText(t, 80);
-    expect(segs.map((s) => s.length)).toEqual([28, 51, 90]); // 尾 56(>=40) 保留独立
+    expect(segs.map((s) => s.length)).toEqual([28, 51, 62, 28]); // 尾 28(>=20) 独立
+    expect(segs.join("")).toBe(t);
+  });
+});
+
+describe("分段器 v2 守门(软标点断 / 硬结束)", () => {
+  it("无标点长串: 硬切(序列固定)且无损", () => {
+    const t = "甲".repeat(500);
+    const segs = segmentText(t);
+    expect(segs.map((s) => s.length)).toEqual([60, 60, 60, 120, 120, 80]);
+    expect(segs.join("")).toBe(t);
+  });
+  it("120/130 无标点边界", () => {
+    expect(segmentText("甲".repeat(120)).map((s) => s.length)).toEqual([60, 60]);
+    expect(segmentText("甲".repeat(130)).map((s) => s.length)).toEqual([60, 70]);
+  });
+  it("恰在软限内不触发(20+20=40)", () => {
+    const t = "甲".repeat(21) + "。" + "乙".repeat(17) + "。";
+    expect(segmentText(t).map((s) => s.length)).toEqual([40]);
+  });
+  it("超长句在软标点断(不整吞到句末)", () => {
+    const long = "短句甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲！" +
+      "长句内容内容内容内容内容内容内容内容内容内容，后半段还有更多内容内容内容内容内容内容内容内容。";
+    const segs = segmentText(long);
+    expect(segs.join("")).toBe(long);
+    for (const s of segs) expect(s.length).toBeLessThanOrEqual(60);
+  });
+  it("数字间冒号/逗号不误切(12:30 / 1,000)", () => {
+    const t = "等到了指定的时刻12:30再出发，另外花了1,000元买的东西。";
+    const segs = segmentText(t, 20);
+    expect(segs.join("")).toBe(t);
+    for (const s of segs) expect(s.endsWith("12")).toBe(false);
+  });
+  it("单短句/引号收尾(回归)", () => {
+    expect(segmentText("你好。")).toEqual(["你好。"]);
+    expect(segmentText("“饭好了。”她说。“马上来！”")).toEqual(["“饭好了。”她说。“马上来！”"]);
   });
 });
 

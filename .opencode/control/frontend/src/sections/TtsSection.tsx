@@ -17,7 +17,7 @@ import {
 } from "@ant-design/icons";
 import type { VoiceAsset } from "../types";
 import { useTtsPlayer } from "../hooks/useTtsPlayer";
-import { DEFAULT_FIRST_LEN, DEFAULT_NEXT_LEN } from "../utils/segmentText";
+import { parseStairs } from "../utils/segmentText";
 
 /** 通道 a 固定测试文案（覆盖对话引号/拟声/叹号/省略号/问号） */
 const DEFAULT_TEXT =
@@ -227,8 +227,7 @@ const TtsSection: React.FC = () => {
   const [useCustomInstruct, setUseCustomInstruct] = useState(false);
   const [customInstruct, setCustomInstruct] = useState("");
   const [seedVal, setSeedVal] = useState<number | null>(null);
-  const [firstLen, setFirstLen] = useState<number>(DEFAULT_FIRST_LEN);
-  const [nextLen, setNextLen] = useState<number>(DEFAULT_NEXT_LEN);
+  const [stairsText, setStairsText] = useState<string>("20,40,60,80"); // 阶梯序列(逗号分隔——默认 20,40,60,80)
   const [engineMode, setEngineMode] = useState<"default" | "instruct">("default");
 
   const refresh = useCallback(() => {
@@ -247,8 +246,7 @@ const TtsSection: React.FC = () => {
       voice: voiceId,  // 试听=用该行音色(空串走服务端默认)
       instruct,
       seed: seedVal !== null ? seedVal : -1,  // 0 是合法种子; null(留空)=默认
-      firstLen,
-      nextLen,
+      stairs: parseStairs(stairsText) ?? undefined,
       mode: engineMode === "instruct" ? "instruct" : "",  // ""=默认 zero_shot 情感饱满
     });
   };
@@ -629,10 +627,13 @@ const TtsSection: React.FC = () => {
               分段设置（字）
             </Typography.Text>
             <Space>
-              <InputNumber addonBefore="首段" min={10} max={500} value={firstLen}
-                style={{ width: 145 }} onChange={(v) => setFirstLen(Number(v) || DEFAULT_FIRST_LEN)} />
-              <InputNumber addonBefore="常规段" min={80} max={1000} value={nextLen}
-                style={{ width: 165 }} onChange={(v) => setNextLen(Number(v) || DEFAULT_NEXT_LEN)} />
+              <Input value={stairsText} style={{ width: 260 }} addonBefore="阶梯(字)"
+                placeholder="20,40,60,80"
+                onChange={(e) => setStairsText(e.target.value)}
+                onBlur={() => { if (parseStairs(stairsText) === null) setStairsText("20,40,60,80"); }} />
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                逗号分隔逐档渐进; 末档=常规段封顶
+              </Typography.Text>
             </Space>
           </div>
         </Space>

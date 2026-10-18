@@ -8,7 +8,7 @@
  * 仍失败跳过该段继续, 累计 3 段失败停止并报错。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { DEFAULT_FIRST_LEN, DEFAULT_NEXT_LEN, createSegmentFeeder, rampFor,
+import { DEFAULT_FIRST_LEN, DEFAULT_NEXT_LEN, createSegmentFeeder, normalizeStairs, rampFor,
   type SegmentFeeder } from "../utils/segmentText";
 
 export type PlayerStatus = "idle" | "starting" | "playing" | "paused";
@@ -50,8 +50,9 @@ export interface StartOptions {
   voice?: string;    // 音色库 id(空=服务端默认音色)
   instruct?: string; // 朗读指令仅 instruct 模式用(空=引擎默认"请用正常语速朗读接下来的内容。")
   seed?: number;     // 采样种子(≤0=默认 4)
-  firstLen?: number; // 首段字数(默认 20)
-  nextLen?: number;  // 常规段字数(默认 80)
+  firstLen?: number; // 首段字数(默认 20——stairs 未提供时用于派生)
+  nextLen?: number;  // 常规段字数(默认 80——stairs 未提供时用于派生)
+  stairs?: number[]; // 阶梯序列(优先; 默认 [20,40,60,80]; 非法回退派生)
   mode?: string;     // 合成模式(""=默认 zero_shot 情感饱满; "instruct"=指令控制)
 }
 
@@ -278,11 +279,12 @@ export function useTtsPlayer() {
   const start = useCallback((text: string, opts?: StartOptions) => {
     stop(); // 单实例: 新试听停旧
     optsRef.current = opts ?? {};
-    const nextLen = opts?.nextLen ?? DEFAULT_NEXT_LEN;
-    const firstTargets = rampFor(opts?.firstLen ?? DEFAULT_FIRST_LEN, nextLen);
-    console.log(`[tts] 模式=${opts?.mode || "默认(zero_shot)"} 首段目标=${opts?.firstLen ?? DEFAULT_FIRST_LEN}字 常规段=${nextLen}字`);
+    const firstTargets = normalizeStairs(opts?.stairs)
+      ?? rampFor(opts?.firstLen ?? DEFAULT_FIRST_LEN, opts?.nextLen ?? DEFAULT_NEXT_LEN);
+    const target = firstTargets[firstTargets.length - 1];
+    console.log(`[tts] 模式=${opts?.mode || "默认(zero_shot)"} 阶梯=${firstTargets.join("/")}字`);
     // 惰性分段: 不预切全文——播放路径只依赖"下一段"（真实听书场景: 选起点向后连读）
-    feederRef.current = createSegmentFeeder(text, nextLen, undefined, firstTargets);
+    feederRef.current = createSegmentFeeder(text, target, undefined, firstTargets);
     producedRef.current = new Map();
     producedCountRef.current = 0;
     finishedRef.current = false;
