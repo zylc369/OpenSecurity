@@ -52,6 +52,13 @@
 - `audit_middleware` 把 WAV 二进制 body 原样写日志（control.log 出现 NUL 字节，grep 需 `-a`）——先于本提交存在。
 - `_upgrade_loop` teardown 的 "Task was destroyed but it is pending"（测试环境杂音）。
 
-## 冷启动实测
+## 冷启动实测（F3，通过）
 
-（见提交后记录）
+节点 `update-restart`（a2a8346→1a15bd0，冷启动）后立刻试听第一笔：
+
+- 主控侧：HTTP 200、**总耗时 5.63s**（远程往返 5628ms）
+- 节点侧：`模型加载完成(+预加载) 5.3s` → `本地预热完成: worker 2/2 + 质检链路`（23:55:02）→ 首笔合成 `生成 3678ms`（rtf 0.711）
+
+**结论**：当前部署链路（update-restart 自带预加载）下冷启动最坏 ~6s，**90s 上限有 15 倍余量**
+（对照 review 提供的暖态历史最坏 31.2s，90s 仍有 ~3 倍）。冷态超 90s 需"无预加载 + 首次装依赖"
+的极端路径，此时主控 fallback 本地（功能可用），节点侧继续完成（白耗）——留观。
