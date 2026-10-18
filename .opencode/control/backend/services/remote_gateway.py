@@ -227,17 +227,21 @@ class RemoteGateway:
             task.cancel()
         if self._join_tasks:
             await asyncio.gather(*self._join_tasks, return_exceptions=True)
-        self._close_udp()
-        self._sessions.clear()
-        self._punched.clear()
+        self._close_udp()  # 含 sessions/punched 清理（收口）
 
     def _close_udp(self) -> None:
-        """关闭固定 UDP socket（幂等——重建/停止双路径收口）。"""
+        """关闭固定 UDP socket（幂等——重建/停止双路径收口）。
+
+        同步清理会话/打洞表: socket 关闭后旧会话不应再被 datagram_received
+        路由（防 ephemeral 端口复用时新直连尝试落入旧会话——直连恢复被推迟）。
+        """
         if self._udp is not None:
             transport = self._udp.transport
             if transport is not None:
                 transport.close()
             self._udp = None
+        self._sessions.clear()
+        self._punched.clear()
 
     async def _close_client(self) -> None:
         if self._client is not None:

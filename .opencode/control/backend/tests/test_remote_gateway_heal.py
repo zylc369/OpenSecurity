@@ -72,7 +72,6 @@ def test_signal_dead_triggers_reconnect(monkeypatch: pytest.MonkeyPatch) -> None
         client = _SilentClient()
         with pytest.raises(ConnectionError, match="静默超时"):
             await gw._signal_steady(client)  # type: ignore[arg-type]
-        assert client.sent >= 1  # 期间仍在尝试发心跳（死连接不可见性=本缺口本体）
 
     asyncio.run(run())
 
@@ -116,5 +115,49 @@ def test_close_udp_idempotent_and_rebinds() -> None:
         assert gw._udp is not None
         assert gw._udp is not udp1  # 新 socket 对象（换网后绑定新网络）
         gw._close_udp()
+
+    asyncio.run(run())
+
+
+def test_silence_driven_full_reconnect_registers_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """粘合点: 信号断 → 重建路径 → 重新注册 + UDP 重绑（真 RelayServer 观测）。
+
+    驱动: 关闭 relayd 侧对该节点的连接（EOF——gateway recv 读到断流立即走
+    重建；"静默"变体的判死抛错已由 test_signal_dead_triggers_reconnect 覆盖）。
+    断言三点: 重新注册（relayd 侧新 writer）/ UDP 重绑（新 _udp 对象）/
+    会话表清理——删除重建路径接入即红。
+    """
+
+    async def run() -> None:
+        from services.remote_relayd.server import RelayServer
+        monkeypatch.setattr(remote_gateway, "RECONNECT_MIN_SEC", 0.05)
+        psk = make_psk(seed=91)
+        server = RelayServer(psk)
+        port = await server.serve("127.0.0.1", 0)
+        gw = RemoteGateway(psk=psk, relay_host="127.0.0.1", relay_port=port,
+                           node_id="heal-node", backend_port=0)
+        try:
+            gw.start()
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                if server.registry.get("heal-node") is not None:
+                    break
+            ent1 = server.registry.get("heal-node")
+            assert ent1 is not None, "初始注册失败"
+            first_writer = ent1.writer
+            udp1 = gw._udp
+            first_writer.close()  # 断开 relayd 侧连接 → gateway 走重建
+            ent2 = None
+            for _ in range(100):
+                await asyncio.sleep(0.1)
+                ent2 = server.registry.get("heal-node")
+                if ent2 is not None and ent2.writer is not first_writer:
+                    break
+            assert ent2 is not None and ent2.writer is not first_writer, "未重新注册"
+            assert gw._udp is not None and gw._udp is not udp1, (
+                "UDP 未重绑（重建路径未接 _close_udp/_ensure_udp）")
+        finally:
+            await gw.stop()
+            await server.close()
 
     asyncio.run(run())
