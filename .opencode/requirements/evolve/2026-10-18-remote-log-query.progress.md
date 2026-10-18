@@ -7,7 +7,7 @@
 | 3. routes/remote.py 转发端点 | ✅ | 双分支冒烟：local 真实查询 / remote 转 path+payload 全对 |
 | 4. tests/test_logs_query.py | ✅ | 12 passed（反向读/跨块/长行/坏字节/校验矩阵/symlink） |
 | 5. tests/test_remote_logs_forward.py | ✅ | 5 passed（local/转发/502/409/映射）；pyright 修复 2 处 memoryview |
-| 6. 全量回归 + e2e | 🔄 | 进行中 |
+| 6. 全量回归 + e2e | ✅ | 回归 266 passed / pyright 0/0/0；e2e 完成：两端日志查询全通 + 09:01 冷窗自查闭环（串行排队问题另立修复批 2026-10-18-relay-gateway-multiplex） |
 
 ## 证据
 
