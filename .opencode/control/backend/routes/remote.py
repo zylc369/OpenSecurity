@@ -20,13 +20,14 @@ from dataclasses import asdict, dataclass, field
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from services.config_manager import ConfigManager
 from services.remote_client import (
     ModelFingerprint, RemoteConsoleClient, RemoteHealthInfo,
 )
 from services.remote_link import RemoteLinkService, SwitchResult, RemoteLinkStatus
+from routes.logs import LogQueryRequest, query_logs
 
 router = APIRouter(prefix="/api/remote", tags=["remote"])
 
@@ -308,13 +309,8 @@ async def set_autostart(req: AutostartRequest, node: str = Query(default="local"
         raise HTTPException(status_code=422, detail=str(e))
 
 
-class NodeLogsQueryReq(BaseModel):
-    """节点日志查询请求（字段与节点侧 `/api/logs/query` 的 LogQueryRequest 一致）。"""
-
-    file: str = Field(min_length=1, max_length=128)
-    pattern: str = Field(default="", max_length=1000)
-    is_regex: bool = True
-    limit: int = Field(default=200, ge=1, le=5000)
+# 请求模型单点复用 routes.logs（防字段漂移——需求文档架构验收: 零重复逻辑）
+NodeLogsQueryReq = LogQueryRequest
 
 
 @router.post("/node-logs/query")
@@ -324,18 +320,5 @@ async def query_node_logs(req: NodeLogsQueryReq, node: str = Query(default="loca
     if client is not None:
         return JSONResponse(content=await _forward_call(
             client._post_json, "/api/logs/query", req.model_dump()))  # noqa: SLF001 —— 转发通道
-    import asyncio
-    import re
-    from pathlib import Path
-    from services.log_query import query_log
-    from services.runtime_paths import RuntimePaths
-    try:
-        result = await asyncio.to_thread(
-            query_log, Path(RuntimePaths.LOGS_DIR), req.file, req.pattern, req.is_regex, req.limit)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"日志文件不存在: {req.file}")
-    except re.error as e:
-        raise HTTPException(status_code=422, detail=f"非法正则: {e}")
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    return JSONResponse(content=asdict(result))
+    # local: 直调 routes.logs 同款端点（模型/校验/错误映射全单点——零逻辑拷贝）
+    return JSONResponse(content=asdict(await query_logs(req)))

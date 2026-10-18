@@ -357,7 +357,7 @@ class TtsService:
     def warm_local_workers(self) -> int:
         """预热全部本地 worker 与质检链路（预热唯一入口）。
 
-        节点预载（--model-preload）/降级接管/远程促热（/api/tts/warm）共用。
+        调用方: 节点预载（--model-preload → model_ops.load）/降级接管（model_loader 预热线程）。
         覆盖范围: ① worker 池全量（warm_all——池大小变化自动跟随）
         ② 质检链路（收尾全链短合成触发 TtsQC/funasr 初始化——池预热只覆盖
         worker 进程, ASR ~1GB 懒加载在此提前烧掉）。全程持本地域许可（与
