@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 RETIRED_CLOSE_SEC = 90.0  # 退役连接延迟回收（3×默认 api_timeout——在途请求完成余量）
 
+# 周期健康探测路径: 不记消息级跟踪日志（每 5s 心跳会稀释业务请求的排查信号）
+_QUIET_LOG_PATHS = frozenset({"/api/remote/health"})
+
 
 def resolve_udp_ep(local: "tuple[str, int]") -> "tuple[str, int]":
     """上报前修正 socket 本地地址: 通配/空 → 默认出站接口探测值。
@@ -585,14 +588,17 @@ class RemoteTransport:
         self._pending[msg_id] = fut
         t_send = 0.0  # 发送完成时刻（消息级跟踪的往返耗时基准）
         try:
+            track = (isinstance(job, ApiJob)
+                     and job.path not in _QUIET_LOG_PATHS)  # 周期健康探测不刷跟踪日志
             if isinstance(job, ApiJob):
                 await conn.send_msg(ApiReq(msg_id=msg_id, method=job.method,
                                            path=job.path, body=job.body,
                                            token=job.token or None))
                 t_send = time.monotonic()
-                logger.info("api.req 已发送: %s %s（id=%d, 路径=%s, 等待响应）",
-                            job.method, job.path, msg_id,
-                            "直连" if isinstance(conn, DirectConnection) else "中继")
+                if track:
+                    logger.info("api.req 已发送: %s %s（id=%d, 路径=%s, 等待响应）",
+                                job.method, job.path, msg_id,
+                                "直连" if isinstance(conn, DirectConnection) else "中继")
             else:  # PingJob（内部探测——保持静默，避免高频噪音）
                 await conn.send_msg(PingMsg(msg_id=msg_id))
             # 返回 WireMsg（ApiResp 或 PongMsg）; api 窄化在 request()——
@@ -616,13 +622,18 @@ class RemoteTransport:
                     if fut.done():  # 恰好完成（分段边界——完成与超时同帧竞争）
                         got = fut.result()
                         break
-                    if is_api and not await self._probe_conn():
+                    # 探测针对"承载本请求的连接"（可能已不是 self._conn——
+                    # 请求可能挂在被切换/重建前的旧连接上）
+                    if is_api and not await self._probe_conn(conn):
+                        if fut.done():  # 探测窗口内响应到达——优先交付（勿丢弃）
+                            got = fut.result()
+                            break
                         logger.warning(
                             "看门狗: id=%d 等待 %.0fs 无响应且连接探测失败",
                             msg_id, time.monotonic() - t_wait0)
                         raise ConnectionError("连接无响应（看门狗探测失败）")
                     # 连接健康（慢响应）→ 继续等剩余时间
-            if is_api:
+            if track:
                 logger.info("api.resp 已收到: id=%d（往返 %.0fms）",
                             msg_id, (time.monotonic() - t_send) * 1000)
             return got
@@ -753,14 +764,14 @@ class RemoteTransport:
                 logger.debug("会话 close 异常（忽略）: %s", e)
             self._conn = None
 
-    async def _probe_conn(self) -> bool:
-        """看门狗连接探测: 只用当前会话直发 ping（不重建、不递归 _handle_job）。
+    async def _probe_conn(self, conn: "DirectConnection | RelayConnection") -> bool:
+        """看门狗连接探测: 只用承载请求的连接直发 ping（不重建、不递归 _handle_job）。
 
-        区别 probe(): probe() 走 _submit 跨线程提交（无会话时会触发重建），
-        本方法探测的语义是"现有连接是否活着"——失败即让调用方快速失败。
+        传参 conn（而非取 self._conn）: 请求可能挂在被切换/重建前的旧连接上，
+        探测必须针对"它"本身，否则会探到健康的新会话而漏判（假阴性）。
+        区别 probe(): probe() 走 _submit 跨线程提交（无会话时会触发重建）。
         """
-        conn = self._conn
-        if conn is None or conn.broken:
+        if conn.broken:
             return False
         from services.remote_wire import PingMsg
         pid = self._next_id

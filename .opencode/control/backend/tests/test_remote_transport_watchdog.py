@@ -77,7 +77,6 @@ def _mk_transport(**overrides: float) -> RemoteTransport:
     return t
 
 
-@pytest.mark.slow
 def test_watchdog_fakes_alive_fails_fast(caplog: pytest.LogCaptureFixture) -> None:
     """假活（api 无响应 + ping 无 pong）: 请求快速失败且异常消息非空。"""
     t = _mk_transport()
@@ -105,7 +104,6 @@ def test_watchdog_fakes_alive_fails_fast(caplog: pytest.LogCaptureFixture) -> No
         t.stop()
 
 
-@pytest.mark.slow
 def test_watchdog_does_not_kill_slow_but_healthy(caplog: pytest.LogCaptureFixture) -> None:
     """慢但健康的连接: 响应慢于 watchdog_sec（ping 有 pong）→ 最终成功。"""
     t = _mk_transport()
@@ -125,7 +123,6 @@ def test_watchdog_does_not_kill_slow_but_healthy(caplog: pytest.LogCaptureFixtur
         t.stop()
 
 
-@pytest.mark.slow
 def test_message_tracking_logs(caplog: pytest.LogCaptureFixture) -> None:
     """正常请求: "已发送 / 已收到"成对 INFO 日志各出现一次。"""
     t = _mk_transport()
@@ -142,6 +139,55 @@ def test_message_tracking_logs(caplog: pytest.LogCaptureFixture) -> None:
             text = "\n".join(r.message for r in caplog.records)
             assert "api.req 已发送" in text, text
             assert "api.resp 已收到" in text, text
+        asyncio.run(_run())
+    finally:
+        t.stop()
+
+
+def test_watchdog_probes_request_conn_not_current() -> None:
+    """探测针对"承载请求的连接": 请求挂在死连接、self._conn 已被切成健康新连接
+    → 仍应快速失败（探测请求连接），而不是探到健康新连接后继续等满总超时。"""
+    t = _mk_transport()
+    try:
+        dead = _DummyConn(t, ping_pong=False, api_reply=None)
+        healthy = _DummyConn(t, ping_pong=True, api_reply=None)
+        t._conn = cast("RelayConnection", dead)  # noqa: SLF001 —— 注入
+
+        async def _run() -> None:
+            async def _swap() -> None:
+                await asyncio.sleep(0.3)  # 请求进行中切换 self._conn（模拟升级/重建）
+                t._conn = cast("RelayConnection", healthy)  # noqa: SLF001
+            asyncio.get_running_loop().create_task(_swap())
+            loop = asyncio.get_running_loop()
+            t0 = time.monotonic()
+            with pytest.raises(TransportError) as ei:
+                await loop.run_in_executor(
+                    None, lambda: t.request("POST", "/api/tts",
+                                            {"t": "x"}, timeout=10.0))
+            assert "看门狗" in str(ei.value), str(ei.value)  # 快速失败（探测 dead）
+            assert time.monotonic() - t0 < 5.0
+        asyncio.run(_run())
+    finally:
+        t.stop()
+
+
+def test_watchdog_delivers_response_arriving_in_probe_window() -> None:
+    """探测判定失败期间，响应恰好到达 → 优先交付（不丢弃已送达的合成结果）。"""
+    t = _mk_transport()
+    try:
+        # ping 不回（探测将失败）; api 响应 1.3s 到达（watchdog 1.0s + probe 0.5s 窗口内）
+        dummy = _DummyConn(t, ping_pong=False, api_reply=1.3)
+        t._conn = cast("RelayConnection", dummy)  # noqa: SLF001 —— 注入
+
+        async def _run() -> None:
+            loop = asyncio.get_running_loop()
+            t0 = time.monotonic()
+            resp = await loop.run_in_executor(
+                None, lambda: t.request("POST", "/api/tts",
+                                        {"s": "y"}, timeout=10.0))
+            assert isinstance(resp, remote_wire.ApiResp)
+            assert resp.status == 200
+            assert time.monotonic() - t0 < 10.0
         asyncio.run(_run())
     finally:
         t.stop()

@@ -34,9 +34,24 @@
    修复：补 `mime="application/json"`。**顺带确认实现行为正确**（探测健康 → 持续等待 = 预期）。
 2. **`TTS_TIMEOUT_SEC` 是类内常量**（`RemoteConsoleClient.TTS_TIMEOUT_SEC`）非模块级——测试 import 方式修正。
 
-## 待办
+## review 修复批（提交 fab5319 后外部审查发现，全部修复）
 
-- [ ] Phase 6 审计（2 轮+纯审计）
-- [ ] 真机验证：部署后正常试听，确认日志出现"api.req 已发送 / api.resp 已收到"（含 msg_id）
-- [ ] review 修复批（如有）
-- [ ] 提交
+| # | 发现（severity） | 修复 |
+|---|---|---|
+| F1 | 看门狗探测的是 `self._conn` 而非"请求所在连接"——假阴性（探到健康新会话→请求等满超时）/假阳性（探到死新会话→误杀健康请求） | `_probe_conn(conn)` 传请求连接；新增回归用例 `test_watchdog_probes_request_conn_not_current`（反向验证：还原=红 10s 超时，修复=绿 ~1.5s"看门狗"） |
+| F2 | 探测窗口内到达的响应被丢弃（探测失败后直接 raise，不复查 fut） | 失败分支前复查 `fut.done()` → 优先交付；新增用例 `test_watchdog_delivers_response_arriving_in_probe_window` |
+| F4 | 日志通道被心跳占满（512 条中 510 条是 `/api/remote/health`，~4.2MB/天） | `_QUIET_LOG_PATHS`——健康探测路径不记"已发送/已收到"（失败仍记） |
+| F5a | 3 个用例标 slow 会被日常跳过（实际仅秒级） | 移除 slow 标记（日常回归可守） |
+| F5b | 本文件"待办"段与表格矛盾 | 本节更新 |
+| F3 | TTS 90s 冷启动余量缺实测 | 见下"冷启动实测" |
+
+**验证**：全量 **280 passed, 1 skipped**；pyright 0/0/0；F1 反向验证红→绿。
+
+**记录（改动外，未修，独立问题）**：
+- `_get_json`/`_put_json` 丢弃 timeout 参数（`probe_health` 3s 变 30s）——review 改动外观察。
+- `audit_middleware` 把 WAV 二进制 body 原样写日志（control.log 出现 NUL 字节，grep 需 `-a`）——先于本提交存在。
+- `_upgrade_loop` teardown 的 "Task was destroyed but it is pending"（测试环境杂音）。
+
+## 冷启动实测
+
+（见提交后记录）
