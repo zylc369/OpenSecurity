@@ -112,7 +112,9 @@ function splitOversize(sentence: string, max: number): string[] {
  * 返回 null=整吞；否则 cur+p.slice(0,cut) 收段、p.slice(cut) 继续处理。
  * 软断点若超出硬限 → 视为未找到（走硬切，保证段长 ≤ 硬限）。
  */
-function overflowCut(p: string, cv: number, soft: number, hard: number): number | null {
+function overflowCut(p: string, cv: number, goal: number, first: number): number | null {
+  const soft = goal + first;
+  const hard = 2 * first + goal;
   if (cv + p.length <= soft) return null;
   const limit = Math.min(p.length, hard - cv);
   const softStart = Math.max(0, soft - cv);
@@ -124,7 +126,9 @@ function overflowCut(p: string, cv: number, soft: number, hard: number): number 
     }
   }
   // ② 回落到"本片内、超限点之前"最近的软标点（宁可略早断，保段长受控）
+  //    下界守卫: 切出的段须 ≥ 首段目标（否则碎段播放装不下下段生成——维持整吞）
   for (let i = Math.min(softStart, p.length) - 1; i >= 0; i--) {
+    if (cv + i + 1 < first) break; // 越往左越短——无满足下界的候选
     const ch = p[i];
     if (SOFT_PUNCT.has(ch) && !(isDigit(p[i - 1]) && isDigit(p[i + 1]))) {
       return i + 1;
@@ -138,12 +142,12 @@ function overflowCut(p: string, cv: number, soft: number, hard: number): number 
 /**
  * 第二遍: 句块贪心合并 → 段数组。
  * 渐进分段（首响优化）: 首段 20 字 ≈3.5s 出声;
- * ramp 20→40→80(数学衔接: 每段播放时长 ≥ 下段生成时长——
+ * ramp 20→40→60→80(数学衔接: 每段播放时长 ≥ 下段生成时长——
  * 20字/3.5s音 → 40字/3.5s生成 ✓; 40字/9s音 → 80字/6s生成 ✓; …全链无断档)。
  * 首句过长时允许在逗号处提前断首段（首响优先——见 cutFirstComma）。
  * @param target 目标段长（默认 80）
  * @param hardMax 单句超此长触发逗号兜底（0=自动: max(target*1.5, 120)）
- * @param firstTargets 前几段的目标长（默认 rampFor 派生，如 [20, 40, 80]）
+ * @param firstTargets 前几段的目标长（默认 rampFor 派生，如 [20, 40, 60, 80]）
  */
 export const DEFAULT_FIRST_LEN = 20;   // 首段字数默认（改这里一处生效全前端）
 export const DEFAULT_NEXT_LEN = 80;    // 常规段字数默认（改这里一处生效全前端）
@@ -185,6 +189,7 @@ export function normalizeStairs(input: readonly number[] | undefined | null): nu
   for (const v of input) {
     if (!Number.isFinite(v) || v <= 0) return null;
     const r = Math.round(v);
+    if (r <= 0 || r > 1000) return null; // 取整后仍须为正(0.4→0 拒)且 ≤1000(旧 UI 上界防段超后端 2000)
     if (!cleaned.includes(r)) cleaned.push(r);
   }
   cleaned.sort((a, b) => a - b);
@@ -229,14 +234,15 @@ export function segmentText(
       // 吞下此句会显著超目标（>150%）时先收——超长段生成慢会拖垮
       // "下段生成 ≤ 本段播放"的无缝链（如 76 字差 4 字吞 55 字句 → 131 字）。
       // 小 cur（<半目标）不拆: 拆出小段反而拖垮后续（14+14→14|14 劣于 28）。
-      const g = goalNow();
+      let g = goalNow();
       if (cur.length > 0 && cur.length >= g * 0.5
           && cur.length + p.length > g * 1.5) {
         segs.push(cur);
         cur = "";
+        g = goalNow(); // 收段后档位可能前进——守门按新档位计算
       }
       // v2 超限守门: 软标点断（超软限）/ 硬结束（超硬限）——见 overflowCut
-      const cut = overflowCut(p, cur.length, g + firstGoal, 2 * firstGoal + g);
+      const cut = overflowCut(p, cur.length, g, firstGoal);
       if (cut !== null) {
         segs.push(cur + p.slice(0, cut));
         cur = "";
@@ -357,13 +363,14 @@ export function createSegmentFeeder(
         const queue: string[] = [p0];
         while (queue.length > 0) {
           const p = queue.shift() as string;
-          const g = goalNow();
+          let g = goalNow();
           if (cur.length > 0 && cur.length >= g * 0.5
               && cur.length + p.length > g * 1.5) {
             settle(cur);
             cur = "";
+            g = goalNow(); // 收段后档位可能前进——守门按新档位计算
           }
-          const cut = overflowCut(p, cur.length, g + firstGoal, 2 * firstGoal + g);
+          const cut = overflowCut(p, cur.length, g, firstGoal);
           if (cut !== null) {
             settle(cur + p.slice(0, cut));
             cur = "";

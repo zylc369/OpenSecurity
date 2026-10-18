@@ -65,6 +65,15 @@ describe("useTtsPlayer 协议与状态机", () => {
     expect(env.calls.length).toBe(3);                                // 不超前 seg3（含保底轮询）
   });
 
+  it("stairs 阶梯参数: 优先于 firstLen/nextLen(段按阶梯序列切)", async () => {
+    const { result } = renderHook(() => useTtsPlayer());
+    // TEXT3 三句(21/61/81); stairs [30,120] → [21, 142] 两段; 若 5/5 的 firstLen/nextLen 生效则段数远多于 2
+    act(() => { result.current.start(TEXT3, { stairs: [30, 120], firstLen: 5, nextLen: 5 }); });
+    await waitFor(() => expect(env.calls.length).toBe(2));
+    expect(String(env.calls[0].body.text)).toBe("甲".repeat(20) + "。");
+    expect(env.calls.map((c) => String(c.body.text)).join("")).toBe(TEXT3);
+  });
+
   it("段间等待: 下段未就绪 waiting=true, 就绪起播后清除", async () => {
     const { result } = renderHook(() => useTtsPlayer());
     env.holdText = "乙";  // seg1（乙段）挂起——制造未就绪等待窗口

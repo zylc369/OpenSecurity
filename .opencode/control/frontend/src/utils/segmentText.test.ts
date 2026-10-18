@@ -148,6 +148,8 @@ describe("阶梯输入解析(normalizeStairs/parseStairs)", () => {
     expect(parseStairs("")).toBeNull();
     expect(parseStairs("abc")).toBeNull();
     expect(parseStairs("20,-5")).toBeNull();
+    expect(parseStairs("0.4")).toBeNull();  // 取整后为 0 → 拒绝
+    expect(parseStairs("1001")).toBeNull(); // 上界 1000(防段超后端 MAX_TEXT_LEN)
     expect(normalizeStairs([])).toBeNull();
     expect(normalizeStairs([1, 2, 3, 4, 5, 6, 7, 8, 9])).toBeNull(); // >8 档
   });
@@ -167,6 +169,11 @@ describe("尾并回(v2: 阈值=首段分段字数)", () => {
     const segs = segmentText(t, 80);
     expect(segs.map((s) => s.length)).toEqual([28, 51, 62, 28]); // 尾 28(>=20) 独立
     expect(segs.join("")).toBe(t);
+  });
+  it("阈值随首段设置联动(同文本: 首段20→尾独立; 首段30→尾并入)", () => {
+    const t = "甲".repeat(28) + "。" + "乙".repeat(23) + "。";
+    expect(segmentText(t, 80, 0, [20, 40, 60, 80]).map((s) => s.length)).toEqual([29, 24]);
+    expect(segmentText(t, 80, 0, [30, 80]).map((s) => s.length)).toEqual([53]);
   });
 });
 
@@ -191,6 +198,18 @@ describe("分段器 v2 守门(软标点断 / 硬结束)", () => {
     const segs = segmentText(long);
     expect(segs.join("")).toBe(long);
     for (const s of segs) expect(s.length).toBeLessThanOrEqual(60);
+  });
+  it("回落碎段守卫: 不切出 <首段值的段(防新断档形态)", () => {
+    expect(segmentText("他说，" + "内容".repeat(19) + "。").map((s) => s.length)).toEqual([42]);
+    expect(segmentText("嗯，" + "甲".repeat(115) + "。").map((s) => s.length)).toEqual([60, 58]);
+    expect(segmentText("甲".repeat(19) + "。" + "乙".repeat(3) + "，" + "乙".repeat(58) + "。")
+      .map((s) => s.length)).toEqual([20, 63]);
+    expect(segmentText("甲".repeat(19) + "。" + "，" + "乙".repeat(117) + "。")
+      .map((s) => s.length)).toEqual([20, 80, 39]);
+  });
+  it("预检后档位前进: 守门按新档位计算(与规则书公式一致)", () => {
+    expect(segmentText("甲".repeat(11) + "。" + "乙".repeat(89) + "。", 80)
+      .map((s) => s.length)).toEqual([12, 90]);
   });
   it("数字间冒号/逗号不误切(12:30 / 1,000)", () => {
     const t = "等到了指定的时刻12:30再出发，另外花了1,000元买的东西。";
