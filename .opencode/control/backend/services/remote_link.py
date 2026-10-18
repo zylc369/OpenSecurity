@@ -158,7 +158,6 @@ class RemoteLinkService:
         self._last_health: "RemoteHealthInfo | None" = None
         self._unload_timer: "threading.Timer | None" = None
         self._unload_due_at: "float | None" = None
-        self._last_remote_warmup_at: float = 0.0
         self._task: "asyncio.Task[None] | None" = None
         # 校验进行中标志: switch_transport 探测期间（不持锁），心跳/reload 的
         # _sync_client_locked 不得重建 client——存量配置视角（mode 未写）会误判
@@ -291,7 +290,6 @@ class RemoteLinkService:
                 self._state = self.STATE_REMOTE
                 logger.info("远程初始评估成功 → REMOTE（url=%s, 延迟 %.1fms）",
                             self._client_url, info.latency_ms)
-                self._schedule_remote_tts_warmup_locked()
             elif (self._state == self.STATE_DEGRADED
                   and self._recover_streak >= _tunables().recover_threshold):
                 self._state = self.STATE_REMOTE
@@ -299,7 +297,6 @@ class RemoteLinkService:
                 logger.info("远程恢复（连续 %d 次成功）→ REMOTE；%ds 稳定期后卸载本地模型",
                             self._recover_streak, delay)
                 self._schedule_unload_locked()
-                self._schedule_remote_tts_warmup_locked()
 
     def _register_failure(self, reason: str) -> None:
         with self._lock:
@@ -360,42 +357,6 @@ class RemoteLinkService:
             self._unload_timer.cancel()
             self._unload_timer = None
         self._unload_due_at = None
-
-    def _schedule_remote_tts_warmup_locked(self) -> None:
-        """进入 REMOTE 后预热节点 TTS（防首听吃节点冷启动）。
-
-        节流窗（warmup_throttle_sec, 默认 300s）: 心跳抖动反复
-        DEGRADED↔REMOTE 时不重复轰节点。促热路径: 优先节点 warm 端点
-        （/api/tts/warm——池全池 + 质检链路, 覆盖范围由节点保证）;
-        旧节点/超时 → 回退双发合成。
-        """
-        now = time.monotonic()
-        if now - self._last_remote_warmup_at < _tunables().warmup_throttle_sec:
-            return
-        self._last_remote_warmup_at = now
-        threading.Thread(target=self._warm_remote_tts,
-                         name="remote-tts-warmup", daemon=True).start()
-
-    def _warm_remote_tts(self) -> None:
-        try:
-            client = self.get_client()
-            # 首选: 节点侧全池预热（POST /api/tts/warm——覆盖范围由节点池保证,
-            # 池大小变化自动跟随; 与节点预载同一实现）。
-            warmed = 0
-            try:
-                warmed = client.tts_warm()
-            except Exception:  # noqa: BLE001 —— 旧节点 404/网络异常 → 回退
-                warmed = 0
-            if warmed <= 0:
-                # 回退（旧节点/端点缺失/超时）: 双发不同文本覆盖 2 worker
-                client.tts_synth("好。", "", 1.0, no_cache=True)
-                client.tts_synth("很。", "", 1.0, no_cache=True)
-                logger.info("节点 TTS 预热完成（兼容路径——warm 端点不可用或超时）")
-            else:
-                logger.info("节点 TTS 预热完成（全池 %d 个 worker——远程首听免冷启动）",
-                            warmed)
-        except Exception as e:  # noqa: BLE001 —— 预热失败不影响主流程
-            logger.warning("节点 TTS 预热失败（首听可能吃冷启动）: %s", e)
 
     # ── 切换操作（routes/remote.py 调用）──────────────────
 
@@ -459,7 +420,6 @@ class RemoteLinkService:
             self._last_ok_at = time.time()
             self._last_health = info
             self._schedule_unload_locked()
-            self._schedule_remote_tts_warmup_locked()
         logger.info("切换远程成功（url=%s, warnings=%d）", url, len(warnings))
         return SwitchResult(ok=True, warnings=warnings)
 

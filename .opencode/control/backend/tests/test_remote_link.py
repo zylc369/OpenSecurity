@@ -369,104 +369,17 @@ if __name__ == "__main__":
 
 
 class _FakeTtsClient:
-    """伪造远程 client（记录 tts_synth 调用文本 + warm 端点调用）。"""
+    """伪造远程 client（记录 tts_synth 调用文本）。"""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
-        self.warm_calls = 0
 
-    def tts_synth(self, text, voice, speed, instruct="", seed=-1, mode="",
-                  no_cache=False):
+    def tts_synth(self, text, voice, speed, instruct="", seed=-1, mode=""):
         self.calls.append(text)
         return b"wav"
-
-    def tts_warm(self) -> int:
-        self.warm_calls += 1
-        return 2
 
 
 def _wait_until(cond, timeout=2.0):
     deadline = time.monotonic() + timeout
     while not cond() and time.monotonic() < deadline:
         time.sleep(0.02)
-
-
-@test("remote_link: 进入 REMOTE → 后台预热节点 TTS（防首听吃冷启动）")
-def test_remote_tts_warmup_on_enter():
-    async def run():
-        fake = _FakeTtsClient()
-        svc = _mk_service()
-        svc.get_client = lambda: fake  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]  (测试 fake 注入)
-        _set_probe(svc, [_ok_info()])
-        await _pump(svc, 1)
-        assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE)
-        _wait_until(lambda: bool(fake.warm_calls) or bool(fake.calls))  # 预热在后台线程
-        assert_true(fake.warm_calls == 1 and fake.calls == [],
-                    f"进入 REMOTE 应走全池 warm 端点（覆盖范围由节点池保证），"
-                    f"实际 warm={fake.warm_calls} synth={fake.calls}")
-    try:
-        asyncio.run(run())
-    finally:
-        # 实例属性注入（get_client）随单例存活——收尾复位防跨测试文件泄漏
-        rl_module.RemoteLinkService._reset_for_tests()
-
-
-@test("remote_link: 旧节点（warm 端点缺失）→ 回退双发兼容路径")
-def test_remote_tts_warmup_fallback_legacy_node():
-    async def run():
-        fake = _FakeTtsClient()
-
-        def _no_warm() -> int:
-            raise RuntimeError("legacy node: /api/tts/warm 404")
-
-        fake.tts_warm = _no_warm  # type: ignore[method-assign]  # 旧节点模拟
-        svc = _mk_service()
-        svc.get_client = lambda: fake  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]  (测试 fake 注入)
-        _set_probe(svc, [_ok_info()])
-        await _pump(svc, 1)
-        assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE)
-        _wait_until(lambda: bool(fake.calls))  # 回退双发在后台线程
-        assert_true(fake.calls == ["好。", "很。"],
-                    f"旧节点应回退双发兼容路径，实际 {fake.calls}")
-    try:
-        asyncio.run(run())
-    finally:
-        rl_module.RemoteLinkService._reset_for_tests()
-
-
-@test("remote_link: warm 端点返回 0（异常响应）→ 回退双发")
-def test_remote_tts_warmup_zero_warmed_falls_back():
-    async def run():
-        fake = _FakeTtsClient()
-        fake.tts_warm = lambda: 0  # 有效响应但 0 个 worker——同样回退
-        svc = _mk_service()
-        svc.get_client = lambda: fake  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]  (测试 fake 注入)
-        _set_probe(svc, [_ok_info()])
-        await _pump(svc, 1)
-        assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE)
-        _wait_until(lambda: bool(fake.calls))
-        assert_true(fake.calls == ["好。", "很。"],
-                    f"warmed=0 应回退双发，实际 {fake.calls}")
-    try:
-        asyncio.run(run())
-    finally:
-        rl_module.RemoteLinkService._reset_for_tests()
-
-
-@test("remote_link: 预热节流——节流窗内再进入 REMOTE 不重复预热")
-def test_remote_tts_warmup_throttled():
-    async def run():
-        fake = _FakeTtsClient()
-        svc = _mk_service()
-        svc.get_client = lambda: fake  # noqa: SLF001  # pyright: ignore[reportAttributeAccessIssue]  (测试 fake 注入)
-        svc._last_remote_warmup_at = time.monotonic()  # noqa: SLF001 —— 模拟刚预热过
-        _set_probe(svc, [_ok_info()])
-        await _pump(svc, 1)
-        assert_eq(svc.status().state, rl_module.RemoteLinkService.STATE_REMOTE)
-        time.sleep(0.2)  # 若绕过节流会在此窗口内触发
-        assert_true(fake.calls == [], f"节流窗内不应再预热，实际 {fake.calls}")
-    try:
-        asyncio.run(run())
-    finally:
-        # 实例属性注入（get_client）随单例存活——收尾复位防跨测试文件泄漏
-        rl_module.RemoteLinkService._reset_for_tests()

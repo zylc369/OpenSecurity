@@ -419,13 +419,12 @@ class TtsService:
     def synthesize(self, text: str, voice: str = "",
                    speed: float = DEFAULT_SPEED,
                    instruct: str = "", seed: int = -1,
-                   mode: str = "", no_cache: bool = False) -> TtsResult:
+                   mode: str = "") -> TtsResult:
         """文本 → WAV 字节（LRU 命中标记 cached）。空文本 ValueError。
 
         voice: 音色库 id（空=默认音色）; speed: 1.0 原速, <1 服务端 atempo 减速。
         instruct: 朗读指令（空=引擎默认"请用正常语速朗读接下来的内容。"——测试台参数）。
         seed: 采样种子（≤0=默认 4; 同 seed 同参数输出等效可复现）。
-        no_cache: 跳过缓存读写（预热专用——强制真合成，防缓存假命中）。
         """
         from services.voice_library import VoiceLibrary, VoiceError
         t_enter = time.monotonic()
@@ -447,15 +446,14 @@ class TtsService:
         key = (voice_id, speed, instruct, seed, mode, text)
         logger.info("[tts] 请求进入: %d字 voice=%s instruct=%r seed=%d mode=%r",
                     len(text), voice_id, instruct, seed, mode)
-        if not no_cache:  # 预热请求穿透缓存（强制真合成）
-            with self._cache_lock:
-                hit = self._cache.get(key)
-                if hit is not None:
-                    self._cache.move_to_end(key)
-                    logger.info("[tts] 缓存命中, 直接返回（%.0fms）",
-                                (time.monotonic() - t_enter) * 1000)
-                    return TtsResult(wav=hit[0], cached=True, gen_ms=0.0,
-                                     voice=voice_id, speed=speed, source=hit[1])
+        with self._cache_lock:
+            hit = self._cache.get(key)
+            if hit is not None:
+                self._cache.move_to_end(key)
+                logger.info("[tts] 缓存命中, 直接返回（%.0fms）",
+                            (time.monotonic() - t_enter) * 1000)
+                return TtsResult(wav=hit[0], cached=True, gen_ms=0.0,
+                                 voice=voice_id, speed=speed, source=hit[1])
         # 远程域（独立于本地域）: 远程等待为网络 IO, 不占本地队列
         # （四模型统一远程化——should_use_remote → 远程推理, 失败 fallback 本地;
         #  缓存命中不出本机）
@@ -470,8 +468,7 @@ class TtsService:
             try:
                 client = RemoteLinkService.get_instance().get_client()
                 wav = client.tts_synth(text, voice_id, speed,
-                                       instruct=instruct, seed=seed, mode=mode,
-                                       no_cache=no_cache)
+                                       instruct=instruct, seed=seed, mode=mode)
                 # 质检回验在节点侧完整执行（节点本地链路自带质检 + 不合格派生
                 # 种子重试——生产自检闭环）; 主控不再重复质检: 同代码同模型
                 # 复核无增量——移除冗余层（此前代价: 首段冷加载 ~4s + 每段 ~1s）。
@@ -503,14 +500,12 @@ class TtsService:
                         gen_ms, (time.monotonic() - t_enter) * 1000)
             # 缓存写入保持在域内: release() 的"取号→清缓存"原子性依赖
             # "域内无在途写"——写放域外会被卸载清空后回写（卸载残留旧条目）。
-            # no_cache（预热）不留缓存条目。
-            if not no_cache:
-                with self._cache_lock:
-                    self._cache[key] = (wav, "local")
-                    self._cache.move_to_end(key)
-                    while (len(self._cache) > CACHE_LIMIT
-                           or sum(len(v[0]) for v in self._cache.values()) > CACHE_BYTES_LIMIT):
-                        self._cache.popitem(last=False)
+            with self._cache_lock:
+                self._cache[key] = (wav, "local")
+                self._cache.move_to_end(key)
+                while (len(self._cache) > CACHE_LIMIT
+                       or sum(len(v[0]) for v in self._cache.values()) > CACHE_BYTES_LIMIT):
+                    self._cache.popitem(last=False)
         return TtsResult(wav=wav, cached=False, gen_ms=gen_ms,
                          voice=voice_id, speed=speed, source="local")
 

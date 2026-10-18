@@ -216,14 +216,11 @@ class RemoteConsoleClient:
     TTS_TIMEOUT_SEC = 600.0
 
     def tts_synth(self, text: str, voice: str, speed: float,
-                  instruct: str = "", seed: int = -1, mode: str = "",
-                  no_cache: bool = False) -> bytes:
+                  instruct: str = "", seed: int = -1, mode: str = "") -> bytes:
         """语音合成（POST /api/tts——WAV 二进制响应，不经 _post_json 的
-        JSON 假设; gateway 对非 JSON 响应以原始 bytes 装入 ApiResp.body）。
-        no_cache: 预热专用——节点侧跳过缓存读写（强制真合成）。"""
+        JSON 假设; gateway 对非 JSON 响应以原始 bytes 装入 ApiResp.body）。"""
         payload: dict[str, object] = {"text": text, "voice": voice, "speed": speed,
-                                      "instruct": instruct, "seed": seed, "mode": mode,
-                                      "no_cache": no_cache}
+                                      "instruct": instruct, "seed": seed, "mode": mode}
         if self._p2p_cfg is not None:
             from services.remote_transport import TransportError
             transport = self._get_transport()
@@ -248,22 +245,6 @@ class RemoteConsoleClient:
             raise RemoteUnavailable(
                 f"远程 /api/tts {r.status_code}: {r.text[:120]}")
         return r.content
-
-    def tts_warm(self) -> int:
-        """请求节点预热本地 worker 全池（POST /api/tts/warm——幂等）。
-
-        返回预热 worker 数; 节点版本旧（404）/响应不符 → 抛 RemoteUnavailable
-        （调用方回退"双发合成"兼容路径）。覆盖范围由节点池保证（与 worker 数
-        永不脱节）。超时用 TTS 级（冷节点全池顺序预热可达 20-30s+, 推理默认
-        超时会误杀成"回退"）。
-        """
-        data = self._post_json("/api/tts/warm", {}, timeout=self.TTS_TIMEOUT_SEC)
-        if not isinstance(data, dict):
-            raise RemoteUnavailable("warm 响应非对象")
-        warmed = data.get("warmed")
-        if not isinstance(warmed, int) or isinstance(warmed, bool):
-            raise RemoteUnavailable("warm 响应异常（缺 warmed 计数）")
-        return warmed
 
     # ─── 健康探测 ─────────────────────────────────────────
 

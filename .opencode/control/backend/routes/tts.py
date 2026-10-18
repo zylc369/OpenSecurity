@@ -1,7 +1,6 @@
 """远端 TTS 路由（经 P2P transport 或节点本机 HTTP 调用，同一语义）。
 
 POST /api/tts        {text, voice?, speed?} → audio/wav（bytes body）
-POST /api/tts/warm   预热本地 worker 池 + 质检链路 → {"ok": bool, "warmed": int}
 GET  /api/tts/voices → {"voices": [VoiceAsset 字典...]}
 POST /api/tts/voices → 上传新音色（multipart: wav + 表单字段）——无删除端点
 失败: TtsUnavailable → 503; 文本/音色非法 → 400。
@@ -30,22 +29,11 @@ class TtsRequest(BaseModel):
     instruct: str = Field(default="", max_length=200)  # 朗读指令(空=默认正常语速)
     seed: int = Field(default=-1, ge=-1, le=99999)     # 采样种子(≤0=默认 4)
     mode: str = Field(default="", max_length=16)       # ""=zero_shot(默认 情感饱满); "instruct"=指令控制
-    no_cache: bool = False  # 预热专用: 跳过缓存读写（强制真合成——穿透假命中）
 
 
 def get_tts_service() -> TtsService:
     """依赖注入点（测试 override 用）。"""
     return TtsService.get_instance()
-
-
-@router.post("/warm")
-def warm(svc: TtsService = Depends(get_tts_service)) -> "dict[str, object]":
-    """预热本地 worker 池（幂等短合成——给覆盖范围由池保证）。
-
-    节点预载/远程促热（主控 REMOTE 进入时）共用; 返回已预热 worker 数。
-    """
-    n = svc.warm_local_workers()
-    return {"ok": n > 0, "warmed": n}
 
 
 @router.post("")
@@ -54,7 +42,7 @@ def synthesize(req: TtsRequest,
     try:
         result = svc.synthesize(req.text, voice=req.voice, speed=req.speed,
                                 instruct=req.instruct, seed=req.seed,
-                                mode=req.mode, no_cache=req.no_cache)
+                                mode=req.mode)
     except TtsUnavailable as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except ValueError as e:
