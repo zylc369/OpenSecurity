@@ -197,3 +197,59 @@ class RelayE2eClient(RelayPipeClient):
 
 
 from typing import cast  # noqa: E402 —— 模块级 cast（类内已局部引用）
+
+
+class SlowStubServer:
+    """慢 HTTP stub（路径感知延迟/状态码 + 并发计数——gateway 转发并发测试用）。
+
+    responses: path 子串 → (延迟秒, 状态码, 响应体)；未匹配 → 立即 200 默认体。
+    inflight/max_inflight: 当前/历史最大并发请求数（并发语义的可观测断言面）。
+    """
+
+    def __init__(self, responses: "dict[str, tuple[float, int, bytes]] | None" = None,
+                 body: bytes = b'{"ok": true}') -> None:
+        self.responses: "dict[str, tuple[float, int, bytes]]" = responses or {}
+        self.body = body
+        self.inflight = 0
+        self.max_inflight = 0
+        self._srv: "asyncio.AbstractServer | None" = None
+
+    async def _handle(self, reader: "asyncio.StreamReader",
+                      writer: "asyncio.StreamWriter") -> None:
+        try:
+            raw = await reader.read(65536)
+        except (ConnectionError, OSError):
+            return
+        first = raw.split(b"\r\n", 1)[0].decode("latin-1")
+        parts = first.split(" ")
+        path = parts[1] if len(parts) > 1 else "/"
+        delay, status, payload = 0.0, 200, self.body
+        for key, (d, st, body) in self.responses.items():
+            if key in path:
+                delay, status, payload = d, st, body
+                break
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            if delay:
+                await asyncio.sleep(delay)
+            reason = "OK" if status == 200 else "Error"
+            head = (f"HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n"
+                    f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n").encode()
+            writer.write(head + payload)
+            await writer.drain()
+        finally:
+            self.inflight -= 1
+            writer.close()
+
+    async def start(self) -> int:
+        self._srv = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        sockets = self._srv.sockets or []
+        addr = cast("tuple[int, ...]", sockets[0].getsockname())
+        return addr[1]
+
+    async def close(self) -> None:
+        if self._srv is not None:
+            self._srv.close()
+            await self._srv.wait_closed()
+            self._srv = None

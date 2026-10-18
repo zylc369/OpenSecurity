@@ -42,12 +42,12 @@ def _restore_cm_sandbox(request: "_pytest.FixtureRequest"):
 _SLOW_FILES = {"test_e2e_remote.py", "test_remote_e2e.py", "test_control.py"}
 
 
-def _pytest_configure(config: "_pytest.Config") -> None:
+def pytest_configure(config: "_pytest.Config") -> None:
     config.addinivalue_line(
         "markers", "slow: 真集成/起服务测试（-m 'not slow' 跳过）")
 
 
-def _pytest_collection_modifyitems(config: "_pytest.Config", items: "list") -> None:
+def pytest_collection_modifyitems(config: "_pytest.Config", items: "list") -> None:
     from pathlib import Path as _Path
     for item in items:
         if _Path(str(getattr(item, "fspath", ""))).name in _SLOW_FILES:

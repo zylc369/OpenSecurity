@@ -62,6 +62,7 @@ def test_e2e_direct_and_relay_and_failure() -> None:
             entry = server.registry.get("macmini")
             assert entry is not None
             entry.ep = ("203.0.113.1", 9)
+            entry.lan_ep = ("203.0.113.1", 9)  # 两段式打洞的 LAN 候选同置不可达
             assert client._transport is not None  # noqa: SLF001 —— 触发会话重建
             asyncio.run_coroutine_threadsafe(
                 client._transport._drop_session(),  # type: ignore[union-attr] # noqa: SLF001
@@ -69,6 +70,7 @@ def test_e2e_direct_and_relay_and_failure() -> None:
             result2 = await loop.run_in_executor(
                 None, lambda: client.embed(["relay-me"]))
             assert result2 == [[0.1, 0.2]]
+            assert client._transport.current_path == "relay"  # type: ignore[union-attr] # noqa: SLF001 —— 中继路径必须真落
 
             # ── 场景 3: 节点下线 → RemoteUnavailable ──
             await gw.stop()

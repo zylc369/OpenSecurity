@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Callable, cast
+from typing import Any, Awaitable, Callable, cast
 
 import httpx
 
@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 SESSION_IDLE_CLOSE_SEC = 60.0  # 会话空闲关闭（protocol.md §9）
 HEARTBEAT_SEC = 30.0
+_RELAY_INFLIGHT_MAX = 32  # 中继会话处理并发上限（资源保护线——业务并发由后端决定）
 STUN_REFRESH_SEC = 60.0
 RECONNECT_MIN_SEC = 1.0
 RECONNECT_MAX_SEC = 30.0
@@ -165,6 +166,7 @@ class RemoteGateway:
         self._punched: "set[tuple[str, int]]" = set()
         self._stun_fut: "asyncio.Future[tuple[str, int]] | None" = None
         self._join_tasks: "set[asyncio.Task[None]]" = set()
+        self._relay_inflight = asyncio.Semaphore(_RELAY_INFLIGHT_MAX)
 
     def _is_relay_addr(self, addr: "tuple[str, int]") -> bool:
         return addr[0] == self._relay_host and addr[1] == self._relay_port
@@ -365,16 +367,24 @@ class RemoteGateway:
 
     # ── 会话分发 ──────────────────────────────────────
 
-    async def _session_dispatch(self, msg: remote_wire.WireMsg,
-                                session: UdpSession) -> None:
-        """端到端会话消息分发（UDP 直连路径; 与中继循环同语义）。"""
+    async def _handle_session_msg(
+            self, send: "Callable[[remote_wire.WireMsg], Awaitable[None]]",
+            msg: remote_wire.WireMsg) -> None:
+        """会话消息语义单点（UDP 每包任务与中继每消息任务共用）。
+
+        新增消息类型只改此处——两条路径自动获得一致语义。
+        """
         if isinstance(msg, remote_wire.PingMsg):
-            await session.send_msg(remote_wire.PongMsg(
-                msg_id=msg.msg_id, ts=time.time()))
+            await send(remote_wire.PongMsg(msg_id=msg.msg_id, ts=time.time()))
         elif isinstance(msg, remote_wire.ApiReq):
-            await session.send_msg(await self._forward_api(msg))  # ApiResp 同 id 直传
+            await send(await self._forward_api(msg))  # ApiResp 同 id 直传
         else:
             logger.debug("未知会话消息忽略: %s", type(msg).__name__)
+
+    async def _session_dispatch(self, msg: remote_wire.WireMsg,
+                                session: UdpSession) -> None:
+        """端到端会话消息分发（UDP 直连路径——语义见 _handle_session_msg）。"""
+        await self._handle_session_msg(session.send_msg, msg)
 
     # ── 中继会话（protocol.md §4.2/§4.3）────────────────
 
@@ -417,8 +427,12 @@ class RemoteGateway:
 
     async def _relay_session_loop(self, conn: SignalClient,
                                   session: SessionCrypto) -> None:
-        """中继会话消息循环（TCP 帧 + 隐式计数器）。"""
+        """中继会话读取循环（**只读/解码/派发**——处理在独立任务中并发执行）。
+
+        多路复用: 慢请求（如 TTS）不再阻塞读取循环与后续消息（Ping/新请求）。
+        """
         frame_reader = TcpFrameReader()
+        tasks: "set[asyncio.Task[None]]" = set()
         try:
             while True:
                 chunk = await conn._reader.read(4096)  # noqa: SLF001
@@ -426,16 +440,32 @@ class RemoteGateway:
                     break
                 for payload in frame_reader.feed(chunk):
                     msg = remote_wire.decode(session.decrypt_seq(payload))
-                    if isinstance(msg, remote_wire.PingMsg):
-                        await self._relay_send(conn, session, remote_wire.PongMsg(
-                            msg_id=msg.msg_id, ts=time.time()))
-                    elif isinstance(msg, remote_wire.ApiReq):
-                        await self._relay_send(
-                            conn, session, await self._forward_api(msg))
-                    else:
-                        logger.debug("中继会话未知消息: %s", type(msg).__name__)
+                    task = asyncio.get_running_loop().create_task(
+                        self._serve_relay_msg(conn, session, msg))
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
         except (ConnectionError, OSError, CryptoError, asyncio.IncompleteReadError):
             pass  # 对端断开——正常终态
+        finally:
+            for task in list(tasks):
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _serve_relay_msg(self, conn: SignalClient, session: SessionCrypto,
+                               msg: remote_wire.WireMsg) -> None:
+        """中继单消息处理（读取循环外的独立任务——全类型多路复用）。
+
+        发送并发原子性: encrypt_seq 同步 + 单次 write + drain 并发安全。
+        """
+        try:
+            async with self._relay_inflight:  # 资源保护线（业务并发由后端决定）
+                await self._handle_session_msg(
+                    lambda m: self._relay_send(conn, session, m), msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 —— 单条异常不杀会话（与 UDP 路径 _safe_handle 对称）
+            logger.exception("中继会话单消息处理异常（会话继续）")
 
     async def _relay_send(self, conn: SignalClient, session: SessionCrypto,
                           msg: remote_wire.WireMsg) -> None:
