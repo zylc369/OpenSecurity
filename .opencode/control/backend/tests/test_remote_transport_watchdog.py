@@ -35,10 +35,12 @@ class _DummyConn:
     """
 
     def __init__(self, transport: RemoteTransport, *,
-                 ping_pong: bool = True, api_reply: float | None = None) -> None:
+                 ping_pong: bool = True, api_reply: float | None = None,
+                 ping_error: bool = False) -> None:
         self._t = transport
         self.ping_pong = ping_pong
         self.api_reply = api_reply
+        self.ping_error = ping_error
         self.sent: "list[object]" = []
         self.broken = False
         self._tasks: "list[asyncio.Task[None]]" = []
@@ -47,6 +49,8 @@ class _DummyConn:
         self.sent.append(msg)
         loop = asyncio.get_running_loop()
         if isinstance(msg, remote_wire.PingMsg):
+            if self.ping_error:
+                raise OSError("探针发送失败（测试注入）")
             if self.ping_pong:
                 async def _pong() -> None:
                     await asyncio.sleep(0.01)
@@ -69,9 +73,11 @@ class _DummyConn:
 
 
 def _mk_transport(**overrides: float) -> RemoteTransport:
+    base: "dict[str, float]" = {"watchdog_sec": 1.0, "probe_wait_sec": 0.5}
+    base.update(overrides)
     cfg = TransportConfig(
         relay_host="127.0.0.1", relay_port=1, psk=b"\x00" * 32,
-        node_id="dummy", watchdog_sec=1.0, probe_wait_sec=0.5, **overrides)
+        node_id="dummy", **base)
     t = RemoteTransport(cfg)
     t.start()
     return t
@@ -188,6 +194,105 @@ def test_watchdog_delivers_response_arriving_in_probe_window() -> None:
             assert isinstance(resp, remote_wire.ApiResp)
             assert resp.status == 200
             assert time.monotonic() - t0 < 10.0
+        asyncio.run(_run())
+    finally:
+        t.stop()
+
+
+def test_watchdog_broken_conn_fails_without_probe() -> None:
+    """连接已标记 broken → 探测立即返回失败（不再发探针、不耗探测窗口）。"""
+    t = _mk_transport()
+    try:
+        dummy = _DummyConn(t, ping_pong=True, api_reply=None)
+        t._conn = cast("RelayConnection", dummy)  # noqa: SLF001 —— 注入
+
+        async def _run() -> None:
+            async def _mark_broken() -> None:
+                await asyncio.sleep(0.3)  # 请求拿到 conn 后置 broken
+                dummy.broken = True
+            asyncio.get_running_loop().create_task(_mark_broken())
+            loop = asyncio.get_running_loop()
+            t0 = time.monotonic()
+            with pytest.raises(TransportError) as ei:
+                await loop.run_in_executor(
+                    None, lambda: t.request("POST", "/api/tts",
+                                            {"b": "x"}, timeout=10.0))
+            assert "看门狗" in str(ei.value), str(ei.value)
+            # 只有 api.req（1 条）——broken 后探测未发探针（ping 数为 0）
+            pings = [m for m in dummy.sent if isinstance(m, remote_wire.PingMsg)]
+            assert pings == [], pings
+            # 快速失败：watchdog 1s（探测立即返回，无 0.5s 探测等待）
+            assert time.monotonic() - t0 < 3.0
+        asyncio.run(_run())
+    finally:
+        t.stop()
+
+
+def test_watchdog_probe_send_error_fails() -> None:
+    """探测探针发送本身抛错（连接断）→ 判定失败并中止请求。"""
+    t = _mk_transport()
+    try:
+        dummy = _DummyConn(t, ping_pong=False, api_reply=None, ping_error=True)
+        t._conn = cast("RelayConnection", dummy)  # noqa: SLF001 —— 注入
+
+        async def _run() -> None:
+            loop = asyncio.get_running_loop()
+            t0 = time.monotonic()
+            with pytest.raises(TransportError) as ei:
+                await loop.run_in_executor(
+                    None, lambda: t.request("POST", "/api/tts",
+                                            {"p": "x"}, timeout=10.0))
+            assert "看门狗" in str(ei.value), str(ei.value)
+            assert time.monotonic() - t0 < 3.0
+        asyncio.run(_run())
+    finally:
+        t.stop()
+
+
+def test_watchdog_healthy_but_never_responds_hits_total_timeout() -> None:
+    """连接健康（探针有 pong）但请求永不响应 → 总预算耗尽 → "请求超时"（带消息）。"""
+    t = _mk_transport()
+    try:
+        dummy = _DummyConn(t, ping_pong=True, api_reply=None)
+        t._conn = cast("RelayConnection", dummy)  # noqa: SLF001 —— 注入
+
+        async def _run() -> None:
+            loop = asyncio.get_running_loop()
+            t0 = time.monotonic()
+            with pytest.raises(TransportError) as ei:
+                await loop.run_in_executor(
+                    None, lambda: t.request("POST", "/api/tts",
+                                            {"n": "x"}, timeout=3.0))
+            msg = str(ei.value)
+            assert "请求超时" in msg and "无响应" in msg, msg
+            elapsed = time.monotonic() - t0
+            assert 2.5 <= elapsed < 8.0, elapsed  # 应约 3s（不被看门狗提前中止）
+            # 健康路径: 看门狗探测发生过（至少 1 个探针），但未中止
+            pings = [m for m in dummy.sent if isinstance(m, remote_wire.PingMsg)]
+            assert len(pings) >= 1
+        asyncio.run(_run())
+    finally:
+        t.stop()
+
+
+def test_ping_job_skips_watchdog_probe() -> None:
+    """PingJob（probe() 内部路径）不走看门狗探测（is_api 守卫——防递归），
+    只受自身超时约束；即使 ping 无响应也不会触发额外探针。"""
+    t = _mk_transport(api_timeout_sec=2.0)
+    try:
+        dummy = _DummyConn(t, ping_pong=False, api_reply=None)
+        t._conn = cast("RelayConnection", dummy)  # noqa: SLF001 —— 注入
+
+        async def _run() -> None:
+            loop = asyncio.get_running_loop()
+            t0 = time.monotonic()
+            ok = await loop.run_in_executor(None, lambda: t.probe())
+            assert ok is False  # probe() 吞错返回 False（不向上抛）
+            elapsed = time.monotonic() - t0
+            assert 1.5 <= elapsed < 6.0, elapsed  # 约 2s（api_timeout），非看门狗节奏
+            # 只有 probe() 自己那 1 个 ping——看门狗没有追加探针
+            pings = [m for m in dummy.sent if isinstance(m, remote_wire.PingMsg)]
+            assert len(pings) == 1, pings
         asyncio.run(_run())
     finally:
         t.stop()
