@@ -116,9 +116,10 @@ def test_pool_interface_mock_compatible(monkeypatch) -> None:
 
 
 def test_service_level_concurrent_synthesize(monkeypatch) -> None:
-    """服务级: 两并发 synthesize 真并行（总耗时 < 串行和）; 单请求路径不变。"""
+    """服务级: 两并发 synthesize 经本地域阀门顺序完成
+    （阀门容量=LOCAL_WORKER_POOL_SIZE, 当前 1=串行）; 单请求路径不变。"""
     import services.remote_link as rl
-    from services.tts_service import TtsService
+    from services.tts_service import LOCAL_WORKER_POOL_SIZE, TtsService
 
     TtsService._reset_for_tests()
     svc = TtsService.get_instance()
@@ -143,8 +144,12 @@ def test_service_level_concurrent_synthesize(monkeypatch) -> None:
     try:
         assert len(results) == 2
         assert all(len(r.wav) > 0 for r in results)
-        assert all(c.calls == 1 for c in stubs)   # 真并行分发
-        assert elapsed < 0.28                      # 串行需 0.30+
+        assert sum(c.calls for c in stubs) == 2   # 两笔各一次（阀门下分发正确）
+        # 阀门容量=1 → 串行: 两笔 × 0.15s; 容量>1 时并行更快（断言按容量分支）
+        if LOCAL_WORKER_POOL_SIZE == 1:
+            assert elapsed >= 0.28, f"阀门应串行——实际 {elapsed:.2f}s"
+        else:
+            assert elapsed < 0.15 * 2 * 0.95, f"应并行——实际 {elapsed:.2f}s"
     finally:
         TtsService._reset_for_tests()
 

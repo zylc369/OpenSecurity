@@ -39,11 +39,12 @@ const INITIAL: TtsPlayerState = {
 /** 中文朗读估速（秒/字）——当前段真实时长未就绪时的兜底估算 */
 const SEC_PER_CHAR = 0.2;
 
-// 播放驱动预取深度: 播第 N 段时最多挂到第 N+PREFETCH_DEPTH 段。
-// 深度 2 = 缓冲目标 2: 为并行 worker 供料 + 吸收单次"生成+传输"波动
-// （实测: 深度 1 时"短段接长段"必停——26字播 8s 装不下 91 字的 14.3s 处理）。
-// 停播时最多浪费 2 段（abort 取消在途; 节点已生成的会进节点缓存, 无真实损失）。
-const PREFETCH_DEPTH = 2;
+// 串行流水线发送参数（配合节点单 worker）:
+// 在途上限 2 = 首段 + 预取 1 段; 任一请求返回即补下一段（返回驱动）。
+// 首段永远最先被处理; 生成快于播放（rtf<1）时串行流水线不断档。
+const INFLIGHT_MAX = 2;
+// 第二段错峰延迟: 首段独占竞争窗口, 避免两笔同刻抢工位（防乱序/争用）。
+const SECOND_SEG_DELAY_MS = 1000;
 
 /** 试听可选参数(测试台): 朗读指令/采样种子/分段字长 */
 export interface StartOptions {
@@ -68,6 +69,7 @@ export function useTtsPlayer() {
   const abortRef = useRef<AbortController | null>(null);
   const nextPlayRef = useRef(0);
   const nextFetchRef = useRef(0);
+  const inflightRef = useRef(0);   // 在途请求数（返回驱动补段的额度门）
   const pausedRef = useRef(false);
   const stoppedRef = useRef(true);
   const segUrlRef = useRef<Map<number, string>>(new Map());  // 段→objectURL（仅播放窗口内保留）
@@ -297,30 +299,34 @@ export function useTtsPlayer() {
     const ac = new AbortController();
     abortRef.current = ac;
     setState({ ...INITIAL, status: "starting", startTick: Date.now() });
-    // 播放驱动预取: 首段请求发出即激活（不再等首播）; 每次播放推进再调用
-    // pump 续泵——缓冲目标恒为 2 段未完成（起播前即挂出 seg1+seg2）。
-    const pump = () => {
-      if (!playingStartedRef.current) return;
-      while (!stoppedRef.current
-             && nextFetchRef.current <= nextPlayRef.current + PREFETCH_DEPTH) {
-        const i = nextFetchRef.current;
-        if (ensureSegment(i) === undefined) break;  // feeder 耗尽
-        console.log(`[tts] seg${i} 预取发出（播放点 seg${nextPlayRef.current}）`);
-        fetchSeg(i, ac.signal).catch(() => { /* playSeg 侧统一处理 */ });
-        nextFetchRef.current += 1;
-      }
+    // 串行流水线发送（在途 ≤INFLIGHT_MAX）: 首段立即; 第二段 +1s 错峰;
+    // 之后由"任一请求返回"驱动补段（生成快于播放——串行不断档）。
+    inflightRef.current = 0;
+    nextFetchRef.current = 0;
+    const sendSeg = (i: number): void => {
+      if (ensureSegment(i) === undefined) return;  // 段文本缺失（防御——不应发生）
+      inflightRef.current += 1;
+      console.log(`[tts] seg${i} 预取发出（在途 ${inflightRef.current}）`);
+      fetchSeg(i, ac.signal)
+        .catch(() => { /* 失败仍补段（跳过坏段）; 错误由 playSeg 统一处理 */ })
+        .finally(() => { inflightRef.current -= 1; pumpNext(); });
     };
-    pumpRef.current = pump;
-    const timer = window.setInterval(() => { // 保底: 播放推进后补预取
-      if (stoppedRef.current) { window.clearInterval(timer); return; }
-      pump();
-    }, 500);
-    // 只发首段; 后续段在播放点到达时续发(惰性预取)
-    fetchSeg(0, ac.signal).catch(() => { /* playSeg 侧统一处理 */ });
-    nextFetchRef.current = 1; // 游标与已请求区间同步(预取从 seg1 起, 避免假挂起)
-    // 立即激活预取(不再等首播): 首段生成期即挂出 seg1+seg2——缓冲目标 2
+    const pumpNext = (): void => {
+      if (stoppedRef.current || inflightRef.current >= INFLIGHT_MAX) return;
+      const i = nextFetchRef.current;
+      if (ensureSegment(i) === undefined) return;  // feeder 耗尽
+      nextFetchRef.current += 1;
+      sendSeg(i);
+    };
+    pumpRef.current = pumpNext;  // 播放推进也会调（只需在途额度——无害兜底）
+    sendSeg(0);
+    nextFetchRef.current = 1;    // 游标与已请求区间同步（seg0 已发）
+    window.setTimeout(() => {    // 第二段 +1s 错峰（首段独占窗口）
+      if (stoppedRef.current || nextFetchRef.current > 1) return; // 已被返回驱动发出
+      nextFetchRef.current = 2;
+      sendSeg(1);
+    }, SECOND_SEG_DELAY_MS);
     playingStartedRef.current = true;
-    pump();
     playSeg(0, ac.signal);
   }, [ensureSegment, fetchSeg, playSeg, stop]);
 

@@ -239,7 +239,9 @@ class TtsWorkerClient:
             self._kill()
 
 
-LOCAL_WORKER_POOL_SIZE = 2  # 本地并行 worker 数（内存/GPU 平衡点: 每实例 ~1.3G 模型）
+LOCAL_WORKER_POOL_SIZE = 1  # 本地 worker 数（1=串行: 零 GPU 争用 + 内存减半）
+                            # 前端按"初始 2 笔 + 返回驱动补段"错峰发送配合——
+                            # 串行流水线（rtf<1 生成快于播放）不断档。
 
 
 class TtsWorkerPool:
@@ -309,10 +311,10 @@ class TtsService:
     def __init__(self) -> None:
         self._cache: "OrderedDict[tuple[str, float, str, int, str, str], tuple[bytes, str]]" = OrderedDict()
         # 并发结构（按资源分域）: 缓存细锁 / 本地信号量（容量=worker 池大小）/
-        # 远程独立。本地域并发度由并行 worker 数决定（GPU 双实例实测平衡点）;
+        # 远程独立。本地域并发度由 worker 数决定（当前 1=串行, 前端错峰配合）;
         # 远程等待（网络 IO）不占本地域（transport 并发安全, 节点侧自排队）。
         self._cache_lock = threading.Lock()          # 只包缓存读写（微秒级）
-        # 本地推理域（含 fallback——统一入口）: 并发度=池大小（双 worker 并行）
+        # 本地推理域（含 fallback——统一入口）: 并发度=池大小（单 worker 串行）
         self._local_sem = threading.Semaphore(LOCAL_WORKER_POOL_SIZE)
         self._worker = TtsWorkerPool()
 

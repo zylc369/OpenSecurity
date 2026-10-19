@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import pytest
 
 from services.remote_link import RemoteLinkService
-from services.tts_service import TtsService
+from services.tts_service import LOCAL_WORKER_POOL_SIZE, TtsService
 
 
 @dataclass
@@ -89,7 +89,7 @@ def test_slow_remote_does_not_block_local(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_local_semaphore_concurrency_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
-    """本地域容量=池大小(2): 并发峰值 ≤2（阀门语义）; 超容请求排队。"""
+    """本地域容量=池大小(当前 1=串行): 并发峰值 ≤池大小; 超容请求排队。"""
     svc = TtsService()
     monkeypatch.setattr(RemoteLinkService, "should_use_remote",
                         lambda self: False)
@@ -116,7 +116,10 @@ def test_local_semaphore_concurrency_capacity(monkeypatch: pytest.MonkeyPatch) -
     for th in threads:
         th.join(timeout=5)
     elapsed = time.monotonic() - start
-    assert active["max"] == 2, f"本地域并发峰应=2（池大小）, 实际 {active['max']}"
+    assert active["max"] == LOCAL_WORKER_POOL_SIZE, (
+        f"本地域并发峰应=池大小 {LOCAL_WORKER_POOL_SIZE}, 实际 {active['max']}")
     assert len(results) == 4
-    # 4 请求 × 0.15s, 容量 2 → 至少两轮（容量不足时排队可见）
-    assert elapsed >= 0.25, f"超容应排队（两轮）——实际 {elapsed:.2f}s"
+    # 4 请求 × 0.15s, 容量=LOCAL_WORKER_POOL_SIZE → 轮数=ceil(4/容量)
+    rounds = -(-4 // LOCAL_WORKER_POOL_SIZE)
+    assert elapsed >= 0.15 * rounds - 0.05, (
+        f"超容应排队（{rounds} 轮）——实际 {elapsed:.2f}s")

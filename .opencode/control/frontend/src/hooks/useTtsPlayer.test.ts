@@ -56,13 +56,30 @@ describe("useTtsPlayer 协议与状态机", () => {
     expect(String(body.text).length).toBeGreaterThan(0);
   });
 
-  it("预取缓冲目标 2: 起播前即挂出 seg0+seg1+seg2, 不超前 seg3", async () => {
+  it("串行流水线: 首段立即; 慢首段时第二段 +1s 错峰; 返回驱动补段(在途≤2)", async () => {
+    const { result } = renderHook(() => useTtsPlayer());
+    env.holdText = "。";   // 全部挂起（慢合成——错峰与在途额度可观察）
+    act(() => { result.current.start(TEXT3); });
+    await waitFor(() => expect(env.calls.length).toBe(1));   // 首段立即
+    const t0 = Date.now();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(env.calls.length).toBe(1);                        // 500ms 内不补发（错峰窗口）
+    await waitFor(() => expect(env.calls.length).toBe(2), { timeout: 1500 }); // ~1s: seg1
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(900);     // +1s 错峰（下界）
+    await new Promise((r) => setTimeout(r, 300));
+    expect(env.calls.length).toBe(2);                        // 无返回 → 在途 2 封顶（不起 seg2）
+    await act(async () => { env.release(); });               // seg0 返回 → 返回驱动补 seg2
+    await waitFor(() => expect(env.calls.length).toBe(3), { timeout: 1500 });
+  });
+
+  it("串行流水线: 快段返回驱动补段, 定时器不双发(每段恰一请求)", async () => {
     const { result } = renderHook(() => useTtsPlayer());
     act(() => { result.current.start(TEXT3); });
-    await waitFor(() => expect(env.calls.length).toBe(3));           // seg0+seg1+seg2
-    await waitFor(() => expect(FakeAudio.instances.length).toBe(1)); // seg0 起播
-    await new Promise((r) => setTimeout(r, 600));                    // 跑满一个 500ms 保底周期
-    expect(env.calls.length).toBe(3);                                // 不超前 seg3（含保底轮询）
+    await waitFor(() => expect(env.calls.length).toBe(3), { timeout: 2500 });
+    await new Promise((r) => setTimeout(r, 1300));           // 跨过 seg1 的 +1s 定时器点
+    const texts = env.calls.map((c) => String(c.body.text));
+    expect(texts.length).toBe(3);                            // 无双发
+    expect(new Set(texts).size).toBe(3);                     // 不重
   });
 
   it("stairs 阶梯参数: 优先于 firstLen/nextLen(段按阶梯序列切)", async () => {
