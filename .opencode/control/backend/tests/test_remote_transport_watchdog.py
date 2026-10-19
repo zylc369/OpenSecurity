@@ -302,3 +302,8 @@ def test_tts_timeout_converged() -> None:
     """TTS 远程调用超时收敛为 90s（灾难上限 600s→90s）。"""
     from services.remote_client import RemoteConsoleClient
     assert RemoteConsoleClient.TTS_TIMEOUT_SEC == 90.0
+
+
+# 未单测分支说明: stop() 时在途请求的立即取消（_fail_pending → future 置异常）
+# 属既有 transport 生命周期机制（stop/join 调度含竞态窗口，不宜单测），
+# 本改动对其无修改; 看门狗等待循环遇 fut 异常会直接向上传播（不吞错）。
