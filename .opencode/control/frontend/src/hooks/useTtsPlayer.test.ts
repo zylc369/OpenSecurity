@@ -185,6 +185,29 @@ describe("useTtsPlayer 协议与状态机", () => {
     expect(texts.join("")).toBe(TEXT3);    // 不漏（分段无损）
   });
 
+  it("重启会话隔离: 旧请求 abort 不污染新会话（B 全部正常播放）", async () => {
+    const { result } = renderHook(() => useTtsPlayer());
+    env.holdText = "。";                     // A 会话全部挂起（在途请求滞留）
+    act(() => { result.current.start(TEXT3); });
+    await waitFor(() => expect(env.calls.length).toBe(1));   // A seg0 在途
+    await new Promise((r) => setTimeout(r, 1100));           // A 的 +1s 定时器也发出 seg1
+    expect(env.calls.length).toBe(2);
+    env.holdText = "";                       // B 会话不挂起
+    act(() => { result.current.start(TEXT3); });             // 重启（A 被 abort）
+    await waitFor(() => expect(FakeAudio.instances.length).toBe(1)); // B seg0 起播
+    expect(result.current.state.error).toBe("");             // B 无失败段
+    // 留出旧 finally/定时器的污染窗口
+    await new Promise((r) => setTimeout(r, 700));
+    // B 三段完整播放（无跳过、无提前停止）
+    const segCount = expectedSegCount(TEXT3);
+    for (let i = 1; i < segCount; i++) {
+      await act(async () => { FakeAudio.instances[i - 1].finish(1); });
+      await waitFor(() => expect(FakeAudio.instances.length).toBe(i + 1));
+    }
+    await act(async () => { FakeAudio.instances[segCount - 1].finish(1); });
+    await waitFor(() => expect(result.current.state.status).toBe("idle"));
+  });
+
   it("stop 清场: 状态回 idle 且已 revoke 对象 URL", async () => {
     const { result } = renderHook(() => useTtsPlayer());
     act(() => { result.current.start(TEXT2); });

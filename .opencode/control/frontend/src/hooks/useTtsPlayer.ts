@@ -43,6 +43,9 @@ const SEC_PER_CHAR = 0.2;
 // 在途上限 2 = 首段 + 预取 1 段; 任一请求返回即补下一段（返回驱动）。
 // 首段永远最先被处理; 生成快于播放（rtf<1）时串行流水线不断档。
 const INFLIGHT_MAX = 2;
+// 前瞻上限: 最多预取到"播放点 + N 段"（防整篇文本被连续请求完——
+// 已完成未播的 Blob 会常驻内存; 停止时超前生成全部浪费）。
+const LOOKAHEAD_MAX = 2;
 // 第二段错峰延迟: 首段独占竞争窗口, 避免两笔同刻抢工位（防乱序/争用）。
 const SECOND_SEG_DELAY_MS = 1000;
 
@@ -76,7 +79,8 @@ export function useTtsPlayer() {
   const errCount = useRef(0);
   const speedRef = useRef(1.0);
   const optsRef = useRef<StartOptions>({});
-  const playingStartedRef = useRef(false);     // 首段请求发出即激活预取(缓冲目标 2)
+  const sessionRef = useRef(0);            // 会话序号（重启隔离——旧回调不得触碰新会话状态）
+  const secondSegTimerRef = useRef(0);     // 第二段错峰定时器（stop/cleanup 清除）
   const waitStartRef = useRef<number | null>(null);  // 段间缓冲等待起点(performance.now)
   const elapsedBase = useRef(0);               // 已完成段时长累计
   const genMsList = useRef<number[]>([]);      // 每段生成耗时
@@ -101,8 +105,11 @@ export function useTtsPlayer() {
     nextPlayRef.current = 0;
     nextFetchRef.current = 0;
     errCount.current = 0;
-    playingStartedRef.current = false;
     waitStartRef.current = null;
+    if (secondSegTimerRef.current) {
+      window.clearTimeout(secondSegTimerRef.current);
+      secondSegTimerRef.current = 0;
+    }
   }, []);
 
   const stop = useCallback(() => {
@@ -180,7 +187,7 @@ export function useTtsPlayer() {
     return p;
   }, []);
 
-  // 播放驱动预取: 保证挂至 nextPlay+PREFETCH_DEPTH(经 pumpRef 供 playSeg 调用)
+  // 补段泵: 播放推进与请求返回两条驱动（经 pumpRef 供 playSeg 调用）
   const pumpRef = useRef<() => void>(() => { /* start() 内替换 */ });
 
   const playSeg = useCallback((idx: number, signal: AbortSignal) => {
@@ -255,8 +262,6 @@ export function useTtsPlayer() {
         setState((s) => ({ ...s, error: `段 ${idx + 1} 播放失败` }));
       };
       void audio.play();
-      // 播放推进即续泵（缓冲目标恒 PREFETCH_DEPTH 段未完成）
-      playingStartedRef.current = true;
       if (waitStartRef.current !== null) {
         console.log(`[tts] seg${idx} 开始播放（缓冲等待 ${(performance.now() - waitStartRef.current).toFixed(0)}ms）`);
         waitStartRef.current = null;
@@ -299,34 +304,44 @@ export function useTtsPlayer() {
     const ac = new AbortController();
     abortRef.current = ac;
     setState({ ...INITIAL, status: "starting", startTick: Date.now() });
-    // 串行流水线发送（在途 ≤INFLIGHT_MAX）: 首段立即; 第二段 +1s 错峰;
-    // 之后由"任一请求返回"驱动补段（生成快于播放——串行不断档）。
+    // 串行流水线发送（在途 ≤INFLIGHT_MAX; 段序 ≤ 播放点+LOOKAHEAD_MAX）:
+    // 首段立即; 第二段 +1s 错峰; 之后由"任一请求返回"驱动补段。
+    // 会话序号: 旧会话的迟到回调（abort 的 finally / 未清的定时器）直接丢弃——
+    // 不得触碰新会话共享状态（曾致新段被旧 signal 误发为失败段）。
+    const session = ++sessionRef.current;
     inflightRef.current = 0;
     nextFetchRef.current = 0;
     const sendSeg = (i: number): void => {
+      if (session !== sessionRef.current) return;  // 旧会话回调（防御）
       if (ensureSegment(i) === undefined) return;  // 段文本缺失（防御——不应发生）
       inflightRef.current += 1;
       console.log(`[tts] seg${i} 预取发出（在途 ${inflightRef.current}）`);
       fetchSeg(i, ac.signal)
         .catch(() => { /* 失败仍补段（跳过坏段）; 错误由 playSeg 统一处理 */ })
-        .finally(() => { inflightRef.current -= 1; pumpNext(); });
+        .finally(() => {
+          if (session !== sessionRef.current) return;  // 旧会话: 不触碰共享状态
+          inflightRef.current -= 1;
+          pumpNext();
+        });
     };
     const pumpNext = (): void => {
       if (stoppedRef.current || inflightRef.current >= INFLIGHT_MAX) return;
       const i = nextFetchRef.current;
-      if (ensureSegment(i) === undefined) return;  // feeder 耗尽
+      if (i > nextPlayRef.current + LOOKAHEAD_MAX) return;  // 前瞻上限（防整篇超前生成）
+      if (ensureSegment(i) === undefined) return;           // feeder 耗尽
       nextFetchRef.current += 1;
       sendSeg(i);
     };
-    pumpRef.current = pumpNext;  // 播放推进也会调（只需在途额度——无害兜底）
+    pumpRef.current = pumpNext;  // 播放推进也调（推进后解锁下一段前瞻）
     sendSeg(0);
     nextFetchRef.current = 1;    // 游标与已请求区间同步（seg0 已发）
-    window.setTimeout(() => {    // 第二段 +1s 错峰（首段独占窗口）
+    window.clearTimeout(secondSegTimerRef.current);
+    secondSegTimerRef.current = window.setTimeout(() => {  // 第二段 +1s 错峰
+      if (session !== sessionRef.current) return;          // 旧会话定时器（防御）
       if (stoppedRef.current || nextFetchRef.current > 1) return; // 已被返回驱动发出
       nextFetchRef.current = 2;
       sendSeg(1);
     }, SECOND_SEG_DELAY_MS);
-    playingStartedRef.current = true;
     playSeg(0, ac.signal);
   }, [ensureSegment, fetchSeg, playSeg, stop]);
 

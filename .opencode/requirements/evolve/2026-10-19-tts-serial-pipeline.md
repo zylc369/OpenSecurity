@@ -73,7 +73,8 @@ setTimeout(() => { if (!stoppedRef.current) { inflightRef.current += 1; fetchSeg
 - 第 1 段：`fetchSeg(0)` 立即
 - 第 2 段：+1s 发出
 - 第 3 段起：初始两笔任一笔 `.finally` → `pumpNext()` 补下一段（在途始终 ≤2）
-- `playSeg` 不再调用续泵（移除播放驱动）；500ms `setInterval` 兜底移除
+- `playSeg` 保留 `pumpRef.current()` 调用：播放推进后解锁"播放点+LOOKAHEAD_MAX"的前瞻额度
+  （补段主驱动仍是"任一请求返回"）；500ms `setInterval` 兜底移除
 
 **边缘**:
 - stop：`stoppedRef` 拦截 `pumpNext`；`AbortController` 中断在途

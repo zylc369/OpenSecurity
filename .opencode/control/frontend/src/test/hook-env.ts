@@ -42,7 +42,7 @@ export class FakeAudio {
   }
 }
 
-type FetchInit = { body?: string } | undefined;
+type FetchInit = { body?: string; signal?: AbortSignal } | undefined;
 type FetchMock = (url: string, init?: FetchInit) => Promise<unknown>;
 
 export interface TtsEnv {
@@ -88,6 +88,10 @@ export function installTtsEnv(): TtsEnv {
   const fetchMock = vi.fn<FetchMock>(async (url: string, init?: FetchInit) => {
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     calls.push({ url, body });
+    // abort 语义与真实 fetch 一致（重启会话隔离测试依赖）
+    if (init?.signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
     if (state.failNextTimes > 0) {
       state.failNextTimes -= 1;
       return mkResp(500, null, "");
@@ -99,8 +103,14 @@ export function installTtsEnv(): TtsEnv {
     }
     if (state.holdText && String(body.text).includes(state.holdText)) {
       const b = new Blob([new Uint8Array([1, 2])], { type: "audio/wav" });
-      return new Promise<unknown>((resolve) => {
-        held.push(() => resolve(mkResp(200, b, state.source)));
+      return new Promise<unknown>((resolve, reject) => {
+        const onAbort = (): void =>
+          reject(new DOMException("Aborted", "AbortError"));
+        init?.signal?.addEventListener("abort", onAbort, { once: true });
+        held.push(() => {
+          init?.signal?.removeEventListener("abort", onAbort);
+          resolve(mkResp(200, b, state.source));
+        });
       });
     }
     return mkResp(200, new Blob([new Uint8Array([1, 2])], { type: "audio/wav" }),
