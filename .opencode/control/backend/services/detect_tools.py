@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import ssl
 import urllib.request
 import zipfile
 from collections.abc import Callable
@@ -2360,7 +2361,19 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
     @staticmethod
     def _download(url: str) -> bytes:
         req = urllib.request.Request(url, headers=_UA)
-        with urllib.request.urlopen(req, timeout=ToolsInstaller.TIMEOUT) as resp:  # pyright: ignore[reportAny] —— urlopen(Request) typeshed 为 Any
+        # SSL 上下文: 系统默认优先，验证失败（LaunchAgent 环境的 Python 无系统
+        # CA 路径——OpenSSL 不读 macOS 钥匙串，报 unable to get local issuer
+        # certificate）回落 certifi bundle（venv 依赖必装）。
+        try:
+            with urllib.request.urlopen(req, timeout=ToolsInstaller.TIMEOUT) as resp:  # pyright: ignore[reportAny]
+                return resp.read()  # pyright: ignore[reportAny]
+        except urllib.error.URLError as e:
+            if not isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+                raise
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(req, timeout=ToolsInstaller.TIMEOUT,  # pyright: ignore[reportAny]
+                                     context=ctx) as resp:
             return resp.read()  # pyright: ignore[reportAny]
 
     @staticmethod
