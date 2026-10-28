@@ -227,9 +227,11 @@ class TtsAsset(ModelAsset):
     冷门仓库 308 回源不可靠。目录由 tts_service.TTS_MODEL_DIR 定型。"""
 
     def local_state(self) -> str:
-        # ready = 本地 worker 存活 或 远程链路可用（懒加载）; 文件就绪是 cached 维度
+        # 本地口径 = worker 是否驻留（与其他资产纯本地判定一致——环境总览/指纹上报）。
+        # "本地存活或远程可用"是功能口径（TtsService.ready，合成路由/就绪判定用），
+        # 不得混入此处: 否则远程在线时卸载本地模型仍显示"已加载"（语义误导）。
         from services.tts_service import TtsService
-        return (ModelLoadState.READY if TtsService.get_instance().ready
+        return (ModelLoadState.READY if TtsService.get_instance().engine_loaded
                 else ModelLoadState.IDLE)
 
     def cache_state(self) -> "ModelCacheState":
