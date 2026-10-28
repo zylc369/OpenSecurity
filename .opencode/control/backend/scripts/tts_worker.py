@@ -12,7 +12,7 @@
 
 内存纪律: 模型常驻（单实例）; 每请求后 mx.clear_cache()（中间张量不累积）。
 输出校验: 尾部静音（RMS<阈值）自动重试 1 次（半截合成事故预防）。
-变速: speed<1 → ffmpeg atempo 后处理（变速不变调; speed=1 跳过）。
+变速: speed≠1 → ffmpeg atempo 后处理（变速不变调; 加减速统一, 超界自动串联）。
 
 用法: .venv-tts/bin/python tts_worker.py [--model-dir PATH]
 """
@@ -103,12 +103,35 @@ def _tail_is_silent(wav_path: Path) -> bool:
     return bool(cast("np.ndarray", np.abs(data)).max() < SILENCE_PEAK_THRESHOLD)
 
 
+def _atempo_factors(speed: float) -> "list[str]":
+    """拆分变速因子（ffmpeg atempo 单实例范围 0.5-2.0; 超界串联相乘还原）。
+
+    例: 3.0 → ["atempo=2.0", "atempo=1.5"]; 0.3 → ["atempo=0.5", "atempo=0.6"]。
+    服务端已 clamp 0.5-3.0（最多两级）; 拆分循环防御超界输入。
+    """
+    factors: "list[float]" = []
+    s = float(speed)
+    while s > 2.0:
+        factors.append(2.0)
+        s /= 2.0
+    while s < 0.5:
+        factors.append(0.5)
+        s /= 0.5
+    factors.append(s)
+    return [f"atempo={f:.6f}" for f in factors]
+
+
 def _atempo(wav_path: Path, speed: float) -> None:
-    """变速不变调后处理（原文件替换——临时文件+rename 原子落盘）。"""
+    """变速不变调后处理（原文件替换——临时文件+rename 原子落盘）。
+
+    引擎 speed 参数 Ignored（mlx_audio CosyVoice3 不支持生成级变速），
+    atempo 是唯一有效手段; 加减速统一走此路径。
+    """
+    chain = ",".join(_atempo_factors(speed))
     tmp = wav_path.with_suffix(".atempo.wav")
     r = subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav_path),
-         "-filter:a", f"atempo={speed:.3f}", str(tmp)],
+         "-filter:a", chain, str(tmp)],
         capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
         raise RuntimeError(f"ffmpeg atempo 失败: {r.stderr[:300]}")
@@ -210,7 +233,7 @@ def _synth(req: dict[str, Any], model_dir: str) -> dict[str, Any]:
         break
 
     retried = attempt == 2
-    if speed < 0.99:
+    if abs(speed - 1.0) > 0.01:  # 加减速统一（引擎无原生 speed; 仅 |Δ|≤0.01 跳过）
         _atempo(out_path, speed)
     _trim_edges(out_path)  # 头尾静音整理(接缝停顿治理, 作用于最终输出)
     info = sf.info(str(out_path))

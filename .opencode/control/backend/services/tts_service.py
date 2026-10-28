@@ -3,7 +3,7 @@
 架构:
   本地: TtsWorkerClient → 主 venv python scripts/tts_worker.py（stdin/stdout
         行式 JSON 协议; 模型常驻 worker 内; 每请求 mx.clear_cache; 尾部静音
-        自动重试; speed<1 ffmpeg atempo 后处理）。
+        自动重试; speed≠1 ffmpeg atempo 后处理）。
   远程: should_use_remote → P2P → 节点同构 TtsService（失败 fallback 本地）。
   音色: VoiceLibrary 双源（内置 git 资产 + 用户运行时）; voice 参数=音色 id。
 
@@ -424,7 +424,7 @@ class TtsService:
                    mode: str = "") -> TtsResult:
         """文本 → WAV 字节（LRU 命中标记 cached）。空文本 ValueError。
 
-        voice: 音色库 id（空=默认音色）; speed: 1.0 原速, <1 服务端 atempo 减速。
+        voice: 音色库 id（空=默认音色）; speed: 1.0 原速, ≠1 服务端 atempo 变速。
         instruct: 朗读指令（空=引擎默认"请用正常语速朗读接下来的内容。"——测试台参数）。
         seed: 采样种子（≤0=默认 4; 同 seed 同参数输出等效可复现）。
         """
