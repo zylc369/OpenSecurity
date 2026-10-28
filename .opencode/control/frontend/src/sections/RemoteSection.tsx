@@ -632,6 +632,18 @@ const RemoteSection: React.FC = () => {
             <Descriptions.Item label="连续成功">
               {status ? `${status.recover_streak} 次` : "—"}
             </Descriptions.Item>
+            <Descriptions.Item label="变速 (ffmpeg)">
+              {health ? (
+                <Tag
+                  color={health.ffmpeg_available ? "success" : "error"}
+                  style={{ marginInlineEnd: 0 }}
+                >
+                  {health.ffmpeg_available ? "可用" : "不可用（变速档降级主控兜底）"}
+                </Tag>
+              ) : (
+                "—"
+              )}
+            </Descriptions.Item>
             <Descriptions.Item label="最近在线">
               {status?.last_ok_at
                 ? new Date(status.last_ok_at * 1000).toLocaleTimeString()

@@ -165,6 +165,18 @@ class RemoteNodeBootstrapper:
             _run_install(dry_run=False, tags=[DepTag.CONSOLE_RUNTIME],
                          venv_backend="stdlib")
             tts_installed = True
+        # 外部工具维度: ffmpeg（TTS 变速 atempo 依赖）——缺失自动装（静态直链，
+        # 无 PM 前置）。失败不 fail-fast（原速合成仍可用），警告 + health 可见。
+        if "tts" in self._args.model_tags:
+            from services.detect_tools import ToolTag, ToolsInstaller, tool_available
+            if not tool_available("ffmpeg", refresh=True):
+                _log("[*] --model-tags tts: ffmpeg 缺失——安装 TTS_RUNTIME 集")
+                results = ToolsInstaller.get_instance().install_by_tags(
+                    [ToolTag.TTS_RUNTIME])
+                for r in results:
+                    _log(f"[*] ffmpeg 安装: {r.status} {r.detail}")
+            else:
+                _log("[+] ffmpeg 可用（PATH 或 $OPENSECURITY_HOME/bin）")
         if probe.returncode == 0:
             _log("[+] 依赖齐备（fastapi 可导入），跳过安装")
             return tts_installed

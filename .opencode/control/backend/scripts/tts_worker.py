@@ -121,6 +121,29 @@ def _atempo_factors(speed: float) -> "list[str]":
     return [f"atempo={f:.6f}" for f in factors]
 
 
+def _ffmpeg_bin() -> str:
+    """ffmpeg 双路解析（brew/系统 PATH 优先 → detect_tools 产物目录回落）。
+
+    detect_tools 装到 $OPENSECURITY_HOME/bin，但节点 server/worker 的 PATH
+    未必含该目录（LaunchAgent 继承安装时刻 environ）——两级解析保证两种
+    安装来源都可被调用。worker 自包含（不 import services）。
+    """
+    import os
+
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    home = os.environ.get("OPENSECURITY_HOME", "")
+    if home:
+        cand = Path(home) / "bin" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+        if cand.is_file():
+            return str(cand)
+    raise RuntimeError(
+        "ffmpeg 不可用（TTS 变速依赖）——安装途径: 控制台「外部工具」页 / "
+        "bash .opencode/install.sh / brew install ffmpeg; detect_tools 安装"
+        "产物目录 $OPENSECURITY_HOME/bin 未命中且 PATH 无 ffmpeg")
+
+
 def _atempo(wav_path: Path, speed: float) -> None:
     """变速不变调后处理（原文件替换——临时文件+rename 原子落盘）。
 
@@ -130,8 +153,8 @@ def _atempo(wav_path: Path, speed: float) -> None:
     chain = ",".join(_atempo_factors(speed))
     tmp = wav_path.with_suffix(".atempo.wav")
     r = subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav_path),
-         "-filter:a", chain, str(tmp)],
+        [_ffmpeg_bin(), "-y", "-loglevel", "error",
+         "-i", str(wav_path), "-filter:a", chain, str(tmp)],
         capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
         raise RuntimeError(f"ffmpeg atempo 失败: {r.stderr[:300]}")
@@ -252,8 +275,10 @@ def main() -> int:
     ap.add_argument("--model-dir", required=True, help="CosyVoice3 模型目录")
     args = ap.parse_args()
 
-    if shutil.which("ffmpeg") is None:
-        print("[worker][warn] ffmpeg 不在 PATH——speed<1 的请求将失败", file=sys.stderr, flush=True)
+    try:
+        _ffmpeg_bin()  # 双路解析失败（两级皆缺）提前警告——变速请求将报错
+    except RuntimeError as e:
+        print(f"[worker][warn] {e}", file=sys.stderr, flush=True)
 
     import select as _select
     while True:  # 常驻循环: 一行请求一行响应 + 孤儿自杀（父进程死亡守护）

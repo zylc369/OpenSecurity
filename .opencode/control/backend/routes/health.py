@@ -117,10 +117,12 @@ async def health() -> JSONResponse:
     前端应提示重启控制台后端。
     """
     stale = _code_fingerprint() != _BOOT_FINGERPRINT
+    from services.detect_tools import tool_available
+    caps = {"ffmpeg_available": tool_available("ffmpeg")}
     if not ModelInferenceService.get_instance().is_models_ready():
         return JSONResponse(
-            {"status": "loading", "code_stale": stale, **asdict(_identity())},
+            {"status": "loading", "code_stale": stale, **caps, **asdict(_identity())},
             status_code=503,
             headers={"Retry-After": "5"},
         )
-    return JSONResponse({"status": "ok", "code_stale": stale, **asdict(_identity())})
+    return JSONResponse({"status": "ok", "code_stale": stale, **caps, **asdict(_identity())})

@@ -80,3 +80,39 @@ def test_atempo_integration_chain_3x(tmp_path: Path) -> None:
          "-of", "csv=p=0", str(src)],
         capture_output=True, text=True, timeout=30).stdout.strip())
     assert before / after == pytest.approx(3.0, rel=0.05)
+
+
+# ───────────────────── _ffmpeg_bin 双路解析 ─────────────────────
+
+
+def test_ffmpeg_bin_path_hit(monkeypatch) -> None:
+    """① PATH 命中（brew/系统来源）优先返回 which 结果。"""
+    monkeypatch.setattr(tts_worker.shutil, "which",
+                        lambda _: "/opt/homebrew/bin/ffmpeg")
+    assert tts_worker._ffmpeg_bin() == "/opt/homebrew/bin/ffmpeg"
+
+
+def test_ffmpeg_bin_cmddir_fallback(monkeypatch, tmp_path: Path) -> None:
+    """② PATH 未命中 → $OPENSECURITY_HOME/bin 回落（detect_tools 产物目录）。"""
+    monkeypatch.setattr(tts_worker.shutil, "which", lambda _: None)
+    monkeypatch.setenv("OPENSECURITY_HOME", str(tmp_path))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "ffmpeg").write_bytes(b"\x7fELF")  # 存在性判定（不执行）
+    assert tts_worker._ffmpeg_bin() == str(bin_dir / "ffmpeg")
+
+
+def test_ffmpeg_bin_missing_raises(monkeypatch, tmp_path: Path) -> None:
+    """③ 两级皆缺 → RuntimeError 含安装指引（不静默返回假路径）。"""
+    monkeypatch.setattr(tts_worker.shutil, "which", lambda _: None)
+    monkeypatch.setenv("OPENSECURITY_HOME", str(tmp_path))
+    with pytest.raises(RuntimeError, match="ffmpeg 不可用"):
+        tts_worker._ffmpeg_bin()
+
+
+def test_ffmpeg_bin_no_env_var(monkeypatch) -> None:
+    """④ OPENSECURITY_HOME 未注入且 PATH 无 → RuntimeError（非 IndexError）。"""
+    monkeypatch.setattr(tts_worker.shutil, "which", lambda _: None)
+    monkeypatch.delenv("OPENSECURITY_HOME", raising=False)
+    with pytest.raises(RuntimeError):
+        tts_worker._ffmpeg_bin()

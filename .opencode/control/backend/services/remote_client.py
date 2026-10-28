@@ -58,6 +58,7 @@ class RemoteHealthInfo:
     models: list[ModelFingerprint] = field(default_factory=list)
     latency_ms: float = 0.0
     code_fingerprint: str = ""
+    ffmpeg_available: bool = False  # TTS 变速能力位（节点 health 透传）
 
 
 class RemoteConsoleClient:
@@ -278,6 +279,7 @@ class RemoteConsoleClient:
             models=models,
             latency_ms=latency,
             code_fingerprint=str(data.get("code_fingerprint", "")),
+            ffmpeg_available=bool(data.get("ffmpeg_available", False)),
         )
 
     # ─── 节点管理转发（主控代理调远程节点，routes/remote.py 用）───

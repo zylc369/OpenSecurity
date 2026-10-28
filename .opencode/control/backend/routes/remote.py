@@ -86,6 +86,7 @@ def _fingerprint_payload() -> FingerprintPayload:
     """本机各模型指纹（注册表多态——不加载模型）。"""
     from services.runtime_identity import code_fingerprint_str
     from services.model_assets import ModelAssetRegistry
+    from services.detect_tools import tool_available
     return FingerprintPayload(
         service="opencode-control",
         version=f"{platform.system()}/{platform.machine()}",
@@ -93,6 +94,7 @@ def _fingerprint_payload() -> FingerprintPayload:
         models=[ModelFingerprint(repo_id=m.repo_id, display=m.display,
                                  snapshot=m.local_snapshot(), loaded=m.loaded())
                 for m in ModelAssetRegistry.MODELS],
+        ffmpeg_available=tool_available("ffmpeg"),
     )
 
 

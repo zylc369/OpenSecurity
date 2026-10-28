@@ -307,6 +307,7 @@ export interface RemoteHealthSummary {
   code_fingerprint: string;
   latency_ms: number;
   models: RemoteModelFingerprint[];
+  ffmpeg_available: boolean; // TTS 变速能力位（节点 health 透传）
 }
 
 /** 模型加载态值域（与后端 ModelLoadState StrEnum 一一对应） */

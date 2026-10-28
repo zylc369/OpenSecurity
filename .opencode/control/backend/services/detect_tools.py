@@ -30,6 +30,7 @@ import zipfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from enum import Enum
 
 from services.config_manager import ConfigManager
 from services.runtime_paths import RuntimePaths
@@ -55,6 +56,16 @@ class ToolsEnv:
         return f"{syst}-{arch}"
 
 
+class ToolTag(str, Enum):
+    """外部工具场景标签（对齐 detect_py_deps.DepTag 模式——安装清单的场景定制维度）。
+
+    TTS_RUNTIME: TTS 运行时依赖（远程节点 model-tags 含 tts 时引导链自动安装;
+      缺失不阻断原速合成——变速档 atempo 后处理需要）。
+    """
+
+    TTS_RUNTIME = "tts_runtime"
+
+
 @dataclass
 class ToolField:
     """工具元数据。"""
@@ -69,6 +80,7 @@ class ToolField:
     # env_var 模式（仅 ida_pro 用）：从配置读路径，拼接 executable
     env_var: str = ""                                  # 配置 key（如 IDA_PRO_HOME）
     executable: str = ""                               # env_var 模式下的可执行文件名
+    tags: tuple[ToolTag, ...] = ()                     # 场景标签（install_by_tags 圈选; 空=未分类）
 
 
 @dataclass
@@ -482,6 +494,23 @@ InstallRecipe = (ReleaseRecipe | GitRecipe | UrlRecipe | DockerRecipe | Prebuilt
 
 _INSTALLABLE_TOOLS: list[InstallRecipe] | None = None
 
+_TOOL_AVAIL_CACHE: dict[str, bool] = {}
+
+
+def tool_available(name: str, refresh: bool = False) -> bool:
+    """单工具可用性（which→CMD_DIR 回落——工具检测唯一入口的轻量包装）。
+
+    供节点引导链/health 能力位等场景; 全量检测走 ToolsScanner.scan_all_parallel。
+    进程内缓存: 安装发生在进程启动前（install.sh/引导链），运行期可用性不变;
+    refresh=True 强制重探（测试用）。未知工具名 → False。
+    """
+    if refresh or name not in _TOOL_AVAIL_CACHE:
+        field = next((t for t in EXTERNAL_TOOLS if t.name == name), None)
+        _TOOL_AVAIL_CACHE[name] = (
+            ToolsScanner.get_instance().scan_tool(field).available
+            if field is not None else False)
+    return _TOOL_AVAIL_CACHE[name]
+
 
 class _GHRelease(TypedDict, total=False):
     """GitHub Releases API 响应（解析边界模型）。"""
@@ -823,9 +852,11 @@ EXTERNAL_TOOLS: list[ToolField] = [
 ]
 
 # ── 自动安装层工具（INSTALLABLE_TOOLS 覆盖; 安装方式 = install.sh / detect_tools.py install） ──
-def _auto(name: str, agents: list[str], desc: str, ver: list[str] | None = None) -> ToolField:
+def _auto(name: str, agents: list[str], desc: str, ver: list[str] | None = None,
+          tags: "tuple[ToolTag, ...]" = ()) -> ToolField:
     return ToolField(name=name, agents=agents, required=False, description=desc,
-                     version_cmd=ver or [], install_hint=_AUTO_HINT.format(name=name))
+                     version_cmd=ver or [], install_hint=_AUTO_HINT.format(name=name),
+                     tags=tags)
 
 
 EXTERNAL_TOOLS.extend([
@@ -873,7 +904,8 @@ EXTERNAL_TOOLS.extend([
     _auto("wesng", _BIN, "Windows 补丁缺失比对"),
     _auto("windapsearch", _BIN, "LDAP/AD 枚举"),
     _auto("regeorg", _BIN, "webshell 隧道（SOCKS）"),
-    _auto("ffmpeg", _BIN, "音视频处理（隐写频谱/帧提取; 便携静态构建）"),
+    _auto("ffmpeg", _BIN, "音视频处理（隐写频谱/帧提取; TTS 变速 atempo）", ["-version"],
+          tags=(ToolTag.TTS_RUNTIME,)),
     _auto("ffprobe", _BIN, "音视频流/元数据分析（便携静态构建）"),
     _auto("steghide", _BIN, "JPEG/BMP 隐写（容器）"),
     _auto("stegseek", _BIN, "steghide 高速爆破（容器; 仅 Kali 源可原生）"),
@@ -1358,6 +1390,22 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             if recipe.name == name:
                 return self.install_recipe(recipe, force=force)
         return InstallResult(name=name, status="failed", detail="不在 INSTALLABLE_TOOLS 清单")
+
+    def install_by_tags(self, tags: "list[ToolTag]", force: bool = False,
+                        progress: "Callable[[str], None] | None" = None) -> "list[InstallResult]":
+        """按场景标签圈选安装（对齐 detect_py_deps._run_install(tags=...) 模式）。
+
+        与 install_all 的差异: 不跑 Phase 0（PM 检查/linux 手动清单）——tags 场景
+        只圈自包含配方（如 ffmpeg 静态直链），无需包管理器前置，避免无 brew 的
+        机器（无人值守节点）被 sys.exit 阻断。幂等/force 语义与 install_tool 一致。
+        """
+        names = [t.name for t in EXTERNAL_TOOLS if any(tag in t.tags for tag in tags)]
+        results: "list[InstallResult]" = []
+        for name in names:
+            if progress:
+                progress(name)
+            results.append(self.install_tool(name, force=force))
+        return results
 
     def install_recipe(self, recipe: InstallRecipe, force: bool) -> InstallResult:
         """分发到各配方类型。"""
