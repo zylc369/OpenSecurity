@@ -167,10 +167,12 @@ class RemoteNodeBootstrapper:
             tts_installed = True
         # 外部工具维度: ffmpeg（TTS 变速 atempo 依赖）——缺失自动装（静态直链，
         # 无 PM 前置）。失败不 fail-fast（原速合成仍可用），警告 + health 可见。
-        if "tts" in self._args.model_tags:
+        # 触发条件: 显式 --model-tags tts 或 TTS 模型已在磁盘（LaunchAgent 拉起
+        # 不带 tags 参数——已部署节点的模型存在即代表 TTS 在服务，参数丢失自愈）。
+        if "tts" in self._args.model_tags or self._tts_model_cached():
             from services.detect_tools import ToolTag, ToolsInstaller, tool_available
             if not tool_available("ffmpeg", refresh=True):
-                _log("[*] --model-tags tts: ffmpeg 缺失——安装 TTS_RUNTIME 集")
+                _log("[*] ffmpeg 缺失——安装 TTS_RUNTIME 集")
                 results = ToolsInstaller.get_instance().install_by_tags(
                     [ToolTag.TTS_RUNTIME])
                 for r in results:
@@ -286,6 +288,13 @@ class RemoteNodeBootstrapper:
                             "import mlx_audio; import importlib.metadata as _m; _m.version('mlx-audio-plus'); _m.version('funasr'); _m.version('pypinyin')"],
                            capture_output=True, timeout=120)  # noqa: S603
         return r.returncode == 0
+
+    @staticmethod
+    def _tts_model_cached() -> bool:
+        """TTS 模型三件套就绪（与 TtsAsset.cache_state 同口径的轻量内联判定）。"""
+        from services.tts_service import TTS_MODEL_DIR
+        return all((TTS_MODEL_DIR / f).is_file()
+                   for f in ("model.safetensors", "tokenizer.json", "config.json"))
 
     def ensure_models(self) -> list[str]:
         """确保模型缓存就位（已缓存秒过）。Returns: 本次实际等待的模型 id 列表。"""
