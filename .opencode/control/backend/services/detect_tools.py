@@ -603,7 +603,9 @@ def installable_tools() -> "list[InstallRecipe]":
     #     mac-arm=osxexperts 原生 / mac-x64+ffprobe-arm(Rosetta)=evermeet——同 GoReSym 先例。
     #     ffprobe 与 ffmpeg 同包（win/linux），独立 recipe 会重下载一次——一次性代价可接受）──
     UrlRecipe(name="ffmpeg", urls={
-        "darwin-arm64": "https://www.osxexperts.net/ffmpeg71arm.zip",
+        # darwin-arm64 用 GitHub 静态构建源: 个人直链站（osxexperts）在部分
+        # 网络环境被 TLS 拦截（证书链自签——路由器安全设备按域名信誉拦截）
+        "darwin-arm64": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.0/ffmpeg-darwin-arm64",
         "darwin-amd64": "https://evermeet.cx/ffmpeg/ffmpeg-9.0.1.zip",
         "linux-amd64": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
         "linux-arm64": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz",
