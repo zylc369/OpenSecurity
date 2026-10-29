@@ -109,7 +109,7 @@ frida-strace -U -f com.xxx
 | blutter | Flutter Dart AOT 符号恢复 | worawit/blutter, 2026-04 更新, 仅 arm64 |
 | reFlutter | Flutter SSL pinning bypass + 流量 | Impact-I/reFlutter v3, 2026-06 活跃 |
 | hermes-dec | RN Hermes 字节码反编译 | P1sec/hermes-dec v0.1.5, HBC v98 |
-| Frida 17.x | 运行时 hook + frida-strace | 17.15.3, ptrace-free 注入 |
+| Frida 17.x | 运行时 hook + frida-strace | 17.18.0, ptrace-free 注入, Script.interrupt/terminate（17.14+）, 建议保持 ≥17.16 |
 | jadx | DEX 反编译 | 1.5.5, 插件/映射/调用图 |
 
 ## §8 关联文件

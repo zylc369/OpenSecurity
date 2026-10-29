@@ -1,0 +1,65 @@
+# tool_call_id_collector.tmpl 分析
+
+## 1. 原文件名
+
+`tool_call_id_collector.tmpl`，注册的 PromptType 字符串为 `tool_call_id_collector`（`templates/templates.go:63`），并注册于 `ToolsPrompts.CollectToolCallID`（`templates/templates.go:591`）。
+
+## 2. 类型与用途
+
+**C 类工具辅助 Prompt**，用于采集 `tool_call_id` 样本，以检测不同 LLM provider 生成的 tool call ID 格式（如 UUID、纯数字、前缀串等），供下游模式识别。
+
+- 调用模式为 **单次带工具调用**：渲染后的 prompt 作为 system message 发出，附一条 human message `Call the get_number function`，再以 `provider.CallWithTools(ctx, opt, messages, []llms.Tool{testTool}, nil)` 执行（`providers/provider/agents.go:290-303`）。
+- 模板强制 LLM **并行调用 `{{.FunctionName}}` 三次、参数 `value=42`**，从而在单次响应中产出多个 tool call，每个 call 携带一个独立的 `tool_call_id`。
+- 输出处理：从 `response.Choices` 抽取每个 `toolCall.ID`（非空才取）封装为 `templates.PatternSample`，按 ID 去重并升序排序后返回（`providers/provider/agents.go:308-336`）。
+- 下游消费方：采集到的样本送入 `detectPatternWithAI`（配合 `PromptTypeToolCallIDDetector`）归纳出 ID 正则模板，最终缓存供 `ToolCallFixer` 等修复类 agent 校验/重建 tool call ID 使用。
+
+## 3. 配对关系
+
+**无配对**（无 `input_tool_call_id_collector` 之类的"主 prompt + input 变体"结构）。
+
+需区分一种易混淆的"关联"：本 prompt 与 `PromptTypeToolCallIDDetector`（`templates/templates.go:420`、`592`）构成 **"样本生产者 → 模式消费者"的两步流水线**（均由 `DetermineToolCallIDTemplate` 编排），但二者并非配对 prompt——collector 只负责诱导 LLM 产出 ID，detector 才做格式归纳，二者无输入/输出文本上的对称关系。
+
+## 4. 调用时机
+
+仅在 **首次使用某 LLM provider 类型时**触发。入口 `DetermineToolCallIDTemplate`（`providers/provider/agents.go:89`）先查 `cacheTemplates`（以 `provider.Type()` 为键，`agents.go:36-47`），命中即直接返回；未命中（首次或缓存失效）才进入采样流程。模板渲染发生在 `runToolCallIDCollector` 的 `providers/provider/agents.go:262`。
+
+`runToolCallIDCollector` 内部有两个上游调用点：
+
+| 调用点 | 所在函数 | 位置 | 触发场景与顺序 |
+|--------|----------|------|----------------|
+| ① | `testTemplate` | `agents.go:66` | **默认模板验证**。`DetermineToolCallIDTemplate` 的 Step 0.5（`agents.go:127`）：若传入 `defaultTemplate` 非空，先采 1 个样本验证默认模板是否匹配，匹配则直接缓存返回，跳过后续步骤 |
+| ② | `collectToolCallIDSamples` | `agents.go:209` | **批量采样**。Step 1（`agents.go:133`）：启动 `sampleCount=5`（`agents.go:23`）个并发 goroutine，每个调用一次 `runToolCallIDCollector`，理论最多产出 5×3=15 个样本，跨 goroutine 按 `Value` 去重 |
+
+两处渲染参数一致，均注入 `{"FunctionName": ..., "RandomContext": ...}`。
+
+## 5. 工具列表
+
+**模板自身不注册工具**，但运行时强制 LLM 调用 `{{.FunctionName}}` 三次。
+
+测试工具在 `runToolCallIDCollector` 中动态构造（`providers/provider/agents.go:271-287`），通过 `CallWithTools` 挂载：
+
+- 工具名：`get_number`（常量 `testFunctionName`，`agents.go:24`），即模板里 `{{.FunctionName}}` 被替换后的值。
+- 描述：`Get a number value`。
+- 参数 schema：`value`（integer，required）——与模板要求的 `value=42` 对应。
+
+该工具仅为采样探测用途，不接入 `FlowToolsExecutor`，不产生任何副作用。
+
+## 6. 非工具占位符
+
+占位符白名单声明为 `["FunctionName", "RandomContext"]`（`templates/templates.go:416-419`），二者均在 `runToolCallIDCollector` 渲染时注入（`providers/provider/agents.go:262-265`）。
+
+### `{{.FunctionName}}`
+
+- **用途**：模板内 6 处引用（`<task>`、`<mandatory_protocol>`、`<instruction>`），向 LLM 显式指明要调用的函数名，并与运行时挂载的 tool 名严格对应。
+- **注入信息**：常量 `testFunctionName = "get_number"`（`agents.go:24`、`263`）。该值必须与第 5 节动态注册的 `testTool.Function.Name` 一致，否则 LLM 调用的函数在工具表中找不到。
+- **注入时机**：`runToolCallIDCollector` 渲染 prompt 时一次性注入（`agents.go:262`），早于 `CallWithTools` 调用。
+
+### `{{.RandomContext}}`
+
+- **用途**：填充模板 `<context>` 块（原文第 29 行）。代码注释明示其目的：**"Generate random context to prevent caching"**（`agents.go:258`）——通过让每次请求的 prompt 内容各不相同，绕过 provider 端的响应缓存，确保采集到的 `tool_call_id` 样本具备多样性（否则同一缓存响应会反复返回相同 ID，无法归纳格式）。
+- **注入信息**：`uuid.New().String()`（`agents.go:259`、`264`），每次 `runToolCallIDCollector` 调用都生成全新的 UUID v4 字符串。
+- **注入时机**：渲染 prompt 时与 `FunctionName` 同步注入（`agents.go:262-265`）。由于 `collectToolCallIDSamples` 会并发调用 5 次，每个 goroutine 各自生成独立 UUID，进一步保证 5 路样本互不雷同。
+
+---
+
+> 备注（关联缺口）：与本 prompt 紧耦合的下游 `tool_call_id_detector.tmpl` 尚无对应 `-analysis.tmpl` 文档。二者共同构成 ID 格式检测流水线，建议补齐 detector 的分析文档以保证链路完整性。

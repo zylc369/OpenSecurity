@@ -1,0 +1,64 @@
+{
+  "evidence": {
+    "path": "D:\\.dev\\.competitions\\.ctf\\BlackHat MEA Qualification CTF 2026\\forensics\\Qfact\\challenge\\Evidence.zip",
+    "size": 35788227,
+    "sha256": "e4281b854b50995bbb3b88b081ce81105a60c159737632791f2ade8e37f1259c"
+  },
+  "identity": {
+    "computer": "DESKTOP-KLPAT9O",
+    "username": "jmartin"
+  },
+  "recovered_hta": {
+    "path": "recovered/Q3_Financial_Review.hta.txt",
+    "size": 4473,
+    "sha256": "4f8fab2ca63a0313edf0a1190071d4d946cf0b90c27046e9fb9e5e84056145b0"
+  },
+  "decrypted_files": [
+    {
+      "path": "recovered/Financial/Q3_auth_memo.txt",
+      "size": 1412,
+      "sha256": "e21b46134b7558e6accf4740e6006a977f7187ca5262522aaa6eb80779ef905e"
+    },
+    {
+      "path": "recovered/Financial/Q3_forecast.csv",
+      "size": 2622,
+      "sha256": "5a95da2475d0c4c1aaefced33d08f28575c0edea60ed77aad703e2bfb177ce81"
+    },
+    {
+      "path": "recovered/Financial/budget_2025.csv",
+      "size": 1976,
+      "sha256": "9b61c3eb052ef96a14f2a6d6a26fa64269ae5834073c5e7eba54dea456478ff7"
+    },
+    {
+      "path": "recovered/Financial/vendor_payments.csv",
+      "size": 3037,
+      "sha256": "2e5fe4f91556d053bdba797e8b57be95e0849fb68cbf11444d72794254e907c4"
+    },
+    {
+      "path": "recovered/Personal/notes.txt",
+      "size": 100,
+      "sha256": "90489f0385b2c14321b66bd145741203fc05d80f0d7ec9ebfaf05357c798a008"
+    },
+    {
+      "path": "recovered/Projects/timeline.txt",
+      "size": 206,
+      "sha256": "83e17cc5a8f43c3f4be529df3144ada6ea627a92fc27cb279b143ad2b4bf1642"
+    },
+    {
+      "path": "recovered/Reports/budget_meeting.txt",
+      "size": 242,
+      "sha256": "6c4bba7eb4b0879fa96f2dbf8bd36c9b0d97f416b241a80bfce5a80c28dd25dc"
+    },
+    {
+      "path": "recovered/Reports/it_request.txt",
+      "size": 158,
+      "sha256": "c35236026fea9821865b6513a264c2a599c428301e4720cd442b3ea0b94d6135"
+    },
+    {
+      "path": "recovered/Reports/standup_notes.txt",
+      "size": 250,
+      "sha256": "073e198a48e09ab243356acf6079f0080833726e3e482510646ca9438506bdcb"
+    }
+  ],
+  "flag_count": 1
+}

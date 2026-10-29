@@ -1,0 +1,57 @@
+# Windows 取证 (Windows Forensics)
+
+> Windows 镜像/KAPE 包/事件日志/注册表/USN/反取证场景加载。
+> 基础（evtx 转换/注册表 hive/关键键）见 `forensics-methodology.md` §4-§5。
+
+## §1 事件 ID 深化
+
+- **账户生命周期**: 4720 创建/4722 启用/4724 密码重置/4726 删除/4738 更改/4781 改名; 1001 Bugcheck、41 非正常关机
+- **RDP 三日志源**: LocalSessionManager（21 登录/23 注销/24 断开/25 重连/40-42）; RemoteConnectionManager（**1149 认证成功含源 IP**/261）; RdpCoreTS（131 含 ClientIP:port/103 断开查 ReasonCode）
+- 解析: python-evtx → XPath `.//ns:EventID` + `.//ns:Data@Name`
+
+## §2 USN Journal 时间线
+
+记录: len@0/major@4/file_ref@8/parent_ref@16/timestamp@32（1601 纪元 100ns）/reason@40/UTF-16 文件名@fn_off。Reason: 0x2 DATA_EXTEND/0x100 CREATE/0x200 DELETE。
+
+三大应用: ①wmiexec 每命令建删 `__<unix时间戳>.<随机>` 于 C:\Windows\——循环计数=命令数（WMIPRVSE prefetch 佐证） ②PSReadLine history 每次 DATA_EXTEND=一条命令（PS 日志清了也有精确时间线） ③C:\Users\<user> 目录 CREATE（parent=Users MFT ref 512）=首次交互登录（wmiexec 不触发）。
+
+## §3 NTFS 深化
+
+- **ADS**: Sleuth Kit `fls -r img | grep ":"`（条目 `66-128-4: file:stream`）→ `istat img 66` 看 $DATA 命名属性 → `icat img 66-128-4` 抽; 活系统 `dir /r`/`Get-Content -Stream`; Zone.Identifier 是溯源第一站; pytsk3 遍历 type==NTFS_DATA 且 name!="(default)"
+- **timestomping**: SI（0x10，可改）早于 FN（0x30，系统维护）=回拨; 文件名 UTF-16LE——`strings -el $MFT` 必跑
+- MFT offset 定向 dump 删除文件见 `disk-memory-forensics.md` §3
+
+## §4 反取证
+
+**日志被清后 10 替代源**: USN $J / SAM 键 last_modified（账号创建时间）/PS history / Prefetch / MFT / Defender MPLog（独立通道常漏清）/RDP 日志/WMI 仓库 OBJECTS.DATA/浏览器 SQLite/注册表时间戳。Security.evtx 1102=清日志动作本身被记录。
+
+- **MPLog**: `ProgramData\...\Support\MPLog-*.log` grep DETECTION/THREAT/ASR; DetectionHistory 二进制 strings 提 SHA256+路径; "Block PSExec&WMI"/"Block lsass credential stealing" 命中=攻击尝试
+- **安全擦除指纹**（恢复前先查，判断可行性）: cipher /w→`EFSTMPWP` 目录; sdelete→`.ZZZ` 扩展; BleachBit→`~BleachBit*.tmp`。已覆写→转 $Recycle.Bin/$LogFile/VSS/MFT resident
+- **certutil/bitsadmin LOTL**: `bitsadmin /transfer`+`certutil -decode`=%TEMP% 批处理标配; 内存按 **UEsD**（=base64("PK\x03")）扫传输中/已删 base64 ZIP; psxview 找隐藏进程
+
+## §5 内存凭证顺序
+
+以下都是 volatility 软件的子命令（即 `$(dirname $PYTHON_CMD)/vol -f mem.raw` 命令的子命令，全部内置无需安装）: windows.clipboard（CF_UNICODETEXT 最近复制——最先跑）→ windows.hashdump / windows.cachedump（volatility 子命令——提取凭据哈希）→ windows.dumpfiles --pid <lsass PID> dump 出 lsass.dmp 后 **`$(dirname $PYTHON_CMD)/pypykatz lsa minidump lsass.dmp`**（pypykatz 是纯 python 凭据提取工具，$PYTHON_CMD 环境已装; 它提取的"wdigest 明文"指内存中的 WDigest 认证缓存——wdigest 是 Windows 协议名不是命令; mimikatz 是 Windows 目标机上运行的工具）→ windows.registry.printkey → windows.memmap --pid <PID> --dump（volatility 子命令，dump 进程内存）+ strings（macOS 系统自带命令）（**`-e l` UTF-16LE 必跑**，Windows 宽字符 ASCII strings 漏一半）→ windows.netscan/pstree/dlllist。实战: TrueCrypt 密码: volatility 2 有 truecryptsummary 子命令可以直接读出，但 volatility 3 没有移植它——改用 dump 全内存后 python 按 TC 密钥结构（find 设备句柄+头部 magic 'TRUE'）搜索，或 strings 找挂载密码; wireshark 进程→memmap dump+`binwalk` 分离 pcap。UEsD 内存扫 ZIP 见 §4。**无内存镜像只有 config 蜜罐目录时**: `$(dirname $PYTHON_CMD)/pypykatz registry local --sam SAM --system SYSTEM`（提取 NTLM 哈希; mimikatz 在目标机 Windows 上运行）。
+
+## §6 杂项五则
+
+回收站 $R=内容/$I=元数据（UTF-16 原路径+时间）; OEMInformation SupportURL=C2 后门 IOC; hosts 行尾空白藏数据（xxd tail）; .contact 的 `<c:Notes>`; 遥测 imprbeacons.dat（CIP/geo_*/COUNTRY）。WinZip AES: zip2john + hashcat -m 13600（-a 6 '?d?d?d?d' 混合）; ZipCrypto 场景用 bkcrack（见 disk-memory §4）。
+
+**Defender 隔离区恢复恶意样本**（原始文件已删、取证包含 `ProgramData/Microsoft/Windows Defender/Quarantine/` 时）: ①`ResourceData/<xx>/...` 数据流用**公开固定 RC4 key** 解保护层（key 见 fox-it dissect.target quarantine parser）②解出后是连续 `WIN32_STREAM_ID` 记录: 按 `dwStreamId`/`Size`/`dwStreamNameSize` 逐条读——**stream id=1 为原始文件数据**（id=3 安全描述符、id=7 object ID）③恢复的样本存为 `.txt` 等非执行后缀再分析。配合 Defender-Operational.evtx 的 1116（检测）/1117（隔离处置）时间线与 Prefetch 交叉确认处置过程; 勒索类案件隔离样本里常含加密 key 材料（key 派生逻辑在样本内 + IV=环境值 hash——从 EVTX/勒索note 恢复 hostname/username 即可重构全部 key material）。
+
+## §6a DFIR 高价值 artifact（SRUM/SNSS/搜索索引/RDP 缓存）
+
+> 常规日志/artifact 被清或答不上"外发流量/运行时长/已删浏览记录/屏幕内容"类问题时逐项检查。
+
+- **SRUM**（System Resource Usage Monitor，`C:\Windows\System32\SRU\SRUDB.dat`）: ESE 数据库，记录**每应用逐小时网络用量（发送/接收字节）与应用运行时长**。场景: 量化恶意样本外发数据量、还原样本执行时间窗。解析: KAPE 生态 `SrumECmd -f SRUDB.dat --rollFiles -z` 出 CSV（`SrumECmd_NetworkUsages_Output.csv` 按应用名 grep，如样本伪装名 `FTK_Imager.exe` 出现两次即两次外发）; 无 KAPE 时 `esedbexport`（libesedb）导表后 python 读。同一表中应用名重复=多时段记录，逐行累加。
+- **Chrome SNSS 会话文件**（`%LOCALAPPDATA%\Google\Chrome\User Data\<Profile>\Sessions\`，`Session_*`/`Tabs_*` 无扩展名）: **内容是 JSON**——python 直接 `json.load` 读 `entries[].url`。场景: History SQLite 被清/无恶意站记录时恢复访问过的页面（会话快照独立于 History）。工具: Chrome-History-SNSS-Parser（GitHub）; 手工: `strings -n 12 Session_* | grep -E "^https?://"` 快筛。
+- **Windows 搜索索引**（`C:\ProgramData\Microsoft\Search\Data\Applications\Windows\Windows.edb`，ESE 库）: 含已删文件的**文件名+路径+最后写时间**（索引滞后于删除）。场景: 文件被删且 MFT/USN 无果时。解析: SIDR（Search Index DB Reporter）或 ESEDatabaseView 导出; `esedbexport` 出表后查 SystemIndex_0A/_1A。
+- **RDP bitmap cache**（`%LOCALAPPDATA%\Microsoft\Terminal Server Client\Cache\Cache0000.bin` 等，magic `RDP8bmp`）: RDP 客户端持久缓存的会话 tile——**重建用户/攻击者在远程桌面看到过的屏幕内容**（凭证、助记词、文档）。解析: ANSSI `bmc-tools`（纯 python）: `python3 bmc-tools.py -s <cache目录> -d rdp_tiles -b -v` 出 tile 拼贴后目视翻查。取证包含 Terminal Server Client\Cache\ 目录必查。
+- **DPAPI-NG 剪贴板/应用加密数据**: Windows 10/11 对剪贴板等用 DPAPI-NG（比传统 DPAPI 多一层 wrap）。解密链: NirSoft **DataProtectionDecryptor**（`/ Windows / DPAPI-NG` 模式）从内存/注册表掏 master key 解出 **KEK（Key Encryption Key，密钥加密密钥）** → 对密文头部的封装密钥做 **AES Key Unwrap（RFC 3394）** 得 **CEK（Content Encryption Key，内容加密密钥）** → CEK 解正文。识别: 加密 blob 头含 `version`+`DPAPI-NG` 描述符（非 `DPAPI` 纯文本标记）。
+
+## §7 关联文件
+
+- `forensics-methodology.md` — 总入口
+- `disk-memory-forensics.md` — 磁盘/内存/平台（KAPE、Docker、MFT dump）
+- `network-forensics.md` — pcap 侧（NTLMv2/SMB3/TLS）
+- `$SHARED_DIR/knowledge-base/ad-domain-attacks.md` — AD 攻击

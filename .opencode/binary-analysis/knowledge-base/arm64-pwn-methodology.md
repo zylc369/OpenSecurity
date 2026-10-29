@@ -49,7 +49,7 @@
 ### gadget 搜索
 ```bash
 ROPgadget --binary <binary> --arch arm64 | grep "ldp x29, x30"
-ropper --file <binary> --arch AARCH64 --search "ldp x29, x30"
+`$(dirname $PYTHON_CMD)/ropper`（$PYTHON_CMD 环境: `ropper -f libc.so --search "ldr x0"`） --file <binary> --arch AARCH64 --search "ldp x29, x30"
 ```
 **gadget 密度低**：不像 x86 "ret(0xc3)" 字节到处都是，ARM64 的 gadget 较少。
 

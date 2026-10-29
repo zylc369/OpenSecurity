@@ -191,6 +191,19 @@ for byte in data:
 
 ---
 
+## S-Box/密钥流生成器常量指纹
+
+- **Fisher-Yates 洗牌**: 从 255 倒数循环 + `sbox[i],sbox[j]=sbox[j],sbox[i]`（j=prng()%(i+1)）→ 在生成 S-box，算法由 seed 唯一决定
+- **Xorshift32**: 移位 13,17,5 无乘法
+- **Xorshift64\***: 移位 12,25,27 后乘 `0x2545f4914f6cdd1d`，密钥流取 `(state>>56)&0xff`
+- **黄金比乘子**（splitmix 族）: `0x9e3779b97f4a7c15`（64 位）/ `0x9E3779B9`（32 位）
+- **MurmurHash3 finalizer**: 32 位 `0x85EBCA6B`、64 位 `0xff51afd7ed558ccd`+`0xc4ceb9fe1a85ec53`; 相关 `0xA97288ED`
+- **MurmurHash64A**: 乘法常数 `0xC6A4A7935BD1E995`（body 逐 8 字节乘加）; 顺带哈希 IV 常数: MD5 `0x67452301`、SHA-256 `0x6a09e667`（嵌 hex 数据/常量表时先查这三个）
+- 变体信号: rol32(i&7) 位置依赖移位 + 验证状态依赖前一字符（rol8(prev,1)）时逐字节顺序复现
+- **AES S-box 首字节**: `0x637c777b` 字序列 = AES S-box 开头（AES_TABLE 查找表特征）; **ChaCha20/Salsa20**: 字符串 `expand 32-byte k` 或常数 `0x61707865`（"expa"）——两组常数出现即锁定流密码族（场景: C2 通信 ChaCha20 keystream 可发全 null payload 直接读出）
+
+识别到家族 → 提取 seed 离线复现生成器。
+
 ## 组合模式
 
 ### 最常见组合
@@ -213,6 +226,10 @@ Base64Decode(Serial)
 
 **关键**：逐字节追踪比较操作，确认两个操作数分别来自哪里。不要假设——从反编译代码中确认。
 
+### .NET 嵌套: RijndaelManaged Key==IV + XOR 折叠 + Base64
+
+.NET 反编译看到 `RijndaelManaged` 先查 Key/IV 是否同一值（常见套路: 同一字符串既当 Key 又当 IV）。还原顺序: ①提取硬编码 byte 数组与 key ②XOR 消一层——多轮 XOR 等价单轮折叠（`0x25` 后 `0x58` == 单 `0x7D`）③Base64 解码（XOR 结果常呈 Base64 字符集形态）④AES-256-CBC 解密（key 补 32 字节、IV=key）。每层剥完查输出形态（可打印/Base64 字符集/PKCS7 padding 合法）确认方向; XOR 层通常是真密码学前的一层轻混淆。
+
 ---
 
 ## 验证策略（强制）
@@ -232,3 +249,13 @@ Base64Decode(Serial)
 - 需要理解算法内部细节以进行修改
 
 **其他情况** → 优先模拟执行（避免重实现引入 bug）。
+
+## EVP 调用参数审计（AAD/IV 语义以寄存器实参为准）
+
+**触发情境**: 逆向加密流程时变量名/伪代码暗示的参数语义与实际不符——尤其 `EVP_EncryptUpdate/EVP_DecryptUpdate` 的第 5/6 参数既可当 AAD 也可当密文传（AEAD 接口同一函数两种用途），看变量名猜必错。
+
+**方法**: 断点/trace 到 `EVP_EncryptUpdate(ctx, out, &outl, in, inl)`，按调用约定读**寄存器实参**（x86-64: rdi=ctx, rsi=out, rdx=&outl, rcx=in, r8=inl）——`out==NULL` 时该调用是 AAD 输入（GCM/CCM 语义），`out!=NULL` 是密文。配合 `EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, ...)` 的调用确定 nonce 长度与来源（未显式 SET 时 GCM 默认 12 字节——**全零 nonce 也合法**，不要假设"没有 IV 设置调用 = 用了随机前缀"）。
+
+**实例模式**: 数据布局 `随机12B ‖ 16B tag ‖ 密文` 中，前 12 字节变量名像 IV，实际经 `EVP_EncryptUpdate(out=NULL)` 走的是 **AAD**; 真 nonce 是 12 个 `00`。判据: 按假设解密 `InvalidTag` 时重审参数寄存器——AAD/tag/ct 边界挪一位重试。
+
+**验证锚点**: 本地调试器观察一次真实加解密的完整 EVP 调用序列（SET_KEY → [SET_IVLEN] → N×Update(AAD) → Update(ct) → FINAL），把序列与逆向推断的布局对齐后再写利用。

@@ -1,0 +1,59 @@
+# input_toolcall_fixer.tmpl 分析
+
+## 1. 原文件名
+
+`input_toolcall_fixer.tmpl`
+
+注册名（PromptType）为 `input_toolcall_fixer`，定义于 `templates/templates.go:54`。
+
+## 2. 类型与用途
+
+属于 **B 类 Agent Human Prompt**（用户输入侧模板）。
+
+- 在 `templates.go:577` 被装配为 `ToolCallFixer` Agent 的 `Human` 消息（`AgentPrompts.Human`）。
+- 用途：当某个工具调用执行失败时，把"失败的工具名 / 原始参数 / 工具 JSON Schema / 错误信息"打包喂给修复模型，要求其输出一份"修正后的单行 JSON 参数"。
+- 运行选项为 `OptionsTypeSimpleJSON`（`handlers.go:978`），即强制 LLM 以 JSON 模式直接输出文本结果，**不**进入工具调用循环——修复结果直接作为新参数回灌重试（`handlers.go:991`）。
+
+## 3. 配对关系
+
+与 **`toolcall_fixer.tmpl`** 配对，二者共同构成 `ToolCallFixer` Agent 的一对 prompt（`templates.go:575-577`）：
+
+| 角色 | 模板 | PromptType | 注入位置 |
+| --- | --- | --- | --- |
+| System | `toolcall_fixer.tmpl` | `toolcall_fixer` | `templates.go:576` |
+| Human | `input_toolcall_fixer.tmpl`（本文件） | `input_toolcall_fixer` | `templates.go:577` |
+
+二者的渲染入口在同一函数 `fixToolCallArgs` 内先后调用（`handlers.go:963` 与 `handlers.go:973`），再由 `performSimpleChain` 组装成 system + human 两条消息送入模型（`performers.go:971-974`）。
+
+## 4. 调用时机
+
+触发链路：`performer.go` 的工具执行重试循环 → `fixToolCallArgs`（`handlers.go:936`）→ 渲染本模板（`handlers.go:963`）。
+
+**精确触发条件**：在 `performer.go:334-364` 的重试循环里，`executor.Execute(...)`（`performer.go:341`）**返回 error** 时，进入 `fixToolCallArgs` 修复参数（`performer.go:356`）。该 error 即注入到 `{{.ToolCallError}}` 的 `funcExecErr`。
+
+关键约束（源码验证，非症状推断）：
+
+- 触发条件是"工具执行返回 error"，**不限于** schema 不符。`funcExecErr` 可能来自：工具 handler 内部的参数校验失败、handler 执行报错、或下游数据库/存储写入失败等（见 `executor.go:301-306`、`347-356`）。
+- **反直觉点（重要）**：纯粹的 JSON 语法错误（`json.Unmarshal` 失败）在 `executor.go:257-259` 被吞成 **`nil` error** 返回一个提示字符串，因此**不会**进入 fixer 流程。也就是说，"参数压根不是合法 JSON"不会被本模板修复；本模板修复的是"能被解析、但在 schema/语义层面导致执行失败"的参数。
+- 修复后用新参数重新执行，循环上限 `maxRetriesToCallFunction = 3`（`performer.go:31`），即最多进行有限次"修复 → 重试"。
+
+## 5. 工具列表
+
+**无工具**。本模板驱动的修复 Agent 是一个纯 JSON 文本生成器：
+
+- 经 `performSimpleChain` 执行（`handlers.go:980`），其内部 `CallEx(ctx, opt, chain, nil)` 第 4 参（工具列表）为 `nil`（`performers.go:981`），chain 仅含 system + human 两条文本（`performers.go:971-974`），无工具调用环节。
+- `OptionsTypeSimpleJSON` 在配置兜底层强制追加 `llms.WithJSONMode()`（`config.go:862/867`），约束输出为 JSON 文本。
+- 因此模型"输出"即"修复后的参数 JSON"本身，由 `handlers.go:991` 作为 `json.RawMessage` 直接返回，回灌到 `performer.go` 重试循环。
+
+## 6. 非工具占位符
+
+占位符清单声明于 `templates.go:367-372`，注入点单一——在 `fixToolCallArgs` 内调用 `RenderTemplate` 时由一个 `map[string]any` 一次性填充全部 4 个值（`handlers.go:963-968`）。注入时机均为"修复调用发起前、参数已收集完成时"。
+
+| 占位符 | 注入来源（变量 → 值） | 注入信息 | 用途 / 注入时机 |
+| --- | --- | --- | --- |
+| `{{.ToolCallName}}` | `funcName`（`handlers.go:964`） | 执行失败的那个工具的名称（来自 `performer.go` 当前 `toolCall` 的函数名）。 | 告知模型"要修的是哪个工具的参数"，让模型据此选择对应 schema 约束。 |
+| `{{.ToolCallArgs}}` | `string(funcArgs)`（`handlers.go:965`） | 原始的、有问题的参数 JSON 原文（`json.RawMessage` 转字符串）。 | 作为修复基线：模型需在"保留原始意图"的前提下做最小改动，而非从零重写。 |
+| `{{.ToolCallSchema}}` | `string(funcJsonSchema)`（`handlers.go:966`） | 该工具的 JSON Schema，由 `executor.GetToolSchema(funcName)` 获取（`performer.go:350`）后 `json.Marshal` 序列化（`handlers.go:946`）。 | 提供目标结构契约：模型据此补齐必填字段、纠正类型/格式。 |
+| `{{.ToolCallError}}` | `funcExecErr.Error()`（`handlers.go:967`） | 执行失败的具体错误描述（`executor.Execute` 返回的 error 文本）。 | 指明"哪里错了"，引导模型对症修复（如缺字段、类型不符、值非法等）。 |
+
+> 说明：本模板**不含**任何工具型占位符（如 `{{.Tools}}`/`{{.AvailableTools}}`），4 个占位符全部是上下文数据注入，用于把"失败现场"完整呈现给修复模型。

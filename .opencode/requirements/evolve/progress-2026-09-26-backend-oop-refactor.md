@@ -1,0 +1,147 @@
+# Progress: 后端 OOP 重构
+
+> 需求: 2026-09-26-backend-oop-refactor.md（35 步，批次 A-G）
+> 当前: 批次 A ✅ + 批次 B ✅ + 步骤 10 ✅（remote_link 单例化被依赖倒逼提前）
+> 测试: 124/124 全绿（80+13+9+5+5+4+8）; 当前为**可运行中间态**（新旧并存、无半成品文件）
+
+## 已完成（细节）
+
+| 步骤 | 内容 | 关键产出 |
+|------|------|---------|
+| 1-4 | ConfigManager | services/config_manager.py: Java 单例(__new__ 双检锁+get_instance+_reset_for_tests); Bootstrap(4 env 键=全项目唯一 os.environ 点)/Keys(28 键)/Protocol/RemoteTunables/HeartbeatTunables/ProxyTunables/ConfigField/ConfigStatusView 全嵌套静态类; get/set/delete/ensure_template/config_meta/required_status/validators; 5/5 单测 |
+| 5 | model_lifecycle | ModelWorkerRegistry 静态类(get_worker); STATE_* → ManagedModel 类静态; logger 类化 self.logger |
+| 6 | ocr_engines | mlx_available/find_mlx_model/footprint_mb → MlxEngine 静态方法; OLLAMA_*/MAX_TOKENS → 类静态; logger 类化 |
+| 7 | ocr_service | OcrService 单例化; 模块级实例+3 委托删除; 消费方(model_assets/remote_link/routes/model_loader/tests)全切 get_instance() |
+| 8 | model_loader | → ModelInferenceService 单例: LockedEmbedder/LockedReranker 为内部类; 路由层/推理/生命周期全部实例方法; EMBED_MODEL 引用 ConfigManager.Protocol; 24 个类外函数清零 |
+| 9 | model_assets | → ModelAssetRegistry 单例: MODELS/_states/_lock/_change_callbacks 入类; 13 函数全方法化; 消费方(routes/models,deps,system + scanner + tests)全切 |
+| 10 | remote_link | RemoteLinkService 单例化(+_shutdown_for_tests 关 client); 模块级实例+3 委托删除; 消费方(model_loader/ocr_service/routes/remote/server/tests)全切 |
+
+## 执行中固化的经验（续作必读）
+
+- **测试顶部 services import 必须在 env 设置之后**（model_assets→config 链冻结 DATA_DIR; 已在 test_control L48 附近修正并有注释）
+- **跨批次依赖倒逼**: 消费方先切 get_instance() 时提供方必须立即有单例（步骤 8→10 的教训，运行时静默走 fallback）
+- 机械迁移脚本风险: 字符串 replace 会伤 docstring/嵌套词（"def self."、"_ocr_download_worker" 二次命中、MODELS 块缩进）——**每步 compile+测试兜底有效**，但优先 AST 定位
+- 测试 patch 私有: `ModelInferenceService.get_instance()._embedder_managed`; OcrService 隔离用 `OcrService._reset_for_tests() or OcrService()`
+- stub fake remote_link: 需提供 `stub.RemoteLinkService` 假类（get_instance 返回带三方法的实例）+ sys.modules 与 services 包属性双写
+
+## 剩余步骤（需求 §3.1 逐条执行，映射表在需求 §2.3/§2.4）
+
+- 步骤 11 剩余: routes/remote.py 薄壳化; remote_link._read_config/_local_fingerprints 方法化; STATE_OFF/REMOTE/DEGRADED 常量入类
+- 12: api_guard 辅助函数 → 中间件静态方法（LAN_ALLOWED_PATHS 入类）
+- 13: launchd_setup → LaunchdManager 单例（LABEL/PLIST_PATH 入类）
+- 14-20 批次 D: logging_setup→LogManager; process_lock→ProcessLockUtil（切 ConfigManager._atomic_write）; heartbeat（Registry get_instance+collect 方法化+HEARTBEAT 参数读 ConfigManager.heartbeat_tunables）; ipc_listener（get_instance+全部模块函数方法化）; frontend_port（get_instance+effective_bind_host/_port_alive 方法化+console_url.py 并入）; restart→ConsoleRestarter.get_instance; anonymizer→Anonymizer 静态类
+- 21-26 批次 E: event_store/knowledge_store（get_instance+委托删）; knowledge_db（6 常量入 MemoryDB 类）; graphiti_config→GraphitiFactory（load_ai_env 删→ConfigManager）; process_registry; proxy_pool/proxy_relay（模块级状态入类+get_instance）
+- 27-31 批次 F: scanner（get_instance）; detect_py_deps（get_instance）; docker_manager→DockerManager（KNOWN_* 入类）; detect_tools（15 辅助函数归类+13 常量入类+ToolsScanner/ToolsInstaller get_instance）; docker_build/push_toolbox 类化
+- 32-35 批次 G: server.py+routes 余量薄壳化+health 的 BOOT_TOKEN 等入 HealthService; **删 config.py+config_store.py**（全部 24 消费方切 ConfigManager.get_instance()——grep 清单: routes/config_route,proxy,system + services/api_guard,detect_tools,docker_manager,frontend_port,heartbeat,ipc_listener,knowledge_store,launchd_setup,logging_setup,proxy_pool,proxy_relay,restart,scanner + server.py + tests×2）; 架构 grep 验收（需求 §4.2 六条）; 全量回归+e2e
+
+## 架构验收红线（§4.2，最终检查）
+
+1. os.environ 全项目仅 config_manager.py 内 Bootstrap 读取点
+2. from config import / config_store 零残留; 两文件不存在
+3. `^[a-z_]+ = [A-Z]\w+\(` 模块级实例导出零残留
+4. 顶层大写常量仅嵌套类/异常注册/__all__（AST 扫描）
+5. .ai_env 直接 open 仅 config_manager.py
+6. routes 处理函数体 ≤3 行
+
+## 追加修复（2026-09-27 晚）：restart execv 自我重跑 bug
+- 现象: test_control 全量跑 387s（套件被 os.execv 重跑 2-4 遍，竞态决定次数）
+- 根因: services/restart.py L142 残留模块级实例导出 `console_restarter = ConsoleRestarter()`（批次 D 遗漏项）; routes/system.py import 该旧实例; restart 测试 _reset_for_tests 后 patch 的是新实例——路由在旧实例上 schedule 挂真 Timer(1.5s)，perform 里 `os.execv(sys.argv[0])` 在测试进程 = 重跑 test_control
+- 修复: 删模块级导出（OOP D 规则彻底达标）; 路由改 `ConsoleRestarter.get_instance().schedule()`; 测试注释同步
+- 验证: TC_FULL_RUN=1 全量 97.79s 单遍 80/80（修复前最坏 387s）; grep console_restarter 零残留
+
+## 追加改进（2026-09-27 晚二）：OCR 测试 fake 化提速
+- 背景: 套件基线 99s 中 OCR 段占 ~69s——12+1 用例全真模型，加载税 ~20 次 × 2-3s; 其中 9 个用例断言的是状态机行为（非识别正确性）
+- 改造: tests/test_control.py 新增 FakeMlxEngine（接口对齐 load/unload/loaded/preprocess/_infer_impl; load_delay 确定性窗口; infer gate; 计数器; fail_load_error 注入; 未加载防御对齐真引擎）; 9 用例切 fake（单飞/串行/在途×2/加载失败/并发失败/reaper/idle_sec/竞态）
+- 防覆盖退化三硬约束落地: ①单飞用例加"窗口存在"（starting 轮询）+ "单飞语义"（总耗时 < 3×load_delay）行为特征断言 ②在途用例用 fake infer gate ③fake 计数直接断言（load_count/infer_count）
+- 真模型 3 用例保留（lifecycle/窗口卸载/worker 稳定性）: 识别正确性 + stream 复用 + footprint——兼作 fake 接口漂移守卫
+- 实施中修两 bug: fake _infer_impl 返回值对齐 (text, stats) 二元组; 串行用例 slow_gen 递归调用自身挂死（改走类原始方法）
+- 结果: 9 用例 35.7s → 7.9s; 全量套件 99s → 69.6s（连续两轮 69.56/70.16 稳定）; 80/80
+
+## 追加（2026-09-27 晚三）：[77] 挂起结案 + 生产 bug 修复
+- 复测: restart bug 修复后挂起消失（档案 3/3 挂 → 3/3 过，70s 稳定）; 根因统一理论: 旧模块级实例武装真 Timer → perform → os.execv 与 ~20 线程碰撞——成功=套件重跑（×2/×4），冻结=进程级 GIL 冻结（即 [77] 挂起全部"玄学"观测）
+- [77] 恢复执行即抓到两处被挂起掩盖的生产 bug: routes/knowledge.py:70 + routes/events.py:73,83 的 submit_entry → submit（OOP 接口漂移，写端点一直 500）; 全路由静态核对无其他漂移
+- [77] TC_FULL_RUN 守卫删除（环境变量零残留），保留子进程隔离形态（防 TestClient 循环互锁——独立真实防御）
+- 验证: 无守卫全量 3/3 通过 80/80; 档案已结案（§9）
+
+## 追加（2026-09-27 晚四）：全量验收——4 个被掩盖的生产 bug + 测试盲区修复
+验收自查发现回归清单遗漏 4 个测试文件（test_e2e_real/test_integration/test_proxy_mcp/test_windows_ipc），补跑后揪出被掩盖的生产 bug 链：
+1. **event_store 三处日志 f-string 缺 f 前缀**——异常细节被吞（写入失败的真因不可见）
+2. **Keys.DEEPSEEK_SMALL_MODEL 键丢失**（config.py 合并遗漏）——events 提取链断裂; 补回 + 全量键核对（28 键 vs 全部引用，零漂移）
+3. **graphiti_config/reranker 裸模块函数调用**（model_loader.embed_batch_sync/rerank_sync 实为实例方法）——落库 embed 与 diverse 搜索 500; 全部改 ModelInferenceService.get_instance()
+4. **IpcListener.__init__ 重入抹状态**（单例 __new__ 未防 __init__ 重跑）——每次 get_instance() 复位 _running/_listener → 退出 cleanup 静默跳过 → IPC sock 文件泄漏（生产日志 11 次"死残留"即此因）; 修为 _init_once 模板 + AST 排查全项目无同款
+测试侧修复：
+- test_integration bun_env 适配 D1 收口（HEARTBEAT_* 小值从进程 env 改独立 OPENCODE_ROOT + .ai_env + backend 目录 symlink）; 宽限 5→15s（覆盖 TS 就绪确认链）; 自杀等待 12→40s
+- test_control IPC 测试改 object.__new__ 模拟第二实例（原依赖 __init__ 重入 bug 行为）
+- test_proxy_mcp 无 __main__ 入口（直跑=假绿）——确认为 pytest 收集形态，2/2 通过
+最终验收全绿：control 80 + integration 5 + e2e_real 6 + e2e_remote 全链路 + 7 快族 51 + proxy 58+2 + mcp 2 + 前端 build; 生产控制台重启吃全部修复（pid 60146）
+
+## 追加（2026-09-27 晚五）：graphiti 适配器真链测试（需求文档 2026-09-27-graphiti-adapter-real-test.md）
+- 背景: FakeGraphiti 把组装链（BgeM3Embedder/BgeRerankerClient/GraphitiFactory.create_graphiti）整体短路——纯项目胶水层曾零单测级动态覆盖（晚四 bug #2/#3 藏点）
+- 实施: test_control 新增 81 号用例（四段断言: create 1024 维 / create_batch 2×1024 / rank 真推理区分度+降序 / create_graphiti 组装类型——graphiti 未传参静默默认 OpenAIEmbedder 的唯一防线）; 置 E2E /rerank 后
+- 防作弊闭环: 注入旧 bug 形态（reranker.py 裸模块调用）→ 用例红（报错与生产当天一字不差）→ 还原 → 绿
+- 验收: 81/81（耗时 77.8s，增量 ~8s 含测试进程首次模型加载）; e2e_real 6/6; config_manager 5/5 + api_guard 4/4 抽测绿; 生产代码零改动
+
+## 追加（2026-09-27 晚六）：外部 review 修复——8 生产 bug + 测试盲区
+外部代码评审（基线 89ab1ba0）发现 8 个生产 bug（全部运行时复现属实），本轮全部修复：
+1. [高] routes/config_route /api/config/meta 引用已删常量 → 500（配置页失效）→ 切 ConfigManager.config_meta()
+2. [高] remote_link._warm_local @staticmethod 引用 self → 降级预热必炸（远程挂时 /health 永久 503）→ 改实例方法
+3. [中高] server.py ConfigManager 类别名当谓词恒真 → 生产每次启动 spawn vite → 改 get_instance().is_dev_mode
+4. [中] restart._restart_windows 同款 self 引用 → Windows 重启静默失败 → 类常量直引
+5. [中] launchd plist 缺 EnvironmentVariables → 自启动节点配置错位自毁 → 补 OPENCODE_ROOT/DATA_DIR + WorkingDirectory
+6. [低中] ipc_probe_alive 缺 @staticmethod / frontend_port effective_bind_host 重复定义 / docker_manager ensure_neo4j 缺装饰器 → 三处修齐
+7. [低] 心跳 _tunables() 在 try 外 → 瞬时读配置异常杀心跳任务 → 入 try
+8. [低] OCR ollama 分支先于远程路由 → 非 mlx 平台永不远程 → 远程优先+本地回落（与 embed/rerank 语义一致）
+遗漏项：routes/deps.py 模块级 deps_service 删除（DepsService 单例化，_init_once 模板防 __init__ 重入）; 三处陈旧文档引用清理
+测试盲区修复：
+- /api/config/meta 新增 E2E 用例（82 号——bug#1 溜走通道）
+- test_remote_link 预热验证改 patch _model_inference 返回桩（真 _warm_local 保持原样——曾掩盖 bug#2）; 修 staticmethod patch/还原脱壳坑（__dict__ 取原对象）
+验证: test_control 82/82; remote_link 9/9; 快族+proxy 58 全绿; e2e_remote 三模型全链路 ✓; e2e_real 6/6; 生产控制台重启（/api/config/meta 27 项 ✓; vite 零进程 ✓）
+
+## 追加（2026-09-27 晚七）：静默吞异常全量审计 + 整改
+- 审计: 171 个 except 块，分拣出 17 处"宽泛 except Exception + pass"黑洞（异常信息完全消失）
+- 整改: 数据/生命周期路径 7 处补 warning（坏库重建/graphiti close/搜索重试/embedder·reranker 释放失败/快照预热/relay 回落）; 辅助采集/降级默认 10 处补 debug（close 类/回调/状态采集/安全默认）; routes/deps.py 补 logger（已有）、routes/proxy.py 补 import logging + logger（L85 函数内局部 import 骗过存在性检查的坑）
+- 合法静默保留: queue.Empty/进程不存在/探测超时（预期语义）、as e 进响应体（有去向）、CancelledError re-raise（生命周期信号非错误）
+- 验证: test_control 82/82（E2E 子进程启动曾因 proxy.py NameError 挂 22 项——修复后全绿）; 生产控制台重启
+
+## 追加（2026-09-27 晚八）：配置来源黑名单制（用户方案）——.ai_env 键 env 不再参与读取
+方案（用户裁决）: 所有 .ai_env 键归 .ai_env 管——ConfigField 新增 source 字段（默认 "ai_env"）标注来源; .ai_env 定义了某键 → 文件权威（env 同名值不参与），未定义 → env 兜底（CI 注入通道）
+实施:
+- ConfigField +source 字段; _read_dev_mode_once 语义反转（.ai_env 优先）; config_meta() 输出带 source（前端可选消费）
+- _refresh_env_from_ai_env 删除（env 优先语义废除后失去存在理由）——业务键不再被主动刷进 os.environ，子进程/docker env 泄露面归零（API keys 不再进任意子进程）
+- 测试: test_dev_mode_default 四场景沙箱化（临时 OPENCODE_ROOT + 自写 .ai_env: 文件1+env0/文件0+env1/无文件env兜底/双无默认False）; meta 测试加 source 断言
+- 事故与恢复: 批量 replace 误删顶层 main()（index 锚点匹配到 async def main 子串 + 旧结构 main 在 is_dev_mode 之后）——从 HEAD 提取恢复（main 今日未改过 = HEAD 版正确）
+验证: test_control 82/82; config_manager 5/5; e2e_remote 三模型全链路 ✓; 生产重启（.ai_env dev=1 → vite 单实例，文件权威语义行为不变）; env 泄露检查: 控制台 env 业务键仅来自上游 shell 自带（不再主动扩散）
+
+## 追加（2026-09-27 晚九）：测试盲区防御四件套实施 + 2 个新生产 bug
+按复盘六大模式（A patch 作弊/B 运行时名称/C 端点枚举/D 配置消费/E 生成物/F 矩阵/G 循环逐段）落地:
+1. 契约扫描用例（2 AST 规则: staticmethod-体内-self 手动递归作用域感知扫描; 路由大写裸名模块级+局部双绑定检查）——**上线即抓 bug #9**: routes/install.py:30 裸名 PYTHON_PACKAGES（实为 PyDepsDetector 类属性）→ 安装端点 500
+2. 全端点 GET 冒烟（_IncludedRouter.original_router 展开枚举 + 路径参数 dummy 化 + 就绪等待）——**上线即抓 bug #10**: process_registry 4 处裸名（_ps_proc_info/_footprint_mb/_pid_on_port 类内静态互调漏类前缀）→ /api/processes（前端进程页数据源）一直 500
+3. dev 消费行为断言（dev=0/1 → create_app 的 ensure_vite_dev 调用分支，拦截协作者不真 spawn）
+4. 知识沉淀: $AGENT_DIR/knowledge-base/testing-blind-spot-patterns.md（七模式 场景/识别/防御 三段式 + 防御资产索引 + 排查指引）
+防作弊闭环: 三项均完成注入-必红-还原验证（裸名注入/NameError 端点注入/恒真谓词注入）
+验证: test_control 85/85（82→85）; config_manager/api_guard/remote_link 全绿; 生产重启（/api/processes 修复生效）
+
+## 追加（2026-09-27 晚十）：review 修复 6 项（四件套复审）
+1. [中] 冒烟测试 create_app 会真拉 vite（dev=1 时 spawn detached 进程）→ patch ensure_vite_dev 拦截（try/finally 还原）
+2. [低] config_meta fallback 分支（用户自加键）补 source 字段（前端统一读取防 undefined）
+3. [低] test_config_manager 陈旧注释（"env 优先"已废）→ 更新为 env 兜底语义（指向 test_dev_mode_default 完整覆盖）
+4. [低] 两新测试 OPENCODE_ROOT 为 None 时不还原（临时目录泄漏进 os.environ）→ None 时 pop（与 CONTROL_FRONTEND_DEV 一致）
+5. [备注] AST 扫描器 local_bound 扩展 6 种绑定形态（AnnAssign/AugAssign/海象/with as/函数内 import/参数名）——防未来合法代码误报
+6. [备注] restart.py 墓碑注释清理（"曾有的...已删"历史叙述删除，保留现行"无需刷新"机制解释）
+验证: test_control 85/85; config_manager 5/5; 全量跑 vite 零新增; 生产重启（meta source 全覆盖 ✓）
+
+## 追加（2026-09-27 晚十一→更正）：自检发现的"bug #11"系误诊——原接口契约本就正确
+- 原判断（已废弃）: "graphiti 无 label 过滤返回空" → 用 default_factory=["Entity"] 掩盖
+- 更正真相: 旧契约 node_labels 必填——不传/null 时 pydantic 本就显式 422 拒绝; "搜到空"是自检脚本只解析 nodes 字段把 422 误读为空结果（未查状态码/error 字段）; [] 空列表经非法 Cypher 'n:' → 异常 → empty_result。直调对照证明 store(node_labels=None) 本就命中——graphiti 无过滤语义正确
+- 最终修复: 回滚 default_factory → 必填 + min_length=1（空列表显式 422）; e2e_real 锚点改为"缺失/空列表必须 422"（新增 post_raw 助手——契约测试必须看状态码）
+- 三重教训入库: ① 验证脚本必须检查 HTTP 状态码与 error 字段 ② 归因前必须做直调对照（API 层症状≠库层原因）③ 不得用魔法默认值"修复"正确的必填契约
+- 重启教训（同日三次假重启）: 运维走正式通道（POST /api/system/restart 的 execv 原子语义天然无竞态）; 任何重启后必须验证 /health.pid/boot_token
+- env 污染链闭合: security-analysis.ts:1276 有意将 .ai_env 全键（除 CONTROL_*）注入 agent shell.env（设计功能——agent bash 需要 API key）; 控制台污染仅发生在"用带注入键的 shell 启动控制台"场景（自检时开发者 nohup 所致）; 标准链路（plugin spawn）无业务键; 本轮以 env -i 最小集重启验证零残留
+- 自检其余结论: 9 端点全 200; 启动零错误; 心跳注册正常; embed/rerank/events 写链/实体提取全通; vite 单实例; env 业务键来自上游 opencode 进程继承（机制上无主动扩散; 可选加固: TS spawn 白名单化——待决策）
+
+## 追加（2026-09-27 晚十二）：bug #12——detect_py_deps CLI 入口裸调用（切换 agent 被自举检查拦截）
+- 现象: 用户切 web-analysis agent → env-check 第一层报"Python 必需依赖不完整"
+- 真相: 依赖完整——CLI 入口 `_main()` 调裸名 `scan`（OOP 收进 PyDepsDetector 类时漏改，同型第 12 个）→ NameError exit 1 → 插件 fail-closed 把链路故障当缺包拦截。自批次 F 起就坏，今天用户首次切 agent 才触发（HTTP 路由正常掩盖 CLI 入口——盲区模式 C 变体: 入口形态枚举缺 CLI）
+- 修复: `PyDepsDetector.get_instance().scan(...)`; 全项目 CLI 入口扫描（4 个 __main__ 文件）确认无其他真裸名（asdict/any 为扫描器漏查 import/内置的误报）
+- 双层防御: ① 契约扫描新增规则 3——CLI 入口函数（main/_main）裸函数调用必须可解析（含 import 绑定与内置收集）② 新增 CLI 真链路消费测试（venv python 跑 scan 断言 exit 0——env-check 第一层的真实消费链）
+- 验证: scan 62 包全 [+] exit 0; test_control 87/87（85→87）

@@ -1,0 +1,404 @@
+/**
+ * 控制台 API 类型定义。
+ *
+ * 收口：所有 TypeScript 类型定义在本文件，其他文件只导入不重复定义。
+ * 与控制台后端 routes 的 Pydantic 模型 / dict 返回结构对齐。
+ */
+
+// ─── /api/hardware ────────────────────────────────────────
+
+export interface CPUInfo {
+  physical_cores: number;
+  logical_cores: number;
+  frequency_mhz: number | null;
+}
+
+export interface MemoryInfo {
+  total_gb: number;
+  available_gb: number;
+}
+
+export interface OSInfo {
+  system: string;
+  platform: string;
+  machine: string;
+  version: string;
+}
+
+export interface GPUInfo {
+  name: string;
+  vendor?: string;
+  metal?: string;
+  vram?: string;
+  vram_gb?: number;
+  vram_mb?: number;
+  capabilities: string[];
+}
+
+export interface HardwareInfo {
+  cpu: CPUInfo;
+  memory: MemoryInfo;
+  os: OSInfo;
+  gpu: GPUInfo[];
+}
+
+// ─── /api/config/* ────────────────────────────────────────
+
+export type ConfigMap = Record<string, string>;
+
+export interface RequiredConfigStatus {
+  label: string;
+  ok: boolean;
+  hint: string;
+  error: string;
+}
+
+export type RequiredStatusMap = Record<string, RequiredConfigStatus>;
+
+// ─── /api/deps + /api/scan ────────────────────────────────
+
+export interface ToolStatus {
+  name: string;
+  description: string;
+  required: boolean;
+  available: boolean;
+  skipped?: boolean;       // 当前平台不适用
+  version: string | null;
+  path: string | null;
+  install_hint: string;
+  kind?: "tool";           // 外部工具（IDA/apktool 等，区别于 Python 包）
+}
+
+export type AgentTools = Record<string, ToolStatus[]>;
+
+/** venv 内 Python 包状态（scan.global.python_packages） */
+export interface PyPackageStatus {
+  name: string;            // import 名
+  pip_name: string;        // pip 安装名
+  kind: "python";
+  description: string;
+  required: boolean;
+  installer: "pip" | "conda";
+  agents: string[];        // ["all"] = 全部
+  available: boolean;
+  version: string | null;
+}
+
+// ─── /api/docker/* ────────────────────────────────────────
+
+export interface DockerStatus {
+  installed: boolean;
+  daemon_running: boolean;
+}
+
+export interface KnownContainer {
+  name: string;
+  image: string;
+  description: string;
+  status: "running" | "stopped" | "not_exists" | "unknown";
+  auto_start: boolean;
+}
+
+export interface KnownImage {
+  name: string;
+  description: string;
+  size_hint: string;
+  pulled: boolean;
+}
+
+export interface DockerScanGlobal {
+  docker: DockerStatus;
+  containers: KnownContainer[];
+  images: KnownImage[];
+}
+
+// ─── /api/scan ────────────────────────────────────────────
+// models 字段与 /api/models 同源（services/model_assets.py），类型复用 ModelAsset。
+
+export interface GlobalResources {
+  docker: DockerScanGlobal;
+  required_configs: RequiredStatusMap;
+  python_packages: PyPackageStatus[];
+  models: ModelAsset[];
+}
+
+export interface ScanResult {
+  agents: AgentTools;
+  global: GlobalResources;
+  timestamp: number;
+}
+
+// ─── /api/install ─────────────────────────────────────────
+
+export interface InstallResult {
+  success: boolean;
+  package: string;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+}
+
+// ─── 通用 ─────────────────────────────────────────────────
+
+export interface ApiError {
+  detail: string;
+}
+
+// ─── /api/system ──────────────────────────────────────────
+
+export interface SystemInfo {
+  venv_path: string;
+  venv_python: string;
+  python_version: string;
+  hf_cache_dir: string;
+  hf_endpoint: string;
+  control_pid: number;
+  /** 控制台进程启动时间（Unix 秒; 运行状态页摘要行） */
+  control_start_time: number;
+  dev_mode: boolean;
+  platform: string;
+  /** backend 代码在进程启动后变更过（清单/逻辑更新未生效）——提示重启 */
+  code_stale: boolean;
+}
+
+// ─── /api/heartbeats ──────────────────────────────────────
+
+/** 连接的 opencode 进程（心跳表条目 + psutil 富化）。 */
+export interface OpencodeProcessInfo {
+  pid: number;
+  /** 距最后心跳秒数（10s 周期; >15 视为延迟） */
+  last_seen_sec_ago: number;
+  /** false = 心跳残留（进程已死，60s sweep 窗口内）→"疑似退出" */
+  alive: boolean;
+  /** 空格连接的完整命令行; 权限受限时 null */
+  cmdline: string | null;
+  /** 工作目录; 权限受限时 null */
+  cwd: string | null;
+  /** 进程运行时长秒; 进程不存在时 null */
+  running_sec: number | null;
+}
+
+export interface HeartbeatsResponse {
+  opencode: OpencodeProcessInfo[];
+}
+
+// ─── /api/models ──────────────────────────────────────────
+
+export interface HardwareSummary {
+  ok: boolean;
+  reason: string;         // 不达标说明（ok=false 时非空）
+  notes: string[];        // 加速说明（如 Apple Silicon Metal）
+  available_gb: number;
+  total_required_gb: number;  // 全部已缓存模型同时驻留的总需求
+}
+
+export interface DownloadState {
+  status: "idle" | "downloading" | "done" | "error";
+  progress: number;       // 0~1
+  error: string;
+}
+
+export interface ModelAsset {
+  id: string;
+  repo_id: string;
+  type: string;           // embedder / reranker / ocr / tts
+  display: string;
+  purpose: string;
+  min_free_gb: number;
+  disk_gb: number;
+  cached: boolean;
+  cache_path: string | null;
+  size_gb: number;
+  loaded: boolean;
+  idle_sec: number | null;        // OCR 专用: 已空闲秒数（未加载 null）
+  idle_timeout_sec: number | null; // OCR 专用: 空闲自动卸载阈值（600s）
+  download: DownloadState;
+}
+
+// ─── /api/tts/voices ──────────────────────────────────────
+
+export interface VoiceAsset {
+  id: string;
+  name: string;
+  gender: string;          // female / male
+  description: string;
+  wav: string;
+  ref_text: string;
+  default_speed: number;
+  source: string;          // builtin（内置）/ user（上传）
+  available: boolean;      // 参考音频文件在位
+}
+
+export interface ModelsResponse {
+  models: ModelAsset[];
+  hardware_summary: HardwareSummary;
+  hf_endpoint: string;
+}
+
+// ─── /api/fs/check ────────────────────────────────────────
+
+export interface FsCheckResult {
+  path: string;
+  resolved: string;
+  exists: boolean;
+  is_dir: boolean;
+}
+
+// ─── /api/config/meta ─────────────────────────────────────
+
+export type ConfigFieldType = "password" | "path" | "text" | "bool" | "select";
+
+export interface ConfigMetaItem {
+  label: string;
+  type: ConfigFieldType;
+  hint: string;
+  required: boolean;
+  /** 不配置时后端消费方使用的默认值（空串 = 无默认，必须配置） */
+  default_value: string;
+  /** 生效值（.ai_env 值或声明默认; 服务端领域模型合并结果，单请求可渲染） */
+  value: string;
+  /** true = 任何页面禁用态渲染 + 写接口 422（服务端强制） */
+  readonly: boolean;
+  /** 分类 code（分组归属; 顺序与可选值由服务端 categories 数组驱动） */
+  category_code: string;
+  /** select 型选项（服务端权威下发; 与后端 SelectOption 一一对应） */
+  options?: SelectOption[];
+  /** 分类描述（服务端权威，原样显示，前端不自行发挥） */
+  category_desc: string;
+}
+
+/** select 型选项（与后端 SelectOption dataclass 一一对应; asdict 序列化形态） */
+export interface SelectOption {
+  value: string;
+  label: string;
+}
+
+export type ConfigMetaMap = Record<string, ConfigMetaItem>;
+
+/** 页面身份（接口请求参数值域; hidden 是存储态，不是页面身份） */
+export type ConfigSurface = "config" | "remote";
+
+export interface ConfigCategoryView {
+  code: string;
+  desc: string;
+}
+
+/** POST /api/config/meta（surfaces 列表）响应（一页一请求拿全渲染所需） */
+export interface ConfigMetaResponse {
+  /** 有序分类（顺序 = 服务端枚举定义序，前端不自行排序） */
+  categories: ConfigCategoryView[];
+  entries: ConfigMetaMap;
+}
+
+// ─── /api/remote（远程资源 TAB）────────────────────────────
+
+export type RemoteLinkState = "off" | "remote" | "degraded";
+
+export interface RemoteModelFingerprint {
+  repo_id: string;
+  display: string;
+  snapshot: string;
+  loaded: boolean;
+}
+
+export interface RemoteHealthSummary {
+  service: string;
+  version: string;
+  code_fingerprint: string;
+  latency_ms: number;
+  models: RemoteModelFingerprint[];
+  ffmpeg_available: boolean; // TTS 变速能力位（节点 health 透传）
+}
+
+/** 模型加载态值域（与后端 ModelLoadState StrEnum 一一对应） */
+export type ModelLoadState =
+  | "ready"
+  | "starting"
+  | "idle"
+  | "error"
+  | "unknown";
+
+/** 本地单模型状态（后端注册表驱动——与环境总览同源） */
+export interface LocalModelState {
+  id: string;
+  display: string;
+  state: ModelLoadState;
+}
+
+export interface RemoteLinkStatusView {
+  enabled: boolean;
+  url: string;
+  token_configured: boolean;
+  token_prefix: string;
+  state: RemoteLinkState;
+  /** 管道枚举（与后端 RemoteTransportMode 一致; null = 未配置/非法——fail-closed 不开任何管道） */
+  transport: null | "p2p" | "http";
+  /** 本机代码指纹（与 remote_health.code_fingerprint 对齐检测） */
+  local_code_fingerprint: string;
+  /** P2P 传输路径: direct/relay/""（空=未建/非 P2P） */
+  path: string;
+  /** 最近一次直连尝试失败原因（空=无失败/已恢复） */
+  direct_last_error: string;
+  /** 本轮离线期累计探测次数（成功后清零——"后端在持续建联"的证据） */
+  probe_attempts: number;
+  probe_interval_sec: number;
+  /** 距下次探测秒数（0=即将/进行中） */
+  next_probe_in_sec: number;
+  fail_streak: number;
+  recover_streak: number;
+  last_ok_at: number | null;
+  last_fail_reason: string | null;
+  remote_health: RemoteHealthSummary | null;
+  local_models: LocalModelState[];
+  unload_countdown_sec: number | null;
+}
+
+export interface SwitchResultView {
+  ok: boolean;
+  error?: string;
+  warnings: string[];
+}
+
+/** 远程节点「更新并重启」响应 */
+export interface UpdateRestartView {
+  ok: boolean;
+  old_boot_token: string;
+  pull_output?: string;
+}
+
+/** 远程节点 health 转发（进程身份信号） */
+export interface HealthForwardView {
+  boot_token?: string;
+}
+
+export interface NodeConfigView {
+  CONTROL_RESIDENT: string;
+  CONTROL_AUTOSTART: string;
+  CONTROL_API_KEY: string; // 脱敏（前 6 位）
+}
+
+export interface AutostartView {
+  supported: boolean;
+  installed: boolean;
+  loaded: boolean;
+}
+
+// ─── /api/processes ───────────────────────────────────────
+
+export interface ProcessInfo {
+  key: string;
+  name: string;
+  pid: number | null;
+  role: string;
+  status: string;
+  memory_mb: number | null;
+  /** 活动监视器同口径（phys_footprint，含压缩页+GPU 映射）；仅 macOS */
+  memory_footprint_mb: number | null;
+  cmdline: string;
+  extra: string;
+}
+
+export interface ProcessRegistryView {
+  generated_at: number;
+  processes: ProcessInfo[];
+}

@@ -1,0 +1,106 @@
+# refiner.tmpl 分析文档
+
+> 本文是对 PentAGI `refiner.tmpl` 的源码级分析，不复制原文，仅写结论。
+> 所有引用形如 `文件:行号`，均相对 `backend/pkg/`。
+
+---
+
+## 1. 原文件名
+
+- 模板文件：`templates/prompts/refiner.tmpl`
+- 加载后映射为 `PromptType = "refiner"`（`templates/templates.go:45`，常量 `PromptTypeRefiner`）
+- 加载机制：`embed.FS` 读取 `prompts/*.tmpl`，去掉 `.tmpl` 后缀即 PromptType（`templates/templates.go:498-513`）
+- 声明的可用变量清单：`PromptVariables[PromptTypeRefiner]`（`templates/templates.go:292-307`）
+
+## 2. 类型与用途
+
+- **类别：A 类 Agent System Prompt**（系统消息，`ChatMessageTypeSystem`）
+- **角色：子任务计划优化器（Refiner Agent）**
+- **核心职责**：分析已完成子任务的结果与当前计划，通过提交**增量操作（patch）**来动态调整剩余子任务列表，使计划向用户原始请求收敛、最小化总步数。
+- **关键设计**：采用「增量 patch」而非「全量重生成」——只下发 `add/remove/modify/reorder` 操作，避免重复传输整张计划，也便于复用上一轮 refiner/generator 的对话链上下文（`providers/performers.go:200-242` 的 `restoreChain`）。
+- 在 prompt 体系中的定位：`AgentsPrompts.Refiner.System = PromptTypeRefiner`，其 `.Human = PromptTypeSubtasksRefiner`（`templates/templates.go:559-562`）。
+
+## 3. 配对关系
+
+`refiner.tmpl` 与 **`subtasks_refiner.tmpl`** 配对，组成 refiner agent 的「系统消息 + 用户消息」二元组：
+
+| 文件 | PromptType | 角色 | 内容性质 |
+|------|-----------|------|---------|
+| `refiner.tmpl` | `PromptTypeRefiner` | System 消息 | 角色定义、优化原则、输出格式、工具使用规范 |
+| `subtasks_refiner.tmpl` | `PromptTypeSubtasksRefiner` | Human 消息 | 运行时 XML 输入（user_task / completed_subtasks / planned_subtasks / previous_tasks / execution_state / execution_logs） |
+
+- 配对声明：`templates/templates.go:559-562`
+- `subtasks_refiner.tmpl` 的变量清单：`PromptVariables[PromptTypeSubtasksRefiner]`（`templates/templates.go:308-315`），注入 `Task/Tasks/PlannedSubtasks/CompletedSubtasks/ExecutionLogs/ExecutionState`
+- 二者渲染后拼成 `[]MessageContent{ System, Human }` 传入 LLM（`providers/performers.go:258-261`，`restoreChain` 失败时的 fallback）
+
+## 4. 调用时机
+
+**触发节点：每个子任务执行完成后，由 Go 控制层自动触发。**
+
+完整调用链（自顶向下）：
+
+```
+taskWorker.Run()                         controller/task.go:284
+  └─ 循环：PopSubtask → st.Run()         controller/task.go:288,299
+       │  （一个子任务执行完毕）
+       └─ stc.RefineSubtasks(ctx)        controller/task.go:309   ← 触发点
+            └─ Provider.RefineSubtasks   controller/subtasks.go:102
+                 └─ flowProvider.RefineSubtasks   providers/provider.go:401
+                      ├─ 渲染 subtasks_refiner.tmpl (Human)   provider.go:457
+                      ├─ 渲染 refiner.tmpl (System)           provider.go:490
+                      └─ performSubtasksRefiner(...)          providers/provider.go:495
+                           └─ performers.go:175  (建链、跑链、apply patch)
+```
+
+要点：
+
+- 触发频率：**每完成一个子任务就跑一次 refiner**（`controller/task.go:287-316` 的循环内，`st.Run()` 之后立即调用）。
+- 不是 generator 阶段触发——generator 只在任务初始化时跑一次（`GenerateSubtasks`）；refiner 是后续每步迭代。
+- 执行结果回写：refiner 返回的新计划会替换掉所有 `created` 状态的剩余子任务（`controller/subtasks.go:107-134`，先 `DeleteSubtasks` 再 `CreateSubtask`）。
+- 上下文复用：`performSubtasksRefiner` 优先复用上一次 refiner 的 msg chain，找不到则回退到 generator 的 msg chain（`providers/performers.go:244-271`），保证跨轮对话连续性。
+
+## 5. 工具占位符（`{{.XxxToolName}}`）
+
+refiner executor 的工具集在 `tools/tools.go:1685-1751`（`GetRefinerExecutor`）注册。下表对齐 prompt 中出现的每一个工具占位符：
+
+| 占位符 | 实际工具名 | 代码定义 | 处理函数 / Handler | 用途 | 调用时机 |
+|--------|-----------|---------|-------------------|------|---------|
+| `{{.SubtaskPatchToolName}}` | `subtask_patch` | `tools/registry.go:44` | `cfg.SubtaskPatch`（`providers/performers.go:288-300`），args 见 `tools/args.go:72-75`（`SubtaskPatch`） | 提交增量操作数组（`add/remove/modify/reorder`）修改剩余子任务列表；**唯一收尾工具**（barrier，`tools.go:1733`） | refiner 完成分析后必须调用一次以落盘计划 |
+| `{{.SearchToolName}}` | `search` | `tools/registry.go:31` | `cfg.Searcher`，即委派给 searcher specialist（`tools.go:1728`） | 针对性互联网技术研究 | 仅当先前结果揭示新技术要求 / 需要探索根本不同的方案时（prompt「战略性搜索使用」章节约束） |
+| `{{.TerminalToolName}}` | `terminal` | `tools/registry.go:45` | `NewTerminalTool(...).Handle`（`tools.go:1699-1708,1730`），args 见 `tools/args.go:93-99`（`TerminalAction`） | 在 Docker 容器内执行 shell 命令，验证状态 / 提取细节 | 需要核实环境事实时 |
+| `{{.FileToolName}}` | `file` | `tools/registry.go:46` | 复用 `term.Handle`（`tools.go:1731`），args 见 `tools/args.go:16-21`（`FileAction`） | 读取 / 写入容器内文件 | 需要查看或产出文件时 |
+| `{{.BrowserToolName}}` | `browser` | `tools/registry.go:23` | `NewBrowserTool(...).Handle`（`tools.go:1736-1748`），args 见 `tools/args.go:31-35`（`Browser`） | 浏览器导航、抓取页面（markdown/html/links） | 需要在线内容时；**条件注册**：仅 `browser.IsAvailable()` 为真才可用 |
+| `{{.SummarizationToolName}}` | `execute_task_and_return_summary` | `pkg/cast/chain_ast.go:18` | **非真实可调用工具**，是系统历史摘要的标记名 | 仅用于「摘要感知协议」识别对话历史中的摘要条目 | **禁止调用**：prompt 明确要求 refiner 永远不要自己调用它（系统标记） |
+
+注入位置：`providers/provider.go:428-434`（`refinerContext["system"]`）。
+
+> 工具集约束：refiner 的 barrier（终结）工具只有 `subtask_patch` 一个——这意味着 LLM 必须调用它才能结束本轮；其余工具（search/terminal/file/browser）是辅助探测手段。
+
+## 6. 非工具占位符（`{{.Xxx}}`）
+
+注入位置统一在 `providers/provider.go:427-443`（`refinerContext["system"]`），渲染于 `provider.go:490`。
+
+| 占位符 | 用途 | 注入信息 | 注入时机 / 计算 |
+|--------|------|---------|----------------|
+| `{{.N}}` | 修改后计划的子任务数量上限（prompt 中两次出现：核心职责 + 细化规则） | 剩余可用配额 | `max(TasksNumberLimit - len(subtasksInfo.Completed), 0)`（`provider.go:440`）；`TasksNumberLimit = 15`（`provider.go:34`）。含义：整任务子任务总数硬上限 15，每完成一个，N 自动减一，逼迫计划收敛 |
+| `{{.Lang}}` | 任务执行日志通道语言（与 English 技术通道对立） | `fp.language`（`provider.go:438`），由 `language_chooser` 在流程启动时决定 | 全局固定，不按消息推断 |
+| `{{.CurrentTime}}` | 当前时间戳 | `getCurrentTime()`（`provider.go:439`） | 每次渲染即时取值 |
+| `{{.DockerImage}}` | 执行环境容器镜像名 | `fp.image`（`provider.go:436`） | 流程启动时由 `image_chooser` 选定 |
+| `{{.Cwd}}` | 容器工作目录绝对路径 | `docker.WorkFolderPathInContainer`（`provider.go:437`） | 常量；仅在 `{{if .UserFiles}}` 块内（任务材料章节）使用 |
+| `{{.SummarizedContentPrefix}}` | 摘要内容前缀，用于识别「带前缀摘要」 | `csum.SummarizedContentPrefix = "**summarized content:**\n"`（`pkg/csum/chain_summary.go:48`），注入前换行被转义为 `\\n`（`provider.go:435`） | 摘要感知协议识别用 |
+| `{{.ToolPlaceholder}}` | 强制工具调用的固定尾注 | 常量 `"Execute operations via function invocation - textual responses are not acceptable for task completion."`（`providers/provider.go:32,441`） | 固定文案，模板末尾输出 |
+| `{{.UserFiles}}` | 附加文件清单（uploads/resources） | `fp.userFilesListing()`（`provider.go:442`） | 控制整段「任务材料」章节是否渲染（`{{if .UserFiles}}`，`refiner.tmpl` 末尾） |
+
+---
+
+## 附：补充发现（查缺补漏）
+
+以下为调研中发现的、与本文档相关但 prompt 文本之外的实现细节，供参考：
+
+1. **`SubtaskListToolName` 注入冗余**：`provider.go:429` 把 `SubtaskListToolName` 注入了 `refinerContext["system"]`，但 `refiner.tmpl` 从不引用它（`subtask_list` 是 generator 的收尾工具），且 `PromptVariables[PromptTypeRefiner]`（`templates.go:292-307`）也未声明该变量。属于注入但未使用的冗余项，不影响运行。
+
+2. **memorist 工具实际可用但 prompt 未点名**：`GetRefinerExecutor` 注册了 `MemoristToolName`（`tools.go:1720,1727`），LLM 可调用长期记忆检索；但 `refiner.tmpl` 通篇未出现 `{{.MemoristToolName}}` 占位符（仅在执行环境章节笼统提及「长期记忆存储」）。即工具可用但 prompt 无显式引导。
+
+3. **`browser` 为条件工具**：仅在 `browser.IsAvailable()` 为真时注册（`tools.go:1745-1748`），对应 prompt 中的 `{{.BrowserToolName}}` 在该环境下无实际工具可调。
+
+4. **N 的硬上限联动**：`N` 与 `taskWorker.Run` 的循环上界 `TasksNumberLimit+3`（`controller/task.go:287`）同源（都基于 `TasksNumberLimit=15`），构成「计划配额 + 执行轮次」的双重收敛机制。

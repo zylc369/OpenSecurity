@@ -6,7 +6,6 @@
 mobile-analysis/
 ├── README.md              # 本文件
 ├── scripts/               # 移动端特有脚本（预留）
-│   └── registry.json      # 沉淀脚本注册表
 └── knowledge-base/        # 知识库（按需加载）
     ├── android-tools.md       # Android 工具安装 + CLI 参考
     ├── ios-tools.md           # iOS 工具安装 + CLI 参考

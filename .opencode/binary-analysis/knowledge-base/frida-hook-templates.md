@@ -1,7 +1,7 @@
 # Frida Hook 脚本模板
 
 > AI 编排器在需要 Frida Hook 脚本时按需加载。
-> **Frida 脚本必须使用 `$PYTHON_CMD` 运行**（需要 frida 包，安装在 venv 中）。
+> **Frida 脚本必须使用 `$PYTHON_CMD` 运行**（frida 包随 $PYTHON_CMD 环境提供）。
 > 验证结果的完整决策树见 `verification-patterns.md`。本文件提供通用的 Hook 模板。
 
 ## 触发条件
@@ -323,6 +323,28 @@ if (strcmp) {
     });
 }
 ```
+
+---
+
+## 模板 4: memoization 加速指数级递归
+
+指数复杂度递归验证函数（Fibonacci/Ackermann/树遍历类）不逆算法——Interceptor 加缓存，命中则改寄存器直接跳过函数体:
+
+```javascript
+var memo = {};
+var funcAddr = ptr("0x400abc"), retAddr = ptr("0x400def"); // 函数地址+其 ret 指令地址
+Interceptor.attach(funcAddr, {
+    onEnter: function(args) {
+        this.key = args[0].toInt32();              // 多参数: args[0]+","+args[1] 组合键
+        if (memo[this.key] !== undefined) {
+            this.context.rax = memo[this.key];     // 返回值装 rax
+            this.context.rip = retAddr;            // rip 跳到 ret——跳过整个函数体
+        }
+    },
+    onLeave: function(retval) { memo[this.key] = retval.toInt32(); }
+});
+```
+前提: 纯函数（同参数同结果、无副作用）+ 能定位函数内 ret 地址。指数变线性。
 
 ---
 

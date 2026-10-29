@@ -1,0 +1,143 @@
+# installer.tmpl 分析文档
+
+## 1. 原文件名
+
+`installer.tmpl`，源码注册名 `PromptTypeInstaller`（`templates/templates.go:35`，字符串值 `"installer"`，注释 "sets up testing environment and tools"），数据库枚举同名（`database/models.go`、`graph/model/models_gen.go` 与其他执行 agent 一致）。
+
+## 2. 类型与用途
+
+**A 类执行 Agent System Prompt——基础设施维护员（DevOps）子 agent 的角色与运行约束。**
+
+- 与 `primary_agent` / `pentester` / `coder` / `searcher` / `memorist` / `adviser` 同属"执行型 agent"层，是 `maintenance_result`（StoreAgentResult）收尾型 agent。
+- 用途：当主链路需要"装东西 / 配环境 / 维护工具链"时被上层委派，在专属 Docker 容器内独立完成"查记忆 → 检索资料 → 检查已装 → 安装配置 → 验证 → 复用入库 → 收尾报告"全流程，最终通过 `maintenance_result` 工具把英文技术报告回交调用方。
+- 设计特征（与同层 agent 共有的能力 + 本 agent 独有的强化与取舍）：
+  - **双通道语言策略**：`message` 字段走任务语言（`{{.Lang}}`），所有技术载荷（`question` / 查询 / 存储指南 / 运行时命令 / `maintenance_result.result`）走英语。
+  - **专属指南向量库切片**：挂载 `search_guide` / `store_guide`（条件可用）。执行 agent 层按"资产类型"分库——installer/pentester 用 `guide`、coder 用 `code`（`tools.go:1195-1198` / `:1302-1306`）、searcher 用 `answer`，installer 是 `guide` 切片的持有者之一。
+  - **无 Graphiti 时序图谱**：变量表（`templates.go:181-200`）不含 `GraphitiEnabled` / `GraphitiSearchToolName`，handler 也未注入——installer 不具备时序知识图谱能力，这是它与 coder/pentester/memorist 的一个结构性差异（这三者均按条件挂载 Graphiti）。
+  - **不自递归**：installer 自身工具集不含 `maintenance` 工具（`tools.go:1145-1152` 无 `MaintenanceToolName`），不能调自己装东西，避免循环委派。
+  - **安装协议特有强化**：先 `which` / `--version` 探活再装、包管理器失败最多重试 2 次后改投替代方案、强制 `-y` 自动确认、`detach` 序列化命令——这些是 DevOps 角色独有的约束，coder/pentester 没有。
+  - **受摘要感知协议约束**：识别 `{{.SummarizationToolName}}` 与 `{{.SummarizedContentPrefix}}` 两种历史摘要形态，禁止自身复现。
+  - **受高级导师（Mentor）监督**：通过 `{{.AdviceToolName}}` 主动咨询，被动接收 `<mentor_analysis>` 增强响应。
+
+## 3. 配对关系
+
+**与 `question_installer.tmpl`（`PromptTypeQuestionInstaller`，注册于 `templates/templates.go:36`、`201`）构成标准 System+User 配对**，装配见 `templates.go:539-542`：
+
+```go
+Installer: AgentPrompts{
+    System: getPrompt(PromptTypeInstaller),        // 本模板
+    Human:  getPrompt(PromptTypeQuestionInstaller),// question_installer.tmpl
+},
+```
+
+- 配对模板极简（7 行），仅承载单一占位符 `{{.Question}}`（来自 `MaintenanceAction.Question`，`tools/args.go:214`），把上层委派描述原样塞进 `<user_question>` 标签，并附一段固定 instruction。
+- 本模板负责全部"角色 / 协议 / 工具描述 / 环境约束"，配对模板只负责"这次具体要做什么"，分工干净。
+
+## 4. 调用时机
+
+**调用链路：上层 agent → `maintenance` 工具 → `GetInstallerHandler` → `performInstaller`。**
+
+### 4.1 入口暴露
+
+`{{.MaintenanceToolName}}`（值 `"maintenance"`，`tools/registry.go:14`）作为委派工具暴露给上层 agent。注册到四处上层 executor：
+
+| 上层 | 注册位置（definition / handler） | 条件 |
+|---|---|---|
+| `primary_agent` | `tools/tools.go:1073`、`handlers[MaintenanceToolName] = cfg.Installer`（`:1082`） | 始终启用 |
+| `pentester` | `tools/tools.go:1378`、`:1388` | 始终启用 |
+| `coder` | `tools/tools.go:1254`、`:1263` | 始终启用 |
+| `assistant` | `tools/tools.go:844`、`:851` | 仅 `cfg.UseAgents=true` |
+
+工具定义见 `registry.go:342-346`，参数结构 `MaintenanceAction{Question, Message}`（`args.go:213`）——其中 `question` 是英语技术载荷（实际安装任务描述），`message` 是任务语言日志条目。
+
+### 4.2 Handler 入口
+
+`providers/handlers.go:351 GetInstallerHandler` 返回包装函数（`:429`），其内层闭包 `installerHandler`（`:362`）：
+
+1. 构造 `installerContext`（`:363`），分 `user` / `system` 两路；
+2. **system 路占位符在 `handlers.go:367-386` 集中注入**（详见第 6 节）；
+3. 渲染 user 模板（`PromptTypeQuestionInstaller`，`:402`）；
+4. 渲染 system 模板（`PromptTypeInstaller`，即本模板，`:407`）；
+5. 调用 `fp.performInstaller(ctx, taskID, subtaskID, systemInstallerTmpl, userInstallerTmpl, action.Question)`（`:421`）。
+
+### 4.3 执行器装配
+
+`providers/performers.go:455 performInstaller`：
+
+1. **取三个委派 handler**（`performers.go:466-479`）：Adviser、Memorist、Searcher——注意 installer **不取** Coder / Pentester / 自身 Installer handler，因此工具集比 pentester/coder 少委派出口；
+2. **构造 `InstallerExecutorConfig`**（`:482-496`），关键字段：
+   - `MaintenanceResult`：**内联闭包**（`:488-494`），反序列化 `MaintenanceResult` 后即返回，**配合 barrier 机制用于收尾退出**；
+   - `Summarizer`：取自 `GetSummarizeResultHandler`；
+3. `fp.executor.GetInstallerExecutor(cfg)`（`:497`）拿到带完整工具集的 executor（工具集见第 5 节）；
+4. 可选 `performPlanner` 注入计划（`:502-511`），失败仅警告不中断；
+5. `restoreChain`（`:513`）+ `performAgentChain`（`:520`）真正驱动 LLM 多轮调用。
+
+### 4.4 收尾
+
+子 agent 在链中调用 `maintenance_result`（barrier 工具，`tools.go:1161-1163` 注册为 barrier）→ 触发第 4.3 步的内联闭包 → `performAgentChain` 主循环退出 → `performInstaller` 把 `maintenanceResult.Result`（英语技术报告）返回给上层调用方（`:537`），并经 `putAgentLog` 写一条 agent 间日志（`:525-535`）。
+
+> 一句话：**任意上层 agent 调 `maintenance` 工具 → 渲染 system+user 模板 → 在专用容器内跑链直到子 agent 调 `maintenance_result` 收尾 → 英文报告回交上层**。
+
+## 5. 工具列表
+
+固定工具集（6 个，注册于 `tools/tools.go:1145-1152`）+ 条件工具（3 类，分别注册于 `:1176-1179` / `:1194-1198`）+ 1 个伪工具名（仅出现在 prompt 文案）。
+
+### 5.1 固定工具集
+
+| 占位符 | 工具实际名称 | 工具类型 | 代码位置 | 用途 | 调用时机 |
+|---|---|---|---|---|---|
+| `{{.MaintenanceResultToolName}}` | `maintenance_result` | `StoreAgentResultToolType` | 常量 `registry.go:15`；定义 `registry.go:347-351`；**schema 参数 `TaskResult`（`args.go:77`，含 `Success`）**；handler 在 `performers.go:488-494` 内联注入（`tools.go:1154`） | 收尾：把英文维护报告 + 任务语言摘要回交上层 | 任务完成或主动放弃时；**barrier 工具**（`tools.go:1161-1163`），调用即终止本子 agent 主循环 |
+| `{{.AdviceToolName}}` | `advice` | `AgentToolType` | 常量 `registry.go:20`；定义 `registry.go:372-376`；参数 `AskAdvice`（`args.go:101`）；handler `cfg.Adviser`（`tools.go:1155`）← `GetAskAdviceHandler`（`performers.go:466`） | 委派给 Adviser 子 agent，向上层 Mentor 提问（含可选 `code` / `output` 片段） | 遇到部署架构 / 镜像选型 / 复杂配置难题，或需导师纠偏时；同时被 Planner / Mentor 机制复用 |
+| `{{.MemoristToolName}}` | `memorist` | `AgentToolType` | 常量 `registry.go:21`；定义 `registry.go:332-336`；参数 `MemoristAction`（`args.go:153`）；handler `cfg.Memorist`（`tools.go:1156`）← `GetMemoristHandler`（`performers.go:471`） | 委派给 Memorist 子 agent，从历史任务库检索过往部署模式 | 需要找"我们以前是否在同类环境装过此工具"时 |
+| `{{.SearchToolName}}` | `search` | `AgentToolType` | 常量 `registry.go:31`；定义 `registry.go:197-204`；参数 `ComplexSearch`（`args.go:108`）；handler `cfg.Searcher`（`tools.go:1157`）← `GetSubtaskSearcherHandler`（`performers.go:476`） | 委派给 Searcher 子 agent，调外部搜索引擎 + 长期记忆做复杂检索 | 需要安装文档、兼容性矩阵、系统要求、配置示例时 |
+| `{{.TerminalToolName}}` | `terminal` | `EnvironmentToolType` | 常量 `registry.go:45`；定义 `registry.go:167-174`；参数 `TerminalAction`（`args.go:93`）；handler `term.Handle`（`tools.go:1158`） | 在专属 Docker 容器内执行 shell 命令（支持 detach / timeout） | 包管理器安装、服务启停、`which`/`--version` 探活等所有命令行操作 |
+| `{{.FileToolName}}` | `file` | `EnvironmentToolType` | 常量 `registry.go:46`；定义 `registry.go:175-179`；参数 `FileAction`（`args.go:16`）；handler `term.Handle`（`tools.go:1159`，与 terminal 共享同一后端） | 容器内读写文件 | 写配置文件、读取参考材料、修改镜像内已有配置 |
+
+### 5.2 条件工具集
+
+| 占位符 | 工具实际名称 | 工具类型 | 代码位置 | 启用条件 | 用途 / 调用时机 |
+|---|---|---|---|---|---|
+| `{{.SearchGuideToolName}}` | `search_guide` | `SearchVectorDbToolType` | 常量 `registry.go:35`；定义 `registry.go:276-284`；参数 `SearchGuideAction`（`args.go:172`）；handler `guide.Handle`（`tools.go:1198`） | `guide.IsAvailable()`（`tools.go:1194`，即 GuideTool 构造成功，依赖 embedder / 向量库就绪） | **指南向量库检索**。安装前查询"团队是否已有此工具/此环境的部署指南"；1-5 条英语语义查询，按 `type`（install/configure/use/...）严格过滤。prompt 在 `<primary_action>` 中将其设为**默认首选动作** |
+| `{{.StoreGuideToolName}}` | `store_guide` | `StoreVectorDbToolType` | 常量 `registry.go:36`；定义 `registry.go:285-290`；参数 `StoreGuideAction`（`args.go:178`）；handler `guide.Handle`（`tools.go:1197`） | 同上 | **指南向量库写入**。仅当产出"记忆中尚不存在"的全新安装方法时调用（prompt `<secondary_action>` 明令）；强制匿名化（IP / 域名 / 凭据 / 路径替换为 `{target_ip}` 等占位符） |
+| `{{.BrowserToolName}}` | `browser` | `SearchNetworkToolType` | 常量 `registry.go:23`；定义 `registry.go:210-214`；参数 `Browser`（`args.go:31`）；handler `browser.Handle`（`tools.go:1178`） | `browser.IsAvailable()`（`tools.go:1176`，即 Scraper 服务可达） | 浏览器抓取网页内容（markdown/html/links） |
+
+> 备注：`browser` 工具在 `tools.go:1176-1179` 会被条件注册到 installer executor，但**本模板文案未引用** `{{.BrowserToolName}}`（变量表 `templates.go:181-200` 也无此项）。因此 installer 是否"知道"自己有浏览器取决于 LLM 对工具 schema 的感知，而非 prompt 文本引导——这与 coder 的情况一致，是个值得注意的文案缺口（见末尾"待确认事项"）。
+
+### 5.3 伪工具名（仅出现在 prompt 文案，不可调用）
+
+| 占位符 | 字面值 | 代码位置 | 性质 |
+|---|---|---|---|
+| `{{.SummarizationToolName}}` | `execute_task_and_return_summary` | `cast/chain_ast.go:18` | **不是注册工具**，是 chainAST 摘要系统使用的占位名。摘要历史时，系统会用这个名字伪装一次"工具调用"以保留结构。本模板文案引用它的目的是让 installer **识别历史摘要中的该标记**，并明令"禁止自行调用、禁止用纯文本模仿其格式"（详见模板"摘要感知协议"段）。 |
+
+## 6. 非工具占位符
+
+注册声明见 `templates/templates.go:181-200`，全部由 `GetInstallerHandler` 在 `handlers.go:367-386` 集中注入。
+
+| 占位符 | 数据来源 | 注入代码位置 | 注入信息 | 用途 |
+|---|---|---|---|---|
+| `{{.SummarizedContentPrefix}}` | `csum.SummarizedContentPrefix`（`csum/chain_summary.go:48`） | `handlers.go:377`（注入前 `strings.ReplaceAll(..., "\n", "\\n")` 转义） | 转义后的前缀字符串 | 摘要感知协议的识别标记：模板指示 installer 把以此前缀开头的 AI Completion 视为历史摘要，禁止自身复现该前缀 |
+| `{{.DockerImage}}` | `fp.image` | `handlers.go:378` | 容器镜像名（如 `kalilinux/kali-rolling`、`ubuntu:22.04`） | 告知 installer 当前运行时的镜像基底，影响其选择安装命令的发行版语法（apt / apk / yum） |
+| `{{.Cwd}}` | `docker.WorkFolderPathInContainer` | `handlers.go:379` | 容器内工作目录绝对路径 | 作为所有文件操作的基准路径；prompt 在"任务材料"段用它拼接 `{{.Cwd}}/uploads` 和 `{{.Cwd}}/resources` 只读目录、`{{.Cwd}}/` 可写目录，并在终端协议中要求"每条命令前显式切目录" |
+| `{{.ContainerPorts}}` | `fp.getContainerPortsDescription()`（`helpers.go:863-927`） | `handlers.go:380` | 多行文本：按 host / bridge 网络模式列出端口映射与回调用法 | 对 installer 主要约束"不得通过 Docker 镜像装软件 / 无 Docker 宿主机访问"，并提示可用端口范围 |
+| `{{.ExecutionContext}}` | `executionContext` ← `fp.getExecutionContext(ctx, taskID, subtaskID)`（`helpers.go:764`） | `handlers.go:381` | 渲染自 `PromptTypeShortExecutionContext` 的结构化 XML，优先级 subtaskID → taskID → flow；包含当前 Flow/Task/SubTask 的 ID/状态/标题/描述、已完成与计划中的兄弟子任务 | 让 installer 知道"本次委派发生在哪条任务支线上、上下游做过什么、还计划做什么"，从而避免重复安装、对齐当前 subtask 目标 |
+| `{{.Lang}}` | `fp.language` | `handlers.go:382` | 任务工作语言代码（如 `zh` / `en`） | **双通道语言策略的锚点**：所有 `message` 日志条目（含 `maintenance_result.result` 与 `message`）按此语言书写，所有技术通道字段仍保持英语。在"语言策略"与"完成要求"两段被反复引用 |
+| `{{.CurrentTime}}` | `getCurrentTime()`（`helpers.go:929-931`） | `handlers.go:383` | 格式化时间字符串（`2006-01-02 15:04:05`） | 注入执行时间戳，供 installer 判断日志时序、超时窗口（默认 120s / 硬上限 20min）等时间敏感决策参考 |
+| `{{.ToolPlaceholder}}` | 常量 `ToolPlaceholder`（`providers/provider.go:32`，值 `"Execute operations via function invocation - textual responses are not acceptable for task completion."`） | `handlers.go:384` | 固定约束文案 | 追加在 system prompt 最末尾的通用硬性约束，强制 LLM 走结构化工具调用而非纯文本模拟；与其他所有 agent 共用同一常量 |
+| `{{.UserFiles}}` | `fp.userFilesListing()`（`provider.go:232-237`） | `handlers.go:385` | uploads/ 与 resources/ 目录的 XML 文件清单（只读）；无任何文件时返回空字符串 | 模板用 `{{if .UserFiles}}` 包住整段"任务材料"协议：**无附件则整段不渲染**；有附件时告知 installer 这批文件（脚本、软件包、配置文件）在容器内的只读路径，以及"修改后的副本要写回 `{{.Cwd}}/`"的规则 |
+
+**关键设计观察：**
+
+- **`search_guide` 是 installer 的事实主入口**：prompt 在 `<memory_protocol>` 中把 `search_guide` 设为 `<primary_action>`（始终先查）、`store_guide` 设为 `<secondary_action>`（仅新建时写）。这与 coder 把 `search_code` 作为代码资产入口是对称设计——installer 的"机构记忆"沉淀在 guide 切片。
+- **`{{.Cwd}}` 的高复用度**：单一份额占位符同时驱动运行环境段、终端协议段、任务材料段（uploads / resources / 可写目录）共四处文案，是连接"运行时事实"与"prompt 指令"的核心纽带。
+- **`{{.ToolPlaceholder}}` 与 `{{.SummarizationToolName}}` 构成防伪造双重锁**：前者从正面要求"必须用结构化工具调用"，后者从反面列出"历史摘要的两种形态（伪工具调用 + 前缀 Completion）"并禁止复现，二者协同防止 LLM 用纯文本"假装"执行过工具。
+- **无整段条件开关**：与 coder/pentester 拥有 `{{.GraphitiEnabled}}`（控制约 70 行协议生灭）不同，installer 唯一的条件分支是 `{{if .UserFiles}}`（控制任务材料段），模板主体始终全量渲染——形态更稳定，但也意味着 installer 的能力集是"静态"的。
+
+---
+
+## 待确认事项（查缺补漏，非本次任务范围）
+
+调研中发现两处值得复核的不一致，供后续判断：
+
+1. **收尾工具 schema 与反序列化目标类型不匹配**：`maintenance_result` 的工具 schema 反射的是 `TaskResult`（`registry.go:350`，含 `Success Bool` 字段），但 `performInstaller` 的内联收尾闭包反序列化的目标是 `MaintenanceResult`（`performers.go:461`、`:489`，**无 `Success` 字段**）。后果：LLM 若按 schema 输出 `success` 字段，会被 `json.Unmarshal` 静默丢弃，installer 收尾时实际无法读取成功/失败标志——`performInstaller` 只返回 `maintenanceResult.Result`（`:537`），从不读 success。这与 coder/pentester（schema 与目标类型一致）形成对比，疑似历史遗留。`pentester` 的 `hack_result` 同样用独立结构体 `HackResult`，但它的 schema 也反射 `HackResult`（`registry.go:367-370`），唯独 installer 的 schema 用了通用的 `TaskResult`。
+
+2. **`browser` 工具注册但文案未引导**：installer executor 在 `tools.go:1176-1179` 条件注册了 `browser`，但模板变量表与文案均未出现 `{{.BrowserToolName}}`。installer 实际能调浏览器（查下载页、读官方文档），但 prompt 层面没有引导——是否应补占位符与使用说明，取决于产品对 installer 浏览器能力的预期定位。

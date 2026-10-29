@@ -209,6 +209,7 @@ spawn 模式偶尔失败（`Failed to spawn: unable to connect to remote frida-s
 | `unable to connect` | adb 连接不稳定 | `adb kill-server && adb start-server` |
 | `process crashed` | 应用检测到 Frida | 反检测措施见 `$AGENT_DIR/knowledge-base/mobile-frida.md` |
 | 间歇性失败 | 设备性能不足或 frida-server 竞争 | 重试 2-3 次；如果持续失败，改 attach + 手动先 kill 再 attach |
+| Android 10 上稳定复现 `remote connection error` | frida < 17.15.2 的已知 bug（XOM 使 libstagefright execute-only，payload 无法运行） | 升级 frida/frida-server 到 ≥17.15.2，无需绕 |
 
 ---
 
@@ -294,3 +295,67 @@ Interceptor.attach(libflutter.base.add(PEER_EXTRACTOR_OFFSET), {
 
 console.log("[+] Flutter SSL bypass script loaded");
 ```
+
+---
+
+## 7. 替代路线：BoringSSL 验证函数模式扫描法
+
+TrustBuiltinRoots 借鸡生蛋法（§2-§6）依赖逆向定位偏移。社区标准替代方案是 **disable-flutter-tls**（NVISOsecurity 维护，Frida Codeshare: `TheDauntless/disable-flutter-tls-v1`）：
+
+```bash
+frida -U -f com.example.target --codeshare TheDauntless/disable-flutter-tls-v1 --no-pause
+```
+
+- **目标函数**：BoringSSL `ssl_verify_peer_cert`（handshake.cc）——证书校验的总入口
+- **定位方式**：内存字节模式匹配，内置 arm64/arm/x64/x86 × Android/iOS 的 pattern 集，无需手工逆向偏移
+- **bypass**：替换实现恒返回 0（校验通过）
+- **版本适配**：pattern 随 Flutter SDK 版本变化，脚本更新滞后时旧 pattern 匹配失败——此时回落到 reFlutter 或 §6 手工偏移法
+
+### 7.1 timing 陷阱：库未加载完导致静默失败
+
+Frida attach 时 `libflutter.so` 可能尚未加载完 → 模式匹配跑空、脚本无报错退出 → **看似加载了 bypass 实际未生效**。自写脚本必须带重试：
+
+```javascript
+function tryHook() {
+    var mod = Process.findModuleByName("libflutter.so");
+    if (!mod) return false;
+    // 执行 pattern 扫描 + hook...
+    return true;
+}
+var attempts = 0;
+var timer = setInterval(function () {
+    if (tryHook() || ++attempts >= 5) clearInterval(timer);
+}, 1000);
+```
+
+---
+
+## 8. Java 层组合 hook（与 Flutter bypass 同时加载）
+
+**为什么必须双层**：部分 app 在 Flutter 初始化前，通过 Java/WebView 层做连接性检查——该检查走 Android 证书链（API 24+ 不信任用户安装的 CA）。只 patch Flutter 层时：BoringSSL 已放行，但 Java 层先拒绝了连接，app 显示 "no internet"（不是 SSL 错误）。
+
+Java 层五个 hook 点（一个脚本全覆盖）：
+
+| # | Hook 点 | 作用 |
+|---|--------|------|
+| 1 | `X509TrustManager` 自定义实现注册 | checkClientTrusted/checkServerTrusted/getAcceptedIssuers 全空实现 |
+| 2 | `SSLContext.init()` | 拦截初始化，把 bypass TrustManager 注入**所有** SSLContext（含第三方库内部创建的） |
+| 3 | `HostnameVerifier` | 恒返回 true——证书校验与主机名校验是两步，过前者仍会被后者拦 |
+| 4 | `WebViewClient.onReceivedSslError` | 改调 `handler.proceed()`，否则 app 内 WebView 遇 Burp 证书直接停载 |
+| 5 | `InAppWebViewClient`（flutter_inappwebview 插件） | **必须按完整类名单独 hook**：插件注册自己的 WebViewClient 子类 `com.pichillilorenzo.flutter_inappwebview_android.webview.in_app_webview.InAppWebViewClient`，hook 父类 WebViewClient 对它无效 |
+
+第 5 点的类可能不存在（app 未用该插件），`Java.use()` 裸调用会抛异常炸掉整个脚本——每个 hook 点独立 try/catch。
+
+TrustManager/SSLContext/HostnameVerifier 的完整 hook 代码见 `$AGENT_DIR/knowledge-base/mobile-patterns.md` SSL Pinning 小节（通用模板一致）。
+
+---
+
+## 9. 排错速查（组合场景）
+
+| 现象 | 根因 | 处理 |
+|------|------|------|
+| bypass 脚本加载无报错，但流量抓不到 | libflutter.so 未加载完，pattern 跑空（§7.1） | 加重试逻辑；或 spawn 模式重跑 |
+| app 显示 "no internet"（非证书报错） | Java/WebView 层连接检查先于 Flutter 初始化被拒（§8） | Flutter + Java 双脚本同时加载 |
+| WebView 页面加载不出来，其余流量正常 | InAppWebViewClient 子类未被 hook（§8 第 5 点） | 按完整类名补 hook |
+| Burp 报 "Client request violates HTTP protocol" | iptables 重定向后 app 发 raw TCP 无 CONNECT 握手 | Burp listener 开 invisible proxying 模式 |
+| Burp Event Log 全空 | 流量根本没到 Burp | 设备上 tcpdump 看实际去向，再决定 iptables/DNSChef |

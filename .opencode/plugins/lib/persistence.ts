@@ -4,11 +4,21 @@ import {
   RESUME_COOLDOWN_STEP_MS,
   RESUME_COOLDOWN_MAX_MS,
   ABORTED_ERROR_NAME,
-  AGENT_SECURITY_ANALYSIS_EVOLVE,
+  SECURITY_ANALYSIS_AGENTS,
+  ENV_KEY_RESUME_ANALYSIS,
 } from "./constants";
 import { ctx } from "./context";
 import { debugLog } from "./logging";
-import { getTaskDir } from "./task-session";
+import { SessionData } from "./session-manager";
+import StringUtils from "./string-utils";
+import { fetchConfig, getCachedConfig } from "./control-config";
+import {
+  sendReflection,
+  isReflectEnabled,
+  isReflectionDue,
+  activeMinutesSinceReflection,
+  generateCompletionMarker,
+} from "./reflection";
 
 // ─── 完成标记（动态生成 + 精确匹配）──────────────────────────────
 //
@@ -22,42 +32,44 @@ import { getTaskDir } from "./task-session";
 // 这样能阻止 LLM 通过"模仿格式"（自己造一个 >>>COMPLETE-yyyy<<<）绕过完成检测，
 // 强制它必须原样复制本次植入的具体值。
 
+// 生成动态完成标记的实现在 lib/reflection.ts（generateCompletionMarker，
+// 与反思唤醒共用；移入 reflection 以避免 persistence ↔ reflection 循环依赖）。
+
 // prompt 模板里的占位符，会被 getResumePrompt() 替换成动态生成的 marker。
 // 用双下划线包裹避免与正常文本混淆。
 const COMPLETION_MARKER_PLACEHOLDER = "__COMPLETION_MARKER__";
-
-// 生成动态完成标记。4 位 hex = 65536 种组合，LLM 瞎猜中的概率可忽略。
-function generateCompletionMarker(): string {
-  const hash = Math.floor(Math.random() * 0x10000)
-    .toString(16)
-    .padStart(4, "0");
-  return `>>>COMPLETE-${hash}<<<`;
-}
 
 // 多条语义等价的恢复提示词模板：每次随机选用且不与上次相同，
 // 避免反复发送同一文本导致 LLM 习惯性"皮掉"、不再继续分析。
 // 模板内的 __COMPLETION_MARKER__ 占位符会在 getResumePrompt() 中
 // 被替换为本次动态生成的 marker（同一条 prompt 内所有占位符共用同一个 marker）。
+const RESUME_PROMPT_PART1 =
+  "**没有想法就找想法，没有思路就找思路，没有方案就找方案，继续做、继续想、继续分析直到完成，不要告诉我你不行！**";
 const RESUME_PROMPTS: string[] = [
   `你之前的分析是否已经完成了？**你必须要如实回答和执行**：\n` +
-  `- 如果已经完成：请直接输出最终结论，然后在最后一行精确输出这个标记（原样复制，不要修改）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
-  `- 如果尚未完成：不论任何原因只要未完成，你都必须自主继续分析，不要停下来向我提问，因为我没有任何想法，但是我需要你给我解决问题。你复盘一下之前的分析内容、结果，然后继续分析，直到完成为止。未完成的情况下绝对不允许输出 ${COMPLETION_MARKER_PLACEHOLDER} 标记。`,
+    `- 如果已经完成：请直接输出最终结论，然后在最后一行精确输出这个标记（原样复制，不要修改）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
+    `- 如果尚未完成：不论任何原因只要未完成，你都必须自主继续分析，不要停下来向我提问，因为我没有任何想法，但是我需要你给我解决问题。你复盘一下之前的分析内容、结果，然后继续分析，直到完成为止。未完成的情况下绝对不允许输出 ${COMPLETION_MARKER_PLACEHOLDER} 标记。\n\n` +
+    `${RESUME_PROMPT_PART1}`,
 
   `请确认此前的分析工作是否已经全部完成。**必须如实回答并严格执行**：\n` +
-  `- 若已完成：直接给出最终结论，并在末尾单独一行原样输出该标记（切勿改动）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
-  `- 若未完成：无论出于何种原因，都必须自行接着分析下去，不得向我提问，因为我没有任何想法，但是我需要你给我解决问题，你解决问题你才有意义。你先回顾之前的分析内容与结论，再继续推进直至全部完成。未完成时严禁输出 ${COMPLETION_MARKER_PLACEHOLDER}。`,
+    `- 若已完成：直接给出最终结论，并在末尾单独一行原样输出该标记（切勿改动）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
+    `- 若未完成：无论出于何种原因，都必须自行接着分析下去，不得向我提问，因为我没有任何想法，但是我需要你给我解决问题，你解决问题你才有意义。你先回顾之前的分析内容与结论，再继续推进直至全部完成。未完成时严禁输出 ${COMPLETION_MARKER_PLACEHOLDER}。\n\n` +
+    `${RESUME_PROMPT_PART1}`,
 
   `你先前的分析完成了吗？**务必如实回答并照做**：\n` +
-  `- 已完成的话：请直接产出最终结论，随后在最后一行一字不差地输出以下标记（不得修改）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
-  `- 尚未完成的话：不管什么原因，你都要自主把分析继续下去，不要停下来问我，因为我没有任何想法，但是我需要你给我解决问题，你想想接下来怎么办。你梳理一下已有的分析内容与结果，接着往下做，直到真正完成。只要还没完成，就绝对不可以输出 ${COMPLETION_MARKER_PLACEHOLDER}。`,
+    `- 已完成的话：请直接产出最终结论，随后在最后一行一字不差地输出以下标记（不得修改）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
+    `- 尚未完成的话：不管什么原因，你都要自主把分析继续下去，不要停下来问我，因为我没有任何想法，但是我需要你给我解决问题，你想想接下来怎么办。你梳理一下已有的分析内容与结果，接着往下做，直到真正完成。只要还没完成，就绝对不可以输出 ${COMPLETION_MARKER_PLACEHOLDER}。\n\n` +
+    `${RESUME_PROMPT_PART1}`,
 
   `请判断此前的分析是否已结束。**你必须诚实回答并按以下执行**：\n` +
-  `- 已结束：请直接陈述最终结论，并在最后一行精确地原样输出这个标记（不要做任何修改）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
-  `- 未结束：任何情况下只要还没做完，都得自主继续分析，不允许停下来征求我的意见，因为我没有任何想法，但是我需要你给我解决问题，你多想想。请你复盘此前分析的内容和结果，然后继续，直到彻底完成。尚未完成时绝不允许输出 ${COMPLETION_MARKER_PLACEHOLDER}。`,
+    `- 已结束：请直接陈述最终结论，并在最后一行精确地原样输出这个标记（不要做任何修改）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
+    `- 未结束：任何情况下只要还没做完，都得自主继续分析，不允许停下来征求我的意见，因为我没有任何想法，但是我需要你给我解决问题，你多想想。请你复盘此前分析的内容和结果，然后继续，直到彻底完成。尚未完成时绝不允许输出 ${COMPLETION_MARKER_PLACEHOLDER}。\n\n` +
+    `${RESUME_PROMPT_PART1}`,
 
   `分析任务完成了吗？**请如实回答并严格执行如下要求**：\n` +
-  `- 倘若已完成：直接输出最终结论，最后单独一行原样复制此标记（一字不改）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
-  `- 倘若未完成：不论任何缘由，你都必须独立继续分析，切勿来询问我，因为我没有任何想法，但是我需要你给我解决问题，不要罢工。你回顾前面的分析内容与结果，继续推进直到完成。在未完成时，绝不可输出 ${COMPLETION_MARKER_PLACEHOLDER}。`,
+    `- 倘若已完成：直接输出最终结论，最后单独一行原样复制此标记（一字不改）：${COMPLETION_MARKER_PLACEHOLDER}\n` +
+    `- 倘若未完成：不论任何缘由，你都必须独立继续分析，切勿来询问我，因为我没有任何想法，但是我需要你给我解决问题，不要罢工。你回顾前面的分析内容与结果，继续推进直到完成。在未完成时，绝不可输出 ${COMPLETION_MARKER_PLACEHOLDER}。\n\n` +
+    `${RESUME_PROMPT_PART1}`,
 ];
 
 // 记录上一次使用的恢复提示词索引，保证本次与上次不重复，缓解 LLM 对同一提示词"皮掉"的问题。
@@ -83,7 +95,10 @@ function getResumePrompt(): ResumePromptResult {
   lastResumePromptIndex = idx;
   // 同一条 prompt 内多个占位符必须替换为同一个 marker，否则 LLM 会困惑
   const marker = generateCompletionMarker();
-  const prompt = RESUME_PROMPTS[idx].replaceAll(COMPLETION_MARKER_PLACEHOLDER, marker);
+  const prompt = RESUME_PROMPTS[idx].replaceAll(
+    COMPLETION_MARKER_PLACEHOLDER,
+    marker,
+  );
   return { prompt, marker };
 }
 
@@ -104,10 +119,14 @@ async function checkLastMessageAborted(sessionID: string): Promise<boolean> {
       .reverse()
       .find((m: { info?: { role?: string } }) => m?.info?.role === "assistant");
     if (!lastAssistant) return false;
-    const info = (lastAssistant as { info?: { error?: { name?: string } } }).info;
+    const info = (lastAssistant as { info?: { error?: { name?: string } } })
+      .info;
     return info?.error?.name === ABORTED_ERROR_NAME;
   } catch (e) {
-    debugLog(`checkLastMessageAborted: 查询异常 sessionID=${sessionID} error=${e}`, sessionID);
+    debugLog(
+      `checkLastMessageAborted: 查询异常 sessionID=${sessionID} error=${e}`,
+      sessionID,
+    );
     return false;
   }
 }
@@ -124,35 +143,69 @@ async function getLastAssistantText(sessionID: string): Promise<string | null> {
     const lastAssistant = [...messages]
       .reverse()
       .find((m: { info?: { role?: string } }) => m?.info?.role === "assistant");
-    if (!lastAssistant) return null;
+    if (!lastAssistant) {
+      debugLog(
+        `getLastAssistantText: 未能查到 role === "assistant" 的信息`,
+        sessionID,
+      );
+      return null;
+    }
     const parts = (
       lastAssistant as { parts?: Array<{ type?: string; text?: string }> }
     ).parts;
-    if (!parts || !Array.isArray(parts)) return null;
-    return parts
+    if (!parts || !Array.isArray(parts)) {
+      debugLog(
+        `getLastAssistantText: 最后一个 assistant 角色的信息没有 parts: ${StringUtils.toStringSafe(lastAssistant)}`,
+        sessionID,
+      );
+      return null;
+    }
+    const result = parts
       .filter((p) => p.type === "text" && p.text)
       .map((p) => p.text!)
       .join("\n");
+
+    debugLog(`getLastAssistantText: 结果: ${result}`, sessionID);
+    return result;
   } catch (e) {
-    debugLog(`getLastAssistantText: 查询异常 sessionID=${sessionID} error=${e}`, sessionID);
+    debugLog(
+      `getLastAssistantText: 查询异常 sessionID=${sessionID} error=${e}`,
+      sessionID,
+    );
     return null;
   }
 }
 
-/** 发送 resume prompt 并记录状态。从 maybeResumeAnalysis 和冷却 setTimeout 回调两处调用。
+// ─── 反思唤醒（空闲通道）──────────────────────────────────────────
+// 实现收口在 lib/reflection.ts（与忙时纸条共用开关/到期/守卫/状态更新）；
+// 本文件仅在 maybeResumeAnalysis 的统一注入器判定中调用 sendReflection。
+
+/** 发送 resume prompt 并记录状态。仅从 maybeResumeAnalysis 调用（冷却 setTimeout 回调
+ *  也改为重入 maybeResumeAnalysis 全量校验，不再直接调用此处）。
  *  内部通过 get 获取最新 session——setTimeout 回调可能延迟很久，闭包捕获的 session 可能已失效。 */
-async function sendResume(sessionID: string): Promise<void> {
+async function sendResume(session: SessionData): Promise<void> {
+  const sessionID = session.sessionID;
   if (!ctx.client) {
-    debugLog(`sendResume: ctx.client 不可用，跳过 sessionID=${sessionID}`, sessionID);
+    debugLog(
+      `sendResume: ctx.client 不可用，跳过 sessionID=${sessionID}`,
+      sessionID,
+    );
     return;
   }
-  const session = ctx.sessionManager.get(sessionID);
-  if (!session || !session.isSecurityAgent()) {
-    debugLog(`sendResume: session 不存在或非 Security Agent，跳过 sessionID=${sessionID}`, sessionID);
-    return;
-  }
-  debugLog(`session.idle: 恢复分析 sessionID=${sessionID} agent=${session.agentName} resumeCount=${session.resumeCount}`, sessionID);
+
   const { prompt, marker } = getResumePrompt();
+
+  debugLog(
+    `session.idle: 恢复分析 sessionID=${sessionID} agent=${session.agentName} resumeCount=${session.resumeCount}, marker=${marker}, prompt=${prompt}`,
+    sessionID,
+  );
+
+  // marker——下一轮 idle 用它做精确完成检测。
+  session.resumePrompt = prompt;
+  session.resumeMarker = marker;
+  session.resumeCount++;
+  session.lastResumeAt = Date.now();
+
   await ctx.client.session.promptAsync({
     path: { id: sessionID },
     body: {
@@ -160,36 +213,61 @@ async function sendResume(sessionID: string): Promise<void> {
       parts: [{ type: "text" as const, text: prompt, synthetic: true }],
     },
   });
-  // 发送成功后才记录 marker——下一轮 idle 用它做精确完成检测。
-  session.resumeMarker = marker;
-  session.resumeCount++;
-  session.lastResumeAt = Date.now();
-  debugLog(`session.idle: 恢复消息已发送 sessionID=${sessionID} marker=${marker}`, sessionID);
+
+  debugLog(
+    `session.idle: 恢复消息已发送 sessionID=${sessionID} marker=${marker}`,
+    sessionID,
+  );
 }
 
-export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
+export async function maybeResumeAnalysis(
+  sessionID: string,
+  viaCooldownTimer = false,
+): Promise<void> {
   try {
-    const session = ctx.sessionManager.requireSecurityAgent("session.idle", sessionID);
+    // 配置读取收口到 control-config（HTTP /api/config 直读）：
+    // fail-closed 语义——控制台不可达时 fetchConfig throw，由本函数外层 catch
+    // 记录（session.idle: 恢复异常）并跳过本轮注入，不基于陈旧缓存发消息。
+    // 注意：resume 开关的判定下移到 resume 专属分支之前——反思唤醒有独立开关
+    // （REFLECT_NUDGE_ENABLED），不能被 RESUME_ANALYSIS_ENABLED 连带门禁。
+    await fetchConfig();
+
+    const session = ctx.sessionManager.requireSecurityAgent(
+      "session.idle",
+      sessionID,
+    );
     if (!session) {
-      debugLog(`session.idle: 跳过恢复 — 非 Security Agent sessionID=${sessionID}`, sessionID);
+      debugLog(
+        `session.idle: 跳过恢复 — 非 Security Agent sessionID=${sessionID}`,
+        sessionID,
+      );
       return;
     }
 
-    if (session.agentName === AGENT_SECURITY_ANALYSIS_EVOLVE) {
-      debugLog(`session.idle: 跳过恢复 — evolve agent 不做分析工作, sessionID=${sessionID}`, sessionID);
+    if (!SECURITY_ANALYSIS_AGENTS.includes(session.agentName)) {
+      debugLog(
+        `session.idle: 跳过恢复 — 非分析 agent：${session.agentName}`,
+        sessionID,
+      );
       return;
     }
 
-    const taskDir = getTaskDir(sessionID);
+    const taskDir = session.getTaskDir();
     if (!taskDir) {
-      debugLog(`session.idle: 跳过恢复 — 无 taskDir（非正式分析任务）, sessionID=${sessionID}`, sessionID);
+      debugLog(
+        `session.idle: 跳过恢复 — 无 taskDir（非正式分析任务）, sessionID=${sessionID}`,
+        sessionID,
+      );
       return;
     }
 
     const elapsed = Date.now() - session.lastUserMessageAt;
     const maxDuration = getMaxDuration();
     if (elapsed >= maxDuration) {
-      debugLog(`session.idle: 跳过恢复 — 已超时 sessionID=${sessionID} elapsed=${Math.floor(elapsed / 60000)}m max=${Math.floor(maxDuration / 60000)}m`, sessionID);
+      debugLog(
+        `session.idle: 跳过恢复 — 已超时 sessionID=${sessionID} elapsed=${Math.floor(elapsed / 60000)}m max=${Math.floor(maxDuration / 60000)}m`,
+        sessionID,
+      );
       return;
     }
 
@@ -200,44 +278,141 @@ export async function maybeResumeAnalysis(sessionID: string): Promise<void> {
 
     const wasAborted = await checkLastMessageAborted(sessionID);
     if (wasAborted) {
-      debugLog(`session.idle: 跳过恢复 — 用户手动中断, sessionID=${sessionID}`, sessionID);
+      // 用户中断 = 明确的停止意图。必须同时取消冷却定时器——否则冷却分支
+      // 此前武装的 pendingResumeTimer 会在几秒后到期发恢复消息，
+      // 出现"用户按 Esc 后分析仍被复活"（定时器盲发绕过中断检测）。
+      const cleared = session.clearPendingResume();
+      debugLog(
+        `session.idle: 跳过恢复 — 用户手动中断${cleared ? "，已取消冷却定时器" : ""}, sessionID=${sessionID}`,
+        sessionID,
+      );
       return;
     }
 
     const lastText = await getLastAssistantText(sessionID);
     // 精确匹配：只有 session.resumeMarker 存在时才检测，且必须原样包含本次植入的具体值。
     // 不存在则跳过检测（首次恢复场景：上一轮没植入过 marker）。
-    if (session.resumeMarker && lastText && lastText.includes(session.resumeMarker)) {
-      debugLog(`session.idle: 跳过恢复 — 检测到完成标记 ${session.resumeMarker}, sessionID=${sessionID}`, sessionID);
+    if (
+      session.resumeMarker &&
+      lastText &&
+      lastText.includes(session.resumeMarker)
+    ) {
+      // 固化完成态：完成检测基于"最后一条 assistant 文本"，该文本会被后续上下文压缩的
+      // 摘要覆盖 → 仅靠文本检测会 完成→压缩→续跑 死循环。置粘性标记跨压缩保持。
+      session.resumeCompletedAt = Date.now();
+      debugLog(
+        `session.idle: 跳过恢复 — 检测到完成标记 ${session.resumeMarker}（已固化完成态）, sessionID=${sessionID}`,
+        sessionID,
+      );
+      return;
+    }
+
+    // 粘性完成态（含"完成 → 上下文压缩摘要覆盖 lastText"的情形）：本轮已完成且此后无
+    // 真实用户消息 → 抑制唤醒/续跑，等待用户开启新一轮。压缩只改文本、不改本状态。
+    if (session.isAnalysisCompleted()) {
+      debugLog(
+        `session.idle: 跳过恢复 — 本轮分析已完成（等待用户新消息）, sessionID=${sessionID}`,
+        sessionID,
+      );
+      return;
+    }
+
+    debugLog(
+      `session.idle: 未检测到完成标记 ${session.resumeMarker}, sessionID=${sessionID}, lastText=${lastText}`,
+      sessionID,
+    );
+
+    // ── 统一注入器：反思到期 → 发唤醒消息（优先于 resume；唤醒自带续接指令，本次不再发 resume） ──
+    if (isReflectEnabled() && isReflectionDue(session)) {
+      debugLog(
+        `session.idle: 反思到期（净活跃 ${activeMinutesSinceReflection(session)}min ≥ 间隔），优先发反思唤醒 sessionID=${sessionID}`,
+        sessionID,
+      );
+      await sendReflection(session);
+      return;
+    }
+    if (!isReflectEnabled()) {
+      debugLog(`session.idle: 反思开关禁用，走 resume 路径 sessionID=${sessionID}`, sessionID);
+    }
+
+    // ── resume 专属开关（原位于函数最顶部；下移至此，避免门禁反思唤醒） ──
+    // 生效值（默认开启）由服务端经 /api/config 返回; 未取到 → 不启用（fail-safe）
+    const enabledRaw = getCachedConfig()[ENV_KEY_RESUME_ANALYSIS];
+    if (enabledRaw === undefined || enabledRaw === "") {
+      debugLog(
+        `session.idle: 跳过恢复 — ${ENV_KEY_RESUME_ANALYSIS} 未取到生效值（服务端未声明默认或控制台不可达），恢复功能不启用 sessionID=${sessionID}`,
+        sessionID,
+      );
+      return;
+    }
+    if (enabledRaw === "0" || enabledRaw.toLowerCase() === "false") {
+      debugLog(
+        `session.idle: 跳过恢复 — 开关已禁用 (${ENV_KEY_RESUME_ANALYSIS}=${enabledRaw}) sessionID=${sessionID}`,
+        sessionID,
+      );
       return;
     }
 
     const resumeCount = session.resumeCount;
     if (resumeCount >= MAX_RESUMES) {
-      debugLog(`session.idle: 跳过恢复 — 已达最大恢复次数 ${MAX_RESUMES} sessionID=${sessionID}`, sessionID);
+      debugLog(
+        `session.idle: 跳过恢复 — 已达最大恢复次数 ${MAX_RESUMES} sessionID=${sessionID}`,
+        sessionID,
+      );
       return;
     }
+
+    debugLog(
+      `session.idle: 未达最大恢复次数 ${MAX_RESUMES}, resumeCount=${resumeCount}, sessionID=${sessionID}`,
+      sessionID,
+    );
 
     // 冷却判断：基于 resumeCount 的线性退避（1s起，每次+1s，上限10s）。
     // 只影响"快速空转"——AI 认真分析时回复时间 > 冷却阈值，sinceLastResume > cooldown，不会触发延迟。
     const now = Date.now();
     const sinceLastResume = now - session.lastResumeAt;
-    const cooldown = Math.min((session.resumeCount + 1) * RESUME_COOLDOWN_STEP_MS, RESUME_COOLDOWN_MAX_MS);
+    const cooldown = Math.min(
+      (session.resumeCount + 1) * RESUME_COOLDOWN_STEP_MS,
+      RESUME_COOLDOWN_MAX_MS,
+    );
     if (sinceLastResume >= 0 && sinceLastResume < cooldown) {
       const wait = cooldown - sinceLastResume;
-      debugLog(`session.idle: 冷却中，${Math.ceil(wait / 1000)}s 后恢复 sessionID=${sessionID}（backoff=${cooldown / 1000}s resumeCount=${session.resumeCount}）`, sessionID);
+      // 定时器到期重入却再次进入冷却分支，只可能是武装后窗口内又发生过一次
+      // sendResume（lastResumeAt 前移、cooldown 随 resumeCount 变大）。wait > 0
+      // 且 sinceLastResume 随墙钟单调增长，重武装链必然有限次收敛，不是死循环。
+      // 此处打点留痕，便于事后审计异常长的重武装链。
+      debugLog(
+        `session.idle: 冷却中，${Math.ceil(wait / 1000)}s 后恢复 sessionID=${sessionID}` +
+          `（backoff=${cooldown / 1000}s resumeCount=${session.resumeCount}${viaCooldownTimer ? " viaCooldownTimer" : ""}）`,
+        sessionID,
+      );
       session.clearPendingResume();
       session.pendingResumeTimer = setTimeout(() => {
-        session.pendingResumeTimer = null;
-        sendResume(sessionID).catch((e) => {
-          debugLog(`session.idle: 冷却恢复异常 sessionID=${sessionID} error=${e}`, sessionID);
-        });
+        if (session.pendingResumeTimer) {
+          session.pendingResumeTimer = null;
+          // 到期后不直接 sendResume——盲发会绕过中断/开关/完成标记/session 存活
+          // 检查（冷却窗口内用户按 Esc、关开关、删除 session 都会被无视）。
+          // 改为刷新配置后重走完整校验：此时 sinceLastResume ≈ cooldown，
+          // 不会再进入冷却分支（无重入死循环），校验通过即正常发送；
+          // 校验不通过（中断/关开关/已完成/session 已删）则静默终止。
+          fetchConfig()
+            .then(() => maybeResumeAnalysis(sessionID, true))
+            .catch((e) => {
+              debugLog(
+                `session.idle: 冷却恢复异常 sessionID=${sessionID} error=${e}`,
+                sessionID,
+              );
+            });
+        }
       }, wait);
       return;
     }
 
-    await sendResume(sessionID);
+    await sendResume(session);
   } catch (e) {
-    debugLog(`session.idle: 恢复异常 sessionID=${sessionID} error=${e}`, sessionID);
+    debugLog(
+      `session.idle: 恢复异常 sessionID=${sessionID} error=${e}`,
+      sessionID,
+    );
   }
 }

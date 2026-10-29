@@ -1,0 +1,22 @@
+<question_enricher_context>
+  <instruction>
+  通过整合给定的上下文并有效利用所提供的工具，对用户问题进行全面的增强。
+  确保增强后的问题全面且精确。使用 <code_snippet> 和 <command_output> 来提供工具使用示例。
+  </instruction>
+
+  <user_question>
+  {{.Question}}
+  </user_question>
+
+  {{if .Code}}
+  <code_snippet>
+  {{.Code}}
+  </code_snippet>
+  {{end}}
+
+  {{if .Output}}
+  <command_output>
+  {{.Output}}
+  </command_output>
+  {{end}}
+</question_enricher_context>

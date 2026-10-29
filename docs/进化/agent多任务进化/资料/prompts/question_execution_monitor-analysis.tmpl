@@ -1,0 +1,133 @@
+# `question_execution_monitor.tmpl` 分析文档
+
+## 1. 原文件名
+
+`question_execution_monitor.tmpl`（注册键：`PromptTypeQuestionExecutionMonitor = "question_execution_monitor"`）。
+
+## 2. 类型与用途
+
+这是一个 **question 模板**（user prompt 文本生成模板），**不是独立 agent**，也没有自己的 LLM 链。
+
+它属于 adviser 的 **"执行监控"复用模式**——adviser 这条 LLM chain 有三重用途，区别只在于注入到 user prompt 的问题内容来源不同：
+
+1. **主动提问**：执行中的 agent 自己写问题，调 `advice` 工具求助；
+2. **任务规划**：`performTaskPlanner` 渲染 `question_task_planner.tmpl` 生成规划问题；
+3. **执行监控**（本文件）：`performMentor` 渲染本文件，生成"我是否在空转"的进度评估问题。
+
+三者共用同一条 adviser LLM chain（同一 system prompt、同一 user prompt 框架），本文件只是第三种用途的"问题文本生成器"。它把执行中的 agent 的当前任务、角色、历史动作、最近一次工具调用组织成一段结构化提问，让 adviser 以"被求助的专家"身份判断 agent 是否在原地打转、是否该换策略、是否该终止。
+
+## 3. 配对关系
+
+> 注：本节精确化"复用 adviser.tmpl 但不用 question_adviser.tmpl"的说法——源码事实是 `question_adviser.tmpl` **仍在使用**，本文件渲染出的文本被嵌套注入到它的 `{{.Question}}` 占位符中。
+
+实际链路（`handlers.go` 的 `adviserHandler`，handlers.go:150-225）：
+
+- **system prompt**：渲染 `PromptTypeAdviser`（`adviser.tmpl`），注入执行上下文、工具名表、容器信息等。
+- **user prompt 框架**：渲染 `PromptTypeQuestionAdviser`（`question_adviser.tmpl`）。该框架模板的关键占位符是 `{{.Question}}`（question_adviser.tmpl:13），其余还有 `{{.InitiatorAgent}}`、`{{.Enriches}}`、`{{.Code}}`、`{{.Output}}`。
+
+本文件与 `question_adviser.tmpl` 的关系是**嵌套注入**，而非替换：
+
+- `performMentor` 先用本文件渲染出一段完整的执行监控问题文本；
+- 把这段文本塞进 `AskAdvice.Question` 字段；
+- `adviserHandler` 再渲染 `question_adviser.tmpl` 时，其 `{{.Question}}` 占位符被填成上述整段文本。
+
+因此本文件**不是替代** `question_adviser.tmpl`，而是成为它的 `{{.Question}}` 内容来源。agent 主动提问模式下，`{{.Question}}` 来源是 agent 自己写的字段；本模式下，来源是本文件自动生成的文本——这是两种模式的唯一区别。
+
+## 4. 调用时机
+
+**触发位置**：`performer.go:366`，在执行中的 agent **每次工具调用执行完成后**进行检查。
+
+**触发条件**（需同时满足）：
+
+1. `monitor.shouldInvokeMentor(toolCall)` 返回 true（helpers.go:153）；
+2. 执行器中存在 `advice` 工具（`executor.IsFunctionExists(tools.AdviceToolName)`）。
+
+`shouldInvokeMentor` 的判定逻辑是**两类"卡顿信号"任一命中**（helpers.go:158-167）：
+
+- **同工具重复**：同一工具连续调用次数 `sameToolCount >= sameThreshold`；
+- **总量触顶**：本阶段总工具调用次数 `totalCallCount >= totalThreshold`。
+
+两个阈值来自配置（config.go:219-220）：
+
+| 配置项 | 环境变量 | 默认值 | 含义 |
+|---|---|---|---|
+| `ExecutionMonitorSameToolLimit` | `EXECUTION_MONITOR_SAME_TOOL_LIMIT` | 5 | 同一工具连续重复调用阈值 |
+| `ExecutionMonitorTotalToolLimit` | `EXECUTION_MONITOR_TOTAL_TOOL_LIMIT` | 10 | 单阶段总工具调用阈值 |
+
+即默认情况下：某 agent 连续 5 次调同一工具，或累计调 10 次工具，就会触发一次 adviser 进度评审。
+
+**调用函数**：`performMentor`（performers.go:873-955）。它完成渲染后，以 `executor.Execute(ctx, 0, toolCallID, tools.AdviceToolName, "mentor", "", askAdviceJSON)`（performers.go:948）进入 `advice` 工具 handler，观察名标记为 `"mentor"`（与主动提问的默认观察名区分）。
+
+**结果回流**：adviser 返回的分析文本经 `formatEnhancedToolResponse`（helpers.go:1108）包装成 `<enhanced_response><original_result>…</original_result><mentor_analysis>…</mentor_analysis></enhanced_response>`，**替换原工具结果**回送给执行中的 agent，使 agent 在下一步看到 adviser 的进度评估。触发后 `monitor.reset()` 清零计数（helpers.go:171）。
+
+## 5. 工具列表
+
+**无工具声明**。本文件是 question 模板，仅生成发给 adviser 的问题文本，不向任何 agent 暴露工具。工具能力由配对的 `adviser.tmpl`（system prompt）决定，与本文件无关。
+
+## 6. 非工具占位符
+
+8 个占位符，全部在 `performMentor` 构造的 `questionData` map 中注入（performers.go:921-930）。注入时机均为**阈值触发的本次评审瞬间**，数据取自当前执行 agent 的消息链与本次工具调用。
+
+### `{{.SubtaskDescription}}`
+- **注入内容**：当前子任务的描述文本。
+- **来源**：按 `subtaskID` 从数据库查 `subtask.Description`（performers.go:910-915）；`subtaskID` 为 nil 时为空串。
+- **作用**：告诉 adviser "agent 现在背着什么目标"，用于判断是否在朝目标推进。
+- **对应模板位置**：`<my_current_assignment>` 块。
+
+### `{{.AgentType}}`
+- **注入内容**：当前执行 agent 的类型名字符串。
+- **来源**：`string(opt)`，即 `ProviderOptionsType`（如 pentester / coder / installer / searcher 等）。
+- **作用**：让 adviser 知道是哪类专家在求助，结合该角色的能力边界给建议。
+- **对应模板位置**：开篇自述"我是一名 {{.AgentType}} 代理"。
+
+### `{{.AgentPrompt}}`
+- **注入内容**：当前执行 agent 启动时收到的原始角色指令文本（system/user prompt 的 human message 部分）。
+- **来源**：`extractAgentPromptFromChain(chain)`（helpers.go:1077）——从消息链最后一个 section 的 `Header.HumanMessage` 中拼接所有 `TextContent`。
+- **作用**：让 adviser 看到"这个 agent 被要求做什么、有什么约束"，避免给出超出角色能力的建议。
+- **对应模板位置**：`<my_role_and_capabilities>` 块。
+
+### `{{.RecentMessages}}`（range 切片）
+- **注入内容**：最近若干条已完成工具调用的简记，每项为 `{name, msg}`。
+- **来源**：`getRecentMessages(chain)`（helpers.go:961）——从链最后 section 倒序取最近 `extractLastMessagesCount` 条 `RequestResponse` 中已完成工具调用的 `{name, msg}`，再正序返回。
+- **作用**：给 adviser 一个紧凑的"近况摘要"，快速识别重复动作。模板中用 `{{- range .RecentMessages }}` 渲染为 `<message tool_call="{{.name}}">{{.msg}}</message>`。
+- **为空处理**：模板用 `{{- if .RecentMessages }}` 包裹，空则整块省略。
+
+### `{{.ExecutedToolCalls}}`（range 切片）
+- **注入内容**：本阶段已执行的工具调用明细，每项为 `{name, args, result}`。
+- **来源**：`extractToolCallsFromChain(chain)`（helpers.go:1043）——从链最后 section 倒序取最近 `extractToolCallsCount` 条已完成工具调用。
+  - `args`：经 `formatToolCallArguments` 处理——删除 `message` 字段、按键名排序、每字段值 `cutString` 截断至 256 字节，输出为 `<field name="...">…</field>` 序列。
+  - `result`：经 `cutString` 截断至 1024 字节。
+- **作用**：给 adviser 完整的可审计动作轨迹，判断循环 / 空转 / 方向错误。模板渲染为 `<tool_call><name>…</name><arguments>…</arguments><result>…</result></tool_call>`。
+- **为空处理**：`{{- if .ExecutedToolCalls }}` 包裹，空则省略。
+
+### `{{.LastToolName}}`
+- **注入内容**：本次刚执行的工具名。
+- **来源**：`lastToolCall.FunctionCall.Name`——由 `performer.go` 在工具执行后传入 `performMentor`。
+- **作用**：聚焦"最近一步"，让 adviser 重点评估这一步是否有效。
+- **对应模板位置**：`<my_most_recent_action>` 块的 `<tool_name>`。
+
+### `{{.LastToolArgs}}`
+- **注入内容**：本次工具调用的参数（已格式化）。
+- **来源**：`formatToolCallArguments(lastToolCall.FunctionCall.Arguments)`——同样删除 `message` 字段、键名排序、每字段 `cutString` 至 256 字节。
+- **作用**：让 adviser 判断参数是否合理（如终端命令是否漏了 `-x` / `;exit` 等）。模板填入 `<arguments>`。
+- **注意**：`message` 字段被刻意剔除，因为它是面向用户的日志文案，对技术诊断无信息量。
+
+### `{{.LastToolResult}}`
+- **注入内容**：本次工具返回结果（已截断）。
+- **来源**：`cutString(lastToolResult, 4096)`——超过 4096 字节则截断并附 `...[truncated full size is N bytes]`。
+- **作用**：让 adviser 看到这一步的实际产出，据此判断进展。模板填入 `<result>`。
+
+---
+
+### 占位符注入小结
+
+| 占位符 | 类型 | 数据来源 | 截断/处理 |
+|---|---|---|---|
+| `SubtaskDescription` | 字符串 | DB `subtask.Description` | 原样 |
+| `AgentType` | 字符串 | `ProviderOptionsType` | 原样 |
+| `AgentPrompt` | 字符串 | 链最后 section 的 HumanMessage | 原样 |
+| `RecentMessages` | `[]{name,msg}` | 链最后 section 最近 N 条已完成 tool call | 取 `extractLastMessagesCount` 条 |
+| `ExecutedToolCalls` | `[]{name,args,result}` | 链最后 section 最近 M 条已完成 tool call | args 每字段 256B、result 1024B |
+| `LastToolName` | 字符串 | 本次 `toolCall.FunctionCall.Name` | 原样 |
+| `LastToolArgs` | 字符串 | 本次参数经 `formatToolCallArguments` | 每字段 256B、去 message |
+| `LastToolResult` | 字符串 | 本次结果 `cutString(_, 4096)` | 4096B |

@@ -96,7 +96,7 @@ frida-ps -H 127.0.0.1:6655
 
 ```bash
 # iOS 通过 USB 直连，无需端口转发
-# 需要安装 usbmuxd（macOS: brew install usbmuxd）
+# macOS 内建 usbmuxd 服务（无命令行工具，守护进程随系统运行）; Linux 需 usbmuxd 包
 
 # 验证连接
 frida-ps -U
@@ -311,6 +311,38 @@ Interceptor.attach(hook.implementation, {
 | /proc/pid/status 检查 TracerPid | 反反调试 Hook |
 | frida-agent.so 特征 | 使用 frida-gadget 注入方式 |
 | D-Bus 协议特征 | 使用 frida-gadget + 随机端口 |
+
+### 检测线程禁用（pthread_create 拦截）
+
+**场景**：native 层反检测常在 `pthread_create` 创建的独立线程中循环执行（Java 层 hook 和一次性 hook 都压不住），检测到即 kill 进程。
+
+**原语**：replace `pthread_create`，识别"检测线程"特征（`attr == NULL && arg == NULL`）并拒绝创建，其余线程正常放行：
+
+```javascript
+// 检测线程的典型创建形态: pthread_create(&t, NULL, check_fn, NULL)
+// ⚠ frida 17.x: Module.findExportByName 静态方法已移除，必须走 Process 实例
+var p = Process.getModuleByName("libc.so").getExportByName("pthread_create");
+var pthread_create = new NativeFunction(p, "int", ["pointer", "pointer", "pointer", "pointer"]);
+Interceptor.replace(p, new NativeCallback(function(ptr0, ptr1, ptr2, ptr3) {
+    if (ptr1.isNull() && ptr3.isNull()) {
+        console.log("[*] Thread creation blocked (suspected anti-frida checker)");
+        return -1;
+    }
+    return pthread_create(ptr0, ptr1, ptr2, ptr3);
+}, "int", ["pointer", "pointer", "pointer", "pointer"]));
+```
+
+**判定依据**：反检测线程几乎不用自定义 attr、不传 arg（裸函数循环扫描 /proc、端口、maps）；业务线程（音频/GPU/网络）常带参数。误杀表现为 app 功能异常，可放宽为只拦 start_routine 落在可疑 so 范围内的创建请求。
+
+### 现成反检测工具
+
+| 工具 | 用途 |
+|------|------|
+| phantom-frida (`github.com/TheQmaks/phantom-frida`) | 绕过 16 种主流 Frida 检测（端口/线程名/maps/符号等），加载后常规 hook 无需再自带反检测 |
+| Frida CodeShare `@fdciabdul/frida-multiple-bypass` | root 检测 + SSL unpinning 多合一（按需截取段落） |
+| Frida CodeShare `@dzonerzy/Fridantiroot` | rootbeer 等 root 检测库绕过 |
+
+**配合手法**：so 写文件后立即删除（fwrite → unlink）时，hook `fwrite` 在 onEnter 读参数抓内容：`size = args[1].toInt32() * args[2].toInt32(); Memory.readUtf8String(args[0], size)`。
 
 ### Root/越狱检测绕过
 

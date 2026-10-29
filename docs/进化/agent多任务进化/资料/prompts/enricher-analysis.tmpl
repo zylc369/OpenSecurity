@@ -1,0 +1,328 @@
+# enricher.tmpl 详细分析文档
+
+> 源码路径：`pentagi/backend/pkg/templates/prompts/enricher.tmpl`
+> 模板变量定义：`templates/templates.go:344`（`PromptTypeEnricher`）
+> 渲染逻辑：`providers/handlers.go:125`（`enricherHandler` 内渲染 system 模板）
+> 执行逻辑：`providers/performers.go:755`（`performEnricher`，装配工具跑 agent 链）
+> 工具装配：`tools/tools.go:1824`（`GetEnricherExecutor`）
+
+---
+
+## §1 原文件名
+
+| 项 | 值 |
+|----|----|
+| **原文件名** | `enricher.tmpl` |
+| **行数** | 258 行 |
+| **模板类型** | Go `text/template`（`.tmpl`） |
+| **PromptType 常量** | `PromptTypeEnricher = "enricher"`（`templates/templates.go:51`，注释 *adds context and details to requests*） |
+| **Provider 配置类型** | `pconfig.OptionsTypeEnricher = "enricher"`（`pconfig/config.go:148`） |
+| **消息链类型** | `database.MsgchainTypeEnricher`（`performers.go:763`） |
+| **Langfuse evaluator 名** | `"render enricher agent prompts"`（`handlers.go:112`） |
+
+---
+
+## §2 类型与用途：上下文增强专家（adviser 的影子前置）
+
+`enricher.tmpl` 定义的是 **上下文增强专家（Context Enricher / 信息收集 agent）**，是 PentAGI 多 agent 编排体系中一个**对调用方完全透明的影子角色**。
+
+### 2.1 核心定位
+
+enricher 的角色宣言（模板第 3 行）：它是一个**专门的信息收集 agent**，职责是检索 adviser 尚未掌握的额外相关信息。**它绝不自己回答问题**——回答是 adviser 的职责，enricher 只负责把"adviser 缺的事实"挖出来喂给它。
+
+这一定位被模板的多条硬规则固化（`<enhancement_rules>` 段）：
+- `<primary_rule>`：**仅提供 adviser 尚未掌握的额外信息**
+- `<factual_only>`：提供事实、数据与上下文——**而非答案、观点或建议**
+- `<no_duplication>`：不重复用户的问题、代码、输出或执行上下文（adviser 已自动收到这些）
+
+简言之：enricher 是 adviser 的**事实采买员**，不是顾问，不是执行者。
+
+### 2.2 与 adviser 的"一体两面"关系
+
+enricher 和 adviser 构成一对**强绑定的功能双胞**，但职责严格互补：
+
+| 维度 | enricher（本文档） | adviser |
+|------|-------------------|---------|
+| 职责 | 收集补充事实 | 分析推理给建议 |
+| 工具 | **有**（全副武装的信息检索工具集） | **无**（纯推理链） |
+| 执行入口 | `performEnricher`（带工具的 `performAgentChain`） | `performSimpleChain`（无工具单轮） |
+| 输出形态 | 事实/数据/上下文片段（可能为空） | 技术分析 + 优先级建议 |
+| 语言通道 | 双通道（日志用 `{{.Lang}}`，技术载荷用英语） | 单通道（纯英语） |
+
+enricher 的"有工具"与 adviser 的"无工具"形成精确分工：**要补充上下文 → enricher 用工具挖；要决策建议 → adviser 纯推理**。两者绝不越界。
+
+### 2.3 自我克制的效率协议
+
+模板第 70-79 行的 `<enhancement_rules>` 设定了一个反直觉的约束：**允许并鼓励返回空或最小结果**。`<efficiency>` 规则明确"若不存在额外的相关信息——保持响应最小化或为空"，模板第 119-121 行的检索策略进一步列出三种"应该返回空"的情形（通用概念问题且记忆无内容 / 执行上下文已含全部数据 / 关于当前任务且无历史数据）。
+
+这意味着 enricher 的成功标准不是"产出多少"，而是"产出多少**有边际价值**的信息"。一个诚实的空结果胜过一段重复 adviser 已知内容的废话。
+
+---
+
+## §3 配对关系：与 question_enricher.tmpl 配对（System + Human）
+
+enricher 是标准的 **System + Human 配对**模式。
+
+### 3.1 两个模板的分工
+
+| 模板 | 角色 | 消息 role | 变量上下文 | 内容 |
+|------|------|-----------|-----------|------|
+| `enricher.tmpl`（本文档） | System Prompt | `system` | `enricherContext["system"]`（14 个变量） | 角色、信息源、增强协议、工具说明、摘要感知协议 |
+| `question_enricher.tmpl`（3 占位符） | Human Prompt | `human` | `enricherContext["user"]`（3 个变量） | 仅投喂 `Question/Code/Output` |
+
+它们作为两条独立消息发给 LLM：
+
+```json
+{
+  "messages": [
+    { "role": "system", "content": "<enricher.tmpl 渲染结果>" },
+    { "role": "user",   "content": "<question_enricher.tmpl 渲染结果>" }
+  ]
+}
+```
+
+### 3.2 上下文分离的关键设计
+
+两个模板的**变量上下文是分离的**（`handlers.go:85-108`），分别注入 `enricherContext["user"]` 和 `enricherContext["system"]` 两个 map。每个 map 只能引用自己白名单内的占位符：
+
+- **user context**（`handlers.go:86-90`）：仅 `Question/Code/Output` 三个字段，来自调用方 `advice` 工具入参反序列化的 `tools.AskAdvice`。
+- **system context**（`handlers.go:91-107`）：14 个字段——所有工具名、执行上下文、Cwd、语言、时间等。
+
+这种分离是**有意的**：user 模板只承载"被提出的问题"，所有策略、工具、环境信息都在 system 模板里。这样即使 enricher 的执行环境变化（如切换容器、启用知识图谱），user 模板的结构保持稳定。
+
+### 3.3 渲染顺序
+
+`handlers.go` 中两个模板的渲染**先后执行**：
+1. `handlers.go:120`：先渲染 `question_enricher.tmpl`（user）→ `userEnricherTmpl`
+2. `handlers.go:125`：后渲染 `enricher.tmpl`（system）→ `systemEnricherTmpl`
+3. `handlers.go:142`：两者一并传入 `performEnricher` 执行
+
+---
+
+## §4 调用时机：adviser 的强制前置步骤（非独立工具）
+
+### 4.1 关键澄清：enricher 不是独立工具
+
+enricher **没有独立的工具入口**——它不在任何 agent 的工具列表里被直接调用。调用方 agent（primary_agent / pentester / coder / installer / searcher / memorist / assistant）只调用一个 `advice` 工具（`tools.AdviceToolName = "advice"`，`registry.go:20`），**完全不知道 enricher 的存在**。
+
+enricher 是 `GetAskAdviceHandler`（`handlers.go:73`）返回的外层闭包**内部的无条件前置步骤**。对调用方而言，`advice` 工具就是"输入问题、输出建议"的黑盒。
+
+### 4.2 完整调用链
+
+```
+调用方 agent 遇到困难 → LLM 决策调用 advice 工具（参数 tools.AskAdvice）
+  ↓
+GetAskAdviceHandler 返回的外层闭包（handlers.go:227-248）
+  ↓ json.Unmarshal(args, &ask)
+  ├─ ① enricherHandler(ctx, ask)（handlers.go:237）【强制前置，无条件执行】
+  │     ↓ handlers.go:120 渲染 question_enricher.tmpl（user）
+  │     ↓ handlers.go:125 渲染 enricher.tmpl（system）
+  │     ↓ handlers.go:142 调用 performEnricher(ctx, ..., systemEnricherTmpl, userEnricherTmpl, ask.Question)
+  │           ↓ performers.go:779 GetEnricherExecutor 装配工具
+  │           ↓ performers.go:784 restoreChain 恢复/初始化消息链
+  │           ↓ performers.go:791 performAgentChain 跑带工具的 agent 链（多轮 function calling）
+  │           ↓ enricher agent 调用 enricher_result 工具收尾（barrier）
+  │           ↓ performers.go:770 回调解析结果到 enricherResult 变量
+  │     ↓ 返回 enriches（补充上下文文本，可能为空）
+  └─ ② adviserHandler(ctx, ask, enriches)（handlers.go:242）
+        ↓ enriches 注入 adviser 的 user context 的 Enriches 字段（handlers.go:162）
+        ↓ 渲染 question_adviser.tmpl + adviser.tmpl
+        ↓ performSimpleChain 跑纯推理链
+        ↓ 返回 advice 文本
+  ↓
+advice 文本返回给调用方 agent（调用方看到的只是最终建议）
+```
+
+### 4.3 "强制前置"的精确含义
+
+`handlers.go:237-243` 的代码是无条件顺序执行——**不存在"跳过 enricher"的分支**：
+
+```go
+enriches, err := enricherHandler(ctx, ask)    // 必跑
+if err != nil { return "", err }
+advice, err := adviserHandler(ctx, ask, enriches)  // 必跑
+```
+
+所谓的"可选"只体现在**产出内容层面**：当 enricher 判定无补充信息时，可返回空/极简结果（见 §2.3 的效率协议），adviser 拿到空 `Enriches` 仍正常工作。**流程不可跳过，产出可空**。
+
+### 4.4 三种 advice 触发路径下 enricher 都跑
+
+adviser 有三条调用路径（直接咨询 / 任务规划 `performPlanner` / 执行监控 `performMentor`，详见 `adviser-analysis.tmpl` §4）。无论哪条路径，都经过 `GetAskAdviceHandler` 的同一个外层闭包，因此 **enricher 在所有三种场景下都会先跑一轮**：
+
+- 直接咨询时：enricher 先收集 → adviser 基于完整信息回答
+- 规划模式时：enricher 先收集 → adviser 基于完整信息规划
+- 监控模式时：enricher 先收集 → adviser 基于完整信息评估
+
+### 4.5 渲染 vs 执行的职责分离
+
+- **渲染**（"组提示词"）：发生在 `handlers.go` 的 `enricherHandler`（`handlers.go:120`、`125`），用 `fp.prompter.RenderTemplate` 把占位符填实。
+- **执行**（"跑 agent"）：发生在 `performers.go:755` 的 `performEnricher`，经 `restoreChain`（恢复/初始化消息链）+ `performAgentChain`（带工具的多轮 function calling）跑 agent 链。
+
+两者职责不同，不可混淆。`performEnricher` 只消费已渲染好的模板字符串，不再渲染。
+
+---
+
+## §5 工具列表
+
+### 5.1 关键认知：enricher 自身工具齐全（与 adviser 零工具形成对比）
+
+enricher 经 `performEnricher` → `GetEnricherExecutor`（`tools.go:1824`）执行，该方法**注册了真实可调用的工具集**。模板中的 `{{.XxxToolName}}` 占位符对应**enricher 自己注册并使用**的工具——这与 adviser 的引用性工具名（adviser 不调用、只在建议里点名）性质根本不同。
+
+enricher 的工具集按"信息检索"职责定制：环境探查（terminal/file）+ 记忆检索（向量库/知识图谱）+ 定向验证（browser）+ 收尾（enricher_result）。**没有**委派类工具（pentester/coder/installer 等）——enricher 不再向下委派，它就是信息收集链的终点。
+
+### 5.2 工具占位符清单
+
+所有工具名占位符的值注入在 `handlers.go:91-107`（system context），声明在 `templates.go:344-360`（`PromptTypeEnricher`）。工具实际装配在 `GetEnricherExecutor`（`tools.go:1824-1907`）。
+
+#### 收尾工具（barrier / result 类）— enricher 必须调用以终止
+
+| 占位符 | 实际名称 | 常量定义 | 参数结构 | 用途 | 装配条件与调用时机 |
+|--------|---------|---------|---------|------|----------------|
+| `{{.EnricherToolName}}` | `enricher_result` | `registry.go:33`（`EnricherResultToolName`） | `args.go:148` `EnricherResult{Result, Message}` | **唯一收尾工具（barrier）**。`Result` 是补充上下文详述（英语技术载荷，被 adviser 消费）；`Message` 是收尾日志摘要（`{{.Lang}}` 任务语言）。 | **必选**。装配于 `tools.go:1856/1861/1866`（definitions / handlers / barriers 三处都注册）。ToolType 为 `StoreAgentResultToolType`（`registry.go:118`）。调用时机：enricher 检索完信息后，**必须**调用此工具提交结果——它是 barrier 工具，不调用则 agent 链无法终止。`performEnricher` 的回调（`performers.go:770-776`）将参数反序列化到 `enricherResult` 变量，最终作为 `enriches` 返回。 |
+
+#### 环境探查工具（EnvironmentToolType）— 从容器抽取数据
+
+| 占位符 | 实际名称 | 常量定义 | 参数结构 | 用途 | 装配条件与调用时机 |
+|--------|---------|---------|---------|------|----------------|
+| `{{.TerminalToolName}}` | `terminal` | `registry.go:45` | terminal 命令载荷 | 在隔离容器内执行命令，提取特定数据、解析日志、验证文件系统状态。模板 `<terminal_execution>` 强调"命令在隔离容器中执行——调用之间不持久化"。 | **必选**。装配于 `tools.go:1857/1862`。ToolType 为 `EnvironmentToolType`（`registry.go:130`）。由 `NewTerminalTool`（`tools.go:1834`）创建，复用同一个 `term.Handle`。调用时机：enricher 判断问题涉及文件/执行环境时主动调用。 |
+| `{{.FileToolName}}` | `file` | `registry.go:46` | `path/content` | 从容器文件系统读取工件、结果、日志、配置文件。模板要求"始终使用绝对路径以确保可靠访问"。 | **必选**。装配于 `tools.go:1858/1863`。ToolType 为 `EnvironmentToolType`（`registry.go:131`）。**handler 复用 `term.Handle`**（`tools.go:1863`）——file 与 terminal 共享同一终端执行句柄。调用时机：问题涉及文件系统制品时主动调用。 |
+
+#### 记忆检索工具（SearchVectorDbToolType）— 查历史方案与情景记忆
+
+| 占位符 | 实际名称 | 常量定义 | 参数结构 | 用途 | 装配条件与调用时机 |
+|--------|---------|---------|---------|------|----------------|
+| `{{.SearchInMemoryToolName}}` | `search_in_memory` | `registry.go:34` | `args.go` `SearchInMemoryAction` | 搜索向量数据库（长期记忆）中的已存储知识与过往解决方案。模板标注为"主要记忆来源"。查询**必须用英语**（向量库以英语索引、跨任务共享）。 | **条件装配**：`memory.IsAvailable()` 为真时（`tools.go:1876-1879`）。ToolType 为 `SearchVectorDbToolType`（`registry.go:119`）。调用时机：enricher 检索策略的**第一优先级**（模板第 103 行"检查历史记忆"）。 |
+| `{{.GraphitiSearchToolName}}` | `graphiti_search` | `registry.go:41` | `args.go` `GraphitiSearchAction` | 搜索时序知识图谱的情景记忆与执行历史——agent 在操作期间实际做了什么、发现了什么。支持 `recent_context/episode_context/successful_tools/entity_relationships` 等检索类型。 | **条件装配**：`graphitiSearch.IsAvailable()` 为真时（`tools.go:1887-1890`）。ToolType 为 `SearchVectorDbToolType`（`registry.go:126`）。其可用性由 `{{.GraphitiEnabled}}` 布尔值控制（见 §6），模板中多处用 `{{if .GraphitiEnabled}}` 条件渲染知识图谱相关段落。 |
+
+#### 定向验证工具
+
+| 占位符 | 实际名称 | 常量定义 | 参数结构 | 用途 | 装配条件与调用时机 |
+|--------|---------|---------|---------|------|----------------|
+| `{{.BrowserToolName}}` | `browser` | `registry.go:23` | `url` 等 | 从**特定已知 URL** 检索内容，定向验证 web 资源。 | **条件装配**：`browser.IsAvailable()` 为真时（`tools.go:1901-1904`）。由 `NewBrowserTool`（`tools.go:1892`）创建。调用时机：**仅当问题中提及特定 URL 时**（模板第 115-117 行，检索策略第 3 优先级，最低优先级）。 |
+
+#### 摘要处理工具（非 LLM 工具，内部句柄）
+
+| 占位符 | 实际名称 | 常量定义 | 用途 | 装配方式 |
+|--------|---------|---------|------|---------|
+| `{{.SummarizationToolName}}` | `execute_task_and_return_summary` | `cast/chain_ast.go:18` | **不是 enricher 可调用的 LLM 工具**，而是**历史摘要的识别标记**。enricher 在对话历史中看到此名的工具调用时，应识别为"已摘要的历史交互"。模板 `<prohibited_behavior>` 明确禁止 enricher 自己调用它。 | 经 `EnricherExecutorConfig.Summarizer`（`tools.go:309`）传入内部处理句柄（`performers.go:777` `fp.GetSummarizeResultHandler`），装配于 `tools.go:1868`。它不进入 enricher 的 `definitions`/`handlers`（不是 enricher 的可调用工具），只作为链处理时的摘要回退机制。 |
+
+### 5.3 工具集的设计逻辑
+
+enricher 的工具集严格对应其"信息检索"职责，且与检索优先级（模板第 100-123 行）一一映射：
+
+| 优先级 | 检索方向 | 对应工具 |
+|--------|---------|---------|
+| 1 | 历史记忆 | `search_in_memory`（+ 知识图谱 `graphiti_search`，若启用） |
+| 2 | 容器环境 | `terminal` + `file` |
+| 3 | 外部资源（仅特定 URL） | `browser` |
+| 收尾 | 提交结果 | `enricher_result`（barrier） |
+
+注意：**没有搜索引擎类工具**（google/tavily 等）。enricher 不做开放式网络搜索——开放式研究是 searcher agent 的职责。enricher 的 browser 只用于"已知 URL 的定向验证"。
+
+---
+
+## §6 非工具占位符
+
+`PromptTypeEnricher` 声明 14 个变量（`templates.go:344-360`），其中 7 个是工具名/工具相关（见 §5），其余 **8 个是非工具占位符**，全部注入在 `handlers.go:91-107`（system context）。
+
+### 6.1 占位符清单
+
+| 占位符 | 类型 | 来源（`handlers.go`） | 注入信息 | 注入时机 |
+|--------|------|----------------------|---------|---------|
+| `{{.ExecutionContext}}` | 字符串 | `executionContext`（`handlers.go:95`） | 当前 Flow/Task/SubTask 详情（ID、状态、标题、描述） | `GetAskAdviceHandler` 调用时，由 `fp.getExecutionContext(ctx, taskID, subtaskID)`（`handlers.go:79`）预先生成，注入 system context 供渲染时填入 |
+| `{{.Cwd}}` | 字符串 | `docker.WorkFolderPathInContainer`（`handlers.go:96`） | 容器内工作目录路径，固定值 `/work`（`docker/client.go:31`） | 同上 |
+| `{{.Lang}}` | 字符串 | `fp.language`（`handlers.go:97`） | 任务执行语言（如 `zh-CN`、`en`），由 flow 初始化时的 `language_chooser.tmpl` 判定 | 同上 |
+| `{{.CurrentTime}}` | 字符串 | `getCurrentTime()`（`handlers.go:98`） | 当前时间戳，格式 `2006-01-02 15:04:05`（`helpers.go:929-931`） | 同上，每次 `enricherHandler` 调用时实时取值 |
+| `{{.ToolPlaceholder}}` | 字符串 | `ToolPlaceholder` 常量（`handlers.go:99`） | 工具使用强制提示："Execute operations via function invocation - textual responses are not acceptable for task completion."（`provider.go:32`） | 静态常量，每次渲染时直接填入 |
+| `{{.GraphitiEnabled}}` | 布尔值 | `fp.graphitiClient != nil && fp.graphitiClient.IsEnabled()`（`handlers.go:101`） | 知识图谱是否启用，控制模板中所有 `{{if .GraphitiEnabled}}` 条件段（知识图谱信息源说明、工具说明、检索策略项等） | flow 初始化时由 graphitiClient 配置决定，渲染时填入 |
+| `{{.SummarizedContentPrefix}}` | 字符串 | `cast.SummarizedContentPrefix` 换行转义（`handlers.go:94`） | 已摘要内容的文本前缀标记，固定值 `**summarized content:**\n`（`csum/chain_summary.go:48`），渲染时 `\n` 转义为 `\\n` | 静态值，渲染时填入 |
+| `{{.UserFiles}}` | 字符串 | `fp.userFilesListing()`（`handlers.go:106`） | 用户附加到该 flow 的文件列表（来自 `flowfiles.FileListingForPrompt`，`provider.go:232-237`） | flow 运行期间 `fp.dataDir` 下扫描文件列表，渲染时填入；为空则模板的 `{{if .UserFiles}}` 段不渲染 |
+
+### 6.2 重点占位符详解
+
+#### `{{.ExecutionContext}}` — 执行上下文（enricher 理解"我在帮谁"的核心）
+
+由 `fp.getExecutionContext`（`helpers.go:764`）生成，内部按 `subtaskID` → `taskID` → `flow` 三级回退：
+- 有 `subtaskID`：渲染该 subtask 的 `Context` 字段（`helpers.go:776`）
+- 仅 `taskID`：用 `short_execution_context.tmpl` 渲染 Task + 已完成/计划 subtask 列表（`helpers.go:785`）
+- 都没有：回退到 flow 级上下文（`helpers.go:806`）
+
+渲染到模板第 230-232 行的 `<execution_context>` 段。模板第 222-228 行指导 enricher 用它来：提取 Flow/Task/SubTask 详情、确定操作范围与父任务关系、识别当前操作分支内的相关历史、专门针对当前 SubTask 目标定制检索方法。
+
+这是 enricher 判断"哪些信息 adviser 已掌握、哪些需要我补"的关键依据——`<no_duplication>` 规则要求 enricher 不重复执行上下文里已有的内容。
+
+#### `{{.Lang}}` — 任务语言（双通道语言策略的核心开关）
+
+enricher 是 PentAGI 中**少数采用双通道语言策略**的 agent（模板第 5-19 行 `<language_policy>`）：
+
+1. **任务执行日志通道**——用 `{{.Lang}}`：每次工具调用的 `message` 字段、收尾 `enricher_result` 调用的 `message` 字段，由任务协调团队阅读，保持 1-2 短句。
+2. **技术通道**——固定英语：向量库/知识图谱搜索查询、容器内命令载荷、收尾 `enricher_result.result` 字段。**绝不可翻译**，因为向量库以英语索引、跨任务共享，非英语查询检索不到内容。
+
+这条策略的底层原因：记忆系统（向量库/知识图谱）是跨任务共享的英语基础设施。如果 enricher 用 `{{.Lang}}`（如中文）写搜索查询，会检索不到任何内容。
+
+#### `{{.GraphitiEnabled}}` — 知识图谱开关（条件渲染控制器）
+
+这是唯一一个**布尔类型**的占位符，控制模板中 6 处 `{{if .GraphitiEnabled}}...{{end}}` 条件段的渲染：
+- 语言策略段中知识图谱的提及
+- `<information_sources_available>` 中的 `<knowledge_graph>` 信息源块
+- 工具说明中的 `graphiti_search` 工具项
+- 检索策略中的知识图谱检索项
+
+当 `fp.graphitiClient == nil` 或未启用时，这些段全部不渲染，enricher 收到的提示中完全没有知识图谱相关内容——这是一致的"特性开关"设计，避免 enricher 引用不存在的工具或信息源。
+
+#### `{{.SummarizedContentPrefix}}` + `{{.SummarizationToolName}}` — 摘要感知协议
+
+这两个占位符服务于模板第 126-159 行的 `<summarized_content_handling>`（摘要感知协议）。当 enricher 的消息链因过长被摘要压缩后，历史交互会以两种形式出现在对话中：
+1. 一条仅含对 `{{.SummarizationToolName}}` 工具调用的 AI 消息 + 紧随的 Tool 响应
+2. 一条以 `{{.SummarizedContentPrefix}}` 开头的 AI 消息
+
+enricher 必须识别这些为"历史摘要"而非"当前要模仿的格式"，并遵守 `<prohibited_behavior>`：绝不模仿摘要格式、绝不自己调用 `{{.SummarizationToolName}}`、绝不在自己消息中使用该前缀。这是防止 agent 把系统摘要标记误当成正常行为模板的安全协议。
+
+#### `{{.UserFiles}}` — 任务材料段开关
+
+模板第 233-246 行：整个 `## 任务材料` 段包裹在 `{{if .UserFiles}}...{{end}}` 中。仅当 `fp.userFilesListing()` 返回非空（即有用户附加文件）时才渲染，告知 enricher 可在 `{{.Cwd}}/uploads`（交付文件）和 `{{.Cwd}}/resources`（参考资料）下找到只读的任务材料，并用 `{{.FileToolName}}` 读取相关内容纳入增强结果。
+
+#### `{{.ToolPlaceholder}}` — 工具使用强制提示
+
+渲染到模板第 256 行（文末）。这是一句全局性约束，强制 enricher 通过结构化工具调用而非纯文本完成所有动作。它呼应 `<system_context>` 段（模板第 155-158 行）："绕过该结构（例如以纯文本模拟调用）会阻止底层系统的实际执行。"
+
+---
+
+## §7 关键设计要点
+
+### 7.1 enricher 的"影子"架构
+
+enricher 是 PentAGI 中**唯一对调用方完全透明**的 agent。调用方调用 `advice` 工具时，不知道、也不需要知道 enricher 先跑了一轮。这种设计让 `advice` 工具的语义保持简单（"输入问题、输出建议"），同时让 adviser 的推理始终基于增强后的完整信息——**透明的复杂，简单的接口**。
+
+### 7.2 "有工具"与"无工具"的精确分工
+
+enricher 有工具、adviser 无工具，这不是随意设计：
+- enricher 需要**检索**（记忆、文件、命令执行、URL 验证）——这些必须用工具
+- adviser 需要**推理**（分析、判断、建议）——纯 LLM 能力，工具反而干扰
+
+如果把工具给 adviser，adviser 会忍不住自己检索（越权执行）；如果把 enricher 改成无工具，它无法真正"挖"出事实。两者各司其职，靠 `enricher_result` 工具的 `Result` 字段做单向数据传递。
+
+### 7.3 anti-duplication 协议（反重复）
+
+enricher 的多条规则都指向同一个目标——**不重复 adviser 已知的内容**：
+- `<primary_rule>`：仅提供 adviser 尚未掌握的额外信息
+- `<no_duplication>`：不重复用户的问题、代码、输出或执行上下文
+- 模板第 59-68 行专门列出"adviser 已自动收到的内容"（用户问题、代码、命令输出、执行上下文、当前时间），明确告知 enricher 这些**不需要再检索**
+
+这是因为 enricher 和 adviser 共享同一份输入（`AskAdvice` + `ExecutionContext`），如果不加约束，enricher 很容易把已知的执行上下文当"发现"回传，造成信息冗余。anti-duplication 协议确保 enricher 只提供**边际信息**。
+
+### 7.4 与 adviser 的变量差异
+
+对比 adviser（`adviser-analysis.tmpl` §6），enricher 的非工具占位符有以下特点：
+- **多了** `{{.Lang}}`、`{{.ToolPlaceholder}}`、`{{.SummarizationToolName}}`、`{{.SummarizedContentPrefix}}`、`{{.GraphitiEnabled}}`——因为 enricher 有工具（需 `ToolPlaceholder`）、做摘要感知（需摘要协议变量）、直接检索知识图谱（需 Graphiti 开关）、输出面向任务协调团队（需双通道语言）
+- **少了** `{{.DockerImage}}`、`{{.ContainerPorts}}`——enricher 不需要知道容器镜像详情和 OOB 端口（这些是 adviser 建议回调攻击时才需要的）
+
+这种差异印证了职责分工：enricher 关心"去哪挖事实"，adviser 关心"给什么执行建议"。
+
+### 7.5 摘要感知协议的必要性
+
+enricher 是会经历长链的 agent（多次 advice 调用可能累积长消息链），因此需要摘要感知协议。模板第 126-159 行的 `<summarized_content_handling>` 防止两类错误：
+1. **格式模仿**：把历史摘要的 `execute_task_and_return_summary` 调用或 `**summarized content:**` 前缀误当成正常行为模板去模仿
+2. **纯文本模拟**：用纯文本伪造工具调用输出，绕过结构化执行
+
+这两类错误都会导致底层系统无法真正执行工具，使 enricher 陷入"看起来在干活、实际没产出"的死循环。

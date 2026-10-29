@@ -1,0 +1,98 @@
+# question_memorist.tmpl 分析文档
+
+## 1. 原文件名
+
+`question_memorist.tmpl`，对应内部类型常量 `PromptTypeQuestionMemorist = "question_memorist"`（`backend/pkg/templates/templates.go:40`），注释标注为 *human input querying past experiences*。
+
+- **PentAGI 源码路径**：`backend/pkg/templates/prompts/question_memorist.tmpl`
+- **注册处**：`templates/templates.go:239-244` 登记其合法占位符清单。
+- **登记点**：`templates/templates.go:547-550` 挂在 `AgentsPrompts` 的 `Memorist: { System, Human }` 下。
+
+## 2. 类型与用途
+
+**B 类 Agent Human Prompt**——长期记忆专家（Memorist）Agent 的 human 侧消息模板。
+
+与 system 侧的 `memorist.tmpl`（系统提示，定义档案管理员角色、语言策略、向量库/Graphiti 检索协议、运行环境、工具规范、收尾要求）分工互补：system 模板解决"这个 agent 是谁、能调哪些检索工具、怎么组织多源结果"，本 human 模板解决"这次具体要查什么、查的范围限定在哪条任务/子任务上"。
+
+这正是 B 类模板的意义——Human 消息承载的是**单次记忆检索任务的具体查询 + 作用域**，而非 agent 的稳定身份。把易变的查询输入和稳定的角色/工具规范分离，避免任务上下文污染 system 消息造成角色漂移，也缩小 prompt 注入面。
+
+## 3. 配对关系
+
+与 `memorist.tmpl`（`PromptTypeMemorist`）**严格成对**，在 `templates.go:547-550` 的 `Memorist: AgentPrompts{}` 注册处一并登记：
+
+```
+Memorist: AgentPrompts{
+    System: getPrompt(PromptTypeMemorist),          // memorist.tmpl
+    Human:  getPrompt(PromptTypeQuestionMemorist),  // 本模板
+}
+```
+
+两者必须同时存在：缺少 system 侧则 agent 丢失身份、检索协议与工具规范；缺少 human 侧则每次检索无查询入口。`server/models/prompts.go:30` 把两者作为一组暴露给前端做自定义渲染。
+
+> 与其他专家（pentester/coder/installer/searcher）的 `question_*.tmpl` 不同，本模板是 user 侧 context **键数最多**的一个——除 `Question` 外还携带 `Task`、`Subtask`、`ExecutionDetails` 三个作用域限定字段，因为记忆检索强依赖"在哪条任务上查"。
+
+## 4. 调用时机
+
+调用链（自上而下，已逐段核验）：
+
+1. **任意 agent 决策委派**：调用方 agent（primary_agent、assistant、pentester、coder、installer、searcher 中的任意一个）在各自 system prompt 中都声明了 `MemoristToolName`（工具名 `memorist`，`tools/registry.go:21`），需要查过往经验时调用它。工具参数为 `tools.MemoristAction`（`tools/args.go:153-158`），含 `Question`（强制英文技术通道查询）、可选 `TaskID`/`SubtaskID`（作为向量库硬过滤条件）、`Message`（任务语言日志条目）。
+2. **handler 派发**：`providers/handlers.go:567-583` `GetMemoristHandler` 返回的执行器 `json.Unmarshal` 解析出 `action`（`handlers.go:571-575`），转交内部 `memoristHandler`（`handlers.go:459`）。
+3. **作用域解析**：`handlers.go:460-496` 依据 `action.TaskID`/`action.SubtaskID` 决定检索作用域，并把每一步决策记录到 `executionDetails` 字符串——这是本模板区别于其他 `question_*` 模板的核心逻辑（详见 §6 ExecutionDetails）。
+4. **上下文构造**：`handlers.go:498-522` 构造 `memoristContext`，分为 `"user"` 与 `"system"` 两套字典。本模板用 `"user"` 这一套（`handlers.go:499-504`），含四个键。
+5. **渲染 human 模板**：`handlers.go:540` `RenderTemplate(PromptTypeQuestionMemorist, memoristContext["user"])` → 得到 `userMemoristTmpl`。紧接着 `handlers.go:545` 渲染 system 模板得到 `systemMemoristTmpl`。
+6. **执行**：`handlers.go:559` 调 `performMemorist(ctx, taskID, subtaskID, systemMemoristTmpl, userMemoristTmpl, action.Question)`（`performers.go:540`）。
+7. **建链**：`performers.go:569-571` `restoreChain` 把 `systemMemoristTmpl` 作为 system 消息、`userMemoristTmpl` 作为 **human 消息**注入消息链，随后 `performers.go:576` `performAgentChain` 驱动 Memorist Agent 执行。
+
+一句话：**调用方 agent 调 `MemoristToolName` → handlers.go 解析作用域 → 渲染本模板 → 作为 human 消息送给 Memorist Agent**。
+
+> 修正说明：调用方不限于 primary_agent。`assistant.tmpl`、`pentester.tmpl`、`coder.tmpl`、`installer.tmpl`、`searcher.tmpl` 的 system prompt 均声明了 `MemoristToolName`（见 grep 结果中各模板的 `<tool_name>{{.MemoristToolName}}</tool_name>`），任何一个在当前上下文不足以决策、需要过往经验时都可委派给 memorist。primary_agent 只是其中之一。
+
+## 5. 工具列表
+
+**本模板不声明任何工具，也不含任何工具名占位符。**
+
+这是有意为之的分工：工具规范全部声明在配对的 system 模板 `memorist.tmpl` 中，实际可调工具则由 Memorist executor 在 `tools/tools.go:1753-1822` `GetMemoristExecutor` 通过 `MemoristExecutorConfig` 注入：
+
+| 工具 | 来源 | 条件 |
+|------|------|------|
+| `MemoristResultToolName`（收尾/返回结果，barrier） | `tools.go:1785` | 始终 |
+| `TerminalToolName`（容器内命令，验证发现） | `tools.go:1786` | 始终 |
+| `FileToolName`（容器内文件读取） | `tools.go:1787` | 始终 |
+| `SearchInMemoryToolName`（向量库语义检索） | `tools.go:1806` | memory tool 可用时 |
+| `GraphitiSearchToolName`（时序知识图谱检索） | `tools.go:1817` | Graphiti 启用时 |
+
+工具规范属于"稳定身份信息"，留在 system 侧；本模板只承载易变的查询内容与作用域，因此**零工具声明**。
+
+## 6. 非工具占位符
+
+`templates.go:239-244` 登记本模板允许的占位符清单共四项：`Question`、`Task`、`Subtask`、`ExecutionDetails`。全部由 `handlers.go:499-504` 写入 user 侧字典，渲染时机在 `handlers.go:540`（收到 `MemoristAction` 之后、调 `performMemorist` 之前的一次性实例化）。
+
+### `{{.Question}}`
+
+- **用途**：承载本次记忆检索的具体查询——调用方 agent 向 Memorist Agent 派发的"查询说明书"。告诉 memorist 要从过往经验里找什么、相关上下文是什么。模板在 `<question_memorist_context>` > `<user_question>` 内引用，是检索的语义核心。
+- **注入信息**：来自 `tools.MemoristAction.Question`（`tools/args.go:154`）。其 jsonschema 描述约定为 *Technical-channel payload — question for complex search in previous work, tasks, and calls; include full context of what happened and what you want to find. Always written in English; never translated.* 即由调用方 agent 生成、**强制英文、不翻译**的技术通道载荷。
+- **注入时机**：`handlers.go:500` 从 `action.Question` 取值写入 user context，`handlers.go:540` 渲染时填充。
+
+### `{{.Task}}`
+
+- **用途**：把用户**显式指定检索的任务**的结构化详情注入模板，供 memorist 用作向量库检索的硬过滤上下文。模板在 `<mentioned_task>` 标签内展开其 `ID`/`Status`/`Title`/`Input`/`Result`，并配一条 instruction 引导结合该任务细节增强检索准确率。memorist 据此把搜索范围收窄到具体任务的历史产物上。
+- **注入信息**：来自 `*database.Task` 指针（`handlers.go:462` 声明 `requestedTask`）。仅当 `action.TaskID` 非空且**指向一个不同于当前上下文任务**的其它任务时，`handlers.go:465-474` 调 `fp.db.GetFlowTask` 从数据库取回该任务记录赋值；若查询失败则 `requestedTask` 保持 nil，仅把错误写进 `ExecutionDetails`。若 `action.TaskID` 缺省或指向当前任务，则不取记录、`Task` 为 nil，模板里 `{{if .Task}}` 块整体跳过。
+- **注入时机**：`handlers.go:462-477` 作用域解析阶段决定，`handlers.go:501` 写入 user context，`handlers.go:540` 渲染时条件填充。
+
+### `{{.Subtask}}`
+
+- **用途**：把用户**显式指定检索的子任务**的结构化详情注入模板，提供比 Task 更细粒度的检索上下文。模板在 `<mentioned_subtask>` 标签内展开其 `ID`/`Status`/`Title`/`Description`/`Result`，并配一条 instruction 引导利用该子任务信息提供更具体的历史上下文。用于把搜索锁定到某个子任务分支的执行记录。
+- **注入信息**：来自 `*database.Subtask` 指针（`handlers.go:479` 声明 `requestedSubtask`）。仅当 `action.SubtaskID` 非空且**指向一个不同于当前上下文子任务**的其它子任务时，`handlers.go:482-491` 调 `fp.db.GetFlowSubtask` 从数据库取回该子任务记录赋值；查询失败则保持 nil。缺省或指向当前子任务时不取记录，模板里 `{{if .Subtask}}` 块整体跳过。
+- **注入时机**：`handlers.go:479-496` 作用域解析阶段决定，`handlers.go:502` 写入 user context，`handlers.go:540` 渲染时条件填充。
+
+### `{{.ExecutionDetails}}`
+
+- **用途**：承载**本次调用的作用域决策轨迹**——一段人类可读的英文说明，记录"用户指定/未指定任务、指定/未指定子任务、是否退回当前上下文、查询是否失败"等过程信息。模板在 `<execution_details>` 标签内原样展开，让 memorist 在执行检索前先理解本次作用域是怎么定下来的，从而正确解读 Task/Subtask 字段的有无。这是本模板区别于其他 `question_*` 模板的独有字段。
+- **注入信息**：来自 `handlers.go:460` 初始化并在 `handlers.go:463-496` 逐步追加的 `executionDetails` 字符串，是分支决策的纯文本记录，而非任何数据库实体。其内容是以下若干片段的组合（按实际走的分支）：
+  - `user requested current task '%d'`（TaskID 指向当前任务）
+  - `failed to get requested task '%d': %s`（TaskID 指向其它任务但查询出错）
+  - `user no specified task, using current task '%d'`（TaskID 缺省）
+  - `user requested current subtask '%d'` / `user no specified subtask, using current subtask '%d'` / `user no specified subtask, using all subtasks related to the task` / `failed to get requested subtask '%d': %s`（SubtaskID 的四种子情况）
+- **注入时机**：`handlers.go:460-496` 作用域解析过程中逐条追加，`handlers.go:503` 写入 user context，`handlers.go:540` 渲染时填充。注意它**始终有值**（至少含一行决策记录），不同于可能为 nil 的 Task/Subtask。
+
+> 设计要点：四个占位符中 `Question` 是检索语义、`Task`/`Subtask` 是检索作用域实体、`ExecutionDetails` 是作用域决策的可审计轨迹。后三者共同解决了 memorist 检索特有的"在哪查"问题，使检索既受调用方显式过滤约束，又留有决策回溯能力。模板用 `{{if}}` 条件块保证 Task/Subtask 缺省时不输出空标签，维持 XML 语义结构干净。

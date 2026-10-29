@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "connection": {
+    "type": "tcp",
+    "host": "tcp.flagyard.com",
+    "port": 21221,
+    "url": null,
+    "username": null,
+    "password_env": null,
+    "key_file_env": null
+  }
+}

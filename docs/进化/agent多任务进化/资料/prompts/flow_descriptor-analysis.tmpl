@@ -1,0 +1,222 @@
+# flow_descriptor.tmpl 详细分析
+
+> 源码路径：`pentagi/backend/pkg/templates/prompts/flow_descriptor.tmpl`
+> 模板变量定义：`templates/templates.go:379-384`（`PromptTypeFlowDescriptor`）
+> 触发逻辑：`providers/providers.go:430`（`NewFlowProvider`）、`providers.go:576`（`NewAssistantProvider`）
+> 时间工具：`providers/helpers.go:929`（`getCurrentTime`）
+
+---
+
+## 元信息
+
+| 项目 | 值 |
+|------|-----|
+| **原文件名** | `flow_descriptor.tmpl` |
+| **常量名** | `PromptTypeFlowDescriptor` |
+| **所属分类** | C 类 · 工具/辅助 Prompt（功能性模板） |
+| **结构体归属** | `ToolsPrompts.GetFlowDescription`（`templates/templates.go:583-584`） |
+| **配对关系** | 无配对（不是 agent 角色模板） |
+| **注册工具** | 无 |
+| **定义位置** | `templates/templates.go:58`（常量）、`templates.go:379-384`（占位符注册）、`templates.go:584`（结构体挂载） |
+| **触发源码** | `providers/providers.go:430-444`（flow）、`providers.go:576-590`（assistant） |
+| **下游消费** | flowProvider.title / assistantProvider.title（provider 结构体的 `title` 字段） |
+
+---
+
+## 一、原文件名
+
+`flow_descriptor.tmpl`
+
+对应模板类型常量：`templates.PromptTypeFlowDescriptor = "flow_descriptor"`（定义于 `templates/templates.go:58`，注释为 `// generates flow titles from user requests`）。
+
+在 prompter 初始化时，它被挂载到 `ToolsPrompts` 结构体的 `GetFlowDescription` 字段（`templates.go:583-584`），与同属"启动期决策模板"组的 `ChooseDockerImage`（image_chooser）、`ChooseUserLanguage`（language_chooser）并列。
+
+---
+
+## 二、类型与用途
+
+**C 类功能性/辅助 Prompt**——一段纯文本生成模板，用于在 flow 启动期为用户任务生成一个简洁、有描述性的标题。
+
+### 2.1 核心定位
+
+本模板**不是面向执行 agent 的角色 system prompt**，而是一次性的"元数据生成器"。它解决的问题：用户输入的任务描述往往很长（一段话），需要一个不超过 N 个字符的短标题，供 UI 展示、日志检索、flow 列表区分。
+
+它归属于 `ToolsPrompts`（功能性模板集合），而非 `AgentsPrompts`（agent 角色模板集合）。这一归属决定了它：
+
+- **无工具**（不参与 function calling 编排）
+- **无配对 Human 模板**（不构成 System+Human 对话）
+- **无消息链**（单次 LLM 调用即结束）
+
+### 2.2 与同类"启动期决策模板"的关系
+
+flow 启动时会串行执行三个功能性模板，本模板是链路的第三环：
+
+| 顺序 | 模板 | 作用 | 本模板是否依赖其输出 |
+|------|------|------|--------------------|
+| ① | `image_chooser.tmpl` | 选择 Docker 镜像 | 否 |
+| ② | `language_chooser.tmpl` | 判定用户语言 | **是**（结果作为 `{{.Lang}}` 注入本模板） |
+| ③ | `flow_descriptor.tmpl`（本模板） | 生成 flow 标题 | — |
+
+本模板的标题语言由 ② 的结果决定——这是设计上的串行依赖，不能并行（见 §4.2）。
+
+---
+
+## 三、配对关系
+
+**无配对。**
+
+- 不属于 `AgentsPrompts` 结构体，不与任何 `question_xxx.tmpl` 配对（全仓库 grep 确认无 `question_flow_descriptor`）。
+- 归属于 `ToolsPrompts`（功能性工具模板集合），与 `task_descriptor.tmpl`（任务级标题生成）属于同一组"描述符工具"，是**兄弟关系**而非配对关系——`task_descriptor` 服务于 task 粒度，本模板服务于 flow 粒度。
+- 它的输出（标题字符串）存入 provider 结构体的标量字段，**不作为占位符注入下游模板**（与 `execution_logs.tmpl` 那种"输出→下游占位符"的数据流向不同）。本模板的输出只流向 UI/数据库展示层。
+
+---
+
+## 四、调用时机
+
+### 4.1 触发场景
+
+本模板只在 flow / assistant **创建（启动）时各触发一次**，是 provider 结构体构造期间的前置步骤：
+
+| 触发场景 | 调用方函数 | 源码位置 | 结果存储 |
+|----------|-----------|---------|---------|
+| **Flow 启动**（用户发起新任务） | `NewFlowProvider` | `providers/providers.go:430-444`（函数定义于 `:385`） | `flowProvider.title`（`:462`） |
+| **Assistant 模式启动** | `NewAssistantProvider` | `providers/providers.go:576-590`（函数定义于 `:546`） | `assistantProvider` 标题字段 |
+
+两处调用点代码完全对称（注入参数、OptionsType、返回处理三者一致），是同一逻辑在 flow / assistant 两条入口的复制。
+
+### 4.2 调用链中的位置（启动期串行依赖）
+
+`NewFlowProvider` 内部按顺序渲染三个模板，本模板排在最后，依赖前置的 language_chooser 输出：
+
+```
+NewFlowProvider(ctx, ..., input)
+  │
+  ├─ ① providers.go:402  渲染 image_chooser.tmpl → prv.Call(OptionsTypeSimple) → image
+  │
+  ├─ ② providers.go:417  渲染 language_chooser.tmpl（仅注入 Input）
+  │     └─ providers.go:424  prv.Call(OptionsTypeSimple) → language  ← 本模板依赖此结果
+  │
+  ├─ ③ providers.go:430  渲染 flow_descriptor.tmpl（注入 Input / Lang / CurrentTime / N）
+  │     │                 └─ Lang ← ② 的 language 输出
+  │     └─ providers.go:440  prv.Call(OptionsTypeSimple) → title
+  │
+  └─ providers.go:451  构造 flowProvider{ ..., title: title, language: language, ... }
+```
+
+`NewAssistantProvider`（`:546`）的逻辑对称，只是省略了 image_chooser（assistant 模式复用已有镜像）。
+
+### 4.3 调用特征
+
+- **一次性**：每个 flow / assistant 生命周期内只调用一次，结果缓存于结构体字段，后续不再重新生成。
+- **同步阻塞**：在 provider 构造期间同步完成，flow 主流程（任务分解、agent 编排）必须等标题生成结束才启动。
+- **OptionsTypeSimple**：见 §五，裸 LLM 调用，无工具、无消息链。
+- **结果清洗**：`title = strings.TrimSpace(title)`（`:444`/`:590`）——仅去除首尾空白，不强制截断长度（长度约束交给 prompt 指令 + LLM 遵从性）。
+
+---
+
+## 五、工具列表
+
+**本模板不注册、不绑定任何工具。**
+
+- 调用时传入的是 `pconfig.OptionsTypeSimple`（`providers.go:440`/`:586`）。
+- `GetOptionsForType(OptionsTypeSimple)`（`pconfig/config.go:732-733`）返回的是 `pc.Simple.BuildOptions()`——即模型配置选项（temperature、model name 等），**不含 function calling 工具**。
+- 与带工具的 agent 模板（如 enricher 走 `OptionsTypeEnricher` 并由 executor 注册工具集）的本质区别：本模板的 LLM 只输出纯文本（一个标题），不能、也不需要调用任何工具。
+- 模板内容中不包含任何 `{{.XxxToolName}}` 占位符。
+
+它是一个**纯文本渲染器 + 单轮纯文本生成**模板：输入 4 个标量值，输出一段 prompt 文本，喂给 LLM 得到一个标题字符串。
+
+---
+
+## 六、非工具占位符详解
+
+本模板注册了 4 个非工具占位符（`templates/templates.go:379-384`）：
+
+```go
+PromptTypeFlowDescriptor: {
+    "Input",
+    "Lang",
+    "CurrentTime",
+    "N",
+},
+```
+
+注册表与模板正文引用的 4 个 `{{.Xxx}}` 完全一致，无多余、无遗漏。注入点统一在 `providers/providers.go:430-435`（flow）与 `:576-581`（assistant），两处注入参数完全相同。
+
+### 6.1 占位符清单
+
+| 占位符 | Go 类型 | 注入值来源 | 用途 |
+|--------|---------|-----------|------|
+| `{{.Input}}` | `string` | `NewFlowProvider` / `NewAssistantProvider` 的 `input` 形参（用户原始任务描述） | 作为待概括的输入材料，注入 `<input>` 段 |
+| `{{.Lang}}` | `string` | 前置 `language_chooser` LLM 调用的返回值（`providers.go:424`/`:570`） | 注入 `<user_language>` 段，约束标题使用该语言 |
+| `{{.CurrentTime}}` | `string` | `getCurrentTime()`（`helpers.go:929`） | 注入 `<current_time>` 段 |
+| `{{.N}}` | `int` | **硬编码字面量 `20`**（`providers.go:434`/`:580`） | 标题字符数上限，注入 `<task>` 段的"不超过 N 个字符"指令 |
+
+### 6.2 各占位符的注入时机与来源
+
+#### `{{.Input}}` — 用户原始输入
+
+- **来源**：`NewFlowProvider(ctx, ..., input string)`（`providers.go:392`）/ `NewAssistantProvider(ctx, ..., input string)`（`:552`）的形参，由 flow 创建入口（GraphQL mutation / API handler）传入，即用户提交任务的原始文本。
+- **注入时机**：provider 构造期间（flow 启动时），原样透传，不做任何预处理（不截断、不清洗）。
+
+#### `{{.Lang}}` — 前置 language_chooser 的输出（依赖链关键）
+
+- **来源**：同一函数内前一步的 `language_chooser` LLM 调用结果：
+  ```go
+  // providers.go:417-428（flow）/ :563-574（assistant）
+  languageTmpl, _ := prompter.RenderTemplate(templates.PromptTypeLanguageChooser, map[string]any{"Input": input})
+  language, _ := prv.Call(ctx, pconfig.OptionsTypeSimple, languageTmpl)
+  language = strings.TrimSpace(language)
+  ```
+- **注入时机**：必须在 `language` 变量赋值完成之后才能渲染本模板（串行依赖）。`{{.Lang}}` 决定了生成标题所用的语言——这是 flow 标题能匹配用户语言的根本机制。
+- **设计含义**：本模板与 `language_chooser.tmpl` 是"启动期决策链"上的强耦合环节，改造时不能脱离 language_chooser 单独调整。
+
+#### `{{.CurrentTime}}` — 当前时间戳
+
+- **来源**：`getCurrentTime()`（`providers/helpers.go:929-931`）：
+  ```go
+  func getCurrentTime() string {
+      return time.Now().Format("2006-01-02 15:04:05")
+  }
+  ```
+- **格式**：`YYYY-MM-DD HH:MM:SS`（Go 时间格式化参考串）。
+- **注入时机**：模板渲染瞬间实时取值。
+- **实用性备注**：标题生成场景对时间信息的实际需求较弱（标题以"目标/动作"为核心，鲜少需要时间），此处注入更多是 PentAGI 全模板的统一惯例（多数模板都注入 CurrentTime 提供时序感知）。对本模板而言属冗余但无害的占位符。
+
+#### `{{.N}}` — 字符上限（硬编码常量）
+
+- **来源**：字面量 `20`，在两处调用点均硬编码：
+  ```go
+  // providers.go:434（flow）/ :580（assistant）
+  titleTmpl, _ := prompter.RenderTemplate(templates.PromptTypeFlowDescriptor, map[string]any{
+      "Input":       input,
+      "Lang":        language,
+      "CurrentTime": getCurrentTime(),
+      "N":           20,   // ← 硬编码，非配置项
+  })
+  ```
+- **作用**：注入 prompt 的 `<task>` 段，指示 LLM "生成一个不超过 N 个字符的标题"。
+- **含义**：标题长度上限固定为 20 字符，不可通过配置调整。若需放宽（如长任务名场景），需改源码而非改配置——这是当前实现的硬约束。
+
+### 6.3 注入时机总结
+
+四个占位符**全部在 flow / assistant 启动期一次性注入**，无运行时更新、无跨请求缓存。其中 `{{.Lang}}` 受串行依赖约束（必须等 language_chooser 完成），其余三者（Input/CurrentTime/N）在调用 `RenderTemplate` 的瞬间即可取值。
+
+---
+
+## 七、关键设计点
+
+### 7.1 "启动期决策链"模式
+
+本模板是 PentAGI"启动期一次性决策"模式的典型代表：在 flow 主流程开始前，用一组轻量级（OptionsTypeSimple）LLM 调用预先确定元数据（镜像 / 语言 / 标题），结果固化为 provider 结构体字段，主流程直接消费。这避免了在运行期反复判定这些相对稳定的属性。
+
+### 7.2 N=20 硬编码 vs 可配置
+
+`{{.N}}` 取值 20 是源码字面量，未走配置系统。对比 `OptionsTypeSimple` 自身可通过 provider config 调整模型/温度，标题长度上限却是写死的。若不同部署环境对标题长度有差异需求（如移动端 UI 更短），当前实现无法适配，需改源码。
+
+### 7.3 两处调用点的代码重复
+
+`providers.go:430-444` 与 `:576-590` 是近乎逐字复制的代码块（仅所在函数不同）。这是 flow / assistant 两条入口共享启动逻辑的遗留形式，未抽取公共方法。若后续调整注入参数（如新增占位符、改 N 值），需同步修改两处，存在不一致风险。
+
+### 7.4 长度约束的软执行
+
+标题长度上限仅靠 prompt 指令约束，结果侧只做 `strings.TrimSpace`（`:444`/`:590`），**未做硬截断**。若 LLM 未遵从指令输出超长标题，系统不会强制截断到 20 字符——依赖 LLM 的指令遵从性。这在多数情况下成立，但在极端输入下可能产生超长标题。

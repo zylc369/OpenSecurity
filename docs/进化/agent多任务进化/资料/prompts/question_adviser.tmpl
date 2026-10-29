@@ -1,0 +1,27 @@
+<question_adviser_context>
+  <instruction>利用所提供的上下文和工具，为用户问题生成全面、详细的建议。</instruction>
+
+  <initiator_agent>{{.InitiatorAgent}}</initiator_agent>
+
+  {{if .Enriches}}
+  <enrichment_data>
+  {{.Enriches}}
+  </enrichment_data>
+  {{end}}
+
+  <user_question>
+  {{.Question}}
+  </user_question>
+
+  {{if .Code}}
+  <code_snippet>
+  {{.Code}}
+  </code_snippet>
+  {{end}}
+
+  {{if .Output}}
+  <command_output>
+  {{.Output}}
+  </command_output>
+  {{end}}
+</question_adviser_context>

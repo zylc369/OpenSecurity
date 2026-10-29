@@ -14,6 +14,7 @@
 | 没检查点是否在曲线上 | invalid curve | invalid curve 攻击 | §5 |
 | 判别式 `4a³+27b² ≡ 0 (mod p)` | 奇异曲线 | 退化映射 | §6 |
 | 都不满足 | 通用离散对数 | BSGS / Pollard rho | §7 |
+| 点满足 x²+y²=1（时钟群/单位圆） | clock group | 群阶 = **p+1**（不是 p-1），法则 (x1y2+y1x2, y1y2-x1x2)；p 隐藏时 gcd(x²+y²-1) 恢复 | §8 |
 
 **先算**：`E.order()`（sage）、`(4*a**3+27*b**2) % p`（判奇异，注意 `%` 优先级高于 `+`，必须加括号）、`#E` 是否光滑。
 
@@ -208,6 +209,39 @@ k = discrete_log(Q, G, ord=order, operation='+')
 
 `order > 2^80` 时通用算法不可行——说明题目必有 §2-§6 的弱点，重新检查。
 
+**稀疏指数 MITM（低汉明重）**: 已知 x 至多 k 位为 1（如 128-bit 中 11 位）→ 指数劈半 x=x1·2^64+x2，baby 表存 C(64,5) 个 g^(x1·2^64)，giant 枚举 C(64,6) 个 x2 查 a·g^(-x2)。复杂度 C(n,k/2) 级，远优于 2^k 穷举和 2^(n/2) 标准 BSGS。指纹: "at most k bits set"、指数=若干 2^i 之和的生成逻辑。
+
+## 8. 时钟群（单位圆）DLP
+
+群法则（复数乘法模 p 实虚部）: `(x1,y1)*(x2,y2) = (x1y2+y1x2, y1y2-x1x2)`；单位元 (0,1)。**群阶 = p+1**，同构 GF(p²)* 范数 1 子群。
+
+p 隐藏恢复：每点满足 x²+y²≡1 (mod p) → `p = reduce(gcd, [x²+y²-1 for points])`（剥离小因子）。攻击：分解 **p+1**，光滑则 Pohlig-Hellman + CRT。识别：clock/circle 措辞、DH 在 x²+y²=1 上。
+
+## 9. Ed25519 torsion 侧信道与 nonce 缺陷扩展
+
+**torsion 侧信道**（cofactor 8 泄漏标量位）: 密钥派生 key = MASTER*uid mod l 时，标量绕 l 使结果偏移 torsion 元（8 点之一）。对 t=0..254 查 uid=2^t 与 2^(t+1) 的签名点，`point_double(S_t).y != S_{t+1}.y` = 发生绕 l = 该位 1。位序列重建 MASTER ≈ l·(0.b0b1...)₂，8 个 torsion 修正逐一验证。ecpy 类 mod l 规约库受影响。
+
+**nonce 缺陷三变体**（同 r 复用恢复公式之外）:
+1. Ed25519 跨密钥 same-nonce（标量跨 rekey 存活）: `a = (S1-S2) * inverse(h1-h2) mod L`
+2. k = MD5(prefix+counter) 派生: fastcoll 制造前缀碰撞 → 不同 counter 同 k → 退化标准复用
+3. k 取值空间受限（如 1024 种）: 暴力 (k1,k2) 对解线性系统 `x = (s2k2h1 - s1k1h2)/(s1k1r2 - s2k2r1) mod q`，`pow(g,k1,p)%q==r1` 验证
+
+**素数生成过滤缺陷**: 生成器带模过滤（如只取 p%3==2）→ 密钥空间坍缩 → 多公钥两两 gcd 高概率共享素数（ECC 的 p 与 RSA 的 n 同理）。
+
+## 10. 同源图（isogeny）遍历
+
+同源密码题本质常是**图寻路**:
+- 节点 = j-invariant（同构类）；2-isogeny 连接成近树形图，每节点 ~3 邻居（2 子+1 父）
+- 邻居求法: 解模多项式 Φ₂(j, Y)=0 的根——比算真实 isogeny 快得多
+- 寻路: 随机游走估高度（多轮取最小深度到叶）→ 两端上行找 LCA → 拼接路径
+- CM 判别式 D=f²·D_K，conductor f 决定树深; class number 1 判别式 -163/-67/-43 常是题眼
+
+与 SIDH 密钥恢复（Castryck-Decru，crypto-methodology §5）互补: 那是辅助点泄漏的多项式时间攻击，本节是无可利用泄漏时的图结构攻击面。
+
+### 跨曲线 DDH 判定（Tate 配对）
+
+两条不同基域曲线判 z 是否 = x·y: embedding degree k 存在时点映射到 E1(F_{p^k})，比较 `tate_pairing(zP, Q, n, k) == tate_pairing(xP, yQ, n, k)`（双线性把乘法翻译成相等性; 曲线需满足度 4 twist 关系）。**先做意外检查**: 曲线阶含小因子（如 500）→ Pohlig-Hellman 直接子群解出 x,y,z mod 小因子验证 z≡xy。
+
 ## 决策
 
 ```
@@ -217,6 +251,8 @@ k = discrete_log(Q, G, ord=order, operation='+')
 ├─ #E 光滑? → Pohlig-Hellman (§4, sage 自动)
 ├─ embedding degree 小? → MOV (§3)
 ├─ 服务端不验点? → invalid curve (§5)
+├─ 点在 x²+y²=1 上? → 时钟群 (§8, 查 p+1 光滑)
+├─ Ed25519 + key=master*uid? → torsion 侧信道 (§9)
 └─ 都不满足 → 通用 BSGS (§7), order>2^80 则重查弱点
 ```
 

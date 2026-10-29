@@ -1,0 +1,98 @@
+# subtasks_refiner.tmpl 分析文档
+
+> 本文档仅记录分析结论，不复述原模板内容。所有结论均来自 PentAGI 后端源码调用链追踪。
+> 引用形如 `文件:行号`，均相对 `backend/pkg/`。
+
+## 1. 原文件名
+
+`subtasks_refiner.tmpl`
+
+- 源码路径：`backend/pkg/templates/prompts/subtasks_refiner.tmpl`（go:embed 嵌入）
+- PromptType 常量：`PromptTypeSubtasksRefiner = "subtasks_refiner"`，注释标明 "human input for task refinement"
+- 文件名映射注册于 `templates.go:308` 的 allowed placeholders 校验表
+
+## 2. 类型与用途
+
+**B 类 Agent Human Prompt**（Agent 人类消息模板）。
+
+它是 Refiner（子任务计划优化器）agent 的 **Human 消息**，职责是把"当前任务进展"以 XML 上下文形式喂给 LLM：用户原始请求、已完成子任务的成果、剩余计划子任务、执行状态与日志。本身不含任何行为指令或角色设定（那些都在配对的 System 模板里），只承担"数据载体"职能。
+
+典型 B 类特征：纯数据注入、无工具占位符、被 System prompt 驱动。
+
+## 3. 配对关系
+
+与 **`refiner.tmpl`**（System 消息）配对，共同构成 Refiner agent 的完整 prompt 对。
+
+注册位于 `templates.go:559-562`：
+
+```
+Refiner: AgentPrompts{
+    System: PromptTypeRefiner,         // refiner.tmpl
+    Human:  PromptTypeSubtasksRefiner, // subtasks_refiner.tmpl
+}
+```
+
+- `refiner.tmpl` 提供：角色定位、授权框架、优化原则、细化规则、输出格式（`SubtaskPatchToolName` 增量操作）等全部行为约束
+- `subtasks_refiner.tmpl` 提供：本次细化所需的结构化上下文数据（`<refinement_context>`）
+
+两者职责严格分离：System 管"怎么做"，Human 管"基于什么做"。
+
+## 4. 调用时机
+
+**每个子任务执行完成后，由 Go 代码自动触发**，作为 Refiner agent 的 Human 消息渲染并送入 LLM。
+
+完整调用链：
+
+1. `controller/task.go:284` `taskWorker.Run()` —— 子任务执行主循环
+2. 循环体：`PopSubtask` → `st.Run()`（执行一个子任务）→ **`tw.stc.RefineSubtasks(ctx)`**（`task.go:309`，每个子任务完成后必触发一次）
+3. `controller/subtasks.go:96` `subtaskController.RefineSubtasks` → `provider.go:401` `flowProvider.RefineSubtasks`
+4. `provider.go:495` → `performers.go:175` `performSubtasksRefiner`：渲染模板、构建消息链、调用 LLM、解析 `SubtaskPatch`
+5. 返回的 patch 由 `subtasks.go:107-134` 落库（删除旧的 `Created` 子任务、插入细化后的子任务）
+
+触发是**每轮迭代、无条件**的（只要还有计划子任务且未超 `TasksNumberLimit+3` 上限）。不是一次性规划，而是"执行一个 → 细化一次 → 再执行"的滚动收敛循环。
+
+## 5. 工具列表
+
+**无工具。**
+
+本模板（Human 消息）不声明、不引用任何工具——6 个占位符全部是数据占位符，没有一个工具名占位符。校验表 `templates.go:308-315` 也证实允许的占位符集合里无任何 `*ToolName`。
+
+工具能力由 Refiner agent 的 **System 侧**承载（`refiner.tmpl` 的工具名占位符 + `GetRefinerExecutor` 绑定的执行器），Human 模板只是被动接收执行结果数据，不参与工具定义。Refiner agent 实际可用工具（在 executor 层，非本模板）：memorist、searcher、subtask_patch（barrier，必须调用）、terminal、file、browser（可用时）。
+
+## 6. 非工具占位符
+
+模板校验表（`templates.go:308-315`）注册的全部 6 个占位符均为数据占位符，按注入时机分两组：
+
+### 组 A：基础上下文（渲染时恒定注入）
+
+由 `provider.go:420-426` 的 `refinerContext["user"]` 在首次渲染时一次性注入，始终存在。
+
+| 占位符 | 注入内容（来源） | 用途 |
+|--------|------------------|------|
+| `{{.Task}}` | 当前任务（`database.Task`，`tasksInfo.Task`，由 `helpers.go:199` 取出与 `taskID` 匹配的任务）。模板仅访问 `{{.Task.Input}}` | 用户提供的主要请求/终极目标。整份模板的"北极星"——refiner 的所有细化都必须收敛到这个 Input |
+| `{{.Tasks}}` | 同 flow 内**其他**任务列表（`tasksInfo.Tasks`，`helpers.go:192-200` 已将当前任务从列表中剔除） | 先前任务上下文，仅供学习/参考。模板以 `<previous_tasks>` 列出每条的 ID/Input/Status/Result。`{{if}}` 守卫：为空则整段省略 |
+| `{{.PlannedSubtasks}}` | 状态为 `Created` 的子任务（`subtasksInfo.Planned`，`helpers.go:232-233`），含 ID/Title/Description | **待细化**的剩余计划。`{{if}}` 守卫：为空时输出 `<status>empty</status>` + 提示"所有子任务都已完成，请检查状态/结果"，这是触发"任务完成判定"的信号 |
+| `{{.CompletedSubtasks}}` | 状态为 `Finished` 或 `Failed` 的子任务（`subtasksInfo.Completed`，`helpers.go:234-235`），含 ID/Title/Description/Status/Result | 已执行子任务的成果与失败原因，是 refiner 做"基于结果的调整"的核心证据。`{{if}}` 守卫：为空则整段省略 |
+
+### 组 B：渐进式摘要（按尺寸阈值条件注入）
+
+注入逻辑在 `provider.go:457-488`，模板最多被渲染 **3 次**，依据 `msgRefinerSizeLimit = 100 KB`（`provider.go:38`）逐级叠加：
+
+| 占位符 | 注入内容（来源） | 注入时机 |
+|--------|------------------|----------|
+| `{{.ExecutionState}}` | 主 agent 链的摘要（`getTaskPrimaryAgentChainSummary`，`helpers.go:302`）：对 `MsgchainTypePrimaryAgent` 消息链生成"用户需求摘要 + 执行动作/结果摘要"两段式 Markdown | **第 2 次渲染前**：仅当首次渲染结果 `< 100KB`（`provider.go:463`）才计算并注入；否则该占位符缺省，`{{if}}` 守卫整段省略 |
+| `{{.ExecutionLogs}}` | 任务消息日志摘要（`getTaskMsgLogsSummary`，`helpers.go:376`）：对该任务的全部 msg logs 先按条截断再摘要压缩；无日志时返回字面量 "no msg logs" | **第 3 次渲染前**：嵌套条件——仅当加入 ExecutionState 后的二次渲染结果**仍** `< 100KB`（`provider.go:476`）才计算并注入；否则缺省省略 |
+
+**渐进注入的意义**：避免把过大的上下文塞进 LLM。基础四项（Task/Tasks/Planned/Completed）已足够支撑大多数细化决策；只有当消息体量未触顶时，才追加更"重"的主链摘要和日志摘要，提供更深的执行细节。这是一条按 token 预算自适应的上下文供给策略，而非每次都全量灌入。
+
+> 注：组 B 两个占位符的注入与否完全由运行时尺寸决定，模板内的 `{{if}}` 只是被动兜底——即使代码没注入，渲染也不会报错，对应 XML 段直接消失。
+
+---
+
+## 附：补充发现（查缺补漏）
+
+1. **与 `subtasks_generator.tmpl` 的上下文控制策略不同**：generator 用"二分截断 `Subtasks` 切片"控制体积（`provider.go:370-381`，保留较新子任务）；而本模板（refiner）用"渐进追加摘要"控制体积（基础四项 → 主链摘要 → 日志摘要，逐级叠加）。两者目标一致（控量），但 refiner 选择"补更深的执行细节"而非"砍历史数据"——因为 refiner 必须理解已完成子任务的真实结果才能做失败分析与方案调整，砍数据会丢失关键证据。
+
+2. **`PlannedSubtasks` 为空是有意信号**：模板对 `PlannedSubtasks` 设了 `{{else}}` 分支，输出 `<status>empty</status>` + "所有子任务都已完成，请检查它们的状态和结果"。而 `CompletedSubtasks` / `Tasks` 为空时只是整段省略（无 else）。这是为"任务完成判定"专门设计的提示——配合 `refiner.tmpl` 的细化规则第 4 条（任务完成时返回空子任务列表）。
+
+3. **上下文跨轮复用**：`performSubtasksRefiner`（`performers.go:244-271`）优先复用上一轮 refiner 的 msg chain，找不到才回退到 generator 的 msg chain，保证 refiner 在多轮迭代中的对话连续性。本模板渲染的 Human 消息会与历史工具调用合并（`performers.go:228-235`），而非每次孤立发送。

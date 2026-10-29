@@ -206,8 +206,8 @@ Plugin 在 system.transform 阶段把占位符替换为 `agents-rules/<name>.md`
 
 `tool.execute.before` hook 做两件事：
 
-- **预装依赖拦截**：detect_env.py 的 `--check-preinstall` 在 chat.message 检查必需预装依赖（IDA Pro/外部工具/sage），缺失时拦截整个 agent 并提示安装命令
-- **注入环境变量**：每次 bash 命令前缀 `SESSION_ID=... AGENT_NAME=...`，让 Python 脚本能识别当前 session（用于日志路由、task 目录映射）
+- **预装依赖拦截**：chat.message 前两层检测——第一层 CLI 调 `detect_py_deps.py scan`（Python 依赖缺失 → 提示 install.sh），第二层控制台 `/api/deps/{agent}`（五分类检测：Python 包/外部工具/编译器/Docker/模型，有问题返回控制台链接）
+- **注入环境变量**：shell.env hook 注入 `SESSION_ID/AGENT_NAME/PYTHON_CMD/IDAT` 等（不含前缀改写，避免 LLM 模仿累积），让 Python 脚本能识别当前 session
 
 ## 五、几个"反直觉"但关键的设计
 
@@ -303,7 +303,7 @@ Plugin 加载时确保 `~/bw-security-analysis/.venv` 存在且可用，失败�
 
 ### 工具脚本沉淀机制
 
-每次实战中如果生成了可复用的脚本（比如"针对 VMProtect 3.x 的 OEP 定位"），evolve Agent 会把它沉淀到 `scripts/` 并注册到 `registry.json`。下次遇到类似场景，Agent 直接调用沉淀脚本而不是从头构造。
+每次实战中如果生成了可复用的脚本（比如"针对 VMProtect 3.x 的 OEP 定位"），evolve Agent 会把它沉淀到 `scripts/`。下次遇到类似场景，Agent 直接调用沉淀脚本而不是从头构造。
 
 ### IDAPython 编码规范
 

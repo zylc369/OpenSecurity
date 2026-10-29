@@ -1,0 +1,17 @@
+{
+  "name": "readtwice-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ejs": "^3.1.10",
+    "express": "^4.19.2",
+    "express-rate-limit": "^8.5.2",
+    "express-session": "^1.18.1",
+    "helmet": "^7.1.0",
+    "memorystore": "^1.6.8"
+  }
+}

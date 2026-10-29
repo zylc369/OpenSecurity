@@ -11,5 +11,5 @@
 
 ## 执行统计
 - 总耗时: Xm Xs
-- 任务目录: ~/bw-security-analysis/workspace/<task_id>/
+- 任务目录: $TASK_DIR
 ```

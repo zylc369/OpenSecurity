@@ -22,7 +22,7 @@ labels: bug
 ## 环境信息
 
 - **操作系统**：（如 macOS 14.4 / Ubuntu 22.04 / Windows 11）
-- **涉及哪个 Agent**：（如 binary-analysis / web-analysis / security-coordinator）
+- **涉及哪个 Agent**：（如 binary-analysis / web-analysis）
 - **IDA Pro 版本**：（如 8.4，如涉及）
 - **Python 版本**：`$PYTHON_CMD --version` 的输出
 

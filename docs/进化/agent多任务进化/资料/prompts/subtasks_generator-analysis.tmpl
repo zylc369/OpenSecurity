@@ -1,0 +1,57 @@
+# subtasks_generator.tmpl 分析文档
+
+## 1. 原文件名
+
+`subtasks_generator.tmpl`，嵌入路径 `prompts/subtasks_generator.tmpl`，通过 `//go:embed prompts/*.tmpl` 打包（templates/templates.go:18-19）。对应的 PromptType 常量为 `PromptTypeSubtasksGenerator = "subtasks_generator"`（templates/templates.go:44，注释 "human input for task decomposition"）。
+
+## 2. 类型与用途
+
+属于 **B 类 Agent Human Prompt**（Human 角色消息），角色为**子任务生成器的运行时上下文载体**。
+
+- 结构归属：`AgentsPrompts.Generator.Human`（templates/templates.go:555-558），与 System 槽（`generator.tmpl`）同属一个 `AgentPrompts`。
+- 消息链类型：`database.MsgchainTypeGenerator`（performers.go:102），与配对 System 模板共用。
+- 选项类型：`pconfig.OptionsTypeGenerator`（performers.go:101）。
+- 职责：**只负责喂料**——以 XML 结构向 LLM 提交本次待拆解的任务上下文（当前任务、历史任务、已有子任务）。不承载任何角色设定、规则、工具说明或优化原则（这些全部由配对的 `generator.tmpl` 承担）。是 Generator agent 消息链中的第二条（Human）消息。
+
+## 3. 配对关系
+
+与 **`generator.tmpl`**（`PromptTypeGenerator`，A 类 System Prompt）配对，构成 Generator agent 的 System + Human 双消息：
+
+- 本模板 = Human 消息（注入 `Task`/`Tasks`/`Subtasks` 运行时上下文），templates.go:557。
+- `generator.tmpl` = System 消息（agent 人格、规则、工具说明），templates.go:556。
+
+两模板在 `flowProvider.GenerateSubtasks` 中分别渲染后拼入同一条消息链（provider.go:365 渲染本 Human 模板，provider.go:383 渲染配对 System 模板），再传入 `performSubtasksGenerator`（provider.go:388），最终在 performers.go:105-108 组装为 `[System, Human]` 顺序。两份模板的详细分析互为补充，工具与系统侧占位符请参见 `generator-analysis.tmpl`。
+
+## 4. 调用时机
+
+**每次创建新 Task 时由 Go 代码自动触发，早于该 Task 的任何子任务执行，且为 Generator agent 每个 Task 的单次调用。** 完整调用链：
+
+1. `controller/flow.go:1017` — 用户向 Flow 发送输入（首个任务或后续新任务）时，`fw.tc.CreateTask(ctx, flin.input, fw)` 被调用。仅当存在 waiting 状态可复用任务时才走 `runTask`（flow.go:985-996,1038）路径，那时**不**重新生成子任务。
+2. `controller/task.go:63-94` — 任务写入 DB（CreateTask）后，立即同步调用 `stc.GenerateSubtasks(ctx)`。源码注释明确（flow.go:1001-1004）："GenerateSubtasks (an LLM call) runs synchronously inside CreateTask and may take many seconds."
+3. `controller/subtasks.go:70-71` — `subtaskController.GenerateSubtasks` 转调 `Provider.GenerateSubtasks`。
+4. `provider.go:318` — `flowProvider.GenerateSubtasks` 通过 `getTasksInfo`（provider.go:324）组装上下文，渲染本 Human 模板（provider.go:365），必要时按大小截断重渲染（provider.go:370-381），再渲染配对 System 模板（provider.go:383）。
+5. `provider.go:388` — 调用 `performSubtasksGenerator`。
+6. `performers.go:94-173` — 构建 `GeneratorExecutorConfig`、创建 msg chain、执行 `performAgentChain`，LLM 通过 `subtask_list` 工具产出子任务列表。
+7. 返回的 `[]SubtaskInfo` 由 controller 逐条写入数据库（subtasks.go:81-91）。
+
+触发点位于 Task 生命周期最早期、同步执行，是 task 级别的单次调用。后续每个子任务执行后由 `Refiner`（refiner.tmpl）做增量优化，而非再次调用 generator。
+
+## 5. 工具列表
+
+**本模板无任何工具占位符。** 作为 Human 消息，它不声明、不绑定、不引用任何工具。
+
+可用占位符清单（`PromptVariables[PromptTypeSubtasksGenerator]`，templates/templates.go:287-291）仅 3 个数据占位符：`Task` / `Tasks` / `Subtasks`，不含任何 `*ToolName` 类工具占位符。
+
+Generator agent 整体的工具绑定发生在配对 System 模板与 executor 层，详见 `generator-analysis.tmpl` 第 5 节（`subtask_list` / `search` / `terminal` / `file` / `browser`，注册于 `GetGeneratorExecutor`，tools/tools.go:1617-1683）。本 Human 模板不重复这些工具声明。
+
+## 6. 非工具占位符
+
+以下 3 个占位符在 `flowProvider.GenerateSubtasks` 的 `generatorContext["user"]`（provider.go:330-335）中赋值，模板渲染时注入。声明清单见 `PromptVariables[PromptTypeSubtasksGenerator]`（templates.go:287-291）。数据源统一来自 `getTasksInfo`（providers/helpers.go:177-219）。
+
+| 占位符 | 注入值（来源） | 用途 | 注入时机 |
+|---|---|---|---|
+| `{{.Task}}` | 当前任务对象，取自 `db.GetFlowTasks(flowID)` 结果中匹配当前 `taskID` 的那一条（helpers.go:192-203：匹配后从 `Tasks` 列表中移除并单独赋值）。模板实际消费 `{{.Task.Input}}` | 告知 Generator "用户本次要什么"——这是子任务必须协同实现的终极目标。**始终非空**（必填），是模板核心输入 | 渲染本 Human 模板时（provider.go:332 赋值，provider.go:365 渲染） |
+| `{{.Tasks}}` | 同 Flow 内**除当前任务外**的其余任务列表（每项含 `ID`/`Input`/`Status`/`Result`），来源同 `GetFlowTasks` 剔除当前任务后的剩余（helpers.go:200） | 提供历史/并行任务上下文，让 Generator 在多任务 Flow 中理解前因后果，避免子任务与既有任务重复或冲突。**可为空**——Flow 首个任务生成时为空，模板中 `{{if .Tasks}}` 块整段跳过 | 同上（provider.go:333 赋值） |
+| `{{.Subtasks}}` | 同 Flow 内**所有任务**已生成的子任务列表（每项含 `TaskID`/`ID`/`Title`/`Description`/`Status`/`Result`），来源 `db.GetFlowSubtasks(flowID)`（helpers.go:205） | 作为"示例/避免重复"的参考（配对 System 模板将其定位为"仅用作示例"），让 Generator 知晓已规划过哪些子任务，保持计划整体协调。**可为空**——首任务首次生成时为空，`{{if .Subtasks}}` 块跳过 | 同上（provider.go:334 赋值），但存在**大小截断**特殊处理 |
+
+**`{{.Subtasks}}` 的大小截断逻辑**（provider.go:370-381）：首次渲染后，若结果长度 ≥ `msgGeneratorSizeLimit`，进入二分截断循环——按 `l = subtasksLen; l > 2; l /= 2` 逐步缩小，保留尾部（较新的）子任务切片 `tasksInfo.Subtasks[(subtasksLen - l):]` 重新渲染（provider.go:376-377），直到体积达标或无可再截。目的是在多任务/长上下文场景下控制 prompt 体积，防止超出模型上下文窗口。`{{.Task}}` 与 `{{.Tasks}}` 不参与截断。

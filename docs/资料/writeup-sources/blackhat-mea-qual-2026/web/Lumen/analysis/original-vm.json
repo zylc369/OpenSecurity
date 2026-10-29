@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "connection": {
+    "type": "http",
+    "host": "k84e2c92879e2e11c9a50a9313232ca0e.playat.flagyard.com",
+    "port": 80,
+    "url": "http://k84e2c92879e2e11c9a50a9313232ca0e.playat.flagyard.com",
+    "username": null,
+    "password_env": null,
+    "key_file_env": null
+  }
+}

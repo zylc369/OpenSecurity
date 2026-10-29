@@ -1,0 +1,3444 @@
+"""opencode-control 后端 + Plugin 集成测试。
+
+按需求文档 §4 验收标准设计测试用例，覆盖：
+- 功能验收 F1-F12, F15, F16（F13/F14 前端测试，留待前端完成）
+- 边界条件（心跳超时、启动宽限、原子写、端口 fallback）
+- 端到端集成（Plugin spawn 控制台 → HTTP 调用 → 配置获取 → embed 推理）
+
+运行方式：
+  cd .opencode/control/backend
+  python tests/test_control.py
+  （自隔离沙箱 /tmp/control_test_data + 随机高位端口 + .ai_env 副本——
+   可在生产控制台运行期间直接跑，生产数据/sock/端口/配置零接触；
+   TEST_OPENSECURITY_HOME 可显式覆盖沙箱根）
+
+每个测试独立运行（自带 setup + teardown），失败一个不影响其他。
+"""
+# pyright: reportMissingParameterType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAny=false, reportMissingTypeArgument=false
+from __future__ import annotations
+
+import os
+import sys
+from typing import Callable, cast
+import shutil
+import time
+import asyncio
+import socket
+import subprocess
+import threading
+import signal
+from pathlib import Path
+
+import httpx
+import uvicorn
+from fastapi import FastAPI
+
+# 配置测试环境
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND_DIR))
+from services.config_manager import Surface  # noqa: E402
+
+# 测试专用 OPENSECURITY_HOME 沙箱（TEST_OPENSECURITY_HOME 可显式覆盖;
+# 不读变量 OPENSECURITY_HOME——沿用生产值会把测试数据写进生产目录）
+TEST_OPENSECURITY_HOME = Path(os.path.abspath(os.path.expanduser(
+    os.environ.get("TEST_OPENSECURITY_HOME", "/tmp/control_test_data"))))
+# 防假隔离：沙箱解析结果等于系统默认生产路径即拒绝运行（模式 K"设了但没
+# 生效"的一票否决; 不比对环境变量 OPENSECURITY_HOME——子进程隔离执行时
+# 该值本就是沙箱，比对会误伤）
+_default_prod = os.path.abspath(os.path.expanduser(str(Path.home() / "bw-security-analysis")))
+if str(TEST_OPENSECURITY_HOME) == _default_prod:
+    raise SystemExit(f"测试沙箱指向生产目录，拒绝运行: {TEST_OPENSECURITY_HOME}")
+TEST_OPENSECURITY_HOME.mkdir(parents=True, exist_ok=True)
+
+# OPENCODE_ROOT 用真实路径（代码本体在真实 .opencode; .ai_env 走沙箱副本见下）。
+# 未导出/无效时回落本文件位置推导的 .opencode（普通 Terminal 手动跑可自持，
+# 不依赖 OPENCODE_ROOT 环境变量）
+_root_raw = os.environ.get("OPENCODE_ROOT", "").strip()
+OPENCODE_ROOT = (Path(os.path.abspath(os.path.expanduser(_root_raw)))
+                 if _root_raw else BACKEND_DIR.parents[1])
+if not OPENCODE_ROOT.is_dir():
+    OPENCODE_ROOT = BACKEND_DIR.parents[1]
+
+# 强制环境变量
+os.environ["OPENSECURITY_HOME"] = str(TEST_OPENSECURITY_HOME)
+os.environ["OPENCODE_ROOT"] = str(OPENCODE_ROOT)
+# CONTROL_TCP_PORT 随机高位：沙箱控制台与生产 9776 隔离（bind 冲突会直接退出）
+os.environ.setdefault("CONTROL_TCP_PORT", str(__import__("random").randint(41000, 49000)))
+
+# .ai_env 沙箱副本：配置读写用例（含 E2E PUT /api/config）全落副本，生产文件
+# 零接触; OPENSECURITY_AI_ENV 由 ConfigManager.Bootstrap 消费（测试进程与
+# E2E 子进程同走副本）
+SOURCE_AI_ENV = OPENCODE_ROOT / ".ai_env"
+TEST_AI_ENV = TEST_OPENSECURITY_HOME / ".ai_env"
+if not SOURCE_AI_ENV.is_file():
+    raise SystemExit(f"源 .ai_env 不存在（测试依赖真实配置结构）: {SOURCE_AI_ENV}")
+shutil.copy2(SOURCE_AI_ENV, TEST_AI_ENV)  # 覆盖复制：清掉上次可能残留的测试键
+os.chmod(TEST_AI_ENV, 0o600)  # 副本含凭证——/tmp 沙箱下收紧权限（防多用户机器可读）
+os.environ["OPENSECURITY_AI_ENV"] = str(TEST_AI_ENV)
+
+# services 顶部 import 必须在 env 设置之后（model_assets→config 链会冻结 OPENSECURITY_HOME）
+from services.model_lifecycle import ManagedModel  # noqa: E402
+from services.model_assets import ModelAssetRegistry  # noqa: E402
+# 重模块单线程预热: 后段测试在 patch/create_app 里延迟 import（多线程互锁死锁源），在此一次性完成
+import graphiti_core.nodes  # noqa: E402,F401
+import server  # noqa: E402,F401
+
+
+
+def _hb_fast(sweep: float, grace: float, timeout: float = 60.0):
+    """heartbeat 测试参数注入（patch ConfigManager.heartbeat_tunables 返回小值）。"""
+    from services.config_manager import ConfigManager
+    CM = ConfigManager
+    orig = CM.heartbeat_tunables
+    CM.heartbeat_tunables = lambda self: CM.HeartbeatTunables(  # type: ignore[method-assign]
+        timeout_sec=timeout, sweep_interval_sec=sweep, grace_sec=grace)
+    return orig
+
+def _hb_restore(orig) -> None:
+    from services.config_manager import ConfigManager
+    ConfigManager.heartbeat_tunables = orig  # type: ignore[method-assign]
+
+# ─── 测试框架（极简）──────────────────────────────────────
+
+_results: list[tuple[str, bool, str]] = []
+
+
+def test(name: str):
+    """测试装饰器：注册测试函数。"""
+    def decorator(fn):
+        def wrapper():
+            try:
+                fn()
+                _results.append((name, True, ""))
+                print(f"  ✓ {name}")
+            except AssertionError as e:
+                _results.append((name, False, str(e)))
+                print(f"  ✗ {name}: {e}")
+                import traceback
+                traceback.print_exc()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                _results.append((name, False, f"{type(e).__name__}: {e}"))
+                print(f"  ✗ {name}: {type(e).__name__}: {e}")
+        wrapper._is_test = True
+        return wrapper
+    return decorator
+
+
+test.__test__ = False  # pytest 收集免疫（import 到消费方模块也不被收集）
+
+
+def assert_eq(actual, expected, msg=""):
+    if actual != expected:
+        raise AssertionError(f"{msg}: actual={actual!r}, expected={expected!r}")
+
+
+def assert_true(value, msg=""):
+    if not value:
+        raise AssertionError(f"{msg}: value is falsy ({value!r})")
+
+
+def assert_false(value, msg=""):
+    if value:
+        raise AssertionError(f"{msg}: value is truthy ({value!r})")
+
+
+# ─── 测试用例 ─────────────────────────────────────────────
+
+# ============ 模块单元测试 ============
+
+@test("process_lock.get_process_start_time: 跨平台获取")
+def test_get_process_start_time():
+    from services.process_lock import ProcessLockUtil
+    st = ProcessLockUtil.get_process_start_time(os.getpid())
+    assert st is not None, "应该返回启动时间戳"
+    assert_true(st > 1_000_000_000, f"时间戳应该 > 2001 年，实际 {st}")
+
+
+@test("process_lock.atomic_write: 写入 + 读取一致")
+def test_atomic_write():
+    from services.process_lock import ProcessLockUtil
+    test_file = TEST_OPENSECURITY_HOME / "test_atomic.txt"
+    ProcessLockUtil.atomic_write(test_file, "hello\nworld\n")
+    content = test_file.read_text()
+    assert_eq(content, "hello\nworld\n", "内容应该一致")
+    test_file.unlink()
+
+
+@test("process_lock.atomic_write: 父目录不存在时自动创建")
+def test_atomic_write_mkdir():
+    from services.process_lock import ProcessLockUtil
+    test_file = TEST_OPENSECURITY_HOME / "subdir" / "test_atomic.txt"
+    if test_file.exists():
+        test_file.unlink()
+    ProcessLockUtil.atomic_write(test_file, "test")
+    assert_true(test_file.exists(), "文件应该存在")
+    test_file.unlink()
+    test_file.parent.rmdir()
+
+
+# ============ ipc_listener 测试 ============
+
+@test("ipc_listener: Unix bind + probe + 残留自愈 + 并发等待语义")
+def test_ipc_listener_unix():
+    """bind → probe 通；死残留清理重建；已活实例场景 start 返回 False（复用）。"""
+    from services.ipc_listener import IpcListener
+    from services.config_manager import ConfigManager
+
+    from services.ipc_listener import IpcListener, IpcStartStatus
+    lst = IpcListener._reset_for_tests() or IpcListener()
+    assert_true(lst.start() is IpcStartStatus.LISTENING, "首次 bind 应返回 LISTENING")
+    try:
+        assert_true(IpcListener.ipc_probe_alive(timeout=1.0), "bind 后 probe 应通")
+        # 已有活实例：另一实例 start 应返回 EXISTING_INSTANCE（复用语义，不抛错）
+        # （object.__new__ 绕过单例模拟"另一进程的新实例"——单例修正后
+        # IpcListener() 返回同一实例，其 start 幂等返回 LISTENING 而非复用）
+        second = object.__new__(IpcListener)
+        second._init_once()
+        assert_true(
+            second.start() is IpcStartStatus.EXISTING_INSTANCE,
+            "活实例在时第二个 start 应返回 EXISTING_INSTANCE",
+        )
+    finally:
+        lst.cleanup()
+        ConfigManager.get_instance().ipc_unix_socket_path().unlink(missing_ok=True)
+
+    # 死残留自愈：文件存在但无人监听 → probe 失败 → 再次 start 应清理并成功
+    ConfigManager.get_instance().ipc_unix_socket_path().touch()
+    assert_false(IpcListener.ipc_probe_alive(timeout=0.5), "死残留 probe 应失败")
+    lst2 = IpcListener._reset_for_tests() or IpcListener()
+    assert_true(
+        lst2.start() is IpcStartStatus.LISTENING,
+        "死残留应被清理后重新 bind（LISTENING）",
+    )
+    lst2.cleanup()
+    ConfigManager.get_instance().ipc_unix_socket_path().unlink(missing_ok=True)
+
+
+@test("ipc_listener: bind 后可通过 uds 完成 HTTP 往返")
+def test_ipc_listener_http_roundtrip():
+    """最小 FastAPI + TCP + IPC 桥 → httpx(uds) 请求 /health。
+
+    上游 uvicorn 用独立随机端口并注册进 FrontendPortRegistry
+    （桥经注册中心找 upstream，与生产路径一致）。
+    """
+    import threading
+    import httpx
+    import uvicorn
+    from services.frontend_port import FrontendPortRegistry
+    from services.ipc_listener import IpcListener
+
+    app = FastAPI()
+
+    @app.get("/health")
+    def _h():
+        return {"ok": True}
+
+    upstream_port = __import__("random").randint(41000, 49000)
+    config = uvicorn.Config(app, host="127.0.0.1", port=upstream_port, log_level="error")
+    server = uvicorn.Server(config)
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    for _ in range(20):
+        if server.started:
+            break
+        time.sleep(0.25)
+    assert_true(server.started, "uvicorn 测试实例应启动")
+    assert_true(
+        FrontendPortRegistry.get_instance().register_tcp(upstream_port),
+        "上游端口应注册成功（有监听）",
+    )
+
+    from services.ipc_listener import IpcListener, IpcStartStatus
+    listener = IpcListener()
+    assert_true(listener.start() is IpcStartStatus.LISTENING, "IPC 监听应启动")
+    try:
+        with httpx.Client(
+            transport=httpx.HTTPTransport(uds=str(_ipc_sock())),
+            base_url="http://localhost",
+            timeout=5,
+        ) as c:
+            r = c.get("/health")
+            assert_eq(r.status_code, 200, "uds HTTP 往返应 200")
+            assert_true(r.json().get("ok") is True, "响应体应正确")
+    finally:
+        listener.cleanup()
+        FrontendPortRegistry.get_instance().unregister_tcp()
+        server.should_exit = True
+        t.join(timeout=5)  # 确保 TCP 完全释放，不泄漏到后续测试
+
+
+def _ipc_sock():
+    from services.config_manager import ConfigManager
+    return ConfigManager.get_instance().ipc_unix_socket_path()
+    from services.config_manager import ConfigManager
+    return ConfigManager.get_instance().ipc_unix_socket_path()
+
+
+# ============ heartbeat 测试 ============
+
+@test("heartbeat: record + 幂等键 + active_count")
+def test_heartbeat_record():
+    from services.heartbeat import HeartbeatRegistry
+    reg = HeartbeatRegistry()
+    reg.record(11111)
+    reg.record(22222)
+    reg.record(11111)  # 同 pid 重复心跳 → 刷新而非新增
+    assert_eq(reg.active_count(), 2, "同 pid 重复心跳应幂等")
+
+
+@test("heartbeat.sweep: 超时未跳的条目被移除，活跃的保留")
+def test_heartbeat_sweep():
+    import services.heartbeat as hb
+    from services.heartbeat import HeartbeatRegistry
+    _orig_hb = _hb_fast(0.1, 90.0, 0.3)  # 小超时（sweep 读 tunables）
+    try:
+        reg = HeartbeatRegistry()
+        reg.record(11111)
+        time.sleep(0.5)          # 11111 超时
+        reg.record(22222)        # 刚跳，活跃
+        removed = reg.sweep()
+        assert_eq(removed, 1, "应移除 1 个超时条目")
+        assert_eq(reg.active_count(), 1, "应剩 1 个活跃条目")
+    finally:
+        _hb_restore(_orig_hb)
+
+
+@test("heartbeat.HeartbeatTask: 宽限期内表空不自杀，过宽限后自杀")
+def test_heartbeat_task_grace_and_suicide():
+    import services.heartbeat as hb
+    from services.heartbeat import HeartbeatRegistry, HeartbeatTask
+    _orig_hb = _hb_fast(0.1, 0.4)
+    fired = []
+    try:
+        # 宽限期内表空：不自杀（reset 清前序测试的单例残留条目）
+        reg1 = HeartbeatRegistry._reset_for_tests() or HeartbeatRegistry()
+        t1 = HeartbeatTask(reg1, lambda: fired.append("early"))
+        t1.start()
+        time.sleep(0.25)  # < 0.4 宽限
+        assert_eq(len(fired), 0, "宽限期内表空不应自杀")
+        t1.stop()
+        # 过宽限后表空：自杀
+        reg2 = HeartbeatRegistry()
+        t2 = HeartbeatTask(reg2, lambda: fired.append("late"))
+        t2.start()
+        time.sleep(0.7)  # > 0.4 宽限 + 多个 sweep 周期
+        assert_true("late" in fired, "过宽限后表空应触发自杀回调")
+        t2.stop()
+    finally:
+        _hb_restore(_orig_hb)
+
+
+@test("heartbeat.HeartbeatTask: 宽限过后注册→停跳→必须等满超时才自杀（非表空即杀）")
+def test_heartbeat_task_full_timeout_after_registration():
+    """防语义曲化的锚点: 表空 ≠ 立即自杀。
+
+    场景: 宽限期已过，opencode 注册后又退出。它的条目留在表里直到
+    超时被 sweep 移除——移除那一刻才是自杀判定点，而非"最后一次心跳后
+    宽限结束就杀"。若未来有人把宽限判定改成"距最后心跳"，此测试会抓住。
+    """
+    import services.heartbeat as hb
+    from services.heartbeat import HeartbeatRegistry, HeartbeatTask
+    _orig_hb = _hb_fast(0.1, 0.3, 0.8)
+    fired = []
+    try:
+        # 时序: 宽限内先注册，宽限过后才停跳（reset 清残留）
+        reg = HeartbeatRegistry._reset_for_tests() or HeartbeatRegistry()
+        t0 = time.monotonic()
+        task = HeartbeatTask(reg, lambda: fired.append(time.monotonic()))
+        task.start()
+        reg.record(11111)      # 宽限期内注册
+        time.sleep(0.45)       # 过宽限(0.3)，但条目未到超时(0.8)——不得自杀
+        assert_eq(len(fired), 0, "条目未超时前不得自杀（即使宽限已过）")
+        time.sleep(0.6)        # 条目超时(0.8)被 sweep → 表空 → 自杀
+        assert_eq(len(fired), 1, "条目超时移除后应自杀")
+        suicide_at = fired[0] - t0
+        assert_true(suicide_at >= 0.75, f"自杀应不早于条目超时时刻（实际 {suicide_at:.2f}s）")
+        task.stop()
+    finally:
+        _hb_restore(_orig_hb)
+
+
+@test("heartbeat: 多 opencode 时序——A 停跳被移除，B 持续跳则控制台不死")
+def test_heartbeat_multi_user_timeline():
+    import services.heartbeat as hb
+    from services.heartbeat import HeartbeatRegistry, HeartbeatTask
+    _orig_hb = _hb_fast(0.1, 0.3, 0.5)
+    fired = []
+    try:
+        reg = HeartbeatRegistry._reset_for_tests() or HeartbeatRegistry()
+        task = HeartbeatTask(reg, lambda: fired.append(1))
+        task.start()
+        reg.record(11111)  # A
+        reg.record(22222)  # B
+        time.sleep(0.25)   # 宽限内
+        # A 停跳；B 每 0.15s 续跳
+        import threading
+        stop_b = threading.Event()
+
+        def b_loop():
+            while not stop_b.wait(0.15):
+                reg.record(22222)
+
+        bt = threading.Thread(target=b_loop, daemon=True)
+        bt.start()
+        time.sleep(1.2)   # A 早已超时移除；B 一直续跳
+        assert_eq(len(fired), 0, "B 存活时控制台不得自杀")
+        assert_eq(reg.active_count(), 1, "应只剩 B")
+        # B 也停跳 → 全移除 → 自杀
+        stop_b.set()
+        bt.join(timeout=2)
+        time.sleep(1.0)
+        assert_eq(len(fired), 1, "B 停跳超时后应自杀")
+        task.stop()
+    finally:
+        _hb_restore(_orig_hb)
+
+
+@test("heartbeat 路由: 并发 POST 不丢注册（10 路同时跳）")
+def test_heartbeat_route_concurrent():
+    from concurrent.futures import ThreadPoolExecutor
+    from fastapi.testclient import TestClient
+    from routes.heartbeat import router
+    from services.heartbeat import HeartbeatRegistry
+    heartbeats = HeartbeatRegistry._reset_for_tests() or HeartbeatRegistry()
+
+    # 直接压路由层（TestClient 走 ASGI，绕过 uds；heartbeats 是生产单例，
+    # 测完手动清空防止影响其他测试）
+    from fastapi import FastAPI
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+    try:
+        with ThreadPoolExecutor(10) as ex:
+            results = list(ex.map(
+                lambda i: client.post("/api/heartbeat", json={"pid": 30000 + i}).status_code,
+                range(10),
+            ))
+        assert_true(all(s == 200 for s in results), f"应全 200，实际 {results}")
+        assert_eq(heartbeats.active_count(), 10, "10 个不同 pid 应全部入表")
+        # 非法 pid 被拒（pydantic gt=0）
+        assert_eq(client.post("/api/heartbeat", json={"pid": -1}).status_code, 422, "负 pid 应 422")
+    finally:
+        # 清空生产单例表（防泄漏到其他测试的 active 断言）
+        with heartbeats._lock:
+            heartbeats._entries.clear()
+
+@test("ConfigManager.read_all: 读到 4 项配置")
+def test_config_read_all():
+    if not OPENCODE_ROOT.exists():
+        raise AssertionError("OPENCODE_ROOT 未设置或不存在")
+    from services.config_manager import ConfigManager
+    configs = ConfigManager.get_instance().get_kv_list([Surface.CONFIG])
+    assert_true("DEEPSEEK_API_KEY" in configs, "应该有 DEEPSEEK_API_KEY")
+    assert_true("IDA_PRO_HOME" in configs, "应该有 IDA_PRO_HOME")
+
+
+@test("ConfigManager.write + delete: 不破坏原有注释")
+def test_config_write_preserve_comments():
+    if not OPENCODE_ROOT.exists():
+        raise AssertionError("OPENCODE_ROOT 未设置")
+    from services.config_manager import ConfigManager
+    ai_env_path = ConfigManager.get_instance().ai_env_path
+    original = ai_env_path.read_text()
+
+    try:
+        ConfigManager.get_instance().set({"TEST_CONTROL_KEY": "test_value"})
+        content = ai_env_path.read_text()
+        assert_true("# bw-security-analysis" in content, "原注释应该保留")
+        assert_true("TEST_CONTROL_KEY=test_value" in content, "新 key 应该写入")
+
+        ConfigManager.get_instance().delete("TEST_CONTROL_KEY")
+        content = ai_env_path.read_text()
+        assert_true("TEST_CONTROL_KEY" not in content, "key 应该被删除")
+        assert_true("# bw-security-analysis" in content, "注释仍应保留")
+    finally:
+        # 还原
+        ai_env_path.write_text(original)
+
+
+@test("ConfigManager.required_status: 必要配置状态")
+def test_required_status():
+    from services.config_manager import ConfigManager
+    keys = {c.key for c in ConfigManager.get_instance().required_status([Surface.CONFIG])}
+    # 必要键判定依据 = ConfigField.required；IDA_PRO_HOME 为可选工具目录（值仍经 validator 校验）
+    assert_true("DEEPSEEK_API_KEY" in keys, "应有 DEEPSEEK_API_KEY")
+    assert_true("IDA_PRO_HOME" not in keys, "IDA_PRO_HOME 为可选（不参与必要配置检查）")
+
+
+@test("ConfigManager.validate_ida_pro_home: 存在路径")
+def test_validate_ida_pro_home():
+    from services.config_manager import ConfigManager
+    # 当前用户的 IDA_PRO_HOME
+    from services.config_manager import ConfigManager
+    ida_home = ConfigManager.get_instance().get("IDA_PRO_HOME")
+    if ida_home:
+        ok, msg = ConfigManager.get_instance().validate_ida_pro_home(ida_home)
+        assert_true(ok, f"已配置的 IDA_PRO_HOME 应该有效: {msg}")
+
+
+@test("ConfigManager.validate_ida_pro_home: 不存在路径")
+def test_validate_ida_pro_home_invalid():
+    from services.config_manager import ConfigManager
+    ok, msg = ConfigManager.get_instance().validate_ida_pro_home("/nonexistent/path")
+    assert_false(ok, "不存在路径应该无效")
+    assert_true("不存在" in msg, f"错误信息应该包含'不存在': {msg}")
+
+
+# ============ detect_tools 测试 ============
+
+@test("detect_tools.scan_agent: mobile-analysis 工具")
+def test_scan_mobile():
+    from services.detect_tools import ToolsScanner
+    tools = ToolsScanner.get_instance().scan_agent("mobile-analysis")
+    assert_true(len(tools) > 0, "应该有工具")
+    names = [t.name for t in tools]
+    assert_true("apktool" in names, "应该包含 apktool")
+    assert_true("ida_pro" in names, "应该包含 ida_pro")
+
+
+@test("detect_tools.scan_all: 所有 agent")
+def test_scan_all_tools():
+    from services.detect_tools import ToolsScanner
+    all_tools = ToolsScanner.get_instance().scan_all()
+    assert_true("binary-analysis" in all_tools, "应有 binary-analysis")
+    assert_true("mobile-analysis" in all_tools, "应有 mobile-analysis")
+
+
+@test("detect_tools: binwalk 检测项与配方一致（回归线）")
+def test_detect_tools_binwalk_consistency():
+    """检测项名与配方名不一致（binwalk-full ← binwalk 改名残留）会使状态
+    永远报缺失、依赖安装被误跳过。"""
+    from services.detect_tools import EXTERNAL_TOOLS, installable_tools, PkgToolRecipe
+    ext = {t.name: t for t in EXTERNAL_TOOLS}
+    assert_true("binwalk" in ext, "binwalk 检测项缺失")
+    assert_true("binwalk-full" not in ext, "binwalk-full 旧名残留")
+    rs = [r for r in installable_tools() if r.name == "binwalk"]
+    assert_eq(len(rs), 1, "binwalk 配方应恰一条")
+    r0 = rs[0]
+    assert isinstance(r0, PkgToolRecipe), f"配方类型 {type(r0)}"  # 真断言（isinstance 收窄）——语义同 assert_true
+    assert_eq(r0.pkg_brew, "binwalk", "mac 包名")
+    assert_eq(r0.pkg_linux, "binwalk", "linux 包名")
+    assert_eq(ext["binwalk"].version_cmd, ["--version"], "version_cmd")
+
+
+@test("detect_tools: rg 配方存在且排除 sha256（防 raw 分支误写）")
+def test_detect_tools_rg_recipe():
+    """上游 release 每产物附 .sha256——不排除会被 raw 分支当二进制写入 rg。"""
+    from services.detect_tools import EXTERNAL_TOOLS, installable_tools, ReleaseRecipe
+    assert_true(any(t.name == "rg" for t in EXTERNAL_TOOLS), "rg 检测项缺失")
+    rs = [r for r in installable_tools() if r.name == "rg"]
+    assert_eq(len(rs), 1, "rg 配方应恰一条")
+    r = rs[0]
+    assert isinstance(r, ReleaseRecipe), f"配方类型 {type(r)}"  # 真断言（isinstance 收窄）
+    assert_eq(r.bins, ["rg"], "bins")
+    assert_true("sha256" in r.excl, f"excl 缺 sha256: {r.excl}")
+    assert_eq(len(r.plats), 6, f"应六平台: {sorted(r.plats)}")
+
+
+@test("detect_py_deps: binwalk 死包已移除 + oletools 在清单")
+def test_detect_py_deps_list_invariants():
+    """PyPI binwalk 2.1.0 缺 core 模块（import 即崩）且遮蔽 PM 版本;
+    oletools 是 Office 宏文档分析（olevba/pcodedmp）依赖来源。"""
+    from services.detect_py_deps import PyDepsDetector
+    names = {p.name for p in PyDepsDetector.PYTHON_PACKAGES}
+    assert_true("binwalk" not in names, "binwalk 死包不应在清单")
+    assert_true("oletools" in names, "oletools 不在清单")
+
+
+@test("detect_tools: CMD_DIR 回落 nt 双形态（.exe 单二进制 + 无扩展名 wrapper）")
+def test_resolve_tool_path_nt_wrapper():
+    """nt 分支只拼 <name>.exe 会让 docker wrapper（无扩展名 sh，经 Git Bash
+    执行）误报缺失——回落需依次认 .exe 与无扩展名两种落盘形态。"""
+    import os as _os
+    import tempfile
+    from unittest.mock import patch
+    from services.detect_tools import ToolsScanner, ToolField, ToolsEnv
+    sc = ToolsScanner.get_instance()
+    tool = ToolField(name="fake-tool-xyz", agents=["binary-analysis"],
+                     required=False, description="t", version_cmd=[])
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(ToolsEnv, "CMD_DIR", tmp), \
+                patch("services.detect_tools.shutil.which", return_value=None), \
+                patch("os.name", "nt"):
+            # 形态 A: 无扩展名 wrapper（docker 工具落盘形态）
+            open(_os.path.join(tmp, "fake-tool-xyz"), "w").close()
+            path, found = sc.resolve_tool_path(tool)
+            assert_true(found, "无扩展名 wrapper 应命中（nt 回落缺陷回归线）")
+            assert_true(path.endswith("fake-tool-xyz"), f"path={path}")
+            # 形态 B: .exe 单二进制
+            _os.remove(_os.path.join(tmp, "fake-tool-xyz"))
+            open(_os.path.join(tmp, "fake-tool-xyz.exe"), "w").close()
+            path, found = sc.resolve_tool_path(tool)
+            assert_true(found, ".exe 单二进制应命中")
+            assert_true(path.endswith("fake-tool-xyz.exe"), f"path={path}")
+            # 两者皆无 → 未安装
+            _os.remove(_os.path.join(tmp, "fake-tool-xyz.exe"))
+            _, found = sc.resolve_tool_path(tool)
+            assert_false(found, "无文件应报未安装")
+
+
+@test("detect_tools: 陈旧 wrapper 清理认无扩展名形态（nt 回归线）")
+def test_remove_stale_wrapper_nt():
+    """nt 下用 _bin_path（<name>.exe）定位 wrapper 会永远 miss——系统真身
+    存在时陈旧 wrapper 清不掉（PATH 首段遮蔽原生版）。同名 .exe 是单二进制
+    机制产物，非 wrapper，不得误删。"""
+    import os as _os
+    import tempfile
+    from unittest.mock import patch
+    from services.detect_tools import ToolsInstaller, ToolsEnv
+    sc = ToolsInstaller.get_instance()
+    with tempfile.TemporaryDirectory() as cmd_dir, \
+            tempfile.TemporaryDirectory() as real_dir:
+        wrapper = _os.path.join(cmd_dir, "fake-tool-xyz")      # 本项目 wrapper（无扩展名）
+        open(wrapper, "w").close()
+        exe_bin = _os.path.join(cmd_dir, "fake-tool-xyz.exe")  # 单二进制机制产物
+        open(exe_bin, "w").close()
+        real = _os.path.join(real_dir, "fake-tool-xyz.exe")    # 系统真身（nt 形态）
+        open(real, "w").close()
+        _os.chmod(real, 0o755)
+        with patch.object(ToolsEnv, "CMD_DIR", cmd_dir), \
+                patch("os.name", "nt"), \
+                patch.dict("os.environ", {"PATH": real_dir}):
+            sc._remove_stale_wrapper("fake-tool-xyz")
+        assert_false(_os.path.exists(wrapper), "nt 下陈旧 wrapper 应被清理（回归线）")
+        assert_true(_os.path.exists(exe_bin), "同名 .exe 非 wrapper，不应误删")
+
+
+# ============ docker_manager 测试 ============
+
+@test("docker_manager.DockerManager.check_status: Docker 安装 + daemon 状态")
+def test_docker_status():
+    from services.docker_manager import DockerManager
+    status = DockerManager.check_status()
+    assert_true(isinstance(status.installed, bool), "应该返回 installed 字段")
+    assert_true(isinstance(status.daemon_running, bool), "应该返回 daemon_running 字段")
+
+
+@test("docker_manager.DockerManager.scan_global: 返回完整结构")
+def test_docker_scan_global():
+    from services.docker_manager import DockerManager
+    result = DockerManager.scan_global()
+    assert_true(result.docker.installed, "应有 docker 字段")
+    assert_true(isinstance(result.containers, list), "应有 containers 字段")
+    assert_true(isinstance(result.images, list), "应有 images 字段")
+
+
+# ============ scanner 测试 ============
+
+@test("scanner.scan_all: 全量扫描返回完整结果")
+def test_scanner_full():
+    import asyncio
+    from services.scanner import Scanner
+    result = asyncio.run(Scanner.get_instance().scan_all(force_refresh=True))
+    assert_true(len(result.agents) > 0, "应该有 agent 数据")
+    assert_true(result.global_.docker is not None, "应该有 docker 数据")
+    assert_true(result.global_.required_configs is not None, "应该有 configs 数据")
+    assert_true(result.global_.models is not None, "应该有 models 数据")
+
+
+@test("scanner.scan_all: 缓存命中（无 force_refresh 时返回缓存）")
+def test_scanner_cache():
+    import asyncio
+    from services.scanner import Scanner
+    scanner = Scanner.get_instance()
+    # 第一次扫描
+    asyncio.run(Scanner.get_instance().scan_all(force_refresh=True))
+    # 第二次应该命中缓存（时间应该更短）
+    start = time.time()
+    asyncio.run(Scanner.get_instance().scan_all())
+    duration = time.time() - start
+    assert_true(duration < 0.1, f"缓存命中应该 < 0.1s，实际 {duration:.3f}s")
+
+
+@test("E2E 沙箱: home/sock/端口/ai_env 四要素均落沙箱（防假隔离回归线）")
+def test_sandbox_isolation():
+    """模式 K 标准防御：沙箱"设了但没生效"会静默读写生产——四要素锁死。"""
+    from services.runtime_paths import RuntimePaths
+    from services.config_manager import ConfigManager
+    cm = ConfigManager.get_instance()
+    home = str(RuntimePaths.OPENSECURITY_HOME)
+    assert_true(home.startswith(str(TEST_OPENSECURITY_HOME)),
+                f"OPENSECURITY_HOME 应在沙箱内: {home}")
+    sock = str(cm.ipc_unix_socket_path())
+    assert_true(sock.startswith(str(TEST_OPENSECURITY_HOME)),
+                f"IPC sock 应在沙箱内: {sock}")
+    port = cm.tcp_port_start()
+    assert_true(not (9776 <= port <= 9785), f"TCP 起点不得落在生产候选段: {port}")
+    ai_env = str(cm.ai_env_path)
+    assert_true(ai_env.startswith(str(TEST_OPENSECURITY_HOME)),
+                f"ai_env 应在沙箱副本: {ai_env}")
+
+
+# ============ 端到端：控制台启动 + HTTP API ============
+
+class ControlProcess:
+    """控制台进程管理（测试用）。"""
+
+    def __init__(self):
+        self.proc: subprocess.Popen | None = None
+        self._client: httpx.Client | None = None
+
+    @property
+    def client(self) -> httpx.Client:
+        """就绪的 HTTP 客户端（读取方保证生命周期：start 后 / stop 前）。"""
+        assert self._client is not None, "控制台未连接（CP.start 前或 stop 后）"
+        return self._client
+
+    def start(self):
+        """启动控制台（首跳心跳防自杀）。"""
+        env = os.environ.copy()
+        # 沙箱三键显式注入（不依赖继承——防环境改动导致隔离失效；
+        # 值的存在性由本文件头部强制：沙箱根 / .ai_env 副本 / 随机高位端口）
+        env["OPENSECURITY_HOME"] = str(TEST_OPENSECURITY_HOME)
+        env["OPENSECURITY_AI_ENV"] = str(TEST_AI_ENV)
+        env["CONTROL_TCP_PORT"] = os.environ["CONTROL_TCP_PORT"]
+        cmd = [
+            sys.executable,
+            str(BACKEND_DIR / "server.py"),
+        ]
+        self.proc = subprocess.Popen(
+            cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        # 等 IPC socket 出现 + /health 应答（uds 探测）
+        from services.config_manager import ConfigManager
+        sock_path = ConfigManager.get_instance().ipc_unix_socket_path()
+        for _ in range(20):
+            if sock_path.exists():
+                try:
+                    with httpx.Client(
+                        transport=httpx.HTTPTransport(uds=str(sock_path)),
+                        timeout=2,
+                    ) as probe:
+                        probe.get("http://localhost/health")
+                        # 200/503 都算活着（503=模型加载中）；
+                        # disconnected（uvicorn 未起）等异常继续轮询
+                        self._client = httpx.Client(
+                            transport=httpx.HTTPTransport(uds=str(sock_path)),
+                            timeout=15,
+                        )
+                        # 首跳心跳防自杀（同时验证 /api/heartbeat 路由）
+                        r = self.client.post(
+                            "http://localhost/api/heartbeat",
+                            json={"pid": os.getpid()},
+                        )
+                        assert r.status_code == 200, f"心跳路由应 200，实际 {r.status_code}"
+                        return
+                except Exception:
+                    pass
+            time.sleep(0.5)
+        raise AssertionError("控制台启动超时（IPC 未就绪）")
+
+    def stop(self):
+        if self.proc:
+            self.proc.terminate()
+            self.proc.wait(timeout=5)
+            self.proc = None
+        if self._client:
+            self._client.close()
+            self._client = None
+        # 清理沙箱 IPC socket（控制台信号处理已删 sock，这里兜底）
+        from services.config_manager import ConfigManager
+        try:
+            ConfigManager.get_instance().ipc_unix_socket_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+# ── E2E 共享控制台进程（模型只加载一次；端口/用户全局文件生命周期由首个启动者管理） ──
+_SHARED_CP: "ControlProcess | None" = None
+
+
+def get_shared_server() -> ControlProcess:
+    """E2E 段共享控制台（懒加载；main() 退出时统一 stop）。
+
+    只读/自清理用例共享同一进程，消灭每例 ~5s 的重复模型加载；
+    需要独占全局状态的用例（端口耗尽）先 stop_shared_server()。
+    """
+    global _SHARED_CP
+    if _SHARED_CP is None:
+        _SHARED_CP = ControlProcess()
+        _SHARED_CP.start()
+    return _SHARED_CP
+
+
+def stop_shared_server() -> None:
+    global _SHARED_CP
+    if _SHARED_CP is not None:
+        _SHARED_CP.stop()
+        _SHARED_CP = None
+
+
+@test("E2E: 控制台启动 + /health + /embed")
+def test_e2e_control_startup():
+    cp = get_shared_server()
+    import httpx
+    # /health
+    r = cp.client.get("http://localhost/health", timeout=10)
+    assert_true(r.status_code in (200, 503), f"/health 应返回 200/503，实际 {r.status_code}")
+
+    # 等模型加载
+    for _ in range(30):
+        r = cp.client.get("http://localhost/health", timeout=3)
+        if r.status_code == 200:
+            break
+        time.sleep(1)
+
+    # /embed
+    r = cp.client.post(
+        f"http://localhost/embed",
+        json={"inputs": "hello world"},
+        timeout=30,
+    )
+    assert_eq(r.status_code, 200, f"/embed 应返回 200，实际 {r.status_code}")
+    data = r.json()
+    assert_true(len(data) == 1, f"应返回 1 个向量，实际 {len(data)}")
+    assert_eq(len(data[0]), 1024, f"向量维度应 1024，实际 {len(data[0])}")
+
+
+@test("E2E: 控制台全局唯一（第二个进程 exit 2）")
+def test_e2e_singleton():
+    # 复用共享控制台作为"第一个进程"（独立起第二个短命进程验证 exit 2）
+    cp = get_shared_server()
+    env = os.environ.copy()
+    proc2 = subprocess.Popen(
+        [sys.executable, str(BACKEND_DIR / "server.py")],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    try:
+        proc2.wait(timeout=15)
+        assert_eq(proc2.returncode, 2, f"第二个进程应该 exit 2，实际 {proc2.returncode}")
+    finally:
+        if proc2.poll() is None:
+            proc2.terminate()
+            try:
+                proc2.wait(timeout=5)
+            except Exception:
+                proc2.kill()
+
+
+@test("E2E: POST /api/config/list 返回生效值（默认值融合）")
+def test_e2e_get_config():
+    if not OPENCODE_ROOT.exists():
+        raise AssertionError("OPENCODE_ROOT 未设置")
+    cp = get_shared_server()
+    import httpx
+    # surface 必填: 缺省 422（与 meta 同契约——值获取以场景为轴）
+    r = cp.client.post("http://localhost/api/config/list", timeout=5)
+    assert_eq(r.status_code, 422, "缺 surface 应 422")
+    r = cp.client.post("http://localhost/api/config/list",
+                      json={"surfaces": ["config"]}, timeout=5)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    # 声明了默认值的键恒有生效值（配置值或默认——沙箱副本来自生产 .ai_env，
+    # 具体回退逻辑由 test_config_manager 的干净沙箱用例锁定）
+    assert_true(data.get("PERMISSION_ASK_TIMEOUT_SEC") is not None,
+                "权限超时键应有生效值（配置值或声明默认）")
+    assert_true(data.get("REFLECT_NUDGE_ENABLED") is not None,
+                "反思开关键应有生效值")
+    # 场景隔离: config 面 KV 不含 remote/hidden 键
+    assert_true("REMOTE_CONSOLE_URL" not in data, "config 面不含 remote 键")
+    assert_true("HEARTBEAT_TIMEOUT_SEC" not in data, "config 面不含 hidden 键")
+
+
+@test("E2E: POST /api/config/required-status")
+def test_e2e_required_status():
+    cp = get_shared_server()
+    import httpx
+    # surface 必填: 缺省 422
+    r = cp.client.post("http://localhost/api/config/required-status", timeout=5)
+    assert_eq(r.status_code, 422, "缺 surface 应 422")
+    r = cp.client.post("http://localhost/api/config/required-status",
+                      json={"surfaces": ["config"]}, timeout=5)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_true("DEEPSEEK_API_KEY" in data, "应有 DEEPSEEK_API_KEY 状态")
+
+
+@test("CLI 真链路: detect_py_deps scan（env-check 第一层消费链）")
+def test_cli_deps_scan_consumer():
+    """插件会话自举检查的真实消费链: venv python 跑 detect_py_deps.py scan
+    → exit 0。曾因 CLI 入口裸调用 NameError（HTTP 路由正常/CLI 必炸）被
+    fail-closed 误报为"依赖缺失"，拦截所有 agent 会话。"""
+    import subprocess
+    venv_py = Path(sys.executable)
+    r = subprocess.run(
+        [str(venv_py), str(Path(__file__).resolve().parents[1] / "services" / "detect_py_deps.py"), "scan"],
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "PYTHONPATH": str(BACKEND_DIR)})  # CLI 消费链：启动方注入模块搜索路径
+    assert_eq(r.returncode, 0,
+              f"scan 应 exit 0（stderr 尾: {r.stderr[-200:] if r.stderr else '空'}）")
+
+
+@test("E2E: POST /api/config/meta 配置页元数据（surfaces 页面声明模型）")
+def test_e2e_config_meta():
+    """配置页/远程页渲染唯一数据源（曾因引用已删模块级常量 500——页面永久
+    "加载中"无测试覆盖而溜进生产; 本用例锚定 surface 必填 + 页面过滤契约）。"""
+    cp = get_shared_server()
+    import httpx
+    # surface 必填: 缺省 422; hidden 是存储态不是页面身份 → 422
+    r = cp.client.post("http://localhost/api/config/meta", timeout=5)
+    assert_eq(r.status_code, 422, "缺 surface 应 422")
+    r = cp.client.post("http://localhost/api/config/meta",
+                      json={"surfaces": ["hidden"]}, timeout=5)
+    assert_eq(r.status_code, 422, "surface=hidden 应 422")
+
+    # config 面: categories 有序内嵌 + 条目新契约字段
+    r = cp.client.post("http://localhost/api/config/meta",
+                      json={"surfaces": ["config"]}, timeout=5)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_true("categories" in data and "entries" in data, "ConfigMetaView 双键")
+    codes = [c["code"] for c in data["categories"]]
+    assert_eq(codes, ["tools", "models", "proxy", "behavior", "developer"],
+              "config 面分类序")
+    for key in ("DEEPSEEK_API_KEY", "IDA_PRO_HOME", "DEEPSEEK_MODEL",
+                "REFLECT_NUDGE_ENABLED", "JULIANG_IP_TTL_SEC",
+                "PERMISSION_ASK_TIMEOUT_SEC", "PERMISSION_ASK_TIMEOUT_TYPES"):
+        assert_true(key in data["entries"], f"config 面缺 {key}")
+        field = data["entries"][key]
+        for prop in ("label", "type", "required", "default_value", "value",
+                     "readonly", "category_code", "category_desc"):
+            assert_true(prop in field, f"{key}.{prop} 缺失")
+        assert_true("hidden" not in field, f"{key} 不应再有 hidden 字段")
+    # value = 领域模型合并的生效值（与值接口 /api/config/list 同源一致）
+    r_vals = cp.client.post("http://localhost/api/config/list", json={"surfaces": ["config"]}, timeout=5)
+    assert_eq(data["entries"]["PERMISSION_ASK_TIMEOUT_SEC"]["value"],
+              r_vals.json().get("PERMISSION_ASK_TIMEOUT_SEC"),
+              "meta.value 应与值接口同键一致（同一领域模型来源）")
+    assert_true(data["entries"]["DEEPSEEK_API_KEY"]["required"], "API_KEY 应 required")
+    assert_eq(data["entries"]["REFLECT_NUDGE_ENABLED"]["category_code"], "behavior",
+              "反思开关归行为分类")
+    assert_eq(data["entries"]["PERMISSION_ASK_TIMEOUT_SEC"]["category_code"], "behavior",
+              "权限超时归行为分类")
+    for hidden_key in ("REMOTE_CONSOLE_URL", "CONTROL_API_KEY", "HEARTBEAT_TIMEOUT_SEC"):
+        assert_true(hidden_key not in data["entries"], f"{hidden_key} 不进 config 面")
+
+    # remote 面: 连接三键 + 远程调参 readonly 语义
+    r = cp.client.post("http://localhost/api/config/meta",
+                      json={"surfaces": ["remote"]}, timeout=5)
+    assert_eq(r.status_code, 200)
+    rem = r.json()
+    assert_eq([c["code"] for c in rem["categories"]], ["remote", "remote_tuning"],
+              "remote 面分类序")
+    assert_eq(len(rem["entries"]), 13, "remote 面 13 条目（连接 5+URL/TOKEN+调参 6; MODE=hidden 状态键不出面）")
+    assert_true("REMOTE_TRANSPORT_MODE" not in rem["entries"], "MODE 为按钮专用键不出面")
+    assert_true(rem["entries"]["REMOTE_HEARTBEAT_INTERVAL_SEC"]["readonly"],
+                "远程调参只读")
+    assert_true(not rem["entries"]["REMOTE_CONSOLE_URL"]["readonly"], "URL 可写")
+
+
+@test("E2E: PUT /api/config surface 写校验（页面归属/readonly/hidden）")
+def test_e2e_config_write_surface():
+    """写接口与 meta 同一声明数据源校验: 跨面 422 / readonly 422 /
+    hidden 键 422 / 未声明键仅 config 面放行语义; ENABLED 专用文案保留。"""
+    cp = get_shared_server()
+    # config 面写远程键 → 422
+    r = cp.client.post("http://localhost/api/config/update",
+                      json={"surfaces": ["config"], "configs": {"REMOTE_CONSOLE_URL": "http://x"}}, timeout=5)
+    assert_eq(r.status_code, 422, "config 面写远程键应 422")
+    # remote 面写 readonly 调参 → 422
+    r = cp.client.post("http://localhost/api/config/update",
+                      json={"surfaces": ["remote"], "configs": {"REMOTE_HEARTBEAT_INTERVAL_SEC": "1"}}, timeout=5)
+    assert_eq(r.status_code, 422, "readonly 调参写应 422")
+    # remote 面写 hidden 节点键 → 422（堵 node-config 旁路）
+    r = cp.client.post("http://localhost/api/config/update",
+                      json={"surfaces": ["remote"], "configs": {"CONTROL_API_KEY": "x"}}, timeout=5)
+    assert_eq(r.status_code, 422, "hidden 节点键写应 422")
+    # 写未声明键 → 422（声明是配置存在的前提——任何场景都不放行）
+    r = cp.client.post("http://localhost/api/config/update",
+                      json={"surfaces": ["config"], "configs": {"NOT_DECLARED_KEY": "x"}}, timeout=5)
+    assert_eq(r.status_code, 422, "config 面写未声明键应 422")
+    r = cp.client.post("http://localhost/api/config/update",
+                      json={"surfaces": ["remote"], "configs": {"NOT_DECLARED_KEY": "x"}}, timeout=5)
+    assert_eq(r.status_code, 422, "remote 面写未声明键应 422")
+    # MODE: 专用守卫文案（引导「切换远程」按钮）先于通用校验——mode 即开关
+    r = cp.client.post("http://localhost/api/config/update",
+                      json={"surfaces": ["remote"], "configs": {"REMOTE_TRANSPORT_MODE": "p2p"}}, timeout=5)
+    assert_eq(r.status_code, 422)
+    assert_true("切换远程" in str(r.json().get("detail", "")), "MODE 报错引导按钮")
+    # DELETE 同一守卫链: 跨面删除拒绝 + readonly 键删除拒绝
+    r = cp.client.post("http://localhost/api/config/delete",
+                         json={"surfaces": ["config"], "keys": ["REMOTE_CONSOLE_URL"]}, timeout=5)
+    assert_eq(r.status_code, 422, "config 面删远程键应 422")
+    r = cp.client.post("http://localhost/api/config/delete",
+                         json={"surfaces": ["remote"], "keys": ["REMOTE_HEARTBEAT_INTERVAL_SEC"]}, timeout=5)
+    assert_eq(r.status_code, 422, "remote 面删 readonly 调参应 422")
+
+
+@test("E2E: 全端点冒烟——所有 GET 路由非 5xx")
+def test_e2e_all_endpoints_smoke():
+    """NameError/ImportError 级回归的霸王防线: 枚举 app 全部 GET 路由逐个请求，
+    5xx = 路由体内引用了不存在的名称/模块（import 不炸调用才炸——曾致
+    /api/config/meta 500 且零测试覆盖）。400/404 合法（校验层正常工作）。
+    路径参数统一填 dummy。新端点自动纳入（无需逐个补用例）。"""
+    import re as _re
+    from server import create_app
+    cp = get_shared_server()
+    for _ in range(60):   # 就绪等待（503=模型加载中——同 E2E 段惯例）
+        if cp.client.get("http://localhost/health", timeout=3).status_code == 200:
+            break
+        time.sleep(1)
+    # 拦截 create_app 的 vite 拉起（真 .ai_env dev=1 时会同步 spawn detached
+    # vite 进程，超越测试生命周期——"仅取路由清单"必须无此副作用）
+    import services.frontend_port as _fp
+    _orig_vite = _fp.FrontendPortRegistry.ensure_vite_dev
+    _fp.FrontendPortRegistry.ensure_vite_dev = lambda self: None  # type: ignore[method-assign]
+    try:
+        app = create_app()   # 测试进程内构建——仅取路由清单（vite 已拦截）
+        # 展开挂载结构: 业务路由以 _IncludedRouter 包装（original_router 持真实清单）
+        all_routes = []
+        for r in app.routes:
+            if type(r).__name__ == "_IncludedRouter":
+                all_routes.extend(r.original_router.routes)  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+            else:
+                all_routes.append(r)
+        checked = 0
+        for route in all_routes:
+            methods = getattr(route, "methods", None) or set()
+            if "GET" not in methods:
+                continue
+            path = getattr(route, "path", "")
+            if not path:
+                continue
+            real_path = _re.sub(r"\{[^}]+\}", "SMOKE_DUMMY", path)
+            r = cp.client.get(f"http://localhost{real_path}", timeout=30)
+            assert_true(r.status_code < 500,
+                        f"GET {real_path} → {r.status_code}: {r.text[:120]}")
+            checked += 1
+        assert_true(checked >= 20, f"应枚举到足够端点（现网 25+），实际 {checked}")
+    finally:
+        _fp.FrontendPortRegistry.ensure_vite_dev = _orig_vite  # type: ignore[method-assign]
+
+
+@test("E2E: GET /api/scan 全量扫描")
+def test_e2e_scan():
+    cp = get_shared_server()
+    import httpx
+    # 等模型加载（scanner 会查 model 状态）
+    for _ in range(20):
+        r = cp.client.get("http://localhost/health", timeout=3)
+        if r.status_code == 200:
+            break
+        time.sleep(1)
+
+    r = cp.client.get("http://localhost/api/scan", timeout=30)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_true("agents" in data, "应有 agents")
+    assert_true("global" in data, "应有 global")
+
+
+@test("E2E: GET /api/deps/mobile-analysis")
+def test_e2e_deps():
+    cp = get_shared_server()
+    import httpx
+    r = cp.client.get("http://localhost/api/deps/mobile-analysis", timeout=10)
+    assert_eq(r.status_code, 200)
+    tools = r.json()
+    assert_true(len(tools) > 0, "应有工具列表")
+
+
+@test("E2E: GET /api/docker/status")
+def test_e2e_docker():
+    cp = get_shared_server()
+    import httpx
+    r = cp.client.get("http://localhost/api/docker/status", timeout=10)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_true("docker" in data, "应有 docker 字段")
+
+
+@test("E2E: GET /api/hardware 硬件信息")
+def test_e2e_hardware():
+    cp = get_shared_server()
+    import httpx
+    r = cp.client.get("http://localhost/api/hardware", timeout=10)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_true("cpu" in data, "应有 cpu")
+    assert_true("memory" in data, "应有 memory")
+    assert_true("os" in data, "应有 os")
+    assert_true("gpu" in data, "应有 gpu")
+
+
+@test("E2E: PUT /api/config 写入 + 验证文件")
+def test_e2e_config_write():
+    from services.config_manager import ConfigManager
+    if not OPENCODE_ROOT.exists():
+        raise AssertionError("OPENCODE_ROOT 未设置")
+    ai_env_path = ConfigManager.get_instance().ai_env_path
+    original = ai_env_path.read_text()
+    cp = get_shared_server()
+    import httpx
+    r = cp.client.post(
+        "http://localhost/api/config/update",
+        json={"surfaces": ["config"], "configs": {"GITHUB_TOKEN": "e2e_value"}},
+        timeout=5,
+    )
+    assert_eq(r.status_code, 200)
+    # 响应为所请求场景生效值 KV（与 /list 同契约——保存方以响应为新基线，
+    # 默认值支撑的表单状态不被原始值响应覆盖）
+    assert_true(r.json().get("PERMISSION_ASK_TIMEOUT_SEC") is not None,
+                "PUT 响应应含未配置键的声明默认（生效值契约）")
+    # 验证文件实际改变
+    content = ai_env_path.read_text()
+    assert_true("GITHUB_TOKEN=e2e_value" in content, "文件应包含新 key")
+    # 清理 + 还原
+    ai_env_path.write_text(original)
+
+
+@test("E2E: /api/install 白名单外拒绝")
+def test_e2e_install_whitelist():
+    cp = get_shared_server()
+    import httpx
+    r = cp.client.post(
+        f"http://localhost/api/install",
+        json={"package": "malicious-package-not-in-whitelist"},
+        timeout=5,
+    )
+    assert_eq(r.status_code, 400, "白名单外应返回 400")
+
+
+@test("ipc_listener: BIND_TIMEOUT——窗口耗尽且无活实例时返回真异常枚举")
+def test_ipc_listener_bind_timeout():
+    import services.ipc_listener as il
+
+    lst = il.IpcListener()
+    # monkeypatch：bind 恒失败 + 探测恒不通 + 缩短等待窗口
+    orig_start, orig_probe = (
+        il.IpcListener._do_start_platform, il.IpcListener.__dict__['ipc_probe_alive']
+    )
+    import services.config_manager as _cm
+    _cm.ConfigManager.Protocol.IPC_BIND_WAIT_SEC = 0.2  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+    il.IpcListener._do_start_platform = lambda self: None
+    il.IpcListener.ipc_probe_alive = staticmethod(lambda **kw: False)  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+    try:
+        from services.config_manager import ConfigManager
+        ConfigManager.get_instance().ipc_unix_socket_path().unlink(missing_ok=True)  # 确保不触发"文件消失提前重试"
+        status = lst.start()
+        assert_true(
+            status is il.IpcStartStatus.BIND_TIMEOUT,
+            f"应返回 BIND_TIMEOUT，实际 {status}",
+        )
+    finally:
+        il.IpcListener._do_start_platform = orig_start
+        il.IpcListener.ipc_probe_alive = orig_probe
+
+
+
+# ============ frontend_port（注册中心）测试 ============
+
+@test("frontend_port: TCP 顺延 bind + 注册")
+def test_frontend_port_fallback():
+    import os
+    import random as _rnd
+    import socket
+    from services.frontend_port import FrontendPortRegistry
+
+    def _port_free(p: int) -> bool:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", p))
+            return True
+        except OSError:
+            return False
+        finally:
+            probe.close()
+
+    # 随机起点段可能撞系统临时端口：选前两个候选都空闲的起点（最多试 5 次）
+    for _ in range(5):
+        if _port_free(FrontendPortRegistry.tcp_candidates()[0]) and \
+           _port_free(FrontendPortRegistry.tcp_candidates()[1]):
+            break
+        os.environ["CONTROL_TCP_PORT"] = str(_rnd.randint(41000, 49000))
+
+    reg = FrontendPortRegistry()
+    candidates = reg.tcp_candidates()
+    assert_true(len(candidates) >= 2, "候选段至少 2 个")
+    # 占住起点 → bind 应顺延到下一候选
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocker.bind(("127.0.0.1", candidates[0]))
+    blocker.listen(1)
+    try:
+        sock = reg.bind_and_register_tcp()
+        try:
+            assert_eq(reg.tcp_port(), candidates[1], "应顺延并注册下一候选端口")
+        finally:
+            sock.close()
+            reg.unregister_tcp()
+        # 候选段全占 → RuntimeError
+        blockers = [blocker]
+        for p in candidates[1:]:
+            b = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            b.bind(("127.0.0.1", p))
+            b.listen(1)
+            blockers.append(b)
+        try:
+            reg2 = FrontendPortRegistry()
+            raised = False
+            try:
+                reg2.bind_and_register_tcp()
+            except RuntimeError:
+                raised = True
+            assert_true(raised, "候选段全占应 RuntimeError")
+        finally:
+            for b in blockers:
+                b.close()
+    finally:
+        blocker.close()
+@test("frontend_port: vite 注册 + console_url 计算分支")
+def test_frontend_port_vite_and_url():
+    from services.frontend_port import FrontendPortRegistry
+
+    reg = FrontendPortRegistry()
+    # 发布态（非 dev）：注册 TCP 后 console_url 指向该端口。
+    # monkeypatch is_dev_mode：防 .ai_env 的 CONTROL_FRONTEND_DEV=1 + 生产 vite(5173) 干扰
+    import services.config_manager as _cm
+    _orig_dev = _cm.ConfigManager.is_dev_mode
+    _cm.ConfigManager.is_dev_mode = property(lambda self: False)  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+    import socket as _s
+    srv = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        assert_true(reg.register_tcp(port), "注册活端口应成功")
+        url = reg.console_url()
+        assert_true(url.endswith(f":{port}"), f"发布态 URL 应含注册端口，实际 {url}")
+        # vite 注册死端口 → vite_port() 不得返回死注册值；返回则必须是真实监听端口
+        # （环境里可能有真 vite 在 5173-5175——回退探测命中是设计行为，不算失败）
+        reg.register_vite_port(1)  # 端口 1 无监听
+        vp = reg.vite_port()
+        if vp is not None:
+            from services.frontend_port import FrontendPortRegistry as _FPR
+            assert_true(vp != 1 and FrontendPortRegistry._port_alive(vp), f"回退值应为活端口，实际 {vp}")
+    finally:
+        srv.close()
+        reg.unregister_tcp()
+        _cm.ConfigManager.is_dev_mode = _orig_dev  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+    # register_tcp 死端口 + verify → False
+    assert_false(reg.register_tcp(1), "注册死端口（verify_alive）应失败")
+
+
+# ============ OCR 进程内服务测试 ============
+# 铁律: OcrService 内含 asyncio.Lock/Event——必须同一事件循环访问。
+# 禁用 fastapi.testclient.TestClient（每请求独立循环 → 锁跨循环 → 误报 503），
+# 一律 asyncio.run + 直接 await，或 httpx.AsyncClient+ASGITransport。
+
+@test("heartbeat: snapshot——浅拷贝语义（不污染注册表、last_seen 保持 monotonic）")
+def test_heartbeat_snapshot_pure():
+    from services.heartbeat import HeartbeatRegistry
+
+    reg = HeartbeatRegistry()
+    reg.record(100)
+    snap = reg.snapshot()
+    assert_eq(len(snap), 1, "快照应含 1 条")
+    import time as _t
+
+    _t.sleep(0.02)
+    # 快照条目的 last_seen 是拷贝——原表刷新不影响已取快照
+    reg.record(100)
+    assert_true(snap[0].last_seen < reg.snapshot()[0].last_seen, "原表刷新后新快照应更新")
+    assert_eq(len(reg.snapshot()), 1, "多次 snapshot 不应增加条目")
+
+
+@test("heartbeat: collect_opencode_processes——真 pid 富化 + 假 pid 降级")
+def test_heartbeat_collect_enrich():
+    import os
+
+    from services.heartbeat import HeartbeatRegistry
+
+    reg = HeartbeatRegistry._reset_for_tests() or HeartbeatRegistry()
+    reg.record(os.getpid())
+    reg.record(999999)  # 超出 macOS pid 上限，必不存在
+    infos = {i.pid: i for i in reg.collect_opencode_processes()}
+    try:
+        me = infos[os.getpid()]
+        assert_true(me.alive, "自进程应存活")
+        assert_true(me.cmdline is not None and "python" in me.cmdline, "应富化出命令行")
+        assert_true(me.cwd is not None, "应富化出工作目录")
+        assert_true(me.running_sec is not None and me.running_sec >= 0, "应富化出运行时长")
+        fake = infos[999999]
+        assert_false(fake.alive, "假 pid 应判定不存活")
+        assert_true(
+            fake.cmdline is None and fake.cwd is None and fake.running_sec is None,
+            "不存活进程三字段应降级 None",
+        )
+    finally:
+        # 单例注册表不能被测试污染（生产 heartbeats 与本测试同进程）
+        reg._entries.pop(os.getpid(), None)
+        reg._entries.pop(999999, None)
+
+
+@test("heartbeat: GET /api/heartbeats——响应契约（单键列表 + 条目字段）")
+def test_heartbeat_route_contract():
+    import asyncio
+
+    from routes.heartbeat import list_heartbeats
+
+    # async 路由函数直调（asyncio.run 同循环; 避免 TestClient 每请求独立事件循环）
+    resp = asyncio.run(list_heartbeats())
+    assert_true(set(resp.keys()) == {"opencode"}, f"响应应单键 opencode，实际 {set(resp.keys())}")
+    for item in resp["opencode"]:
+        assert_true(
+            set(item.keys())
+            >= {"pid", "last_seen_sec_ago", "alive", "cmdline", "cwd", "running_sec"},
+            f"条目字段缺失: {item.keys()}",
+        )
+
+
+@test("system: /api/system 响应含 control_start_time（运行状态页摘要行数据源）")
+def test_system_start_time():
+    import asyncio
+
+    from routes.system import get_system_info
+
+    info = asyncio.run(get_system_info())
+    import time as _t
+
+    assert_true(
+        isinstance(info.control_start_time, float)
+        and _t.time() - info.control_start_time < 3600,
+        "control_start_time 应为近过去的 Unix 时间戳",
+    )
+
+
+@test("models: hardware_summary——内存充足路径 + 只计已缓存模型")
+def test_hardware_summary_ok_path():
+    import services.model_assets as _ma_mod
+    from services.model_assets import ModelAssetRegistry as ma
+
+    orig = _ma_mod.psutil.virtual_memory
+    _ma_mod.psutil.virtual_memory = lambda: type("VM", (), {"available": 64 * 1024**3})()
+    try:
+        hs = ModelAssetRegistry.get_instance().hardware_summary()
+        assert_true(hs.ok, f"64GB 可用应满足（需 {hs.total_required_gb}GB）")
+        assert_eq(hs.reason, "", "充足时 reason 为空")
+        assert_true(hs.total_required_gb > 0, "总需求应非零（本机有已缓存模型）")
+        assert_true(hs.available_gb == 64.0, "应取 monkeypatch 的可用值")
+    finally:
+        _ma_mod.psutil.virtual_memory = orig
+
+
+@test("models: hardware_summary——内存不足路径（ok=False + 用户可读 reason）")
+def test_hardware_summary_insufficient():
+    import services.model_assets as _ma_mod
+    from services.model_assets import ModelAssetRegistry as ma
+
+    orig = _ma_mod.psutil.virtual_memory
+    _ma_mod.psutil.virtual_memory = lambda: type("VM", (), {"available": 1 * 1024**3})()
+    try:
+        hs = ModelAssetRegistry.get_instance().hardware_summary()
+        assert_false(hs.ok, "1GB 可用应不满足")
+        assert_true("1.0GB" in hs.reason and f"{hs.total_required_gb}GB" in hs.reason,
+                    f"reason 应含可用值与需求值，实际 {hs.reason!r}")
+    finally:
+        _ma_mod.psutil.virtual_memory = orig
+
+
+@test("models: get_model_assets——loaded 三元语义 + active_clients 字段契约")
+def test_model_assets_loaded_semantics():
+    from services.model_assets import ModelAssetRegistry
+
+    # loaded 语义 = 调用进程的真实加载态（生产=控制台; 测试进程=未加载）。
+    # 断言与 model_loader 标志一致（而非硬编码 True——那会撒谎）
+    from services.model_loader import ModelInferenceService
+    assets = {m.id: m for m in ModelAssetRegistry.get_instance().get_model_assets()}
+    assert_true(assets["bge-m3"].loaded == ModelInferenceService.get_instance().is_models_ready(),
+                "embedder loaded 应与 is_models_ready 一致")
+    assert_true(assets["bge-m3"].idle_sec is None and assets["bge-m3"].idle_timeout_sec is None,
+                "非 OCR 模型空闲字段应 None")
+    assert_true(assets["bge-reranker-v2-m3"].loaded == ModelInferenceService.get_instance().is_reranker_loaded(),
+                "reranker loaded 应与 is_reranker_loaded 一致（懒加载真实态, 不再复用 embedder 标志）")
+    # ocr: 空闲时长字段（模型页"空闲 X / 10 分钟"数据源）
+    ocr = assets["glm-ocr"]
+    assert_true(ocr.idle_timeout_sec == 600, f"idle_timeout_sec 应 600，实际 {ocr.idle_timeout_sec}")
+    assert_true(ocr.idle_sec is None or ocr.idle_sec >= 0, "idle_sec 应 None 或非负")
+
+
+def _png_b64() -> str:
+    """1x1 PNG（合法真图——懒加载路径测试的 extract 入参，识别内容无所谓）。"""
+    import base64
+    import io
+
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+class FakeMlxEngine:
+    """MlxEngine 测试替身（接口对齐: load/unload/loaded/preprocess/_infer_impl）。
+
+    状态机/竞态用例的引擎协作者——零 GPU 成本，但必须还原关键行为特征
+    （防覆盖退化的三条硬约束）:
+    - load_delay: 确定性加载窗口——等待者路径必被触发（真模型 2-3s 加载
+      耗时随磁盘缓存波动，窗口可能偶发过短导致单飞路径未被触发）
+    - infer gate: infer_entered/infer_release 构成"推理在途"挂起窗口
+    - 计数器: load/unload/infer 次数——调度断言的直接证据
+
+    接口漂移守卫: 真模型用例（lifecycle/窗口卸载/worker 稳定性）每轮全量
+    跑验证真实接口; fake 缺方法时本类用例立即 AttributeError，不静默。
+    """
+
+    def __init__(self, infer_text: str = "FAKE-OCR-OK", load_delay: float = 0.0):
+        self._loaded = False
+        self.infer_text = infer_text
+        self.load_delay = load_delay
+        self.fail_load_error: Exception | None = None   # 非空 → load 抛此错
+        self.load_count = 0
+        self.unload_count = 0
+        self.infer_count = 0
+        self.infer_entered = threading.Event()
+        self.infer_release = threading.Event()
+        self.infer_release.set()                        # 默认放行（不阻塞）
+
+    @property
+    def loaded(self) -> bool:
+        return self._loaded
+
+    def load(self, model_path: str) -> None:
+        time.sleep(self.load_delay)                     # 确定性窗口（等待者在此挂上）
+        self.load_count += 1
+        if self.fail_load_error is not None:
+            raise self.fail_load_error
+        self._loaded = True
+
+    def unload(self) -> None:
+        self.unload_count += 1
+        self._loaded = False
+
+    def preprocess(self, image_b64: str, prompt: str):
+        return (image_b64, prompt)                      # PreparedOcrInput 直通替身
+
+    def _infer_impl(self, prepared):
+        if not self._loaded:
+            raise RuntimeError("MLX 引擎未加载（推理窗口内被卸载，请重试）")
+        self.infer_count += 1
+        self.infer_entered.set()
+        self.infer_release.wait(timeout=10)
+        return self.infer_text, None              # (text, stats) 二元组对齐真引擎
+
+
+@test("ocr: 状态机——extract 懒加载/识图/force_release 卸载/再 extract 重载")
+def test_ocr_lifecycle():
+    import base64
+    import io
+
+    from PIL import Image, ImageDraw
+    from services.model_lifecycle import ManagedModel
+    from services.ocr_service import OcrService
+
+    def _b64(text: str) -> str:
+        img = Image.new("RGB", (320, 100), "white")
+        ImageDraw.Draw(img).text((40, 35), text, fill="black")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+
+    svc = OcrService._reset_for_tests() or OcrService()
+
+    async def main():
+        # 懒加载: 未就绪直接 extract → 自动加载 + 识图（一步到位）
+        assert_eq(svc.status().state, ManagedModel.STATE_IDLE, "初始应 idle")
+        text = await svc.extract(_b64("LIFE-OK"), "")
+        assert_true("LIFE-OK" in text, f"懒加载后应识别出文字，实际 {text!r}")
+        assert_eq(svc.status().state, ManagedModel.STATE_READY, "懒加载后应 ready")
+        # 第二次 extract 复用（不再加载）— 文本避开连字符（模型对短横线的
+        # 识别不稳定，属识别能力边界而非服务缺陷）
+        text2 = await svc.extract(_b64("LIFE TWO"), "")
+        assert_true("TWO" in text2, f"复用路径应识别，实际 {text2!r}")
+        # force_release → idle + 引擎卸载
+        await svc.force_release()
+        assert_eq(svc.status().state, ManagedModel.STATE_IDLE, "force_release 后应 idle")
+        assert_false(svc._mlx.loaded, "引擎应已卸载")
+        assert_true(svc.idle_sec() is None, "卸载后 idle_sec 应为 None")
+        # 幂等
+        await svc.force_release()
+        # 卸载后再 extract → 重新懒加载（循环自洽）
+        text3 = await svc.extract(_b64("LIFE THR"), "")
+        assert_true("THR" in text3, f"卸载后重载应识别，实际 {text3!r}")
+        await svc.force_release()
+
+    asyncio.run(main())
+
+
+@test("ocr: 并发 extract 懒加载单飞——6 路并发首图只加载一次")
+def test_ocr_lazy_singleflight():
+    from services.ocr_service import OcrService
+
+    svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine(load_delay=0.3)   # 确定性窗口: 6 路必全落在加载中
+    svc._mlx = fake                        # ManagedModel 惰性构建前替换即全链路生效  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+
+    async def main():
+        t0 = time.monotonic()
+        tasks = [asyncio.create_task(svc.extract(_png_b64(), "")) for _ in range(6)]
+        # 行为特征断言①（防"测试绿但没测到"）: 轮询确认进入加载窗口——
+        # 若加载瞬时完成，等待者走 ready 快路径，单飞等待逻辑根本未被触发
+        # （create_task 仅注册不执行，需让出控制权等首任务真正开跑）
+        for _ in range(30):
+            if svc.status().state == "starting":
+                break
+            await asyncio.sleep(0.01)
+        assert_eq(svc.status().state, "starting", "并发首图期间状态应为 starting（加载窗口存在证明）")
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        elapsed = time.monotonic() - t0
+        assert_true(all(not isinstance(r, Exception) for r in results),
+                    f"6 路并发应全成功: {results}")
+        assert_eq(fake.load_count, 1, f"6 路并发应只 load 一次，实际 {fake.load_count}")
+        # 行为特征断言②: 单飞语义——若各自独立加载，耗时 ≥ 6×load_delay
+        assert_true(elapsed < fake.load_delay * 3,
+                    f"6 路共享一次加载应约 1 个窗口时长，实际 {elapsed:.2f}s"
+                    f"（各自独立加载会 ≥{fake.load_delay * 6:.1f}s）")
+        assert_eq(fake.infer_count, 6, "6 路应各完成一次推理")
+        await svc.force_release()
+
+    asyncio.run(main())
+
+
+@test("ocr: 并发 extract——generate 串行（物理上限）+ 预处理并发重叠")
+def test_ocr_extract_serialized():
+    import threading
+
+    from services.ocr_service import OcrService
+
+    svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine()
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+    gen_active = []          # generate 区内计数
+    gen_max = [0]
+    pp_active = []           # 预处理区内计数
+    pp_max = [0]
+    guard = threading.Lock()
+
+    def slow_prep(image_b64: str, prompt: str):
+        with guard:
+            pp_active.append(1)
+            pp_max[0] = max(pp_max[0], len(pp_active))
+        time.sleep(0.3)  # 拉长预处理窗口放大并发
+        with guard:
+            pp_active.pop()
+        return (image_b64, prompt)
+
+    def slow_gen(prepared):
+        with guard:
+            gen_active.append(1)
+            gen_max[0] = max(gen_max[0], len(gen_active))
+        time.sleep(0.3)
+        with guard:
+            gen_active.pop()
+        # 走类原始方法（绕过实例 patch——fake._infer_impl 已被替换成
+        # slow_gen 自身，经实例属性调用会无限递归）
+        return FakeMlxEngine._infer_impl(fake, prepared)
+
+    async def main():
+        fake.preprocess = slow_prep
+        # ⚠ patch 层次铁律: 必须 patch _infer_impl（worker 内执行层）。
+        # patch 公开方法会绕过 worker 在池线程执行 → 破坏 FIFO 串行不变量
+        # （真引擎历史上三版假崩溃均源于跨线程绕过）
+        orig_impl = fake._infer_impl
+        fake._infer_impl = slow_gen
+        try:
+            results = await asyncio.gather(*[svc.extract(_png_b64(), "") for _ in range(3)],
+                                           return_exceptions=True)
+            assert_true(all(not isinstance(r, Exception) for r in results),
+                        f"3 路并发 extract 应全成功: {results}")
+            # generate 必须串行（worker FIFO 物理约束）
+            assert_eq(gen_max[0], 1, f"generate 并发峰值为 {gen_max[0]}，必须 1")
+            # 预处理应并发重叠（使用并发语义的直接证据）
+            assert_true(pp_max[0] >= 2,
+                        f"预处理应有并发重叠（峰值 {pp_max[0]}，应 ≥2——串行实现会恒为 1）")
+        finally:
+            fake._infer_impl = orig_impl
+        await svc.force_release()
+
+    asyncio.run(main())
+
+
+@test("ocr: 推理在途——另一 extract 复用不被阻塞（使用不挡生命周期读路径）")
+def test_ocr_infer_not_blocking_extract():
+    from services.ocr_service import OcrService
+
+    svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine()
+    fake.infer_release.clear()           # 推理挂起（在途窗口由替身 gate 制造）
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+
+    async def main():
+        infer_task = asyncio.create_task(svc.extract(_png_b64(), ""))  # 首图懒加载
+        await asyncio.get_running_loop().run_in_executor(None, fake.infer_entered.wait, 5)
+        # 推理在途时生命周期读路径（status/idle_sec——模型页轮询）应立即返回:
+        # 推理只在 worker FIFO 串行，不持 lifecycle 锁、不阻塞读
+        t0 = time.monotonic()
+        st = svc.status()
+        idle = svc.idle_sec()
+        dt = time.monotonic() - t0
+        assert_true(dt < 0.1, f"推理在途时 status/idle_sec 应立即返回，实际 {dt:.2f}s")
+        assert_eq(st.state, "ready", "推理在途状态应 ready")
+        assert_true(idle is not None and idle < 10, "推理刷新活跃后 idle_sec 应近 0")
+        fake.infer_release.set()
+        text = await infer_task
+        assert_eq(text, "FAKE-OCR-OK", "替身推理文本应原样返回")
+        await svc.force_release()
+
+    asyncio.run(main())
+
+
+@test("ocr: 推理在途——force_release 等推理完成再卸载（生命周期互斥）")
+def test_ocr_release_waits_infer():
+    from services.ocr_service import OcrService
+
+    svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine()
+    fake.infer_release.clear()           # 推理挂起（在途窗口由替身 gate 制造）
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+
+    async def main():
+        infer_task = asyncio.create_task(svc.extract(_png_b64(), ""))
+        await asyncio.get_running_loop().run_in_executor(None, fake.infer_entered.wait, 5)
+        # 推理在途发起卸载——必须等推理完成（不能把模型从推理脚下抽走）
+        rel_task = asyncio.create_task(svc.force_release())
+        await asyncio.sleep(0.3)
+        assert_false(rel_task.done(), "推理在途时卸载不得提前完成")
+        assert_true(fake.loaded, "推理在途时模型不得被卸载")
+        fake.infer_release.set()
+        text = await infer_task           # 推理完整完成
+        assert_eq(text, "FAKE-OCR-OK", "替身推理文本应原样返回")
+        await rel_task                    # 卸载随后完成
+        assert_false(fake.loaded, "卸载最终应完成")
+
+    asyncio.run(main())
+
+
+@test("ocr: 懒加载失败——引擎报错传播 + 状态回 idle")
+def test_ocr_load_failure():
+    from services.ocr_service import OcrService
+
+    svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine()
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+
+    async def main():
+        fake.fail_load_error = RuntimeError("boom: 模拟加载失败")
+        try:
+            await svc.extract(_png_b64(), "")
+            raise AssertionError("加载失败应抛 RuntimeError")
+        except RuntimeError as e:
+            assert_true("boom" in str(e), f"应传播引擎错误，实际 {e}")
+        assert_eq(svc.status().state, ManagedModel.STATE_IDLE, "失败后应回 idle")
+        assert_true(svc.status().error is not None, "error 应记录")
+
+    asyncio.run(main())
+
+
+@test("ocr: 并发懒加载失败——全部等待者收到错误 + 状态回 idle")
+def test_ocr_concurrent_load_failure():
+    """单飞失败传播: 发起者与 5 个搭车者都收到同一错误，无一悬挂。"""
+    from services.ocr_service import OcrService
+
+    svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine(load_delay=0.3)   # 确定性窗口: 6 路必全挂上等待再失败
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+
+    async def main():
+        fake.fail_load_error = RuntimeError("boom: 并发失败场景")
+        results = await asyncio.gather(
+            *[svc.extract(_png_b64(), "") for _ in range(6)],
+            return_exceptions=True,
+        )
+        errs = [r for r in results if isinstance(r, RuntimeError) and "boom" in str(r)]
+        assert_eq(len(errs), 6,
+                  f"6 路应全收到失败错误，实际 {[type(r).__name__ + str(r)[:30] for r in results]}")
+        assert_eq(fake.load_count, 1, "失败也是单飞（只尝试加载一次）")
+        assert_eq(svc.status().state, ManagedModel.STATE_IDLE, "失败后状态应回 idle")
+        # 失败后可重试（回 idle 即可重载）
+        fake.fail_load_error = None
+        text = await svc.extract(_png_b64(), "")
+        assert_eq(svc.status().state, "ready", "失败恢复后应可重新加载")
+        assert_eq(text, "FAKE-OCR-OK", "重试应走替身推理")
+        await svc.force_release()
+
+    asyncio.run(main())
+
+
+@test("ocr: reaper 纯空闲超时——ready 且空闲超窗 → 自动卸载")
+def test_ocr_reaper_idle_release():
+    from services import model_policy
+    from services.ocr_service import OcrService
+
+    model_policy.apply_idle_override("glm-ocr", 0.001)  # 近似立即超窗（策略层 0=常驻, 取极小正数）
+    svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine()
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+    async def main():
+        # 真实路径加载（extract → ensure_loaded → reaper 随加载启动）
+        await svc.extract(_png_b64(), "")
+        assert_eq(svc.status().state, ManagedModel.STATE_READY, "ready")
+        # 等 reaper（reaper 周期默认 5s，留 20s 上限）
+        for _ in range(40):
+            await asyncio.sleep(0.5)
+            if svc.status().state == ManagedModel.STATE_IDLE:
+                break
+        assert_eq(svc.status().state, ManagedModel.STATE_IDLE, "空闲超窗后应自动卸载")
+        assert_false(fake.loaded, "引擎应已卸载")
+    try:
+        asyncio.run(main())
+    finally:
+        model_policy.clear_override("glm-ocr")
+        asyncio.run(svc.force_release())
+
+
+@test("ocr: idle_sec 字段——ready 时递增 / 卸载后 None（模型页数据源）")
+def test_ocr_idle_sec_field():
+    from services.ocr_service import OcrService
+
+    svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine()
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+
+    async def main():
+        assert_true(svc.idle_sec() is None, "未加载应为 None")
+        managed = svc._model()  # noqa: SLF001 —— 测试直访受管模型（时间口径注入）
+        await asyncio.to_thread(managed.ensure_loaded)
+        assert_eq(svc.status().state, ManagedModel.STATE_READY, "加载后 ready")
+        # 直接注入活动时刻（monotonic 口径）验证 idle_sec 计算
+        managed._last_activity_at = time.monotonic() - 5  # noqa: SLF001
+        idle = svc.idle_sec()
+        assert idle is not None
+        assert_true(abs(idle - 5) < 1, f"应约 5s，实际 {idle}")
+        managed._last_activity_at = time.monotonic()  # noqa: SLF001
+        idle2 = svc.idle_sec()
+        assert idle2 is not None
+        assert_true(idle2 < 1, "刷新后应接近 0")
+        await svc.force_release()
+        assert_true(svc.idle_sec() is None, "卸载后应 None")
+
+    asyncio.run(main())
+
+
+@test("ocr: force_release 与懒加载完成竞态——不得出现假 READY（状态机损坏防御）")
+def test_ocr_force_release_race_with_load():
+    """竞态回归锚点: force_release 在"加载完成 → 等待者置 READY"窗口抢锁。
+
+    旧 bug: 等待者无条件置 READY → 引擎已被 force 卸载却显示 ready →
+    后续 extract 走快路径永不重载（永久损坏）。修复后: 等待者仅在
+    state==STARTING 时置 READY; 被 force 抢先则保持 IDLE，可重新加载。
+    """
+    import threading
+    from services.ocr_service import OcrService
+
+    svc = OcrService._reset_for_tests() or OcrService()
+    fake = FakeMlxEngine()
+    svc._mlx = fake  # pyright: ignore[reportAttributeAccessIssue]  (测试动态 patch/fake 注入)
+    orig_load = fake.load
+    load_started = threading.Event()
+    gate = threading.Event()
+
+    def gated_load(path):
+        load_started.set()
+        gate.wait(timeout=10)     # 卡在"加载完成前"——force_release 会排队等待
+        orig_load(path)
+
+    async def main():
+        fake.load = gated_load  # pyright: ignore[reportAttributeAccessIssue]  # patch 替身加载层（ManagedModel load_fn 动态查找）
+        ext = asyncio.create_task(svc.extract(_png_b64(), ""))  # 懒加载发起者
+        await asyncio.get_running_loop().run_in_executor(None, load_started.wait, 5)
+        # 加载在途 → force_release 等加载完成后卸载（不中断加载）
+        rel = asyncio.create_task(svc.force_release())
+        await asyncio.sleep(0.3)
+        gate.set()                # 放行加载 → release 随后卸载
+        # 发起者醒来: 若 release 已抢先卸载，其后续推理触发引擎防御报错（可重试）——
+        # 两种结果都可接受，本测试锚定的是终态不得出现假 READY
+        ext_res = (await asyncio.gather(ext, return_exceptions=True))[0]
+        assert_true(not isinstance(ext_res, Exception) or "重试" in str(ext_res) or "加载" in str(ext_res),
+                    f"发起者异常应为可重试防御错误，实际 {ext_res!r}")
+        await rel
+        # 无论 release 与等待者的顺序如何，终态必须是 IDLE + 引擎空
+        assert_eq(svc.status().state, ManagedModel.STATE_IDLE,
+                  f"竞态后不得出现假 READY（实际 {svc.status().state}）")
+        assert_false(fake.loaded, "引擎应已卸载")
+        # 自愈验证: 竞态后仍可重新懒加载（旧 bug 会永久卡 READY）
+        fake.load = orig_load
+        await svc.extract(_png_b64(), "")
+        assert_eq(svc.status().state, "ready", "竞态后应可重新加载（自愈）")
+        await svc.force_release()
+
+    try:
+        asyncio.run(main())
+    finally:
+        fake.load = orig_load
+
+
+@test("ocr: 坏输入防御——坏 b64 / 非图数据")
+def test_ocr_bad_input():
+    from services.ocr_service import OcrService
+
+    svc = OcrService._reset_for_tests() or OcrService()
+
+    async def main():
+        for bad in ["!!!not-base64!!!", "AAAA"]:
+            try:
+                await svc.extract(bad, "")
+                raise AssertionError(f"坏输入 {bad[:12]!r} 应报错")
+            except RuntimeError:
+                pass
+        await svc.force_release()
+
+    asyncio.run(main())
+
+
+@test("ocr: 预处理期间卸载——再次推理自动重载成功（窗口消灭，不防御报错）")
+def test_ocr_race_window_unloaded_before_generate():
+    """旧机制的"竞争窗口防御"（extract 过 ready 检查后被卸载 → generate
+    防御报错）在 ManagedModel 收口后被结构性消灭: 预处理期间模型被
+    force_release 卸载 → run_inference 的 ensure_loaded 观察到 IDLE 自动
+    重新加载 → 推理成功。本测试锚定"总是成功"的更强保证。
+    """
+    import base64
+    import io
+    import threading
+
+    from PIL import Image
+    from services.ocr_service import OcrService
+
+    svc = OcrService._reset_for_tests() or OcrService()
+    orig_prep = svc._mlx.preprocess
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_prep(image_b64: str, prompt: str):
+        entered.set()
+        release.wait(timeout=10)  # 制造窗口：extract 卡在预处理
+        return orig_prep(image_b64, prompt)
+
+    img = Image.new("RGB", (64, 32), "white")
+    buf = io.BytesIO(); img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+
+    async def main():
+        svc._mlx.preprocess = blocking_prep
+        await svc.extract(b64, "")          # 首图懒加载 + 立即推理（ready）
+        await svc.force_release()           # 卸载，回到 idle
+        task = asyncio.create_task(svc.extract(b64, ""))
+        await asyncio.get_running_loop().run_in_executor(None, entered.wait, 5)
+        # 窗口内卸载（extract 卡在预处理、尚未 ensure_loaded）
+        await svc.force_release()
+        assert_false(svc._mlx.loaded, "窗口内卸载应完成")
+        release.set()
+        text = await task                    # 自动重载 → 成功（不防御报错）
+        assert_true(isinstance(text, str), "窗口卸载后推理应自动重载并成功")
+
+    try:
+        asyncio.run(main())
+    finally:
+        svc._mlx.preprocess = orig_prep
+
+
+@test("ocr: worker 稳定性——连续两轮 load/infer/unload 循环（stream 复用 + 无泄漏锚点）")
+def test_ocr_two_cycles():
+    """跨 unload→load 循环的 worker stream 复用（thread-local stream 约束下
+    的核心稳定性断言）+ 两轮卸载后 footprint 不累积。"""
+    import base64
+    import io
+
+    from PIL import Image, ImageDraw
+    from services.ocr_engines import MlxEngine
+    from services.ocr_service import OcrService
+
+    def make_b64(text: str) -> str:
+        img = Image.new("RGB", (320, 100), "white")
+        ImageDraw.Draw(img).text((40, 35), text, fill="black")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+
+    svc = OcrService._reset_for_tests() or OcrService()
+
+    async def main():
+        fps = []
+        for rnd in (1, 2):
+            text = await svc.extract(make_b64(f"CYCLE-{rnd}"), "")  # 懒加载+识图
+            assert_true(f"CYCLE-{rnd}" in text, f"第 {rnd} 轮应正确识别，实际 {text!r}")
+            await svc.force_release()
+            assert_false(svc._mlx.loaded, f"第 {rnd} 轮卸载应完成")
+            fps.append(MlxEngine.footprint_mb())
+        # 两轮卸载后 footprint 一致（无跨循环累积；容忍小幅抖动）
+        v0, v1 = fps[0], fps[1]
+        assert v0 is not None and v1 is not None, "footprint 应可测"
+        delta = abs(v1 - v0)
+        assert_true(delta < 150, f"两轮卸载后 footprint 应一致（{v0} vs {v1}）")
+
+    asyncio.run(main())
+
+
+
+# ============ 边界条件补充测试 ============
+
+@test("ConfigManager.write: 覆盖已存在 key")
+def test_config_overwrite():
+    from services.config_manager import ConfigManager
+    cm = ConfigManager.get_instance()
+    original = cm.ai_env_path.read_text()
+    try:
+        cm.set({cm.Keys.GITHUB_TOKEN: "v1"})
+        assert_eq(cm.get_kv_list([Surface.CONFIG]).get(cm.Keys.GITHUB_TOKEN), "v1")
+        cm.set({cm.Keys.GITHUB_TOKEN: "v2"})
+        assert_eq(cm.get_kv_list([Surface.CONFIG]).get(cm.Keys.GITHUB_TOKEN), "v2", "覆盖后应新值")
+    finally:
+        cm.ai_env_path.write_text(original)
+
+
+@test("ConfigManager.write: 批量多个 key")
+def test_config_multi_keys():
+    from services.config_manager import ConfigManager
+    cm = ConfigManager.get_instance()
+    original = cm.ai_env_path.read_text()
+    try:
+        cm.set({cm.Keys.GITHUB_TOKEN: "v1", cm.Keys.HF_ENDPOINT: "v2"})
+        cfg = cm.get_kv_list([Surface.CONFIG])
+        assert_eq(cfg.get(cm.Keys.GITHUB_TOKEN), "v1")
+        assert_eq(cfg.get(cm.Keys.HF_ENDPOINT), "v2")
+    finally:
+        cm.ai_env_path.write_text(original)
+
+
+@test("detect_tools: otool 平台过滤（非 macOS skipped）")
+def test_tool_platform_filter():
+    import sys as _sys
+    from services.detect_tools import ToolsScanner, EXTERNAL_TOOLS
+    otool = next((t for t in EXTERNAL_TOOLS if t.name == "otool"), None)
+    if otool is None: return
+    result = ToolsScanner.get_instance().scan_tool(otool)
+    if _sys.platform == "darwin":
+        assert_false(result.skipped, "macOS otool 不应 skipped")
+    else:
+        assert_true(result.skipped, "非 macOS otool 应 skipped")
+
+
+@test("detect_tools: GoReSym required=False（可选）")
+def test_tool_optional():
+    from services.detect_tools import ToolsScanner, EXTERNAL_TOOLS
+    gosym = next((t for t in EXTERNAL_TOOLS if t.name == "GoReSym"), None)
+    if gosym is None: return
+    result = ToolsScanner.get_instance().scan_tool(gosym)
+    assert_false(result.required, "GoReSym 应 required=False")
+
+
+@test("E2E: 浏览器 TCP 被占 → 顺延候选段（不 exit 3）")
+def test_e2e_tcp_fallback():
+    # 占住沙箱起点端口 → 控制台应顺延到下一候选并正常服务（IPC 应答）。
+    # 先停共享（后续用例懒加载会自动重启，代价一次模型加载）
+    stop_shared_server()
+    import socket
+    from services.config_manager import ConfigManager
+    from services.frontend_port import FrontendPortRegistry
+    start_port = FrontendPortRegistry.get_instance().tcp_candidates()[0]
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocker.bind(("127.0.0.1", start_port))
+    blocker.listen(1)
+    env = os.environ.copy()
+    env["CONTROL_TCP_PORT"] = str(start_port)  # 子进程与沙箱同起点
+    env["OPENSECURITY_HOME"] = str(TEST_OPENSECURITY_HOME)  # 显式沙箱（不依赖继承）
+    env["OPENSECURITY_AI_ENV"] = str(TEST_AI_ENV)
+    proc = subprocess.Popen(
+        [sys.executable, str(BACKEND_DIR / "server.py")],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        import httpx
+        sock_path = ConfigManager.get_instance().ipc_unix_socket_path()
+        ok_port = None
+        for _ in range(20):
+            if sock_path.exists():
+                try:
+                    with httpx.Client(
+                        transport=httpx.HTTPTransport(uds=str(sock_path)), timeout=2,
+                    ) as c:
+                        r = c.get("http://localhost/api/console-url")
+                        if r.status_code == 200:
+                            ok_port = r.json().get("tcp_port")
+                            break
+                except Exception:
+                    pass
+            time.sleep(0.5)
+        assert isinstance(ok_port, int), "IPC 应答 /api/console-url"
+        candidates = FrontendPortRegistry.get_instance().tcp_candidates()
+        assert_true(
+            ok_port in candidates and ok_port != start_port,
+            f"应顺延到 {start_port} 之外的候选 {candidates}，实际注册 {ok_port}",
+        )
+        # 顺延后的 TCP 真的在听
+        from services.frontend_port import FrontendPortRegistry
+        assert_true(FrontendPortRegistry._port_alive(ok_port), f"顺延端口 {ok_port} 应有监听")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+        blocker.close()
+
+
+@test("E2E: /embed 空输入 → 400")
+def test_e2e_embed_empty():
+    cp = get_shared_server()
+    import httpx
+    r = cp.client.post("http://localhost/embed", json={}, timeout=10)
+    assert_eq(r.status_code, 400, "空输入应 400")
+
+
+@test("E2E: /embed 批量 list 输入")
+def test_e2e_embed_batch():
+    cp = get_shared_server()
+    import httpx
+    for _ in range(30):
+        r = cp.client.get("http://localhost/health", timeout=3)
+        if r.status_code == 200: break
+        time.sleep(1)
+    r = cp.client.post("http://localhost/embed",
+                   json={"inputs": ["hello", "world", "test"]}, timeout=30)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_eq(len(data), 3, "应返回 3 个向量")
+    assert_eq(len(data[0]), 1024)
+
+
+@test("E2E: /embed 字符串单输入")
+def test_e2e_embed_single():
+    cp = get_shared_server()
+    import httpx
+    for _ in range(30):
+        r = cp.client.get("http://localhost/health", timeout=3)
+        if r.status_code == 200: break
+        time.sleep(1)
+    r = cp.client.post("http://localhost/embed",
+                   json={"inputs": "single string"}, timeout=30)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_eq(len(data), 1)
+
+
+@test("E2E: /rerank 接口")
+def test_e2e_rerank():
+    cp = get_shared_server()
+    import httpx
+    for _ in range(60):
+        r = cp.client.get("http://localhost/health", timeout=3)
+        if r.status_code == 200: break
+        time.sleep(1)
+    r = cp.client.post("http://localhost/rerank",
+                   json={"query": "hello", "texts": ["world", "test"]}, timeout=60)
+    assert_eq(r.status_code, 200)
+    data = r.json()
+    assert_eq(len(data), 2)
+
+
+@test("graphiti 适配器真链: BgeM3Embedder/BgeRerankerClient/build 组装（无 fake）")
+def test_graphiti_adapter_real_chain():
+    """graphiti 组装链三个组件的真实动态覆盖（无 fake、真推理）。
+
+    FakeGraphiti 把组装链整体短路——这层是纯项目胶水（项目引用项目的
+    适配层），裸模块调用/键丢失/组装漏传三类漂移只有真调用能抓
+    （2026-09-27 三个生产 bug 均藏于此链，仅 e2e_real 可见的窗口期存活）。
+    置于 E2E /embed、/rerank 之后: bge-m3/bge-reranker 已由共享控制台进程
+    加载——本用例进程内首次推理触发惰性加载后复用，增量秒级。
+    """
+    from services.graphiti_config import BgeM3Embedder
+
+    async def run():
+        # 1. 单文本 embed → 1024 维（create → embed_sync 引用真链）
+        vec = await BgeM3Embedder().create("如何扫描端口")
+        assert_true(isinstance(vec, list) and len(vec) == 1024,
+                    f"create 应返回 1024 维，实际 {type(vec).__name__} len={len(vec) if isinstance(vec, list) else 'N/A'}")
+
+        # 2. 批量 embed → 2×1024（create_batch → embed_batch_sync 引用——
+        #    裸调用 bug 藏点）
+        vecs = await BgeM3Embedder().create_batch(["nmap 扫描", "sql 注入"])
+        assert_true(isinstance(vecs, list) and len(vecs) == 2
+                    and all(isinstance(v, list) and len(v) == 1024 for v in vecs),
+                    f"create_batch 应返回 2×1024，实际 {[len(v) if isinstance(v, list) else type(v).__name__ for v in vecs] if isinstance(vecs, list) else type(vecs).__name__}")
+
+        # 3. rerank 真推理（rank → rerank_sync 引用——裸调用 bug 藏点）:
+        #    相关段得分必须高于无关段（区分度即模型可用性）
+        from services.reranker import BgeRerankerClient
+        ranked = await BgeRerankerClient().rank(
+            "如何扫描主机开放端口",
+            ["用 nmap -sS 扫描目标端口", "今天天气晴朗适合散步"],
+        )
+        assert_true(isinstance(ranked, list) and len(ranked) == 2,
+                    f"rank 应返回 2 项，实际 {len(ranked) if isinstance(ranked, list) else type(ranked).__name__}")
+        scores = [s for _, s in ranked]
+        assert_true(scores == sorted(scores, reverse=True), f"rank 结果应按分降序: {scores}")
+        by_text = dict(ranked)
+        assert_true(by_text["用 nmap -sS 扫描目标端口"] > by_text["今天天气晴朗适合散步"],
+                    f"相关段应得分更高: {scores}")
+
+        # 4. 组装链断言: build 产物组件类型必须是项目适配器——graphiti 未传参时
+        #    静默默认 OpenAIEmbedder()（实证），漏配不报错只会走错模型，
+        #    类型断言是唯一防线
+        from services.graphiti_config import GraphitiFactory
+        graphiti, err = GraphitiFactory.create_graphiti()
+        assert graphiti is not None, f"create_graphiti 应成功: {err}"
+        try:
+            assert_true(isinstance(graphiti.embedder, BgeM3Embedder),
+                        f"embedder 应为 BgeM3Embedder，实际 {type(graphiti.embedder).__name__}")
+            assert_true(isinstance(graphiti.cross_encoder, BgeRerankerClient),
+                        f"cross_encoder 应为 BgeRerankerClient，实际 {type(graphiti.cross_encoder).__name__}")
+        finally:
+            await graphiti.close()   # 释放 driver（构造惰性不连库，close 兜底）
+
+    asyncio.run(run())
+
+
+@test("E2E: DELETE /api/config/{key}")
+def test_e2e_config_delete():
+    cp = get_shared_server()
+    import httpx
+    cp.client.post("http://localhost/api/config/update",
+              json={"surfaces": ["config"], "configs": {"GITHUB_TOKEN": "test"}}, timeout=5)
+    r = cp.client.post("http://localhost/api/config/delete",
+                         json={"surfaces": ["config"], "keys": ["GITHUB_TOKEN"]}, timeout=5)
+    assert_eq(r.status_code, 200)
+    # 删除后经场景值接口确认键回落（单键 GET 接口已随统一场景轴移除）
+    r = cp.client.post("http://localhost/api/config/list", json={"surfaces": ["config"]}, timeout=5)
+    assert_true(not r.json().get("GITHUB_TOKEN"), "删后不应出现在场景 KV 中")
+
+
+@test("E2E: /api/deps/{agent} 不存在 agent → 工具空 + summary 就绪")
+def test_e2e_deps_unknown():
+    cp = get_shared_server()
+    import httpx
+    r = cp.client.get("http://localhost/api/deps/non-existent", timeout=5)
+    assert_eq(r.status_code, 200)
+    d = r.json()
+    # 新契约：响应是聚合对象（summary/python/tools/compiler/shared_infra）
+    # 未知 agent 无归属工具 → tools 空；all 级 Python 包仍命中；
+    # 共享底座非归属 → 不参与判定 → summary.ready 反映 all 级包状态
+    assert_eq(len(d["tools"]), 0, "未知 agent 的外部工具应为空")
+    assert "summary" in d and "console_url" in d["summary"], "summary 应含 console_url"
+    assert isinstance(d["summary"]["required_missing"], list), "summary 应含 required_missing"
+
+
+@test("E2E: /api/scan 缓存命中（第二次更快）")
+def test_e2e_scan_cache():
+    cp = get_shared_server()
+    import httpx
+    t1 = time.time()
+    cp.client.get("http://localhost/api/scan?force_refresh=true", timeout=30)
+    dur1 = time.time() - t1
+    t2 = time.time()
+    cp.client.get("http://localhost/api/scan", timeout=30)
+    dur2 = time.time() - t2
+    assert_true(dur2 < dur1, f"缓存应更快：first={dur1:.2f}s cached={dur2:.2f}s")
+
+
+@test("GITHUB_TOKEN: .ai_env 配置通道（无 env 通道）+ detect_tools 消费")
+def test_github_token_config_path():
+    """GITHUB_TOKEN 走 .ai_env 配置通道（spawn env 白名单化的前置迁移:
+    env 直读通道已删, detect_tools 从 ConfigManager 读）。沙箱: 临时
+    OPENSECURITY_AI_ENV 指向自写 .ai_env（不碰生产文件）。"""
+    import os as _os
+    import tempfile
+    from services.config_manager import ConfigManager
+
+    saved_override = _os.environ.get("OPENSECURITY_AI_ENV")
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            fake_env = Path(td) / ".ai_env"
+            fake_env.write_text("GITHUB_TOKEN=ghp_sandbox_test_123\n", encoding="utf-8")
+            _os.environ["OPENSECURITY_AI_ENV"] = str(fake_env)
+            ConfigManager._reset_for_tests()
+            assert_eq(ConfigManager.get_instance().get("GITHUB_TOKEN"),
+                      "ghp_sandbox_test_123", ".ai_env 配置应可读")
+            # env 通道已收敛: 即使进程 env 有同名值也不参与（source=ai_env）
+            _os.environ["GITHUB_TOKEN"] = "ghp_should_be_ignored"
+            assert_eq(ConfigManager.get_instance().get("GITHUB_TOKEN"),
+                      "ghp_sandbox_test_123", "env 同名值不应覆盖 .ai_env")
+            _os.environ.pop("GITHUB_TOKEN", None)
+            # 消费方真链路: detect_tools 取 token 优先 .ai_env 值
+            from services.detect_tools import ToolsInstaller
+            assert_eq(ToolsInstaller._github_token(), "ghp_sandbox_test_123",
+                      "detect_tools 应从 ConfigManager 拿到 .ai_env 的 GITHUB_TOKEN")
+    finally:
+        if saved_override is None:
+            _os.environ.pop("OPENSECURITY_AI_ENV", None)
+        else:
+            _os.environ["OPENSECURITY_AI_ENV"] = saved_override
+        ConfigManager._reset_for_tests()
+
+
+@test("config.is_dev_mode: .ai_env 权威 + env 仅兜底 + 默认 False")
+def test_dev_mode_default():
+    # source=ai_env 语义: .ai_env 定义了 CONTROL_FRONTEND_DEV → 文件是权威
+    # （env 同名值不参与）; 文件未定义 → env 兜底（CI 注入通道）。
+    # 沙箱: 临时 OPENSECURITY_AI_ENV 指向自写 .ai_env（不碰生产文件）。
+    import os as _os
+    import tempfile
+    from services.config_manager import ConfigManager
+
+    saved_env = _os.environ.get("CONTROL_FRONTEND_DEV")
+    saved_override = _os.environ.get("OPENSECURITY_AI_ENV")
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            fake_env = Path(td) / ".ai_env"
+            _os.environ["OPENSECURITY_AI_ENV"] = str(fake_env)
+            # 场景 1: 文件定义 1，env 同名 0 → 文件权威（env 不参与）
+            fake_env.write_text("CONTROL_FRONTEND_DEV=1\n", encoding="utf-8")
+            _os.environ["CONTROL_FRONTEND_DEV"] = "0"
+            ConfigManager._reset_for_tests()
+            assert_true(ConfigManager.get_instance().is_dev_mode,
+                        "文件=1 + env=0 → 应 True（.ai_env 权威）")
+            # 场景 2: 文件定义 0，env 同名 1 → 文件权威
+            fake_env.write_text("CONTROL_FRONTEND_DEV=0\n", encoding="utf-8")
+            _os.environ["CONTROL_FRONTEND_DEV"] = "1"
+            ConfigManager._reset_for_tests()
+            assert_false(ConfigManager.get_instance().is_dev_mode,
+                         "文件=0 + env=1 → 应 False（env 不压制文件）")
+            # 场景 3: 文件未定义 → env 兜底生效
+            fake_env.unlink()
+            _os.environ["CONTROL_FRONTEND_DEV"] = "true"
+            ConfigManager._reset_for_tests()
+            assert_true(ConfigManager.get_instance().is_dev_mode, "无文件 + env=true → True（兜底）")
+            # 场景 4: 两者皆无 → 默认 False
+            _os.environ.pop("CONTROL_FRONTEND_DEV", None)
+            ConfigManager._reset_for_tests()
+            assert_false(ConfigManager.get_instance().is_dev_mode, "无文件无 env → 默认 False")
+    finally:
+        if saved_env is None:
+            _os.environ.pop("CONTROL_FRONTEND_DEV", None)
+        else:
+            _os.environ["CONTROL_FRONTEND_DEV"] = saved_env
+        if saved_override is None:
+            _os.environ.pop("OPENSECURITY_AI_ENV", None)
+        else:
+            _os.environ["OPENSECURITY_AI_ENV"] = saved_override
+        ConfigManager._reset_for_tests()
+
+
+@test("config.is_dev_mode 消费行为: 值 → create_app 拉起 vite 分支")
+def test_dev_mode_consumer_vite():
+    """配置值测试 ≠ 消费行为测试: 锚定'配置值 → 消费分支'完整链路——
+    曾因把 ConfigManager 类当谓词（构造恒真）致生产每次启动都 spawn vite。
+    拦截点在 FrontendPortRegistry.ensure_vite_dev（不真 spawn 进程）。"""
+    import os as _os
+    import tempfile
+    import services.config_manager as _cm
+    import services.frontend_port as _fp
+
+    called = []
+    orig = _fp.FrontendPortRegistry.ensure_vite_dev
+    _fp.FrontendPortRegistry.ensure_vite_dev = lambda self: called.append(1)  # type: ignore[method-assign]
+    saved_override = _os.environ.get("OPENSECURITY_AI_ENV")
+    saved_dev = _os.environ.pop("CONTROL_FRONTEND_DEV", None)
+    try:
+        from server import create_app
+        with tempfile.TemporaryDirectory() as td:
+            env_file = Path(td) / ".ai_env"
+            _os.environ["OPENSECURITY_AI_ENV"] = str(env_file)
+            # dev=0 → 不拉 vite
+            env_file.write_text("CONTROL_FRONTEND_DEV=0\n", encoding="utf-8")
+            _cm.ConfigManager._reset_for_tests()
+            create_app()
+            assert_true(len(called) == 0, f"dev=0 时 create_app 不得拉 vite（实际调用 {len(called)} 次）")
+            # 对照: dev=1 → 拉起
+            env_file.write_text("CONTROL_FRONTEND_DEV=1\n", encoding="utf-8")
+            _cm.ConfigManager._reset_for_tests()
+            called.clear()
+            create_app()
+            assert_true(len(called) == 1, f"dev=1 时 create_app 应拉 vite（实际调用 {len(called)} 次）")
+    finally:
+        _fp.FrontendPortRegistry.ensure_vite_dev = orig  # type: ignore[method-assign]
+        if saved_override is None:
+            _os.environ.pop("OPENSECURITY_AI_ENV", None)
+        else:
+            _os.environ["OPENSECURITY_AI_ENV"] = saved_override
+        if saved_dev is not None:
+            _os.environ["CONTROL_FRONTEND_DEV"] = saved_dev
+        _cm.ConfigManager._reset_for_tests()
+
+
+def main():
+    print("=" * 60)
+    print("opencode-control 测试套件")
+    print(f"BACKEND_DIR: {BACKEND_DIR}")
+    print(f"TEST_OPENSECURITY_HOME: {TEST_OPENSECURITY_HOME}")
+    print(f"OPENCODE_ROOT: {OPENCODE_ROOT}")
+    print("=" * 60)
+    print()
+
+    # 收集所有 @test 函数
+    tests = [
+        (name, fn) for name, fn in globals().items()
+        if callable(fn) and getattr(fn, "_is_test", False)
+    ]
+    print(f"找到 {len(tests)} 个测试\n")
+
+    # 逐个运行（SIGALRM 看门狗: 单测试超 180s 转储栈并记失败继续——
+    # 本套件混合 E2E 子进程/多线程/C 扩展，存在概率性挂起; 看门狗保证
+    # 套件可跑完且卡点被暴露（fail + traceback），优于永久挂起）
+    import signal
+    import faulthandler
+
+    def _watchdog(signum, frame):
+        raise TimeoutError(f"测试超时（180s）: {_watchdog.current}")
+
+    _watchdog.current = None
+    signal.signal(signal.SIGALRM, _watchdog)
+    for name, fn in tests:
+        _watchdog.current = name
+        signal.setitimer(signal.ITIMER_REAL, 180)
+        try:
+            fn()
+        except TimeoutError as e:
+            faulthandler.dump_traceback()
+            _results.append((name, False, str(e)))
+            print(f"  ✗ {name}: {e}")
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+
+    # 统一收尾共享控制台（无论中途失败与否）
+    stop_shared_server()
+
+    # 汇总
+    print("\n" + "=" * 60)
+    passed = sum(1 for _, ok, _ in _results if ok)
+    failed = sum(1 for _, ok, _ in _results if not ok)
+    print(f"通过 {passed} / 失败 {failed} / 总计 {len(_results)}")
+    if failed:
+        print("\n失败用例：")
+        for name, ok, msg in _results:
+            if not ok:
+                print(f"  ✗ {name}: {msg}")
+    print("=" * 60)
+    return 0 if failed == 0 else 1
+
+
+@test("ConfigManager.ensure_template: 无则创建/有则保留（幂等）")
+def test_config_ensure_template():
+    import tempfile
+    import os as _os
+    from services.config_manager import ConfigManager
+
+    with tempfile.TemporaryDirectory() as td:
+        fake = Path(td) / ".ai_env"
+        saved_override = _os.environ.get("OPENSECURITY_AI_ENV")
+        _os.environ["OPENSECURITY_AI_ENV"] = str(fake)
+        ConfigManager._reset_for_tests()
+        try:
+            assert_true(ConfigManager.get_instance().ensure_template(), "首次应创建并返回 True")
+            assert_true(fake.exists(), "模板文件应存在")
+            content = fake.read_text(encoding="utf-8")
+            assert "IDA_PRO_HOME=" in content and "DEEPSEEK_API_KEY=" in content
+            # 动态模板特性（经 _FIELDS 拼接）: 必要键 hint 注释随声明;
+            # 有默认键省略（生效值自动来自声明默认）; 无默认可选键注释提示
+            assert "该目录下需有 idat" in content, "必要键 hint 进模板注释"
+            assert "# GITHUB_TOKEN=" in content, "无默认可选键注释提示"
+            assert "PERMISSION_ASK_TIMEOUT_SEC" not in content, "有默认键不进模板"
+            fake.write_text("USER_CUSTOM=value\n", encoding="utf-8")
+            assert_false(ConfigManager.get_instance().ensure_template(), "已存在应返回 False")
+            assert fake.read_text(encoding="utf-8") == "USER_CUSTOM=value\n", "用户内容不得被覆盖"
+        finally:
+            if saved_override is None:
+                _os.environ.pop("OPENSECURITY_AI_ENV", None)
+            else:
+                _os.environ["OPENSECURITY_AI_ENV"] = saved_override
+            ConfigManager._reset_for_tests()
+
+
+@test("restart: 调度幂等 + 路由契约（不真 exec）")
+def test_restart_schedule_and_route():
+    from services.restart import ConsoleRestarter as restart_mod
+    from fastapi.testclient import TestClient
+    from server import create_app
+
+    restart_mod._reset_for_tests()
+    r = restart_mod.get_instance()
+    calls = []
+    # 类级 patch：假 perform 挂在类上——任何实例（含路由将来可能持有的
+    # 旧引用）调 perform 都命中假的，真实 execv 在本套件内不可能发生。
+    # （实例级 patch 曾因路由持有旧模块级实例而拦错对象 → execv 重跑套件）
+    _orig_perform = restart_mod.perform  # restart_mod 即 ConsoleRestarter 类
+    restart_mod.perform = lambda self: calls.append(1)
+    try:
+        assert_true(r.schedule(), "首次调度应返回 True")
+        assert_false(r.schedule(), "重复调度应返回 False（幂等）")
+
+        app = create_app()
+        # 路由经 get_instance() 取单例即 r（模块级实例导出已删除——曾导致
+        # 路由持有旧实例、真 Timer 逃逸 execv 重跑整个套件）
+        try:
+            with TestClient(app) as c:
+                resp = c.post("/api/system/restart")
+                assert resp.status_code == 200
+                data = resp.json()
+                assert_true(data["success"], "路由应返回 success")
+                assert_true("message" in data, "路由应带提示消息")
+        finally:
+            pass
+        # schedule 已被 Timer 挂起 → 立即执行 perform 清掉（Timer 0.05s 后也会调，双调用无害）
+        r.perform()
+        assert_true(len(calls) >= 1, "perform 应被调用")
+    finally:
+        restart_mod.perform = _orig_perform
+
+
+@test("restart: 节点重启链路 execv 目标真实存在（防 services/services 拼错回归）")
+def test_restart_via_remote_node_target_exists():
+    import os as _os_mod
+    import services.restart as restart_py
+    r = restart_py.ConsoleRestarter.get_instance()
+    captured = {}
+
+    def _fake_execv(_exe, argv):
+        captured["argv"] = list(argv)
+
+    _orig = restart_py.os.execv
+    restart_py.os.execv = _fake_execv
+    try:
+        r._restart_via_remote_node()
+    finally:
+        restart_py.os.execv = _orig
+    target = captured["argv"][1]
+    assert_true(_os_mod.path.isfile(target),
+                f"execv 目标不存在（节点重启必死）: {target}")
+    assert_true(target.endswith("remote_node.py"), "目标应为 remote_node.py")
+
+
+@test("model_loader: LockedEmbedder/LockedReranker 并发互斥（串行不变量的构造保证）")
+def test_locked_wrapper_mutex():
+    import threading
+    import time
+    from services.model_loader import ModelInferenceService
+
+    class ConcurrencyProbe:
+        """encode/predict 进入 +1、退出 -1，记录并发峰值。"""
+
+        def __init__(self):
+            self.current = 0
+            self.peak = 0
+            self._lk = threading.Lock()
+
+        def _enter(self):
+            with self._lk:
+                self.current += 1
+                self.peak = max(self.peak, self.current)
+
+        def _exit(self):
+            with self._lk:
+                self.current -= 1
+
+        def encode(self, inputs, **kw):
+            self._enter()
+            time.sleep(0.05)  # 拉宽并发窗口：无锁时 4 线程必然交叠
+            self._exit()
+            import numpy as np
+            single = isinstance(inputs, str)
+            n = 1 if single else len(inputs)
+            out = np.zeros((n, 1024), dtype=np.float32)
+            return out[0] if single else out
+
+        def predict(self, pairs, **kw):
+            self._enter()
+            time.sleep(0.05)
+            self._exit()
+            import numpy as np
+            return np.zeros(len(pairs), dtype=np.float32)
+
+    def run_concurrent(wrapped, method, make_args):
+        probe = wrapped._inner
+        threads = [
+            threading.Thread(target=getattr(wrapped, method), args=make_args(i))
+            for i in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        assert_true(probe.peak == 1, f"推理并发峰值应恒为 1（串行保证），实测 {probe.peak}")
+
+    probe = ConcurrencyProbe()
+    embedder = ModelInferenceService.LockedEmbedder(probe)  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
+    run_concurrent(embedder, "encode", lambda i: (f"t{i}",))
+
+    probe2 = ConcurrencyProbe()
+    reranker = ModelInferenceService.LockedReranker(probe2)  # pyright: ignore[reportArgumentType]  (测试动态 patch/fake 注入)
+    run_concurrent(reranker, "predict", lambda i: ([("q", f"p{i}")],))
+
+
+@test("model_loader: 架构守护——推理收口不回归（静态断言，防绕锁复发）")
+def test_model_loader_architecture_guard():
+    """并发安全回归的静态层：真模型并发竞态无法在单测复现（fake 线程安全、
+    竞态概率性、需 MPS 真环境），因此用源码级断言锁住架构不变量——
+    2026-09-25 双 SIGSEGV 的教训：注释契约挡不住人，只有 CI 断言挡得住。"""
+    from pathlib import Path
+    backend = Path(__file__).resolve().parents[1]
+    py_files = sorted(
+        list((backend / "services").glob("*.py")) + list((backend / "routes").glob("*.py"))
+    )
+    assert_true(len(py_files) > 5, f"源文件收集异常: {len(py_files)}")
+
+    def test_read_cfg(p):
+        return p.read_text(encoding="utf-8")
+
+    # 1. sentence_transformers 只允许 model_loader import——其他模块
+    #    import 即可能构造裸模型（绕过 LockedEmbedder 的唯一途径）
+    offenders = [
+        f"{p.name}: {i+1}"
+        for p in py_files if p.name != "model_loader.py"
+        for i, line in enumerate(p.read_text().splitlines())
+        if "from sentence_transformers import" in line or "import sentence_transformers" in line
+    ]
+    assert_true(not offenders, f"sentence_transformers 应只在 model_loader 出现: {offenders}")
+
+    # 2. _infer_lock 获取点恰 6 处——全部合法落点:
+    #    LockedEmbedder/LockedReranker 注入直通 2 处 + _route_encode/_route_predict
+    #    本地路径 2 处 + 两个 unload impl 2 处。推理串行与"卸载等在途推理"
+    #    共用同一把锁才互斥; 偏离 6 = 绕锁回归或互斥被破坏
+    ml_src = (backend / "services" / "model_loader.py").read_text()
+    lock_sites = sum(1 for line in ml_src.splitlines()
+                     if line.strip().startswith("with self._infer_lock")
+                     or line.strip().startswith("with svc._infer_lock"))
+    assert_eq(lock_sites, 6, f"_infer_lock 获取点应为 6，实际 {lock_sites}")
+
+    # 3. 已删符号零引用（D 痕迹/死出口/重复函数不得复活）
+    for sym in ("def infer_lock", "_do_embed", "_do_rerank"):
+        hits = [f"{p.name}: {i+1}" for p in py_files
+                for i, line in enumerate(p.read_text().splitlines()) if sym in line]
+        assert_true(not hits, f"已删符号 {sym} 出现: {hits}")
+
+    # 4. .model 裸引用死出口禁止复活（graphiti_core 从不访问该属性；
+    #    复活即提供绕过 LockedEmbedder 拿裸模型的通道）
+    prop_hits = [f"{p.name}: {i+1}" for p in py_files
+                 for i, line in enumerate(p.read_text().splitlines())
+                 if line.strip().startswith("def model")]
+    assert_true(not prop_hits, f"不得定义 .model property（裸引用出口）: {prop_hits}")
+
+
+@test("架构守护: staticmethod-self + 路由裸名——运行时才炸的名称引用静态防线")
+def test_contract_scan_name_references():
+    """NameError 类缺陷（staticmethod 引 self / 路由体内引用不存在的模块级
+    常量）import 不炸、调用才炸——调用路径没被测试覆盖就是盲区。AST 全量
+    扫描封死两类形态（曾致降级预热必炸与配置页 500 两类生产故障）。"""
+    import ast
+    from pathlib import Path
+    backend = Path(__file__).resolve().parents[1]
+    problems = []
+
+    # 规则 1: @staticmethod 体内引用 self
+    # 作用域规则: 嵌套函数/Lambda 参数含 self → 该子树合法（self 指参数）;
+    # 参数无 self → 体内 self 引用 = 闭包引用外层（不存在）→ 违规
+    def _iter_self_refs(fn) -> list:
+        refs = []
+
+        def _visit(n):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                if any(getattr(a, "arg", None) == "self" for a in n.args.args):
+                    return  # 嵌套参数含 self → 子树合法
+            if isinstance(n, ast.Name) and n.id == "self":
+                refs.append(n)
+                return
+            for child in ast.iter_child_nodes(n):
+                _visit(child)
+
+        for stmt in fn.body:
+            _visit(stmt)
+        return refs
+
+    for p in sorted((backend / "services").glob("*.py")):
+        tree = ast.parse(p.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and any(
+                    isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list):
+                for ref in _iter_self_refs(node):
+                    problems.append(f"{p.name}:{ref.lineno} staticmethod {node.name} 引用 self")
+
+    # 规则 2: 路由模块函数体内的大写裸名必须在模块顶层或函数局部有绑定
+    for p in sorted((backend / "routes").glob("*.py")):
+        tree = ast.parse(p.read_text())
+        module_bound = set()
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for a in node.names:
+                    module_bound.add((a.asname or a.name).split(".")[0])
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        module_bound.add(t.id)
+            elif isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                module_bound.add(node.name)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # 局部绑定全形态收集（防合法代码误报）: 赋值/标注赋值/增量赋值/
+                # 海象/for 目标/comprehension 目标/except as/with as/参数名/函数内 import
+                local_bound = {a.arg for a in node.args.args}
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Assign):
+                        for t in sub.targets:
+                            if isinstance(t, ast.Name):
+                                local_bound.add(t.id)
+                    elif isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
+                        local_bound.add(sub.target.id)
+                    elif isinstance(sub, ast.AugAssign) and isinstance(sub.target, ast.Name):
+                        local_bound.add(sub.target.id)
+                    elif isinstance(sub, ast.NamedExpr) and isinstance(sub.target, ast.Name):
+                        local_bound.add(sub.target.id)
+                    elif isinstance(sub, (ast.For, ast.AsyncFor)) and isinstance(sub.target, ast.Name):
+                        local_bound.add(sub.target.id)
+                    elif isinstance(sub, ast.comprehension) and isinstance(sub.target, ast.Name):
+                        local_bound.add(sub.target.id)
+                    elif isinstance(sub, ast.ExceptHandler) and sub.name:
+                        local_bound.add(sub.name)
+                    elif isinstance(sub, ast.withitem) and isinstance(sub.optional_vars, ast.Name):
+                        local_bound.add(sub.optional_vars.id)
+                    elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                        for a in sub.names:
+                            local_bound.add((a.asname or a.name).split(".")[0])
+                for sub in ast.walk(node):
+                    if (isinstance(sub, ast.Name) and sub.id.isupper()
+                            and isinstance(sub.ctx, ast.Load)
+                            and sub.id not in module_bound and sub.id not in local_bound):
+                        problems.append(f"{p.name}:{sub.lineno} 大写裸名 {sub.id} 无定义（模块级/局部均未绑定）")
+
+    # 规则 3: CLI 入口函数（main/_main）体内的裸函数调用必须可解析
+    # （模块级 def / import 绑定 / 类静态方法调用之外的裸调用 = 运行时 NameError
+    # ——曾致 detect_py_deps scan CLI 入口必炸、被 env-check fail-closed 误报为缺依赖）
+    import builtins
+    _BUILTINS = set(dir(builtins))
+    for p in sorted((backend / "services").glob("*.py")):
+        src_text = p.read_text()
+        if "if __name__" not in src_text:
+            continue
+        tree = ast.parse(src_text)
+        # 模块级绑定: def/class/import（import 的 asname/name 均算）
+        bound = set()
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
+                bound.add(node.name)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for a in node.names:
+                    bound.add((a.asname or a.name).split(".")[0])
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name in ("main", "_main"):
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
+                        n = sub.func.id
+                        if n not in bound and n not in _BUILTINS:
+                            problems.append(f"{p.name}:{sub.lineno} CLI 入口裸调用 {n}() 未定义")
+
+    # 规则 4: except 引用的名字不得仅由同 try 内 import 绑定
+    # （try: import httpx ... except (httpx.HTTPError, ...): —— import 失败时
+    #   except 元组求值即 NameError，降级路径自己炸。pyright/mypy 流分析
+    #   把 import 当无条件绑定抓不到此类; AST 结构判定可精确封死。
+    #   防御形态: import 单独一层 try/except ImportError，使用处放第二层
+    #   try——except 引用时名字必已绑定）
+    def _import_binds(s) -> set:
+        if isinstance(s, (ast.Import, ast.ImportFrom)):
+            return {a.asname or a.name.split(".")[0] for a in s.names}
+        return set()
+
+    scan_targets = sorted((backend / "services").glob("*.py")) \
+        + sorted((backend / "routes").glob("*.py")) \
+        + [backend / "server.py"] \
+        + sorted((backend.parent / "mcp-servers").glob("*.py")) \
+        + sorted((backend.parent / "mcp-servers").glob("*/server.py"))
+
+    def _module_import_binds(tree) -> set:
+        binds = set()
+        for node in tree.body:
+            binds |= _import_binds(node)
+        return binds
+
+    def _scan_except_import(node, prior_bound, fname):
+        """单个作用域节点（模块）内全量扫描。
+
+        ast.walk 递归覆盖全部嵌套形态（if/for/while/with 内的 try、
+        TryStar 即 except*、函数体内的 try）——lazy import 最常见的
+        就是条件分支内。prior_bound = 模块顶层 import 绑定（函数内
+        重复 import 同名模块不可能失败，walk 单遍天然抑制该误报）。
+        """
+        for sub in ast.walk(node):
+            if not isinstance(sub, (ast.Try, ast.TryStar)):
+                continue
+            try_binds: set = set()
+            for s in sub.body:
+                try_binds |= _import_binds(s)
+                if isinstance(s, ast.Assign):
+                    try_binds |= {t.id for t in s.targets if isinstance(t, ast.Name)}
+            for handler in sub.handlers:
+                if handler.type is None:
+                    continue
+                for hn in ast.walk(handler.type):
+                    if isinstance(hn, ast.Name) and hn.id in try_binds and hn.id not in prior_bound:
+                        problems.append(
+                            f"{fname}:{sub.lineno} except 引用 '{hn.id}' 仅由同 try 内 import 绑定"
+                            "（import 失败 → except 求值 NameError; 防御: import 单独一层 try）")
+
+    for p in scan_targets:
+        tree = ast.parse(p.read_text())
+        _scan_except_import(tree, _module_import_binds(tree), p.name)
+
+    assert_true(not problems, f"名称引用契约违规 {len(problems)} 处:\n" + "\n".join(problems[:10]))
+
+
+@test("e2e 冒烟: 真模型三路并发 embed×memory×graphiti-embedder（OPENSECURITY_E2E_SMOKE=1 启用，零污染）")
+def test_real_model_concurrency_smoke():
+    """真模型 + MPS + 多线程并发的唯一可复现验证层。
+
+    为什么需要它：fake 测不了并发安全（fake 线程安全，故障域被抽象边界
+    隔离）；竞态在真环境概率性触发。本测试零污染设计——三路并发全部
+    避开生产存储：embed 直调（纯计算）、MemoryDB 写临时库（finally 删）、
+    BgeM3Embedder.create 是 graphiti 的 embed 入口（episode 落图在其上，
+    崩溃点在本层）。SIGSEGV 会直接杀死测试进程 = 最强失败信号。
+    成本：真模型加载 ~90s + 压测 ~10s，故 ENV 开关默认跳过。
+    """
+    import os
+    if os.environ.get("OPENSECURITY_E2E_SMOKE") != "1":
+        print("  ⏭ 跳过（设 OPENSECURITY_E2E_SMOKE=1 启用）")
+        return
+    import asyncio
+    import tempfile
+    import threading
+    import time
+    from pathlib import Path
+    from services.model_loader import ModelInferenceService
+    from services.knowledge_db import MemoryDB
+    from services.graphiti_config import BgeM3Embedder
+
+    ITER = 6
+    errors: list[str] = []
+
+    def lane_embed():
+        for i in range(ITER):
+            vecs = ModelInferenceService.get_instance().embed_batch_sync([f"smoke embed {i}", f"lane a {i}"])
+            if len(vecs) != 2 or len(vecs[0]) != 1024:
+                errors.append(f"embed_batch_sync 形状异常: {len(vecs)}")
+
+    def lane_memory(db_path: Path):
+        try:
+            db = MemoryDB(db_path, ModelInferenceService.get_instance().get_embedder())
+            for i in range(ITER):
+                db.store(question=f"smoke {i}", content=f"smoke memory content {i}",
+                         doc_type="memory", flow_id="smoke-flow")
+            if not db.search(["smoke memory"], doc_type="memory", flow_id="smoke-flow"):
+                errors.append("memory 临时库回读为空")
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def lane_graphiti():
+        async def run():
+            emb = BgeM3Embedder()
+            for i in range(ITER):
+                v = await emb.create(input_data=[f"smoke graphiti {i}"])
+                if len(v) != 1024:
+                    errors.append(f"graphiti embedder 维度异常: {len(v)}")
+        asyncio.run(run())
+
+    t0 = time.monotonic()
+    with tempfile.TemporaryDirectory() as td:
+        db_path = Path(td) / "smoke.db"
+        lanes = [
+            threading.Thread(target=lane_embed, name="smoke-embed"),
+            threading.Thread(target=lane_memory, args=(db_path,), name="smoke-memory"),
+            threading.Thread(target=lane_graphiti, name="smoke-graphiti"),
+        ]
+        for t in lanes:
+            t.start()
+        for t in lanes:
+            t.join(timeout=300)
+        assert_true(not any(t.is_alive() for t in lanes), "并发线程 300s 超时未结束")
+    assert_true(not errors, f"三路并发错误: {errors}")
+    print(f"  ⏱ 三路×{ITER} 并发完成，耗时 {time.monotonic() - t0:.1f}s（含模型加载）")
+
+
+@test("knowledge_store: 队列写路径落库 + 非法条目跳过 + 同步方法（fake embedder）")
+def test_knowledge_store_paths():
+    import numpy as np
+    from services.knowledge_store import MemoryEntry, KnowledgeStoreService
+
+    class FakeEmbedder:
+        def encode(self, inputs, **kw):
+            single = isinstance(inputs, str)
+            seq = [inputs] if single else inputs
+            out = np.zeros((len(seq), 1024), dtype=np.float32)
+            return out[0] if single else out
+
+    db_path = TEST_OPENSECURITY_HOME / "ks_unit" / "knowledge.db"
+    if db_path.exists():
+        db_path.unlink()
+    svc = KnowledgeStoreService._create_fresh(db_path=db_path, embedder_factory=FakeEmbedder)
+    svc.start()
+    assert_true(svc.submit(MemoryEntry(question="bash execution", answer="Tool result...", type="bash", flow_id="flow-1")), "合法条目应入队")
+    assert_true(not svc.submit(MemoryEntry(question="", answer="x", type="bash")), "空 question 应跳过")
+    assert_true(not svc.submit(MemoryEntry(question="q", answer="a", type="")), "空 type 应跳过")
+    svc.stop(timeout=10)
+
+    import sqlite3
+    import sqlite_vec
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    rows = conn.execute("SELECT question, type, flow_id FROM answers").fetchall()
+    assert_true(rows == [("[bash] bash execution", "memory", "flow-1")], f"落库不符: {rows}")
+    assert_true(conn.execute("SELECT count(*) FROM answer_vectors").fetchone()[0] == 1, "向量应 1 行")
+
+
+@test("event_store: entry/delete 写路径 + add_episode 参数完整（fake graphiti）")
+def test_event_store_write_paths():
+    from unittest.mock import AsyncMock, patch
+    from services.event_store import EventEntry, DeleteGroup, EventStoreService, GraphitiFactoryResult
+
+    calls = []
+
+    class FakeGraphiti:
+        driver = object()
+        async def build_indices_and_constraints(self):
+            calls.append("build")
+        async def add_episode(self, **kw):
+            calls.append(("add", kw))
+        async def close(self):
+            calls.append("close")
+
+    svc = EventStoreService._create_fresh(graphiti_factory=cast("Callable[[], GraphitiFactoryResult]", lambda: (FakeGraphiti(), None)))
+    svc.start()
+    assert_true(svc.submit(EventEntry(name="bash execution", body="b", source="s", group_id="g1", timestamp=1755432000000.0)), "事件应入队")
+    assert_true(svc.submit(DeleteGroup(group_id="g1")), "delete 应入队")
+    assert_true(not svc.submit(DeleteGroup(group_id="")), "空 group_id 应跳过")
+    with patch("graphiti_core.nodes.EntityNode.delete_by_group_id", new=AsyncMock()) as m1, \
+         patch("graphiti_core.nodes.EpisodicNode.delete_by_group_id", new=AsyncMock()) as m2:
+        svc.stop(timeout=15)
+        assert_true(m1.await_count == 1 and m2.await_count == 1, f"delete 调用数 {m1.await_count}/{m2.await_count}")
+
+    adds = [c for c in calls if isinstance(c, tuple)]
+    assert_true(adds and adds[0][0] == "add", f"add_episode 未调用: {calls}")
+    kw = adds[0][1]
+    assert_true(kw["name"] == "bash execution" and kw["group_id"] == "g1", "name/group_id 不符")
+    assert_true(kw["reference_time"].timestamp() == 1755432000.0, "timestamp ms→s 应无损")
+    assert_true("Tool" in kw["entity_types"], "entity_types 缺自定义类型")
+
+
+def _knowledge_events_routes_inner():
+    """[77] 主体（经子进程隔离执行——TestClient + 全量前置线程存在进程内
+    竞态活锁; 隔离执行断言原样，见 wrapper 注释）。"""
+    import hashlib
+    import numpy as np
+    from fastapi.testclient import TestClient
+    from services.knowledge_store import KnowledgeStoreService as ks
+    from services.event_store import EventStoreService as es, GraphitiFactoryResult
+
+    class FakeEmbedder:
+        def encode(self, inputs, **kw):
+            single = isinstance(inputs, str)
+            seq = [inputs] if single else inputs
+            def vec(t):
+                h = hashlib.sha256(t.encode()).digest()
+                out = np.frombuffer((h * 32)[:1024], dtype=np.uint8).astype(np.float32)
+                return out / np.linalg.norm(out)
+            out = np.stack([vec(t) for t in seq])
+            return out[0] if single else out
+
+    class FakeGraphiti:
+        driver = object()
+        async def build_indices_and_constraints(self):
+            pass
+        async def add_episode(self, **kw):
+            pass
+        async def close(self):
+            pass
+
+    db_path = TEST_OPENSECURITY_HOME / "ingest_route" / "knowledge.db"
+    if db_path.exists():
+        db_path.unlink()
+    ks._reset_for_tests()
+    es._reset_for_tests()
+    ks._force_instance(ks._create_fresh(db_path=db_path, embedder_factory=FakeEmbedder))
+    es._force_instance(es._create_fresh(graphiti_factory=cast("Callable[[], GraphitiFactoryResult]", lambda: (FakeGraphiti(), None))))
+    try:
+        from server import create_app
+        with TestClient(create_app()) as client:
+            r1 = client.post("/api/memory/entry", json={"question": "q", "answer": "a", "type": "bash", "flow_id": "f1"})
+            r2 = client.post("/api/events/entry", json={"name": "n", "body": "b", "source": "s", "group_id": "g", "timestamp": 1755432000000})
+            r3 = client.post("/api/events/delete", json={"group_id": "g"})
+            r4 = client.post("/api/memory/entry", json={"question": "", "answer": "a", "type": "bash"})
+            assert_true((r1.status_code, r2.status_code, r3.status_code) == (202, 202, 202), f"状态码 {(r1.status_code, r2.status_code, r3.status_code)}")
+            assert_true(r1.json() == {"queued": True}, f"合法应 queued:true: {r1.json()}")
+            assert_true(r4.json() == {"queued": False}, f"非法应 queued:false: {r4.json()}")
+            r5 = client.post("/api/knowledge/search", json={"questions": ["q"]})
+            assert_true(r5.status_code == 200 and r5.json()["count"] == 0, f"knowledge/search: {r5.json()}")
+            r6 = client.post("/api/events/time-search", json={"query": "q", "group_id": "g"})
+            assert_true(r6.status_code == 200 and r6.json()["edges"] == [], f"time-search: {r6.json()}")
+    finally:
+        ks._reset_for_tests()
+        es._reset_for_tests()
+
+
+def _events_input_contract_inner():
+    """[契约] 主体（经子进程隔离执行——TestClient + 全量前置线程存在进程内
+    竞态活锁; 隔离执行断言原样，同 _knowledge_events_routes_inner 模式）。"""
+    from fastapi.testclient import TestClient
+    from services.event_store import EventStoreService as es, GraphitiFactoryResult
+
+    class FakeGraphiti:
+        driver = object()
+        async def build_indices_and_constraints(self):
+            pass
+        async def add_episode(self, **kw):
+            pass
+        async def close(self):
+            pass
+
+    es._reset_for_tests()
+    es._force_instance(es._create_fresh(graphiti_factory=cast("Callable[[], GraphitiFactoryResult]", lambda: (FakeGraphiti(), None))))
+    try:
+        from server import create_app
+        with TestClient(create_app()) as client:
+            # ── 422：契约违规必须显式拒绝（按字段语义收紧） ──
+            bad = [
+                ("/api/events/entry", {"name": "n", "body": "b", "source": "s"}, "entry 缺 group_id"),
+                ("/api/events/entry", {"name": "", "body": "b", "source": "s", "group_id": "g"}, "entry name 空串"),
+                ("/api/events/entry", {"name": "n", "body": "  ", "source": "s", "group_id": "g"}, "entry body 纯空白"),
+                ("/api/events/entry", {"name": "n", "body": "b", "source": "", "group_id": "g"}, "entry source 空串"),
+                ("/api/events/entry", {"name": "n", "body": "b", "source": "s", "group_id": ""}, "entry group_id 空串"),
+                ("/api/events/entry", {"name": "n", "body": "b", "source": "s", "group_id": "g", "timestamp": 0}, "entry timestamp=0"),
+                ("/api/events/entry", {"name": "n", "body": "b", "source": "s", "group_id": "g", "timestamp": -1}, "entry timestamp=-1"),
+                ("/api/events/delete", {"group_id": "  "}, "delete group_id 纯空白"),
+                ("/api/events/time-search", {"query": "", "group_id": "g"}, "time query 空串"),
+                ("/api/events/time-search", {"query": "q", "group_id": " "}, "time group_id 纯空白"),
+                ("/api/events/time-search", {"query": "q", "group_id": "g", "time_start": "2026/10/01"}, "time_start 非法格式"),
+                ("/api/events/time-search", {"query": "q", "group_id": "g", "max_results": 0}, "time max_results=0"),
+                ("/api/events/time-search", {"query": "q", "group_id": "g", "max_results": 101}, "time max_results=101"),
+                ("/api/events/entity-relationships-search", {"query": "q", "group_id": "g", "center_node_uuid": ""}, "rel center 空串"),
+                ("/api/events/entity-relationships-search", {"query": "q", "group_id": "g", "center_node_uuid": "u", "node_labels": []}, "rel node_labels=[]"),
+                ("/api/events/entity-relationships-search", {"query": "q", "group_id": "g", "center_node_uuid": "u", "edge_types": [""]}, "rel edge_types=['']"),
+                ("/api/events/entity-relationships-search", {"query": "q", "group_id": "g", "center_node_uuid": "u", "max_results": 10**9}, "rel max_results=1e9"),
+                ("/api/events/diverse-results-search", {"query": "q", "group_id": "g", "diversity_level": "extreme"}, "diversity 非法值"),
+                ("/api/events/diverse-results-search", {"query": "q", "group_id": "g", "max_results": -5}, "diverse max_results=-5"),
+                ("/api/events/episode-context-search", {"query": "q", "group_id": "g", "max_results": 0}, "episode max_results=0"),
+                ("/api/events/entity-search", {"query": "q", "group_id": "g", "node_labels": []}, "entity node_labels=[]"),
+                ("/api/events/entity-search", {"query": "q", "group_id": "g", "node_labels": [""]}, "entity node_labels=['']"),
+                ("/api/events/entity-search", {"query": "q", "group_id": "g", "node_labels": ["Tool"], "edge_types": []}, "entity edge_types=[]"),
+                ("/api/events/entity-search", {"query": "q", "group_id": "g", "node_labels": ["Tool"], "max_results": 10**9}, "entity max_results=1e9"),
+                ("/api/events/entry", {"body": "b", "source": "s", "group_id": "g"}, "entry 缺 name"),
+                ("/api/events/entry", {"name": "n", "source": "s", "group_id": "g"}, "entry 缺 body"),
+                ("/api/events/entry", {"name": "n", "body": "b", "group_id": "g"}, "entry 缺 source"),
+                ("/api/events/delete", {}, "delete 缺 group_id"),
+                ("/api/events/time-search", {"group_id": "g"}, "time 缺 query"),
+                ("/api/events/time-search", {"query": "q", "group_id": "g", "time_start": "   "}, "time_start 纯空白"),
+                ("/api/events/entity-relationships-search", {"query": "q", "group_id": "g"}, "rel 缺 center_node_uuid"),
+                ("/api/events/diverse-results-search", {"query": "q", "group_id": "g", "diversity_level": "High"}, "diversity 大小写敏感"),
+                ("/api/events/entity-search", {"query": "q", "group_id": "g"}, "entity 缺 node_labels"),
+                ("/api/events/entity-search", {"query": "q", "group_id": "g", "node_labels": ["Tool"], "edge_types": [""]}, "entity edge_types=['']"),
+            ]
+            for path, payload, label in bad:
+                r = client.post(path, json=payload)
+                assert_true(r.status_code == 422, f"{label} 应 422，实际 {r.status_code}: {r.text[:200]}")
+
+            # NaN/Infinity 字面量（Python json.loads 默认接受）——数值契约必须同样受限。
+            # 同时回归自定义 422 处理器：默认处理器回显 NaN input 时序列化崩溃（曾 500）
+            for lit in ("NaN", "Infinity", "-Infinity"):
+                r = client.post(
+                    "/api/events/entry",
+                    content='{"name":"n","body":"b","source":"s","group_id":"g","timestamp":%s}' % lit,
+                    headers={"Content-Type": "application/json"},
+                )
+                assert_true(r.status_code == 422, f"timestamp {lit} 应 422，实际 {r.status_code}: {r.text[:200]}")
+
+            # 422 响应形状：与 FastAPI 默认结构一致（type/loc/msg/input 全保留）
+            r = client.post("/api/events/entry", json={"name": "", "body": "b", "source": "s", "group_id": "g"})
+            detail = r.json()["detail"][0]
+            assert_true(
+                r.status_code == 422 and detail.get("type") == "string_too_short" and "input" in detail and "loc" in detail,
+                f"422 形状异常: {r.status_code} {r.text[:200]}",
+            )
+
+            # ── PASS：合法请求不回归（搜索类经 fake graphiti 走降级空结构，同 [77]） ──
+            r = client.post("/api/events/entry", json={"name": "n", "body": "b", "source": "s", "group_id": "g", "timestamp": 1755432000000})
+            assert_true(r.status_code == 202 and r.json() == {"queued": True}, f"entry 合法: {r.status_code} {r.text[:200]}")
+            r = client.post("/api/events/entry", json={"name": "n", "body": "b", "source": "s", "group_id": "g"})
+            assert_true(r.status_code == 202, f"entry timestamp 缺省: {r.status_code}")
+            r = client.post("/api/events/delete", json={"group_id": "g"})
+            assert_true(r.status_code == 202, f"delete 合法: {r.status_code}")
+            r = client.post("/api/events/time-search", json={"query": "q", "group_id": "g"})
+            assert_true(r.status_code == 200 and r.json()["edges"] == [], f"time-search 合法: {r.status_code}")
+            r = client.post("/api/events/time-search", json={"query": "q", "group_id": "g", "time_start": "2026-01-01T00:00:00Z", "time_end": "2026-01-02T00:00:00+08:00"})
+            assert_true(r.status_code == 200, f"time-start ISO 合法: {r.status_code}")
+            r = client.post("/api/events/diverse-results-search", json={"query": "q", "group_id": "g", "diversity_level": "high"})
+            assert_true(r.status_code == 200, f"diverse high: {r.status_code}")
+            r = client.post("/api/events/entity-relationships-search", json={"query": "q", "group_id": "g", "center_node_uuid": "u", "node_labels": ["Tool"], "edge_types": ["USES"], "max_depth": 3})
+            assert_true(r.status_code == 200, f"rel 合法: {r.status_code}")
+            r = client.post("/api/events/entity-search", json={"query": "q", "group_id": "g", "node_labels": ["Tool"], "min_mentions": 0, "max_results": 100})
+            assert_true(r.status_code == 200, f"entity 合法: {r.status_code}")
+            r = client.post("/api/events/episode-context-search", json={"query": "q", "group_id": "g", "max_results": 10})
+            assert_true(r.status_code == 200, f"episode 合法: {r.status_code}")
+            r = client.post("/api/events/entry", json={"name": "n", "body": "b", "source": "s", "group_id": "g", "timestamp": 1})
+            assert_true(r.status_code == 202, f"entry timestamp=1（gt 边界正值）: {r.status_code}")
+            r = client.post("/api/events/entity-relationships-search", json={"query": "q", "group_id": "g", "center_node_uuid": "u"})
+            assert_true(r.status_code == 200, f"rel 最小合法（过滤器缺省）: {r.status_code}")
+            r = client.post("/api/events/diverse-results-search", json={"query": "q", "group_id": "g"})
+            assert_true(r.status_code == 200, f"diverse 最小合法（默认 medium）: {r.status_code}")
+            r = client.post("/api/events/entity-search", json={"query": "q", "group_id": "g", "node_labels": ["Tool"]})
+            assert_true(r.status_code == 200, f"entity 最小合法（min_mentions 缺省）: {r.status_code}")
+    finally:
+        es._reset_for_tests()
+
+
+
+@test("health: boot_token 存在且同进程内稳定")
+def test_health_boot_token():
+    from routes.health import BOOT_TOKEN
+    assert_true(len(BOOT_TOKEN) == 8, "boot_token 应为 8 位 hex")
+
+
+@test("knowledge/events 路由: 写端点 202 + 搜索端点结构（fake 注入）")
+def test_knowledge_events_routes():
+    """子进程隔离执行（防进程内 TestClient 与前置线程的循环互锁——
+    见 2026-09-27-test77-hang-investigation.md; 断言原样零弱化）。"""
+    import os as _os
+    import subprocess as _sp
+    code = (
+        "import sys, os; sys.path.insert(0, '.'); sys.path.insert(0, 'tests'); "
+        f"os.environ['OPENSECURITY_HOME'] = {str(TEST_OPENSECURITY_HOME)!r}; "
+        f"os.environ['OPENSECURITY_AI_ENV'] = {str(TEST_AI_ENV)!r}; "
+        f"os.environ['OPENCODE_ROOT'] = {str(OPENCODE_ROOT)!r}; "
+        "os.environ.setdefault('CONTROL_TCP_PORT', os.environ.get('CONTROL_TCP_PORT', '0')); "
+        "from tests.test_control import _knowledge_events_routes_inner; "
+        "_knowledge_events_routes_inner()"
+    )
+    r = _sp.run([sys.executable, '-c', code], timeout=180,
+                capture_output=True, text=True, cwd=str(BACKEND_DIR))
+    if r.returncode != 0:
+        raise AssertionError(f"隔离执行失败: {r.stderr[-400:]}")
+
+
+@test("events 输入契约: 语义收紧 422/PASS 矩阵（子进程隔离 + TestClient）")
+def test_events_input_contract():
+    """子进程隔离执行（同 test_knowledge_events_routes 的活锁规避模式）。"""
+    import subprocess as _sp
+    code = (
+        "import sys, os; sys.path.insert(0, '.'); sys.path.insert(0, 'tests'); "
+        f"os.environ['OPENSECURITY_HOME'] = {str(TEST_OPENSECURITY_HOME)!r}; "
+        f"os.environ['OPENSECURITY_AI_ENV'] = {str(TEST_AI_ENV)!r}; "
+        f"os.environ['OPENCODE_ROOT'] = {str(OPENCODE_ROOT)!r}; "
+        "os.environ.setdefault('CONTROL_TCP_PORT', os.environ.get('CONTROL_TCP_PORT', '0')); "
+        "from tests.test_control import _events_input_contract_inner; "
+        "_events_input_contract_inner()"
+    )
+    r = _sp.run([sys.executable, '-c', code], timeout=180,
+                capture_output=True, text=True, cwd=str(BACKEND_DIR))
+    if r.returncode != 0:
+        raise AssertionError(f"隔离执行失败: {r.stderr[-400:]}")
+
+
+@test("events 输入契约: 模型级全字段穷举矩阵（正常/边界/非法）")
+def test_events_input_contract_model_matrix():
+    """字段级穷举（不经 HTTP）：缺失必填 / 空与纯空白 / 数值边界 / NaN·±inf /
+    时间格式与空值 / 枚举大小写。HTTP 契约测试负责真实通道抽样，本用例负责字段×类别全覆盖。"""
+    from pydantic import ValidationError
+    from routes.events import (EventEntryIn, EventDeleteIn, TimeSearchIn,
+                               EntityRelationsIn, DiverseIn, EpisodeContextIn, EntitySearchIn)
+
+    entry = {"name": "n", "body": "b", "source": "s", "group_id": "g"}
+    tq = {"query": "q", "group_id": "g"}
+    rel = {**tq, "center_node_uuid": "u"}
+    ent = {**tq, "node_labels": ["Tool"]}
+
+    cases = [
+        # ── EventEntryIn ──
+        (EventEntryIn, {**entry, "timestamp": 1755432000000}, True, "entry 全量"),
+        (EventEntryIn, entry, True, "entry 最小（timestamp 缺省）"),
+        (EventEntryIn, {**entry, "timestamp": None}, True, "entry timestamp=None"),
+        (EventEntryIn, {**entry, "timestamp": 1}, True, "entry timestamp=1 边界"),
+        (EventEntryIn, {**entry, "timestamp": 1e12}, True, "entry timestamp=1e12"),
+        (EventEntryIn, {"body": "b", "source": "s", "group_id": "g"}, False, "entry 缺 name"),
+        (EventEntryIn, {"name": "n", "source": "s", "group_id": "g"}, False, "entry 缺 body"),
+        (EventEntryIn, {"name": "n", "body": "b", "group_id": "g"}, False, "entry 缺 source"),
+        (EventEntryIn, {"name": "n", "body": "b", "source": "s"}, False, "entry 缺 group_id"),
+        (EventEntryIn, {**entry, "name": ""}, False, "entry name 空串"),
+        (EventEntryIn, {**entry, "name": "   "}, False, "entry name 纯空白"),
+        (EventEntryIn, {**entry, "body": ""}, False, "entry body 空串"),
+        (EventEntryIn, {**entry, "body": "   "}, False, "entry body 纯空白"),
+        (EventEntryIn, {**entry, "source": ""}, False, "entry source 空串"),
+        (EventEntryIn, {**entry, "source": "   "}, False, "entry source 纯空白"),
+        (EventEntryIn, {**entry, "group_id": ""}, False, "entry group_id 空串"),
+        (EventEntryIn, {**entry, "group_id": "   "}, False, "entry group_id 纯空白"),
+        (EventEntryIn, {**entry, "timestamp": 0}, False, "entry timestamp=0"),
+        (EventEntryIn, {**entry, "timestamp": -1}, False, "entry timestamp 负数"),
+        (EventEntryIn, {**entry, "timestamp": float("nan")}, False, "entry timestamp=NaN"),
+        (EventEntryIn, {**entry, "timestamp": float("inf")}, False, "entry timestamp=+inf"),
+        (EventEntryIn, {**entry, "timestamp": float("-inf")}, False, "entry timestamp=-inf"),
+        (EventEntryIn, {**entry, "timestamp": "abc"}, False, "entry timestamp 类型非法"),
+        # ── EventDeleteIn ──
+        (EventDeleteIn, {"group_id": "g"}, True, "delete 合法"),
+        (EventDeleteIn, {}, False, "delete 缺 group_id"),
+        (EventDeleteIn, {"group_id": ""}, False, "delete 空串"),
+        (EventDeleteIn, {"group_id": "   "}, False, "delete 纯空白"),
+        # ── TimeSearchIn ──
+        (TimeSearchIn, tq, True, "time 最小"),
+        (TimeSearchIn, {"group_id": "g"}, False, "time 缺 query"),
+        (TimeSearchIn, {"query": "q"}, False, "time 缺 group_id"),
+        (TimeSearchIn, {**tq, "query": ""}, False, "time query 空串"),
+        (TimeSearchIn, {**tq, "query": "   "}, False, "time query 纯空白"),
+        (TimeSearchIn, {**tq, "group_id": ""}, False, "time group_id 空串"),
+        (TimeSearchIn, {**tq, "group_id": "   "}, False, "time group_id 纯空白"),
+        (TimeSearchIn, {**tq, "time_start": ""}, True, "time_start 空=不限"),
+        (TimeSearchIn, {**tq, "time_start": "2026-10-01"}, True, "time_start 日期"),
+        (TimeSearchIn, {**tq, "time_start": "2026-01-01T00:00:00Z"}, True, "time_start 带Z"),
+        (TimeSearchIn, {**tq, "time_start": "2026-01-01T00:00:00+08:00"}, True, "time_start 带偏移"),
+        (TimeSearchIn, {**tq, "time_start": "2026-01-01T00:00:00"}, True, "time_start naive（现契约接受）"),
+        (TimeSearchIn, {**tq, "time_end": "2026-01-02"}, True, "time_end 单独给（start 空）"),
+        (TimeSearchIn, {**tq, "time_start": "2026/10/01"}, False, "time_start 非法分隔"),
+        (TimeSearchIn, {**tq, "time_start": "   "}, False, "time_start 纯空白"),
+        (TimeSearchIn, {**tq, "time_start": "abc"}, False, "time_start 非时间"),
+        (TimeSearchIn, {**tq, "time_end": "2026-13-45T00:00:00Z"}, False, "time_end 非法月日"),
+        (TimeSearchIn, {**tq, "max_results": 1}, True, "time max=1 边界"),
+        (TimeSearchIn, {**tq, "max_results": 100}, True, "time max=100 边界"),
+        (TimeSearchIn, {**tq, "max_results": 0}, False, "time max=0"),
+        (TimeSearchIn, {**tq, "max_results": 101}, False, "time max=101"),
+        (TimeSearchIn, {**tq, "max_results": -5}, False, "time max=-5"),
+        # ── EntityRelationsIn ──
+        (EntityRelationsIn, rel, True, "rel 最小（过滤器缺省）"),
+        (EntityRelationsIn, {"group_id": "g", "center_node_uuid": "u"}, False, "rel 缺 query"),
+        (EntityRelationsIn, {"query": "q", "center_node_uuid": "u"}, False, "rel 缺 group_id"),
+        (EntityRelationsIn, tq, False, "rel 缺 center_node_uuid"),
+        (EntityRelationsIn, {**rel, "center_node_uuid": ""}, False, "rel center 空串"),
+        (EntityRelationsIn, {**rel, "center_node_uuid": "   "}, False, "rel center 纯空白"),
+        (EntityRelationsIn, {**rel, "query": ""}, False, "rel query 空串"),
+        (EntityRelationsIn, {**rel, "group_id": "  "}, False, "rel group_id 纯空白"),
+        (EntityRelationsIn, {**rel, "node_labels": None}, True, "rel node_labels=None"),
+        (EntityRelationsIn, {**rel, "node_labels": ["Tool"]}, True, "rel node_labels 合法"),
+        (EntityRelationsIn, {**rel, "node_labels": []}, False, "rel node_labels 空列表"),
+        (EntityRelationsIn, {**rel, "node_labels": [""]}, False, "rel node_labels 元素空串"),
+        (EntityRelationsIn, {**rel, "node_labels": [" "]}, False, "rel node_labels 元素空白"),
+        (EntityRelationsIn, {**rel, "edge_types": ["USES"]}, True, "rel edge_types 合法"),
+        (EntityRelationsIn, {**rel, "edge_types": []}, False, "rel edge_types 空列表"),
+        (EntityRelationsIn, {**rel, "edge_types": [""]}, False, "rel edge_types 元素空串"),
+        (EntityRelationsIn, {**rel, "max_depth": 1}, True, "rel max_depth=1 边界"),
+        (EntityRelationsIn, {**rel, "max_depth": 3}, True, "rel max_depth=3 边界"),
+        (EntityRelationsIn, {**rel, "max_depth": 0}, False, "rel max_depth=0"),
+        (EntityRelationsIn, {**rel, "max_depth": 4}, False, "rel max_depth=4"),
+        (EntityRelationsIn, {**rel, "max_results": 1}, True, "rel max=1 边界"),
+        (EntityRelationsIn, {**rel, "max_results": 100}, True, "rel max=100 边界"),
+        (EntityRelationsIn, {**rel, "max_results": 0}, False, "rel max=0"),
+        (EntityRelationsIn, {**rel, "max_results": 101}, False, "rel max=101"),
+        # ── DiverseIn ──
+        (DiverseIn, tq, True, "diverse 最小（默认 medium）"),
+        (DiverseIn, {"group_id": "g"}, False, "diverse 缺 query"),
+        (DiverseIn, {"query": "q"}, False, "diverse 缺 group_id"),
+        (DiverseIn, {**tq, "query": ""}, False, "diverse query 空串"),
+        (DiverseIn, {**tq, "group_id": " "}, False, "diverse group_id 纯空白"),
+        (DiverseIn, {**tq, "diversity_level": "low"}, True, "diverse low"),
+        (DiverseIn, {**tq, "diversity_level": "medium"}, True, "diverse medium"),
+        (DiverseIn, {**tq, "diversity_level": "high"}, True, "diverse high"),
+        (DiverseIn, {**tq, "diversity_level": "extreme"}, False, "diverse 非法值"),
+        (DiverseIn, {**tq, "diversity_level": "High"}, False, "diverse 大小写敏感"),
+        (DiverseIn, {**tq, "diversity_level": ""}, False, "diverse 空串"),
+        (DiverseIn, {**tq, "max_results": 1}, True, "diverse max=1 边界"),
+        (DiverseIn, {**tq, "max_results": 100}, True, "diverse max=100 边界"),
+        (DiverseIn, {**tq, "max_results": 0}, False, "diverse max=0"),
+        (DiverseIn, {**tq, "max_results": 101}, False, "diverse max=101"),
+        # ── EpisodeContextIn ──
+        (EpisodeContextIn, tq, True, "episode 最小"),
+        (EpisodeContextIn, {"group_id": "g"}, False, "episode 缺 query"),
+        (EpisodeContextIn, {"query": "q"}, False, "episode 缺 group_id"),
+        (EpisodeContextIn, {"query": " ", "group_id": "g"}, False, "episode query 纯空白"),
+        (EpisodeContextIn, {"query": "q", "group_id": ""}, False, "episode group_id 空串"),
+        (EpisodeContextIn, {**tq, "max_results": 1}, True, "episode max=1 边界"),
+        (EpisodeContextIn, {**tq, "max_results": 100}, True, "episode max=100 边界"),
+        (EpisodeContextIn, {**tq, "max_results": 0}, False, "episode max=0"),
+        (EpisodeContextIn, {**tq, "max_results": 101}, False, "episode max=101"),
+        # ── EntitySearchIn ──
+        (EntitySearchIn, ent, True, "entity 最小"),
+        (EntitySearchIn, {"group_id": "g", "node_labels": ["Tool"]}, False, "entity 缺 query"),
+        (EntitySearchIn, {"query": "q", "node_labels": ["Tool"]}, False, "entity 缺 group_id"),
+        (EntitySearchIn, tq, False, "entity 缺 node_labels"),
+        (EntitySearchIn, {**ent, "query": " "}, False, "entity query 纯空白"),
+        (EntitySearchIn, {**ent, "group_id": ""}, False, "entity group_id 空串"),
+        (EntitySearchIn, {**tq, "node_labels": []}, False, "entity node_labels 空列表"),
+        (EntitySearchIn, {**tq, "node_labels": [""]}, False, "entity node_labels 元素空串"),
+        (EntitySearchIn, {**tq, "node_labels": [" "]}, False, "entity node_labels 元素空白"),
+        (EntitySearchIn, {**tq, "node_labels": ["Tool", "Host"]}, True, "entity 多标签"),
+        (EntitySearchIn, {**ent, "min_mentions": 0}, True, "entity min_mentions=0"),
+        (EntitySearchIn, {**ent, "min_mentions": 100}, True, "entity min_mentions=100（无上界）"),
+        (EntitySearchIn, {**ent, "min_mentions": -1}, False, "entity min_mentions=-1"),
+        (EntitySearchIn, {**ent, "edge_types": None}, True, "entity edge_types=None"),
+        (EntitySearchIn, {**ent, "edge_types": []}, False, "entity edge_types 空列表"),
+        (EntitySearchIn, {**ent, "edge_types": ["USES"]}, True, "entity edge_types 合法"),
+        (EntitySearchIn, {**ent, "edge_types": [""]}, False, "entity edge_types 元素空串"),
+        (EntitySearchIn, {**ent, "max_results": 1}, True, "entity max=1 边界"),
+        (EntitySearchIn, {**ent, "max_results": 100}, True, "entity max=100 边界"),
+        (EntitySearchIn, {**ent, "max_results": 0}, False, "entity max=0"),
+        (EntitySearchIn, {**ent, "max_results": 101}, False, "entity max=101"),
+    ]
+
+    mismatches = []
+    for model, payload, expect_ok, label in cases:
+        try:
+            model(**payload)
+            got_ok = True
+        except ValidationError:
+            got_ok = False
+        if got_ok != expect_ok:
+            mismatches.append(f"{label}(期望 {'过' if expect_ok else '拒'}, 实际 {'过' if got_ok else '拒'})")
+    assert_true(not mismatches, f"矩阵 {len(mismatches)}/{len(cases)} 条不符预期: {mismatches[:8]}")
+
+
+@test("knowledge_store 同步方法: store 脱敏 + search 命中 + memory flow 隔离（fake embedder）")
+def test_knowledge_store_sync_methods():
+    import hashlib
+    import numpy as np
+    from services.knowledge_store import MemoryEntry, KnowledgeStoreService
+
+    def vec(text):
+        h = hashlib.sha256(text.encode()).digest()
+        out = np.frombuffer((h * 32)[:1024], dtype=np.uint8).astype(np.float32)
+        return out / np.linalg.norm(out)
+
+    class FakeEmbedder:
+        def encode(self, inputs, **kw):
+            single = isinstance(inputs, str)
+            seq = [inputs] if single else inputs
+            out = np.stack([vec(t) for t in seq])
+            return out[0] if single else out
+
+    db_path = TEST_OPENSECURITY_HOME / "ks_sync" / "knowledge.db"
+    if db_path.exists():
+        db_path.unlink()
+    svc = KnowledgeStoreService._create_fresh(db_path=db_path, embedder_factory=FakeEmbedder)
+
+    r = svc.store_knowledge("如何扫描 192.168.1.1 端口", "nmap -sS 10.0.0.1")
+    assert_true(r.stored is True, f"store 失败: {r}")
+    r = svc.search_knowledge(["如何扫描端口"])
+    assert_true(r.count == 1 and "<IP>" in r.results[0].answer, f"脱敏失效: {r}")
+
+    svc.start()
+    svc.submit(MemoryEntry(question="bash execution", answer="out", type="bash", flow_id="flow-A"))
+    svc.stop(timeout=10)
+    r = svc.search_memory(["执行过什么"], flow_id="flow-A")
+    assert_true(r.count == 1 and r.results[0].question.startswith("[bash]"), f"memory 检索: {r}")
+    r = svc.search_memory(["执行过什么"], flow_id="flow-B")
+    assert_true(r.count == 0, "flow 隔离失效")
+    assert_true(svc.search_knowledge([]).count == 0, "空 questions 应 count=0")
+    assert_true(svc.store_knowledge("", "").stored is False, "空 question/content 应 stored=false")
+
+
+@test("event_store 搜索: time filter + min_mentions 过滤 + 异常重置（fake graphiti）")
+def test_event_store_search_paths():
+    import asyncio
+    from types import SimpleNamespace as NS
+    from datetime import datetime
+    from services.event_store import EventStoreService, GraphitiFactoryResult
+
+    def mk():
+        n1 = NS(name="nmap", uuid="n1", labels=["Tool"], summary="s",
+                created_at=datetime(2026, 8, 17), attributes={"mention_count": 3})
+        n2 = NS(name="CVE-1", uuid="n2", labels=["Vuln"], summary=None, created_at=None, attributes={})
+        return NS(edges=[], nodes=[n1, n2], episodes=[],
+                  edge_reranker_scores=[], node_reranker_scores=[0.8, 0.7], episode_reranker_scores=[])
+
+    searched = {}
+
+    class FakeGraphiti:
+        driver = object()
+        async def build_indices_and_constraints(self): pass
+        async def close(self): pass
+        async def search_(self, **kw):
+            searched.update(kw)
+            return mk()
+
+    svc = EventStoreService._create_fresh(graphiti_factory=cast("Callable[[], GraphitiFactoryResult]", lambda: (FakeGraphiti(), None)))
+
+    async def run():
+        p = await svc.search_time("查工具", "g1", time_start="2026-01-01T00:00:00Z")
+        assert_true(p.nodes[0].name == "nmap", "time_search 节点")
+        assert_true(searched.get("search_filter") is not None, "time filter 未构建")
+        p = await svc.search_entities("q", "g1", node_labels=["Tool"], min_mentions=2)
+        assert_true([n.name for n in p.nodes] == ["nmap"], "min_mentions 过滤")
+        assert_true(p.node_scores == [0.8], "过滤后 scores 对齐")
+
+    asyncio.run(run())
+    svc.stop(timeout=10)
+
+def _vision_contract_inner():
+    """vision 路由契约矩阵（子进程隔离执行; 沙箱无 key → PASS 路径确定性 503）。"""
+    import base64 as _b64
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routes.vision import router
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    png = _b64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64).decode()
+    jpeg = _b64.b64encode(b"\xff\xd8\xff\xe0" + b"\x00" * 64).decode()
+    # 超大图: PNG 魔数 + 10MB+1 填充（解码后超限——解码后才校验尺寸）
+    oversize = _b64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * (10 * 1024 * 1024 + 1)).decode()
+
+    bad = [
+        ({}, "缺全部字段"),
+        ({"question": "q"}, "缺 images"),
+        ({"images": [], "question": "q"}, "空 images"),
+        ({"images": [png] * 5, "question": "q"}, ">4 张"),
+        ({"images": [png, ""], "question": "q"}, "元素空串（解码后空数据）"),
+        ({"images": ["!!!not-b64!!!"], "question": "q"}, "坏 b64"),
+        ({"images": [123], "question": "q"}, "元素非字符串"),
+        ({"images": [_b64.b64encode(b"plain text bytes").decode()], "question": "q"}, "非图片字节（魔数嗅探失败）"),
+        ({"images": [oversize], "question": "q"}, "单张 >10MB"),
+        ({"images": "not-a-list", "question": "q"}, "images 非列表"),
+        ({"images": [png], "question": ""}, "空 question"),
+        ({"images": [png], "question": "   "}, "空白 question"),
+        ({"images": [png], "question": "x" * 8001}, "question 超长"),
+    ]
+    for payload, label in bad:
+        r = client.post("/api/vision/analyze", json=payload)
+        assert_true(r.status_code == 422, f"{label} 应 422，实际 {r.status_code}: {r.text[:200]}")
+
+    # 422 形状（与 events 契约一致: type/loc/msg）
+    r = client.post("/api/vision/analyze", json={"images": [], "question": "q"})
+    detail = r.json()["detail"][0]
+    assert_true(detail.get("type") == "too_short" and "loc" in detail and "msg" in detail,
+                f"422 形状异常: {r.text[:200]}")
+
+    # PASS 路径（沙箱无 key → 服务层 503; 证明 解码→定型→服务 全链贯通且零网络）
+    r = client.post("/api/vision/analyze",
+                    json={"images": [png, jpeg], "question": "两张图有什么区别？"})
+    assert_true(r.status_code == 503 and "DEEPSEEK_API_KEY 未配置" in r.text,
+                f"无 key 应 503: {r.status_code} {r.text[:200]}")
+
+
+@test("vision 输入契约: 422/PASS 矩阵（子进程隔离 + 无 key 沙箱 503）")
+def test_vision_input_contract():
+    """子进程隔离（TestClient 活锁规避，同 events 契约模式）。
+    沙箱 .ai_env 不含 DEEPSEEK_API_KEY → PASS 路径确定性 503（零网络依赖）。"""
+    import subprocess as _sp
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as td:
+        no_key_env = Path(td) / ".ai_env"
+        no_key_env.write_text("", encoding="utf-8")
+        # 注意顺序: tests.test_control import 时会把 OPENSECURITY_AI_ENV 重设为含 key
+        # 的沙箱副本（模块级第 77 行）——必须 import 之后再覆盖为无 key 文件并重置单例
+        code = (
+            "import sys, os; sys.path.insert(0, '.'); sys.path.insert(0, 'tests'); "
+            f"os.environ['OPENSECURITY_HOME'] = {str(TEST_OPENSECURITY_HOME)!r}; "
+            f"os.environ['OPENCODE_ROOT'] = {str(OPENCODE_ROOT)!r}; "
+            "os.environ.setdefault('CONTROL_TCP_PORT', os.environ.get('CONTROL_TCP_PORT', '0')); "
+            "from tests.test_control import _vision_contract_inner; "
+            f"os.environ['OPENSECURITY_AI_ENV'] = {str(no_key_env)!r}; "
+            "from services.config_manager import ConfigManager; "
+            "ConfigManager._reset_for_tests(); "
+            "_vision_contract_inner()"
+        )
+        r = _sp.run([sys.executable, '-c', code], timeout=180,
+                    capture_output=True, text=True, cwd=str(BACKEND_DIR))
+        if r.returncode != 0:
+            raise AssertionError(f"隔离执行失败: {r.stderr[-400:]}")
+
+
+@test("vision 服务: mock 上游全路径（payload 构造/解析/错误映射/边界）")
+def test_vision_service_mock_upstream():
+    """服务级直调 + httpx.MockTransport 注入（无网络; key 来自沙箱副本仅作占位）。"""
+    import asyncio
+    import httpx
+    from services.vision_service import (
+        VisionImage,
+        VisionService,
+        VisionUpstreamError,
+        _to_int,
+    )
+
+    png_img = VisionImage(data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, media_type="image/png")
+    seen: dict[str, object] = {}
+
+    def _handler(request: "httpx.Request") -> "httpx.Response":
+        seen["payload"] = __import__("json").loads(request.content)
+        seen["auth"] = request.headers.get("authorization", "")
+        body = seen.get("respond")
+        if isinstance(body, Exception):
+            raise body
+        assert isinstance(body, httpx.Response)
+        return body
+
+    transport = httpx.MockTransport(_handler)
+
+    def _ok_body(content: object = "红色背景，黑色字母 A") -> dict[str, object]:
+        return {
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "model": "deepseek-flash",
+        }
+
+    async def run() -> None:
+        # 1) 正常: 解析 + payload 构造断言
+        seen["respond"] = httpx.Response(200, json=_ok_body())
+        r = await VisionService.analyze([png_img], "图里有什么？", transport=transport)
+        assert_true(r.text == "红色背景，黑色字母 A", f"text 解析: {r.text!r}")
+        assert_true((r.prompt_tokens, r.completion_tokens, r.total_tokens) == (10, 5, 15),
+                    f"usage 解析: {r}")
+        assert_true(r.model == "deepseek-flash" and r.latency_ms >= 0, f"model/latency: {r}")
+        payload = cast("dict[str, object]", seen["payload"])
+        assert_true(payload.get("model") == "deepseek-flash", "payload.model 应写死 flash")
+        assert_true(payload.get("max_tokens") == VisionService.MAX_TOKENS, "payload.max_tokens")
+        messages = cast("list[dict[str, object]]", payload.get("messages", []))
+        content = cast("list[dict[str, object]]", messages[0].get("content", []))
+        assert_true(content[0].get("type") == "text" and content[0].get("text") == "图里有什么？",
+                    "首块应为 question 文本")
+        url = str(cast("dict[str, object]", content[1].get("image_url", {})).get("url", ""))
+        assert_true(isinstance(url, str) and url.startswith("data:image/png;base64,"),
+                    f"image_url data URL: {url[:40]!r}")
+        assert_true(str(seen["auth"]).startswith("Bearer "), "Authorization Bearer")
+        # 2) 多图: 每图一个 image_url 块
+        seen["respond"] = httpx.Response(200, json=_ok_body())
+        await VisionService.analyze([png_img, png_img], "对比", transport=transport)
+        payload = cast("dict[str, object]", seen["payload"])
+        messages = cast("list[dict[str, object]]", payload.get("messages", []))
+        content = cast("list[dict[str, object]]", messages[0].get("content", []))
+        assert_true(len(content) == 3, f"双图应 3 块（1 text + 2 image）: {len(content)}")
+        # 3) usage/model 缺失 → 零值/回退
+        seen["respond"] = httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        r = await VisionService.analyze([png_img], "q", transport=transport)
+        assert_true(r.prompt_tokens == 0 and r.model == VisionService.MODEL, f"缺省回退: {r}")
+        # 4) 空 content / content 非 str / 缺 choices / body 非 dict
+        for body, label in [
+            ({"choices": [{"message": {"content": "   "}}]}, "空白 content"),
+            ({"choices": [{"message": {"content": ["blocks"]}}]}, "content 为 list"),
+            ({"message": {"content": "x"}}, "缺 choices"),
+            ([1, 2, 3], "body 非 dict"),
+        ]:
+            seen["respond"] = httpx.Response(200, json=body)
+            try:
+                await VisionService.analyze([png_img], "q", transport=transport)
+                raise AssertionError(f"{label}: 应抛 VisionUpstreamError")
+            except VisionUpstreamError as e:
+                assert_true(e.status_code == 502, f"{label}: 502，实际 {e.status_code}")
+        # 5) 上游 401/429 → 502 且透传状态码
+        for status in (401, 429):
+            seen["respond"] = httpx.Response(status, text="upstream err")
+            try:
+                await VisionService.analyze([png_img], "q", transport=transport)
+                raise AssertionError(f"上游 {status}: 应抛")
+            except VisionUpstreamError as e:
+                assert_true(e.status_code == 502 and str(status) in str(e),
+                            f"上游 {status} 透传: {e}")
+        # 6) 超时 → 504
+        seen["respond"] = httpx.ReadTimeout("simulated")
+        try:
+            await VisionService.analyze([png_img], "q", transport=transport)
+            raise AssertionError("超时应抛")
+        except VisionUpstreamError as e:
+            assert_true(e.status_code == 504, f"超时 504，实际 {e.status_code}")
+
+    asyncio.run(run())
+    # 7) _to_int 边界（bool 排除; 非数值归零）
+    assert_true(_to_int(5) == 5 and _to_int(5.7) == 5, "_to_int 数值")
+    assert_true(_to_int(True) == 0 and _to_int("x") == 0 and _to_int(None) == 0,
+                "_to_int 非数值/bool 归零")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+

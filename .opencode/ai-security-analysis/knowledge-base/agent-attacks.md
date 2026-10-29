@@ -90,11 +90,18 @@ MCP 是 Anthropic 提出的 Agent 工具协议（2024-2025 快速普及）。攻
 | 攻击 | 原理 |
 |------|------|
 | 恶意 MCP server | 第三方 MCP server 可在工具描述/返回值中注入指令 |
-| 工具名混淆 | 注册与系统工具同名的工具，劫持调用 |
+| 工具名混淆（Tool Spoofing） | 注册与系统工具同名的工具，劫持调用；确认框不显示来源 server 时用户无从分辨 |
 | 参数注入 | MCP 工具参数 schema 中的默认值/描述含注入 |
 | 跨 server 数据泄露 | 一个 MCP server 的返回值影响另一个 server 的调用 |
+| `instructions` 字段注入 | 发现阶段的 instructions 被客户端**无消毒拼入 system prompt**——注入权限最高的位置 |
+| 跨通道指令拆分（GhostSplice） | 恶意指令拆成 N 个无害片段分布在不同通道，Agent 自行拼装；单点检测全部失效，依从率 42%→82% |
+| 运行时门控改写（Rug-Pull） | server 前 N 次调用表现正常，之后改写自身工具元数据为恶意指令——绕过安装时静态审查 |
+| 协议级缓存投毒 | 投毒响应标记 `cacheScope: public` + 共享网关跨身份缓存 → 跨用户 system prompt 注入 |
+| 隐蔽调用（Covert Tool Usage） | server 故意返回 error 使该次工具调用不显示在 UI，后台静默外发 |
 
 **OWASP LLM06（Excessive Agency）**: Agent 被授予过多权限，注入可导致越权操作。
+
+> 完整攻击参考（注入位置清单、GhostSplice 三通道构造、host 脆弱性矩阵、检测信号、真实 CVE 实例）: `$AGENT_DIR/knowledge-base/mcp-attack-surface.md`
 
 ## §6 Computer Use / Browser Use Agent 攻击
 
@@ -148,3 +155,5 @@ MCP 是 Anthropic 提出的 Agent 工具协议（2024-2025 快速普及）。攻
 - `$AGENT_DIR/knowledge-base/llm-attack-methodology.md` — 应用层攻击规划
 - `$AGENT_DIR/knowledge-base/model-security-analysis-guide.md` — 模型层越狱
 - `$AGENT_DIR/knowledge-base/bypass-framework-matrix.md` — 绕过框架矩阵
+- `$AGENT_DIR/knowledge-base/mcp-attack-surface.md` — MCP 攻击面深度参考（GhostSplice/缓存投毒/host 矩阵）
+- `$AGENT_DIR/knowledge-base/multimodal-jailbreak.md` — 多模态（VLM）目标越狱

@@ -1,0 +1,449 @@
+"""opencode-control 主入口。
+
+替代 mcp-servers/embed_server.py，提供：
+  • /embed, /rerank, /health（embed_server.py 功能迁移）
+  • 后续步骤会增加：/api/scan, /api/config, /api/docker/* 等
+
+启动方式（B 方案）：
+  1. FastAPI app 构造完成
+  2. uvicorn.run 立即启动（不等待模型加载）
+  3. 后台线程加载 BGE-M3 模型
+  4. 加载期间 /health 返回 503，加载完返回 200
+
+注意：步骤 1 只包含 embed + health 路由。
+       后续步骤（2-6）会扩展 server.py 加单实例检测、配置、扫描等。
+"""
+from __future__ import annotations
+
+import logging
+import math
+import os
+import sys
+from pathlib import Path
+from types import FrameType
+from typing import cast
+
+# 避免 SentenceTransformer 加载时向 HuggingFace 发 HEAD 请求（网络不通会卡 120s+）
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+# 把 backend 目录加入 sys.path，让 routes/services 能用绝对 import
+BACKEND_DIR = Path(__file__).parent
+sys.path.insert(0, str(BACKEND_DIR))
+
+from fastapi import FastAPI, Request
+
+_BACKEND_PORT = 0  # main() 绑定 socket 后回填（gateway api 转发目标）
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from services.config_manager import ConfigManager
+from services.model_loader import ModelInferenceService
+
+import asyncio  # noqa: E402 —— 供 _relay_supervise_task 注解解析（字符串注解引用）
+
+_relay_supervise_task: "asyncio.Task[None] | None" = None
+
+
+def _json_safe(obj: object) -> object:
+    """递归净化 JSON 不可序列化值：非有限浮点（NaN/±inf）转字符串。
+
+    Python json.loads 接受 NaN/Infinity 非标准字面量；若校验错误回显 input
+    原值，starlette 的 json.dumps(allow_nan=False) 会抛 ValueError——即校验
+    错误处理器自身崩溃（客户端拿到 500 而非 422）。净化后保持 422 契约可序列化。"""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else str(obj)
+    if isinstance(obj, dict):
+        mapping = cast("dict[object, object]", obj)
+        return {k: _json_safe(v) for k, v in mapping.items()}
+    if isinstance(obj, (list, tuple)):
+        seq = cast("list[object] | tuple[object, ...]", obj)
+        return [_json_safe(v) for v in seq]
+    return obj
+
+
+def create_app() -> FastAPI:
+    """构造 FastAPI app。
+
+    单独抽出函数便于：
+      - 单元测试（不启动 uvicorn）
+      - 后续步骤扩展（加更多路由 include_router）
+    """
+    # 配置收口于 ConfigManager（无循环 import）
+
+    # 首次运行创建 .ai_env 带注释模板（配置收口：ConfigManager 唯一读写方）
+    ConfigManager.get_instance().ensure_template()
+
+    app = FastAPI(
+        title="OpenSecurity Control",
+        docs_url="/api/docs",
+        openapi_url="/api/openapi.json",
+    )
+
+    # 校验错误响应加固：默认处理器在 input 含 NaN/Infinity 时序列化崩溃
+    # （校验错误处理器自身 500）；净化后回显，保持 422 契约。
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_handler(
+            _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        raw_errors = cast("object", jsonable_encoder(
+            exc.errors()))  # pyright: ignore[reportAny] —— jsonable_encoder 返回 Any（FastAPI 边界）
+        return JSONResponse(
+            status_code=422,
+            content={"detail": _json_safe(raw_errors)},
+        )
+
+    # CORS：开发态允许 Vite 5173 跨域访问；发布态同源不需要
+    if ConfigManager.get_instance().is_dev_mode:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    # API 鉴权中间件（后注册先执行——guard 先于 CORS/路由生效）
+    from services.api_guard import ApiGuardMiddleware
+    app.add_middleware(ApiGuardMiddleware)
+
+    # 变更操作审计（非 GET 全记 + 慢请求——排障时"后端当时做了什么"有据可查）
+    from services.audit_middleware import AuditMiddleware
+    app.add_middleware(AuditMiddleware)
+
+    # 路由
+    from routes import embed, health, config_route, deps, docker, scan, install, hardware, fs, models, logs, system, ocr, \
+        processes, knowledge, events, heartbeat, proxy, remote, vision
+    from routes import tts as tts_route
+    app.include_router(tts_route.router)
+    app.include_router(embed.router)
+    app.include_router(health.router)
+    app.include_router(heartbeat.router)
+    app.include_router(config_route.router)
+    app.include_router(deps.router)
+    app.include_router(ocr.router)
+    app.include_router(vision.router)
+    app.include_router(processes.router)
+    app.include_router(docker.router)
+    app.include_router(scan.router)
+    app.include_router(install.router)
+    app.include_router(hardware.router)
+    app.include_router(fs.router)
+    app.include_router(models.router)
+    app.include_router(system.router)
+    app.include_router(logs.router)
+    app.include_router(knowledge.router)
+    app.include_router(events.router)
+    app.include_router(proxy.router)
+    app.include_router(remote.router)
+
+    # 前端静态文件（开发态跳过，发布态挂载 dist/）
+    _mount_frontend(app)
+
+    # 依赖快照预热：启动事件 fire-and-forget，与模型加载并行。
+    # plugin 首个 /api/deps 请求到达时（spawn 后 0.3~1.1s）快照大概率已就绪。
+    # 冷启动首扫含 JVM/磁盘冷缓存，预热正好吸收。失败静默（请求路径会正常构建）。
+    from routes.deps import warm_deps_snapshot
+
+    @app.on_event("startup")
+    async def _start_writers() -> None:
+        # 库服务线程（fire-and-forget 写队列；agent 读写按需惰性初始化）
+        from services.event_store import EventStoreService
+        from services.knowledge_store import KnowledgeStoreService
+        KnowledgeStoreService.get_instance().start()
+        EventStoreService.get_instance().start()
+
+    @app.on_event("startup")
+    async def _warm_deps_snapshot() -> None:
+        import asyncio
+        asyncio.get_running_loop().run_in_executor(None, warm_deps_snapshot)
+
+    @app.on_event("startup")
+    async def _start_remote_link() -> None:
+        # 远程链接心跳（模型远程化: 探测/降级/恢复编排）
+        from services.remote_link import RemoteLinkService
+        RemoteLinkService.get_instance().start()
+
+    @app.on_event("startup")
+    async def _start_remote_gateway() -> None:
+        # remote-p2p 节点角色（P2P_GATEWAY_ENABLE=1 时注册到 relayd;
+        # api.req 经本进程端口转发——backend_port 取 lifespan 实际监听端口）
+        import logging
+        from services.config_manager import ConfigManager
+        from services.remote_gateway import RemoteGateway
+        log = logging.getLogger("remote_gateway")
+        p2p = ConfigManager.get_instance().p2p_settings()
+        if not (p2p.gateway_enable and p2p.psk_valid and p2p.relay_host
+                and p2p.node_id):
+            if p2p.gateway_enable:
+                log.warning("P2P_GATEWAY_ENABLE=1 但配置不完整（RELAY_HOST/"
+                            "RELAY_PSK/REMOTE_NODE_ID），gateway 未启动")
+            return
+        gateway = RemoteGateway(
+            psk=p2p.psk, relay_host=p2p.relay_host, relay_port=p2p.relay_port,
+            node_id=p2p.node_id, backend_port=_BACKEND_PORT)
+        app.state.remote_gateway = gateway
+        gateway.start()
+        log.info("remote gateway 已启动（node=%s → %s:%s）",
+                 p2p.node_id, p2p.relay_host, p2p.relay_port)
+
+    @app.on_event("startup")
+    async def _start_proxy_relay() -> None:
+        # relay（本地代理服务）supervisor：崩溃自动重拉（2 秒级），不拖垮主进程
+        import asyncio
+        import logging
+        from services.proxy_relay import ProxyRelay
+        log = logging.getLogger("proxy_relay")
+
+        async def _supervise() -> None:
+            # 持续监督：启动 + 每 2s 探活（server 对象失活 → 关闭旧的重新拉起，
+            # 2 秒级自愈，不拖垮控制台主进程，需求 §8 步骤 3b 验证点）
+            while True:
+                try:
+                    await ProxyRelay.start_relay()
+                except Exception as e:
+                    log.error("[proxy_relay] 启动失败(2s 后重试): %s", e)
+                    await asyncio.sleep(2)
+                    continue
+                while True:
+                    await asyncio.sleep(2)
+                    srv = ProxyRelay.current_server()
+                    if srv is None or not getattr(srv, "sockets", None) or srv.is_serving() is False:
+                        log.warning("[proxy_relay] 服务失活，自动重拉监听")
+                        await ProxyRelay.stop_relay()
+                        break
+                await asyncio.sleep(0.2)
+
+        global _relay_supervise_task  # 持引用防 GC（asyncio 文档建议）
+        _relay_supervise_task = asyncio.create_task(_supervise())
+
+    # 开发态自动拉起 vite dev server（此前依赖手动启动，控制台重启后
+    # 前端 404）。幂等：vite 已运行则跳过；拉起失败由 dev 提示页指路。
+    # 注意不能把 ConfigManager 类当谓词调用（构造单例恒真——曾在生产
+    # 每次 create_app 都 spawn vite）
+    if ConfigManager.get_instance().is_dev_mode:
+        from services.frontend_port import FrontendPortRegistry
+        FrontendPortRegistry.get_instance().ensure_vite_dev()
+
+    return app
+
+
+def _mount_frontend(app: FastAPI) -> None:
+    """根据 is_dev_mode 决定是否挂载前端 dist/。"""
+    if ConfigManager.get_instance().is_dev_mode:
+        # 开发态：不挂载，/ 返回 dev 提示
+        @app.get("/")
+        async def dev_hint():
+            return {
+                "mode": "dev",
+                "hint": "前端开发模式（CONTROL_FRONTEND_DEV=1）。vite dev server 由控制台自动拉起",
+                "url": "http://localhost:5173",
+            }
+
+        return
+
+    # 发布态：挂载 dist/（如果存在）
+    dist_path = BACKEND_DIR.parent / "frontend" / "dist"
+    if dist_path.exists():
+        app.mount("/", StaticFiles(directory=str(dist_path), html=True), name="frontend")
+    else:
+        @app.get("/")
+        async def no_dist():
+            return {
+                "error": "dist/ 不存在",
+                "hint": "请运行 cd control/frontend && bun install && bun run build",
+            }
+
+
+def _detach_session() -> None:
+    """脱离调用方进程组——免疫父 shell 会话结束时的组清理信号。
+
+    场景: 经 bash 工具/终端手动 nohup 重启时，进程成为命令子进程（同组），
+    会话结束的组 SIGTERM 会误杀控制台。setsid 使其独立成会话。
+    插件 spawn（detached:true）已是组长 → EPERM 忽略（原状即安全）。
+    """
+    try:
+        os.setsid()
+    except OSError:
+        pass
+
+
+def _start_preload_background(model_ids: "list[str]", log: "logging.Logger") -> None:
+    """后台线程串行预载（不阻塞启动; 逐项失败日志不致命——懒加载兜底）。
+
+    加载原语统一走 services.model_ops（与 /api/models load 同一实现）。
+    """
+    def _run() -> None:
+        from services import model_ops
+        for mid in model_ids:
+            try:
+                log.info("预载模型: %s", mid)
+                model_ops.load(mid)
+            except Exception:  # noqa: BLE001 —— 预载失败不致命
+                log.exception("预载失败: %s（懒加载路径兜底）", mid)
+
+    import threading as _threading
+    _threading.Thread(target=_run, name="model-preloader", daemon=True).start()
+
+
+def main() -> None:
+    """控制台主入口。
+
+    单实例检测 + TCP 顺延绑定 + IPC 监听 + B 方案启动 + 引用计数周期清洗。
+
+    时序：
+      0. 脱离调用方进程组（手动重启场景防父会话清理误杀——最先做）
+      1. 日志初始化（文件轮转 OPENSECURITY_HOME/logs/control.log——stdio=ignore 下 print 不可见）
+      2. IPC 监听（内核排他互斥；按 IpcStartStatus 分支处理）
+      3. bind 浏览器 TCP 候选段（9776 起顺延）+ 注册真实端口
+      4. 启动引用计数后台清洗
+      5. 后台线程加载模型
+      6. uvicorn.run
+    """
+    _detach_session()
+    from services.logging_setup import LogManager
+    log = LogManager.get_instance().setup()
+    log.info("=" * 50)
+    log.info("控制台启动（pid=%d, pgid=%d, platform=%s）",
+             os.getpid(), os.getpgrp(), sys.platform)
+
+    # 启动参数（场景差异唯一入口; 默认=现状行为。改需求优先级: 代码常量表 >
+    # 本参数覆盖——见 services/model_policy.py）:
+    #   --model-preload <id[,id...]>     启动即预载（可重复/逗号分隔）
+    #   --model-idle-sec <id=sec[,...]>  空闲释放秒数覆盖（0=常驻; 可重复/逗号分隔）
+    import argparse
+
+    from services import model_policy as _mp
+    _parser = argparse.ArgumentParser(add_help=True)
+    _parser.add_argument("--model-preload", action="append", default=[], metavar="ID",
+                         help="启动即预载的模型 id（可重复或逗号分隔）")
+    _parser.add_argument("--model-idle-sec", action="append", default=[], metavar="ID=SEC",
+                         help="空闲释放秒数覆盖（0=常驻; 可重复或逗号分隔）")
+    _args = _parser.parse_args()
+
+    def _flat_csv(values: "list[str]") -> "list[str]":
+        return [x.strip() for v in values for x in v.split(",") if x.strip()]
+
+    _preload_explicit = _flat_csv(cast("list[str]", _args.model_preload))
+    _known = sorted(_mp.known_ids())
+    for _mid in _preload_explicit:
+        if _mid not in _mp.known_ids():
+            _parser.error(f"未知模型 id: {_mid}（已知: {_known}）")
+    _idle_items = _flat_csv(cast("list[str]", _args.model_idle_sec))
+    for _item in _idle_items:
+        _id, _sep, _sec = _item.partition("=")
+        _mid = _id.strip()
+        if not _mid or not _sep:
+            _parser.error(f"--model-idle-sec 需 id=sec 格式: {_item!r}")
+        if _mid not in _mp.known_ids():
+            _parser.error(f"未知模型 id: {_mid}（已知: {_known}）")
+        try:
+            _sec_val = float(_sec)
+        except ValueError:
+            _parser.error(f"非法秒数: {_item!r}")
+        try:
+            _mp.apply_idle_override(_mid, _sec_val)
+        except ValueError as _e:
+            _parser.error(str(_e))
+    if _preload_explicit or _idle_items:
+        log.info("启动参数生效: preload=%s idle_overrides=%s",
+                 _preload_explicit, _idle_items)
+
+    from services.config_manager import ConfigManager
+    from services.frontend_port import FrontendPortRegistry
+    from services.ipc_listener import IpcListener, IpcStartStatus
+    from services.heartbeat import HeartbeatRegistry, HeartbeatTask
+
+    # 步骤 2: IPC 监听（按枚举语义分支，不用 bool 猜）
+    status = IpcListener.get_instance().start()
+    if status is IpcStartStatus.EXISTING_INSTANCE:
+        log.info("IPC 通道已有实例运行（%s），本进程退出（exit code = %d）",
+                 ConfigManager.get_instance().ipc_addr(), ConfigManager.Protocol.EXIT_CODE_REUSE)
+        sys.exit(ConfigManager.Protocol.EXIT_CODE_REUSE)
+        return
+    if status is IpcStartStatus.BIND_TIMEOUT:
+        log.error("IPC bind 失败且等待窗口耗尽（%s），本进程退出（exit code = %d）",
+                  ConfigManager.get_instance().ipc_addr(), ConfigManager.Protocol.EXIT_CODE_PORT_EXHAUSTED)
+        sys.exit(ConfigManager.Protocol.EXIT_CODE_PORT_EXHAUSTED)
+        return
+    log.info("IPC 监听已启动：%s", ConfigManager.get_instance().ipc_addr())
+
+    # 步骤 3: bind 浏览器 TCP 候选段（顺延）+ 注册真实端口（/api/console-url 对外）
+    global _BACKEND_PORT
+    try:
+        sock = FrontendPortRegistry.get_instance().bind_and_register_tcp()
+        _BACKEND_PORT = int(cast("tuple[int, ...]", sock.getsockname())[1])
+    except RuntimeError as e:
+        log.error("%s", e)
+        IpcListener.get_instance().cleanup()
+        sys.exit(ConfigManager.Protocol.EXIT_CODE_PORT_EXHAUSTED)
+
+    # TTS 环境预热（后台线程——节点重启后自动补装 venv/依赖，消除首个
+    # 合成请求撞上自愈安装窗口的竞态 fallback; 本机环境齐备时秒过零开销）
+    import threading as _threading
+    def _tts_warmup() -> None:
+        try:
+            from services.tts_service import TtsWorkerClient
+            TtsWorkerClient()._venv_healthy()  # noqa: SLF001 —— 预热探测
+        except Exception:  # noqa: BLE001 —— 预热失败不阻塞启动（首请求自愈兜底）
+            pass
+    _threading.Thread(target=_tts_warmup, daemon=True).start()
+
+    # 步骤 4: 启动心跳周期检测后台任务（表空过宽限 → 自杀）
+    def shutdown():
+        log.info("控制台 shutdown（清理 IPC/TTS worker + 退出）")
+        IpcListener.get_instance().cleanup()
+        try:  # TTS worker 显式回收（孤儿自杀 5s 轮询是兜底——正常退出走这里零延迟）
+            from services.tts_service import TtsService
+            TtsService.get_instance().release()
+        except Exception as e:  # noqa: BLE001 —— 退出路径不因清理失败阻塞
+            log.warning("TTS worker 清理异常（忽略）: %s", e)
+        # 用 os._exit 跳过任何 atexit hook（避免 uvicorn 优雅关闭阻塞）
+        import os
+        os._exit(ConfigManager.Protocol.EXIT_CODE_NORMAL)
+
+    heartbeat_task = HeartbeatTask(HeartbeatRegistry.get_instance(), shutdown)
+    heartbeat_task.start()
+
+    # SIGTERM/SIGINT 也走 shutdown（清理 IPC socket + 退出）
+    import signal
+
+    def _on_signal(signum: int, _frame: "FrameType | None"):
+        log.info("收到信号 %s，退出", signum)
+        shutdown()
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
+    # 步骤 5: 后台线程加载模型（B 方案核心）
+    # - 远程已启用（ENABLED=1 且 URL 非空）→ 跳过本地预加载（由心跳判定:
+    #   REMOTE 保持不加载 / DEGRADED 走预热路径）——避免"重启白白加载再卸载"
+    # - 节点角色（CONTROL_API_KEY 已配置）→ 预加载全部三模型（专职资源节点）
+    _cm = ConfigManager.get_instance()
+    _api_key = (_cm.get(_cm.Keys.CONTROL_API_KEY) or "").strip()
+    _remote_on = _cm.p2p_settings().transport_mode is not None  # mode 即开关
+    _preload_ids: "list[str]" = []
+    if _api_key:
+        log.info("节点模式（CONTROL_API_KEY 已配置）: 预加载全部三模型")
+        _preload_ids = ["bge-m3", "bge-reranker-v2-m3", "glm-ocr"]
+    elif _remote_on:
+        log.info("远程模型已启用: 跳过本地预加载（心跳判定后再决定加载）")
+    else:
+        _preload_ids = ["bge-m3"]
+    for _mid in _preload_explicit:  # 启动参数显式预载: 无条件追加（场景条件之外）
+        if _mid not in _preload_ids:
+            _preload_ids.append(_mid)
+    if _preload_ids:
+        _start_preload_background(_preload_ids, log)
+
+    # 步骤 6: 启动 uvicorn（用预绑定的 socket；uvicorn 日志并入 root → 同文件）
+    import uvicorn
+    app = create_app()
+    fd = sock.detach()
+    uvicorn.run(app, fd=fd, log_level="info")
+
+
+if __name__ == "__main__":
+    main()

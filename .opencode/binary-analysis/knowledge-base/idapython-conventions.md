@@ -1,7 +1,6 @@
 # IDAPython 脚本编码规范
 
-> 适用于 `.opencode/binary-analysis/` 下的所有 IDAPython 脚本（query.py、update.py、scripts/*.py）。
-> 纯 Python 脚本（detect_env.py、gui_verify.py）和项目其他模块（ai/、test/）不受此限制。
+> 适用于所有 IDAPython 脚本，这些脚本都会导入 ida 的依赖，例如：ida_auto、ida_bytes、ida_idaapi、ida_funcs、idautils等。非  IDAPython 脚本不受此限制。
 
 ## 导入规则
 
@@ -38,3 +37,17 @@ ida_kernwin.msg(f"[!] 警告或错误: {reason}\n")         # 警告/失败
 - 新脚本必须有 docstring 头部：`"""summary: ...\ndescription: ...\nlevel: ..."""`
 - headless 入口逻辑必须在模块级执行（不能放在 `if __name__ == "__main__"` 内）
   - 原因：IDA 通过 `exec(code, g)` 执行 `-S` 指定的脚本，`__name__` 被设为脚本文件名而非 `"__main__"`
+- **try 内 import 的名字不得出现在同一 try 的 except 元组**：
+  `try: import httpx ... except (httpx.HTTPError, ...)` —— import 失败时
+  except 求值即 NameError（降级路径自己炸）。防御形态：import 单独一层
+  `try/except ImportError`，使用处放第二层 try（结构上消除，不依赖
+  pyright——其流分析不建模 import 失败）
+- **类体内不绑定方法要用的名字**：类体 `logger = ...` / 嵌套 `def _helper()`
+  在同类方法内裸名引用必 NameError（Python 类命名空间不在方法名字查找链）。
+  logger 一律模块级定义（`logger = logging.getLogger(__name__)` 放 import 区后），
+  同类 staticmethod 调用必须 `ClassName._helper(...)` 限定
+
+
+## 环境变量传参（脚本输入的标准通道）
+
+脚本的输出路径与配置参数一律用环境变量传递（`IDA_OUTPUT`/`IDA_PE_OUTPUT`/`IDA_OEP_ADDR` 等），不用命令行参数。脚本内用 `from _base import env_str, env_int` 读取（`_base.py` 提供的环境变量读取工具，自动带默认值）。原因：`-S"script.py --arg"` 的参数只能经 `idc.ARGV` 获取（`sys.argv` 仅含脚本路径），且 `-S` 外层引号占据后 `$TASK_DIR` 含空格时无法再转义；环境变量值不经 shell 二次解析，bash/PowerShell 双平台一致。新增脚本输入项时在脚本头部 docstring 声明变量名与默认值。

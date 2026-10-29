@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# 前端 dist 自动保鲜: 本次提交涉及前端源码时自动重新构建, 并将 dist 并入本次提交。
+# 构建失败（类型错误等）→ 拒绝提交。启用: git config core.hooksPath .githooks
+set -euo pipefail
+FRONTEND=".opencode/control/frontend"
+# 触发范围: src/ 或构建配置（入口/依赖/类型/打包配置）
+# 用 git diff HEAD（非 --cached）: commit -a 的自动 stage 发生在 hook 之后,
+# --cached 会漏检导致"src 进了提交但 dist 是旧的"。代价是工作区有未 stage 的
+# 前端改动时过度触发构建（dist 超前于提交内容 → CI 门禁会提醒一次）——
+# 宁过保不失保。
+if git diff HEAD --name-only | grep -qE "^${FRONTEND}/(src/|package(-lock)?\.json|vite\.config\.|tsconfig|index\.html)"; then
+  echo "[pre-commit] 前端源码有变更——自动构建 dist ..."
+  (cd "${FRONTEND}" && npm run build) || {
+    echo "[pre-commit] 构建失败——提交中止（先修复前端错误）" >&2
+    exit 1
+  }
+  git add "${FRONTEND}/dist"
+  echo "[pre-commit] dist 已重新构建并加入本次提交 ✓"
+fi

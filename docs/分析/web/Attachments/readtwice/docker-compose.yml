@@ -1,0 +1,13 @@
+services:
+  challenge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3000"
+    environment:
+      PORT: "3000"
+      APP_URL: "http://localhost:3000"
+      FLAG: "pwnsec{real_flag_on_remote}"
+      BOT_TOKEN: "local-bot-token"
+      SESSION_SECRET: "looosoosw"

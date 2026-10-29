@@ -36,7 +36,7 @@
 | 🟡 中 | 认证/授权代码 | 权限绕过 |
 | 🟡 中 | Bot/爬虫代码 | Bot 行为决定了 XSS 的触发条件和 Cookie 可达性 |
 | 🟢 低 | 前端代码 | 通常只影响用户体验，除非有 XSS |
-| 🔴 高 | 框架/运行时源码（node_modules/vendor） | **复杂题目的突破往往在这里** |
+| 🔴 高 | 框架/运行时源码（node_modules/vendor） | **复杂目标的突破往往在这里** |
 
 ### 1.3 框架/运行时源码审计方法
 
@@ -93,9 +93,9 @@ PHP 的 `max_input_vars` 限制计算**所有来源**的输入变量：
 
 利用方法：在正常参数之后添加垃圾参数，使总数超过 1000。重要参数放在前面确保被正常解析。
 
-### 1.5 Bot 类题目分析方法
+### 1.5 Bot 类目标分析方法（自动化浏览器）
 
-CTF 中 Bot 类题目是非常常见的模式：Bot 用浏览器访问页面，带着包含 flag 的数据。目标是构造 XSS 在 Bot 的浏览器中执行，窃取数据。
+自动化浏览器访问用户可控 URL 的场景（admin bot、受害者会话模拟、审批/巡检机器人）中，Bot 用浏览器访问页面，带着高价值数据（凭据/token/flag）。目标是构造 XSS 在 Bot 的浏览器中执行，窃取数据。
 
 **按 flag 存储位置分类**：
 
@@ -115,7 +115,7 @@ CTF 中 Bot 类题目是非常常见的模式：Bot 用浏览器访问页面，�
 | Bot 使用 Puppeteer/Playwright | 真实浏览器，支持 JS 执行 |
 | Cookie 域设置为内部域名 | Cookie 只在内部网络域名下发送 |
 
-#### 1.5.2 Bot 类题目分析流程
+#### 1.5.2 Bot 类目标分析流程
 
 ```
 1. 确定 Bot 行为
@@ -249,9 +249,18 @@ const poll = setInterval(() => {
 
 ### 2.2 黑盒下的攻击面枚举
 
+**泄露路径速查**（按命中率优先）:
+`/robots.txt`（Disallow 即入口）｜`/.git/HEAD` 存在则 `git 泄露恢复（内联: 已有 .git 目录时 `git log -p` 审计 + 对象手工恢复; 无目录时按 knowledge 正文的 git 对象 zlib 解压三式重建） --brute` 恢复全仓库（含 stash/分支）｜`/.svn/entries`｜`/.DS_Store`｜`/crossdomain.xml`｜`/.env`（DB 密码/API key）｜`/composer.json`·`/package.json`（依赖+版本）｜`/.htaccess`｜`/config.php`｜`/phpinfo.php`（环境全量泄露: 路径/扩展/环境变量）。
+**备份文件**: `/www.zip`·`/backup.zip` 整站｜`index.php.bak`·`~`·`.swp`（Vim swap 有前导点变体）｜备份扩展枚举 `-e bak,old,zip,tar.gz,sql`。
+**JS 线索**: 引用的 script 全拉，搜 `fetch(`/`axios.`/`password`/`token`/`admin`/`debug`——混淆 JS 只搜字符串不需读懂。
+**HTML 线索**: `<!--注释-->`/`<input type=hidden>`/`<form action>` 暴露接口。
+**Cookie/表单指纹→方向**: PHPSESSID→LFI/反序列化/上传｜connect.sid→原型链/EJS SSTI｜JSESSIONID→反序列化/JNDI/SpEL｜csrfmiddlewaretoken→Django Jinja2 SSTI｜session=eyJ→Flask session 伪造。
+**CTF 单应用效率原则**（CTF-only）: 2-3 轮内完成侦察；不做子域枚举、不做大规模端口扫描；有发现就地深入。
+**兄弟子域定位**（目标 URL 未知、但已知同域任一兄弟服务域名时，按序）: ①`dig +short <已知子域>` 解析 IP → ``echo | openssl s_client -connect <IP>:443 -servername <已知子域> 2>/dev/null | openssl x509 -noout -text | grep -A2 "Subject Alternative Name"``——批量部署的兄弟服务常共用一张多域名证书（同一 LB 后的多站点/多租户均此模式），1 次请求得全部兄弟域名且无 CT 日志入库延迟; ②`crt.sh` 查询（受 CT 日志入库延迟影响，刚部署的证书常查不到）; ③DNS 字典爆破为最后手段——服务命名多为非字典词（拼接词/主题词），命中率极低。
+
 | 枚举方向 | 方法 | 工具 |
 |---------|------|------|
-| 路径发现 | 爬虫 + 常见路径字典 | curl / gobuster / ffuf |
+| 路径发现 | 爬虫 + 常见路径字典 | curl / dirsearch |
 | 参数发现 | HTML 表单 / JS API 调用 | 浏览器 DevTools / curl |
 | 子域名 | DNS 枚举 / 证书透明度 | subfinder / crt.sh |
 | 技术栈 | 响应头 + 行为特征 | whatweb / wappalyzer |
@@ -301,6 +310,44 @@ Web 安全分析不是找单个漏洞，而是构造**攻击链**——多个小
 2. **分步验证** — 攻击链的每一步都独立验证，不要一步跳到最终结果
 3. **记录失败** — 失败的尝试和成功的一样重要，避免重复
 4. **最小化影响** — 验证 XSS 用 alert/document.cookie，不要做破坏性操作
+5. **观测通道自检** — 用监控视图/日志/自身痕迹当 oracle 时，先排除三类污染再解释结果：自匹配（查询自身文本含筛选字面量）、可见性遮蔽（跨角色/权限差异导致字段为空或占位符）、滞留数据（连接池/缓存的旧状态）。
+
+## 4a. 执行失败切换表
+
+| 失败现象 | 切换方向 |
+|---------|---------|
+| 某路径投毒无缓存（MISS/无 X-Cache 头） | 换路径测试哪些路径被缓存 |
+| Vary 头阻止缓存命中 | 分析 Vary 字段，寻找值差异（空值 vs 缺失） |
+| XSS payload 被转义 | 换注入上下文（HTML 属性/JS 字符串/URL）或换编码方式 |
+| Cookie 无法外传（无外网） | 换数据渗出方式（DNS/缓存中缓存/时间侧信道） |
+| 框架版本不明确 | 从 buildId/chunk 文件名/依赖版本推断 |
+| 标准攻击手法全部失败 | 读框架源码（node_modules/vendor）找实现差异 |
+| 所有已知 XSS 方向被阻止 | 回溯：是否有非 XSS 利用方式（CSS 注入、Dangling markup、缓存投毒、CSRF 链） |
+| 所有已知攻击方向都失败 | 系统性回溯：回到信息收集，检查遗漏的攻击面/输入点/配置细节 |
+| 漏洞存在但无法链接成攻击链 | 单独报告每个漏洞，重新审视是否有遗漏的链接环节 |
+| 监控视图/日志查询无命中或全为空 | 先查可见性（跨角色会话 query 被遮蔽为 `<insufficient privilege>`/NULL）与自匹配，再判断"进程未执行"；换同角色载具或改查行级元数据 |
+| 存在性判定间歇性 True/False | 行漂移或滞留数据：固定行（pid/唯一键）+ 行首前缀过滤，排除查询自身与池连接的旧状态 |
+| 需要长时运行的服务端命令（COPY PROGRAM 等） | 命令后台化（`nohup ... &`）让触发请求快速返回，避免长挂请求占用应用 worker |
+
+## 4b. 无法在线验证时的推断性交付规范
+
+适用条件: 目标值（flag/答案/关键数值）因平台关闭、白名单制、活动页已删除、需登录等原因**无法通过提交或官方渠道直接验证**时。
+
+交付必须包含**四件套**:
+
+1. **首选答案 + 备选答案**（如存在多个候选，全部列出并排序）
+2. **分项置信度**: 每个关键结论标注置信度（百分比或 高/中/低）
+3. **证据分级**: 每个关键结论标注级别——
+   - `observed`: 官方源直接观测（官方排行榜/证书/原始 API 响应）
+   - `inferred`: 推理得出（叙事推理、排除法、第三方自述佐证）
+4. **剩余确证路径**: 列出仍存活的具体验证途径，含可执行操作（如"获取证书编号 → 构造对象存储直链 → 下载读官方值"），而不是只写"无法验证"
+
+禁止:
+- 只给单一答案不给置信度（用户无从判断取舍）
+- 把 inferred 说成 observed（误导信任）
+- 剩余确证路径只写"无法验证"而不列具体途径（放弃深挖的交代必须可执行）
+
+> 配套: 成绩/排名类目标的持久验证源（证书直链、档案页入口、API 降级）见 `$AGENT_DIR/knowledge-base/score-verification-osint.md`。
 
 ---
 
@@ -312,3 +359,130 @@ Web 安全分析不是找单个漏洞，而是构造**攻击链**——多个小
 2. **每一步的详细分析**（原理 + 验证方法 + 实际结果）
 3. **失败方向记录**（尝试了什么、为什么失败、学到了什么）
 4. **防御建议**（如何修复每个环节）
+
+---
+
+## 6. 单目标深度扫描方法论（深度优先，区别于 §2 资产广度扫描）
+
+### 6.1 指纹驱动策略
+
+```bash
+curl -sI http://target | grep -i "Server\|X-Powered-By\|X-AspNet"
+httpx -u http://target -tech-detect -silent
+```
+
+| 技术栈 | 自动化重点 | 手动重点 |
+|---|---|---|
+| PHP (WordPress/Laravel/ThinkPHP) | CMS POC、PHP 反序列化 | LFI/上传/include() |
+| Java (Spring/Struts/Tomcat) | Log4j/Spring4Shell/Struts2 | 反序列化入口、Actuator 泄露 |
+| Python (Flask/Django) | SSTI、Debug 模式 | Pickle 反序列化、Secret Key 泄露 |
+| Node.js (Express/Koa) | 原型链污染 | 依赖漏洞、eval() |
+| .NET (ASP.NET/IIS) | ViewState 反序列化 | web.config 泄露 |
+
+### 6.2 三轮优先级
+
+1. **高回报低成本**: 默认凭据/后台弱口令 → nuclei critical,high → 信息泄露（.env/.git/debug 端点）
+2. **输入点逐一**: 全参数 SQLi/XSS polyglot → 上传类型绕过 → API IDOR
+3. **深入利用**: 反序列化（按栈）→ SSRF 内网/云元数据 → 低危串联组合链
+
+输入点矩阵: 搜索=SQLi｜登录=弱密码+SQLi｜上传=类型绕过+穿越｜回显=XSS+SSTI｜URL/文件参数=LFI+SSRF｜XML/SOAP=XXE｜API=IDOR｜JWT=算法绕过+密钥爆破。
+优先级: RCE 类 > 读敏感数据类 > 获凭据类 > 需交互类。
+攻击路径: 直接（RCE→shell/弱密码→后台）与组合链（泄露→凭据→后台→上传→webshell｜SQLi→配置→密钥→伪造 JWT｜SSRF→云元数据→云凭据）。
+
+## 7. 扫描工具矩阵
+
+### 7.1 漏洞扫描器选型（xray vs nuclei）
+
+> xray 是长亭的 Web 漏洞扫描器命令（社区版，已装 1.9.11——被动代理扫描/语义分析误报低是它的强项）。nuclei 同样已装，模板驱动、通用性强。
+
+| 场景 | 选择 | 原因 |
+|---|---|---|
+| 已知 CVE 验证 | nuclei | 模板库更全 |
+| 通用 Web 漏洞 | xray | 语义分析误报低 |
+| 被动代理扫描 | xray | `--listen 127.0.0.1:7777` 原生代理模式 |
+| 批量 PoC | nuclei | 批量性能好 |
+| SQLi 深度 | xray | sqldet 引擎更准 |
+
+xray 的内置检测模块: xss/sqldet/cmd-injection(含 SSTI)/dirscan/path-traversal/xxe/upload/brute-force/jsonp/ssrf/baseline/redirect（"插件"指其内部检测模块，非安装件）/crlf-injection + 高级版 struts/shiro/fastjson/thinkphp；POC 引擎 phantasm + chaitin/xray-plugins；快扫 `--plugins sqldet,cmd-injection,xxe,ssrf`；HTTPS 被动需 genca。
+
+### 7.2 nuclei 缩范围与模板提取
+
+```bash
+nuclei -u T -t cves/ -tags CVE-2021-44228    # 秒级
+nuclei -u T -t cves/ -tags tomcat            # 产品定向（模板匹配后按 raw 字段转 curl 复现确认）
+nuclei -u T -t cves/ -severity critical,high # 1-3 分钟
+grep -rl "apache 2.4.49" ~/nuclei-templates/http/cves/   # 内容搜模板
+```
+模板字段: raw=原始请求（直接转 curl）/matchers=成功判定/extractors=数据提取。发现必手动复现（模板匹配非 100%）。
+
+### 7.3 fuzz 实现（dirsearch + python 内联）
+
+**目录/路径**:
+```bash
+$(dirname $PYTHON_CMD)/dirsearch -u URL -e php,jsp         # 扩展名追加
+$(dirname $PYTHON_CMD)/dirsearch -u URL -e bak,old,zip,tar.gz,sql  # 备份专项
+$(dirname $PYTHON_CMD)/dirsearch -u URL -r --recursion-depth 3 -x 404  # 递归+排 404
+```
+
+**任意位置 fuzz**（python 线程池模板——路径/参数/vhost/POST body/认证爆破通用）:
+```python
+import requests, itertools, concurrent.futures as cf
+def fuzz(tmpl, words, headers=None, filt=lambda r: r.status_code != 404):
+    # tmpl 含 {F} 占位: "http://T/{F}.php" / "http://T/?{F}=1"; headers 值同占位
+    def one(w):
+        kw = {"url": tmpl.format(F=w), "timeout": 8}
+        if headers: kw["headers"] = {k: v.format(F=w) for k, v in headers.items()}
+        try: r = requests.get(**kw); return (w, r) if filt(r) else None
+        except Exception: return None
+    with cf.ThreadPoolExecutor(10) as ex:  # 线程勿超 10——高并发易 429，需节流加 time.sleep(0.1)
+        return [x for x in ex.map(one, words) if x]
+```
+- **过滤/匹配**（fuzzer 的 -fs/-fc/-mr 语义）: filt 闭包写判定——`lambda r: len(r.content) != BASELINE`（排同长响应=自动校准）、`lambda r: "flag{" in r.text`（猎 flag）、`r.status_code in (200,301)` 白名单。
+- **多字典笛卡尔积**（用户×密码）: `words = itertools.product(users, pwds)`，tmpl 用 {F0}/{F1} 双占位（format 换 format_map）。
+- **编码器过 WAF**（请求前函数链）: `words = [urllib.parse.quote(w, safe='') for w in words]`（双重编码套两层）/ base64 变换。
+- **方法枚举**: requests.request(method, ...) 外层循环 GET/POST/PUT。
+
+**vhost 枚举**（Host 头占位）: `fuzz("http://IP/", vhosts, headers={"Host": "{F}.target.com"})`，响应长度/状态与基线比对判命中。
+
+**XSS 专项**: `dalfox url "http://T/?q=test"`（--blind 回调 / --waf-evasion / --mining-dom）
+
+**老版本后门速查**: vsftpd 2.3.4（用户名 :) 结尾→TCP 6200 shell）/ proftpd 1.3.3c / unreal-ircd 3.2.8.1（源码后门）——banner 版本命中先试后门。**Bazaar .bzr 泄露**: bzr check 报错含缺失文件路径→wget 循环重建仓库→bzr log/diff 翻全部修订（删除的凭据可恢复; .git/.hg/.svn 同理）。**.idea/workspace.xml** 等 IDE 项目文件泄露结构/配置。
+
+**侦察增补行**: source map（.map 文件）直接读; 404 的 favicon.ico/robots.txt 可能仍带数据（strings favicon.ico | grep -i flag）; Tor 隐藏服务 feroxbuster --proxy socks5h://127.0.0.1:9050; URL 参数删鉴权组件（admin.auth.inc→admin.inc）与扩展名变换（.inc/.php/.html）; IDOR 枚举中 403=资源存在仅无权（404=不存在）——403 的资源换方法/参数再试。
+
+### 7.4 侦察与端口扫描工具链
+
+> 本节为扫描工具生态（高速无状态扫描/SAN 批量/渲染爬虫）。**项目内最小替代路径**: 子域→证书 SAN 直读优先（`openssl s_client`/`openssl x509`，见 §2.2 兄弟子域定位）+ `curl "https://crt.sh/?q=%25.target.com&output=json"`（证书 SAN）+ dnspython 爆破; 存活探测→python 线程池模板（§7.3）; 端口→nmap; 历史 URL→`curl "http://web.archive.org/cdx/search/cdx?url=*.target.com*&output=json&limit=500"`; JS 端点→web_render.py（playwright 渲染后 grep）; 测绘→FOFA/Shodan API curl。环境具备 go 工具族时用下方管道效率更高。
+
+**端口扫描三件分工**: naabu（SYN 高并发快 10×，非 root 自动 CONNECT，`-top-ports 100/1000`，端口发现首选）→ nmap 深度（`-sV` 版本 `--version-intensity 9` 精确/`-O` OS 指纹/`-A` 组合/600+ NSE; UDP 慢限定 `-sU -p 53,161,500`）; masscan 大规模（/16+ 异步无状态 `--rate 10000`，需 root，nmap XML 兼容输出）。
+**fscan 内网优先**: 单二进制 scp 即用/600 线程/内置 10 服务弱口令爆破/POC（MS17-010·Redis 未授权·WebLogic·Struts2 兼容 xray POC）/利用动作直接打（Redis 写公钥）/NetBIOS 域控识别/国产 CMS·OA 指纹; `-nopoc` 与 `-nobr` 独立开关，`-m ssh/ms17010` 单模块，`-pa` 追加端口。同族 gogo（500 并发 `--filter`）。nikto: `-Tuning` 数字（1上传 2默认文件 3信息泄露 4注入 6DoS 8命令执行 9SQLi; `x6` 排除 DoS）/`-no404` 减误报。服务指纹: fingerprintx（51 协议 `--json`，`naabu -silent | fingerprintx`）/nerva。
+**侦察管道**: `subfinder -d t -silent | httpx -silent | nuclei`（子域→存活→漏洞）; subfinder `-all` 全源+provider-config.yaml 配 API key; dnsx `-wd t.com` **通配符过滤**（泛解析必需）`-ptr` 反解; httpx `-sc -title -tech-detect -cdn`（Wappalyzer 技术栈）; tlsx **`-san -resp-only` 证书 SAN 挖子域**+`-jarm`+`-ex -ss -mm` 证书问题批量; katana **`-jc` JS 端点解析（SPA 必开）**+`-headless -system-chrome` 渲染+`-mr "api|admin"` 正则筛 URL; gau 历史 URL `--from --to` 时间范围+`grep "="` 提参数 URL 接 dalfox pipe; uncover 多引擎测绘统一 CLI（shodan/censys/fofa/hunter/quake）; mapcidr `-shuffle` 打乱防告警+`-sbc 24` 切片分发; ksubdomain 无状态 DNS 验证（`-b 5m` 带宽）比 dnsx 快一个量级。
+**子域三源交叉**（subdomain-deep）: 单一来源仅覆盖 30-50% 资产——DNS 爆破（subfinder/ksubdomain 递归）+OSINT 引擎（FOFA 等基于实际扫描数据）+爬虫三源去重合并; **通配符判定**: random123.target.com 也解析=有通配符，需过滤通配符 IP 对应结果; OSINT 独有发现: 非标端口 Web（dev.t.com:8443）/DNS 记录已删但服务在线的**幽灵子域**/IP 反查同服务器其他域名; CNAME 记录→识别 CDN 归属（CloudFront/Cloudflare/Fastly）。**扫描效率纪律**: 同类路径手动 curl 最多 3 次即停改 gobuster/dirsearch 批扫; 长工具一律 timeout 480+tee 包裹（禁 sleep 轮询等待）。
+
+
+## §8 中国 SRC/EDUSRC 挖掘方法论
+资产收集: 天眼查/企查查（知识产权+股权穿透关联单位）→ ICP 备案 → Whois 历史 → subfinder/altdns → 资产测绘（FOFA: app="万户网络-ezOFFICE"/icon_hash/body="特征js"/org&&port; Quake: domain:"x" AND app:"Apache Tomcat"/port:8443（quake.360.net API v3，深度指纹）; Hunter: app.name/protocol&&port; Shodan: http.favicon.hash）。三引擎交叉比对: 去重合并+标注仅单引擎发现的（新上线/已下线）+SSL 证书 CN/SAN 泄内部域名。
+流程: 指纹识别找 nday（若依等）→ 登录框（弱口令 admin/123456、nacos/nacos、ruoyi/123456; 密码喷洒固定 123456; Google site:xxx.edu.cn "默认密码"）→ 后台三件套（/druid/login.html、/swagger-ui.html、/actuator/heapdump; Vue 隐藏路由 AntiDebug_Breaker）→ 小程序（反编译找接口、越权遍历 member_id、存储 XSS）。
+高频: 弱口令/越权/前端硬编码/上传 html-svg/密码重置（验证码绕过、改返回包）/时间盲注。经验: 配置文件是宝藏（WEB-INF/web.xml、application.yml）; 密码复用横向。
+高价值目标优先级: 集权系统（域控/vCenter/K8s master）> AK/SK 泄露（JS/配置中云凭据→接管云服务器/存储桶/数据库）> 双网卡机器（连通多网段破隔离）。测绘时间范围从默认一个月改为一年扩历史资产。内网横向与域渗透见 `$SHARED_DIR/knowledge-base/internal-pentest-methodology.md` 与 `ad-domain-attacks.md`。
+
+**CDN 绕过取真实 IP**: 多地 ping 判定 → 未 CDN 子域名+C 段 hosts 验证 / 国外冷门 DNS（209.244.0.3/9.9.9.9/208.67.222.222 等）解析 / 历史 DNS（dnsdb.io/threatbook/netcraft/viewdns）/ SMTP 邮件头泄露源站（注册或找回密码触发发信看原文头）/ Discuz downremoteimg SSRF 探测 / phpinfo 探针。hosts 绑定验证后直打 IP 无视 WAF/CC。
+**GitHub 凭据 dork**: `site:github.com smtp @target.com` / `site:github.com smtp password` / `site:github.com password ftp` / `site:github.com 内部`——翻目标员工误提交的邮件/数据库/FTP 配置。
+
+## §9. 流量取证：协议变体完备性清单（pcap 深挖前置步骤）
+
+深挖 pcap 中任一协议之前，必须先完成该协议的**全变体枚举**——只分析"常见类型"会系统性漏掉错误类/控制类报文携带的独立信息源（如 ICMP 错误包引用的"原始数据报"字段：引用内容可以是从未以正常包出现的隐藏数据，32 个引用 × 100B 即 3KB 级暗信道）。
+
+**第 1 步 全景**：`tshark -r x.pcap -q -z io,phs`（协议分层统计）+ 帧数对账：各协议帧数之和 = 总帧数，任何"未归类"帧都要解释。
+
+**第 2 步 逐层 type/code 直方图**（覆盖该层全部变体，不只看高频值）：
+- ICMP：`tshark -r x.pcap -Y icmp -T fields -e icmp.type -e icmp.code | sort | uniq -c`——重点：type 3/5/11 等错误类，其 payload = IP 头 + 原始数据报前 8-128B，是**独立于正常流量的信息源**；引用包可能对应"捕获过滤器漏掉的数据"
+- TCP：flags 全组合分布（`-e tcp.flags`），罕见组合（SYN+FIN 等）单独审查
+- HTTP：全部方法与状态码分布；UDP：全部 dst port × payload 首 2 字节
+- DNS：全部 qtype/rcode
+
+**第 3 步 异常变体深挖**：对每个非预期变体，逐字节解码（scapy 直取 payload），对比"同内容正常包"验证引用忠实性（引用与真包逐字节一致的=索引/标记信道；不一致的=独立数据信道）。
+
+**第 4 步 元数据二值性检查**：可疑子序列（如某协议的重复/标记包序列）的时间戳/序号/长度字段若呈严格二值分布（如 ts mod N 只取两值），按每包 1 bit 提取位流，尝试直接二进制、BCD、7/8-bit 分组、正反序四种解码。
+
+**判读**：帧数对账有缺口、或某错误类变体的引用内容指向 pcap 中不存在的包 → 存在隐藏信道，优先深挖。

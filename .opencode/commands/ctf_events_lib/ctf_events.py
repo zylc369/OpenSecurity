@@ -135,13 +135,14 @@ def render_ongoing(rows, now):
     if not rows:
         return "### 🔴 进行中\n\n暂无进行中的比赛。\n"
     out = ["### 🔴 进行中（按剩余时间降序）\n"]
-    out.append("| 标题 | 剩余 | 持续 | 赛制 | 线上/现场 | 地点 | 权重 | 链接 |")
-    out.append("|------|------|------|------|----------|------|------|------|")
+    out.append("| 标题 | 剩余 | 持续 | 赛制 | 参赛限制 | 线上/现场 | 地点 | 权重 | 链接 |")
+    out.append("|------|------|------|------|------|----------|------|------|------|")
     for e, s, f in rows:
         loc = e.get("location") or "-"
         out.append(
             f"| {title(e)} | {fmt_remaining(f, now)} | {fmt_date_range(s, f)} | "
-            f"{fmt_format(e.get('format'))} | {venue(e)} | {loc} | "
+            f"{fmt_format(e.get('format'))} | {fmt_restriction(e.get('restrictions'))} | "
+            f"{venue(e)} | {loc} | "
             f"{fmt_weight(e.get('weight', 0))} | {link(e)} |"
         )
     return "\n".join(out) + "\n"

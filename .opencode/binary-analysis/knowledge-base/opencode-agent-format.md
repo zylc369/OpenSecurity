@@ -14,7 +14,11 @@
 name: my-agent          # 可选，默认取文件名（不含 .md）
 description: 做某件事    # 可选，Agent 描述
 model: claude-opus-4    # 可选，模型名称（会自动映射到 provider/model 格式）
-tools: Read,Write,Bash  # 可选，逗号分隔的工具列表
+tools:                      # 可选，工具启用映射（白名单须含 "*": false 前置）
+  "*": false
+  read: true
+  write: true
+  bash: true
 mode: subagent          # 可选，默认 "subagent"
 ---
 
@@ -28,7 +32,7 @@ mode: subagent          # 可选，默认 "subagent"
   "name": "my-agent",
   "description": "做某件事",
   "model": "claude-opus-4",
-  "tools": ["Read", "Write", "Bash"],
+  "tools": { "*": false, "read": true, "write": true, "bash": true },
   "mode": "subagent",
   "prompt": "系统提示内容"
 }
@@ -43,8 +47,27 @@ mode: subagent          # 可选，默认 "subagent"
 | `name` | `string` | 否 | Agent 名称，默认取文件名（不含 `.md`） |
 | `description` | `string` | 否 | Agent 描述，用于 UI 展示和 Agent 选择 |
 | `model` | `string` | 否 | 模型名称（如 `claude-opus-4`），自动映射 |
-| `tools` | `string` | 否 | 逗号分隔的工具白名单（如 `Read,Write,Bash`） |
+| `tools` | `object` | 否 | 工具启用映射（键=工具名小写如 `read/bash/webfetch/websearch`, 值=boolean）。白名单语义须前置 `"*": false` 再逐工具 `true`——只列 `true` 不拒绝未列工具。schema 为 Record<String,Boolean>，逗号字符串会解析失败 |
 | `mode` | `string` | 否 | `"primary"` / `"subagent"` / `"all"`，默认 `"subagent"` |
+| `hidden` | `boolean` | 否 | `true` 仅使该 agent 从用户 agent 切换菜单与 available 提示列表移除（源码 `filter((a) => !a.hidden)`）; **不影响 Task 工具说明注入**——Task 列表只按 `mode` 过滤。**仍可被 task 显式派发**（派发按 name 解析）。内部专用 agent 的正确组合: `mode: primary`（使 Task 工具说明不列出）+ `hidden: true`（切换菜单不出现），内置 compaction/title/summary 与 knowledge-scout 同用法; 此组合下 description 不再承担路由职责，调用说明书必须写在派发方的 prompt 模板里 |
+
+---
+
+## description 是唯一路由层（写 agent 的硬要求）
+
+OpenCode 每次请求都会把所有 `mode` 不为 `primary` 的 agent（即 `mode: all` 与 `mode: subagent`）的 `description` 注入 Task 工具说明（格式 `- 名称: description`；缺 description 时替换为"仅限手动调用"文案）——该过滤在 registry.ts describeTask，**只看 mode、不看 hidden**。要使 agent 对其他 agent 零注入，用 `mode: primary` + `hidden: true` 组合（hidden 负责切换菜单与 available 列表移除）。**主 agent 只能看到 description，看不到正文**——因此：
+
+1. description 必须包含：**做什么 + 为什么这么做（避免什么损失）+ 最终目的（拿到什么结果）+ 何时主动委派（明确触发条件）+ 范围/排除 + 必须传什么/返回什么**——调用方据此判断这个委派何时值得发起、能拿到什么。输入契约写在正文里等于没写（主 agent 读不到）。
+2. 想获得更主动的委派，使用明确的触发句式（如"卡壳时主动委派：同一方向连续失败≥5 次…"）。
+3. 单行、不出现 `|` 字符——description 会被渲染进"可委派 Agent"表格单元格，多行或竖线会破坏表格。
+4. 同一原则适用于 skill description 与 MCP 工具 description——三者都是模型的调用路由层（模型据其决定何时调用、传什么参数）。
+5. 面向调用方与人类可读：不用只有作者懂的内部代号（方法论黑话）；必要术语用一句白话解释（坏例：`拆零件求值时刻/维度表已变未变`；好例：`把关键校验代码拆开、标出每个值何时确定`）。
+6. **描述与正文分工**：description 只写【是什么 / 为什么值得调用（动机与目的）/ 什么情况下调用 / 如何调用（必须传什么、返回什么）】；执行方法、判断标准、步骤写在正文，且正文按"什么情况用什么方案"组织，不写与场景无关的机械规则（反例：无条件规定"挑成本最低的实验"——挑选标准应服务于目标，即该实验能否改变当前判断）。
+
+示例：
+- ✅ `密码学分析 — 输入密码学题目（脚本/参数/密文）和分析需求，自动完成密码学攻击与 flag 求解`（含输入契约）
+- ✅ `无记忆评审分身：对卡壳中的分析做不带任何既有结论的独立重判，这是为了避免既有结论的干扰，目的是找到真正的突破点。…委派必须传：目标 + 原始材料绝对路径 + 分析台账（ledger.md）；返回…`（先说清"为什么 + 目的"，再给触发条件与输入契约）
+- ❌ 只有"是什么"：`长期记忆专家 —— 检索历史上下文`（无触发、无输入 → 不会被可靠自动调用）
 
 ---
 

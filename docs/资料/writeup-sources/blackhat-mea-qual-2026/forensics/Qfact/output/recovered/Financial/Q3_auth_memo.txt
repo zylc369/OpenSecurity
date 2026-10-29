@@ -1,0 +1,42 @@
+﻿INTERNAL MEMO - FINANCE DEPARTMENT
+Classification: CONFIDENTIAL
+Date: June 15, 2025
+Document ID: FIN-2025-Q3-AUTH-001
+
+To: Finance Team (Distribution List A)
+From: Office of the CFO
+Re: Q3 Financial Reporting Portal - Access Credentials
+Priority: High
+
+Team,
+
+As we transition to the new Q3 reporting cycle, the IT Security
+team has rotated all portal access credentials per our quarterly
+security policy (ref: SEC-POL-2024-017).
+
+The master authorization code for the Q3 financial reporting
+portal has been encoded below for secure internal transmission
+per our data handling procedures:
+
+QkhGbGFnWXtkM2YzbmQzcl9xdTRyNG50MW4zX3IzYzB2M3J5XzIwMjZ9
+
+IMPORTANT INSTRUCTIONS:
+1. Decode using standard Base64 before entering into the portal
+2. This code grants full read/write access to Q3 financial data
+3. Do NOT share this code outside the Finance distribution list
+4. Do NOT store the decoded value in any unencrypted medium
+5. This code expires September 30, 2025 at 23:59 UTC
+6. Report any suspected unauthorized access immediately to
+   security@company.com
+
+Portal URL: https://finance-portal.internal.company.com/q3
+Support: Contact IT Help Desk (ext. 4500) for access issues
+
+Previous quarter codes have been revoked effective immediately.
+If you experience any issues accessing Q2 archived reports,
+submit a ticket through ServiceNow.
+
+Regards,
+Office of the CFO
+Michael Torres
+Chief Financial Officer

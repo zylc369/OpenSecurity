@@ -27,6 +27,7 @@ $PYTHON_CMD "$OPENCODE_ROOT/commands/ctf_events_lib/ctf_events.py"
 | 窗口 | 过去 7 天 ~ 未来 30 天 |
 | 进行中排序 | 剩余时间降序（剩余多的在前） |
 | 即将开始排序 | 开赛时间升序（最近在前），权重 ≥ 30 标 ⭐ |
+| 参赛限制 | 两表均含「参赛限制」列，来源 CTFtime restrictions 字段（Open/Prequalified/High-school 等），未知值原样显示 |
 | 现场过滤 | 即将开始仅线上；进行中保留全部（含现场，带「线上/现场」列） |
 | 非典型过滤 | 持续 > 14 天视为练习平台/长期 challenge，剔除 |
 | 时区 | 开赛时间显示本地时区，表头已标注 |

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "endpoints": [
+    {
+      "name": "main",
+      "protocol": "http",
+      "url": "http://k84e2c92879e2e11c9a50a9313232ca0e.playat.flagyard.com"
+    }
+  ]
+}
+

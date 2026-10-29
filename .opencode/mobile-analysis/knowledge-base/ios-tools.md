@@ -4,15 +4,16 @@
 
 ## 工具概览
 
-| 工具 | 用途 | 安装方式 |
-|------|------|---------|
-| otool | Mach-O 文件分析 | macOS 自带 |
-| nm | 符号表查看 | macOS 自带 |
-| ldid | 伪签名工具 | Homebrew |
-| insert_dylib | 动态库注入 | Homebrew (optool) |
-| class-dump | ObjC 类信息导出 | GitHub releases（可选） |
-| codesign | 代码签名 | macOS 自带 |
-| security | 钥匙串/证书管理 | macOS 自带 |
+| 工具 | 用途 |
+|------|------|
+| otool | Mach-O 文件分析 |
+| nm | 符号表查看 |
+| ldid | 伪签名工具 |
+| insert_dylib | 动态库注入 |
+| optool | load command 编辑 |
+| class-dump | ObjC 类进制导出 |
+| codesign | 代码签名 |
+| security | 钥匙串/证书管理 |
 
 ---
 
@@ -85,12 +86,6 @@ nm -gU binary | c++filt
 
 ## ldid — 伪签名工具
 
-### 安装
-
-```bash
-brew install ldid
-```
-
 ### 常用命令
 
 ```bash
@@ -123,12 +118,6 @@ ldid -e binary
 
 ## optool — 动态库注入
 
-### 安装
-
-```bash
-brew install optool
-```
-
 ### 常用命令
 
 ```bash
@@ -146,22 +135,9 @@ otool -L target_binary | grep Frameworks
 
 ---
 
-## class-dump — ObjC 类信息导出（可选）
-
-### 安装
-
-class-dump 没有Homebrew 包，需从 GitHub 手动安装：
+## class-dump — ObjC 类信息导出
 
 ```bash
-# 下载
-wget https://github.com/nygard/class-dump/releases/download/3.5/class-dump-3.5.darwin -O /usr/local/bin/class-dump
-chmod +x /usr/local/bin/class-dump
-```
-
-### 常用命令
-
-```bash
-# 导出所有头文件
 class-dump -H binary -o headers/
 
 # 查看指定类的方法

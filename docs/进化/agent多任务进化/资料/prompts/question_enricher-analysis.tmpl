@@ -1,0 +1,77 @@
+# question_enricher.tmpl 分析文档
+
+> 本文档只写分析结论，不复述原模板内容。
+> 源码引用基于 PentAGI `backend/pkg`，行号即结论依据。
+
+---
+
+## 1. 原文件名
+
+- **PentAGI 源码路径**：`backend/pkg/templates/prompts/question_enricher.tmpl`
+- **PromptType 常量**：`PromptTypeQuestionEnricher = "question_enricher"`（`templates/templates.go:52`，注释 *human input for context enhancement*）
+- **数据库枚举**：`database/models.go:369` 同名常量，可被 DB 覆盖。
+
+## 2. 类型与用途
+
+- **类型**：B 类 —— **Agent Human Prompt**（对应 `AgentPrompts.Human` 字段）。
+- **注册位置**：`templates.go:571-574`，挂在 `Enricher: AgentPrompts{ System: enricher.tmpl, Human: question_enricher.tmpl }` 下。
+- **用途定位**：作为 enricher agent 首轮的 **user 侧消息**，把"被某个 specialist agent 提出的问题 + 可选代码/输出"原样投喂给 enricher，触发其去检索**adviser 当前没有的补充事实**。它本身不承载策略，策略全部在配对的系统提示 `enricher.tmpl` 里。
+
+## 3. 配对关系
+
+- **配对系统提示**：`enricher.tmpl`（`PromptTypeEnricher`）。
+- 配对逻辑：二者在同一 `enricherHandler`（`handlers.go:84-148`）内被**先后渲染**：
+  - `handlers.go:120` 渲染本文件（user）；
+  - `handlers.go:125` 渲染 `enricher.tmpl`（system）；
+  - 渲染结果 `userEnricherTmpl` / `systemEnricherTmpl` 一并传入 `performEnricher`。
+- **上下文是分离的**：user context 仅含 `Question/Code/Output`（`templates.go:361-365` 白名单），system context 含工具名、执行上下文、Cwd、语言等（`handlers.go:91-107`）。即本文件**只能引用 `Question/Code/Output` 三个占位符**，引用其余占位符会因白名单校验失败。
+
+## 4. 调用时机
+
+> ⚠️ 对"adviser handler 内部可选步骤、由 handlers.go:performEnricher 渲染"的精确修正：
+
+- **触发源**：任意 specialist agent（primary_agent / pentester / coder / installer / searcher / memorist / assistant）在其执行链中**按需调用 `advice` 工具**（`tools.AdviceToolName = "advice"`）向 mentor 求助时触发。`advice` 工具被注入到上述所有 agent 的 executor（`tools.go` 多处 `registryDefinitions[AdviceToolName]`）。
+- **强制前置、非可选**：`advice` 工具的统一处理句柄 `GetAskAdviceHandler`（`handlers.go:73`）返回的外层闭包（`handlers.go:227-248`）**无条件地**先跑 `enricherHandler`，再跑 `adviserHandler`——enricher 是 adviser 的**前置数据增强步骤**，不是 adviser 内部的可选分支。
+  - "可选"只体现在**产出内容**：当 enricher 判定无补充信息时，可返回空/极简结果（见 `enricher.tmpl` 的 efficiency 规则），adviser 拿到空 `Enriches` 继续工作。
+- **渲染 vs 执行是两处**：
+  - 本文件的**渲染**发生在 `handlers.go:120`（`fp.prompter.RenderTemplate`，enricherHandler 内）；
+  - enricher agent 的**执行**发生在 `performers.go:755`（`performEnricher`，经 `restoreChain` + `performAgentChain` 跑带工具的 agent 链）。
+  - 两者职责不同：handlers 负责"组提示词"，performers 负责"跑 agent"。
+- **结果去向**：enricher 的产出作为 `enriches` 注入 `adviserHandler` 的 user context `Enriches` 字段（`handlers.go:162`），即 adviser 的补充上下文。
+
+## 5. 工具列表
+
+> ⚠️ 对"无工具"的精确澄清（区分"模板"与"agent"）：
+
+- **就本模板文件而言**：`question_enricher.tmpl` 确实**不含任何工具占位符**——它只放 `{{.Question}}/{{.Code}}/{{.Output}}`，不声明、不引用工具。这一点与用户假设一致。
+- **就 enricher agent 而言**：它**是一个全副武装的信息检索 agent**，工具声明在配对系统提示 `enricher.tmpl`，工具装配在 `GetEnricherExecutor`（`tools.go:1824`）。其实际可用工具集为：
+  | 工具 | 用途 | 装配条件 |
+  |---|---|---|
+  | `EnricherResult`（`{{.EnricherToolName}}`） | 收尾工具，回传补充事实写本，被 adviser 消费 | 必选，barrier 工具（`tools.go:1856,1861,1866`） |
+  | `Terminal` | 容器内执行命令抽取数据 | 必选 |
+  | `File` | 读取容器内制品/日志/配置 | 必选 |
+  | `SearchInMemory`（`{{.SearchInMemoryToolName}}`） | 向量库检索历史方案 | `memory.IsAvailable()` 为真时（`tools.go:1876`） |
+  | `GraphitiSearch`（`{{.GraphitiSearchToolName}}`） | 知识图谱 episodic 记忆 | `graphitiClient` 启用时（`tools.go:1887`，对应 `{{if .GraphitiEnabled}}`） |
+  | `Browser` | 校验指定 URL | `tools.go:1892+` |
+  | Summarizer | 历史摘要处理句柄（非 LLM 工具，内部用） | 经 `cfg.Summarizer` 传入 |
+- **结论**：模板无工具占位符 ≠ agent 无工具。enricher agent 依赖上述工具去"挖"出 adviser 缺失的事实；本 Human prompt 只负责把问题交到它手里。
+
+## 6. 非工具占位符
+
+三占位符均在 `templates.go:361-365` 白名单内，数据来自调用方 `advice` 工具入参反序列化得到的 `tools.AskAdvice` 结构体（`tools/args.go:101-106`），由 `enricherHandler` 在 `handlers.go:86-90` 注入 user context，于 `handlers.go:120` 渲染时填入。
+
+| 占位符 | 来源字段 | 语义与注入信息 | 注入时机 | 渲染控制 |
+|---|---|---|---|---|
+| `{{.Question}}` | `ask.Question` | **必填**。技术通道载荷——specialist agent 向 mentor 提出的详细英文问题，描述当前困境与待解决点（`args.go:102`）。 | advice 工具被某 agent 调用、外层闭包进入 `enricherHandler` 时，从入参 JSON 反序列化进 `AskAdvice`，立即注入并渲染。 | 无条件输出（`<user_question>` 块始终渲染）。 |
+| `{{.Code}}` | `ask.Code` | **可选**。技术通道节选——与问题相关的代码片段，要求逐字保留、不翻译（`args.go:103`）。 | 同上；调用方未填则为空字符串。 | `{{if .Code}}` 条件渲染，空则不输出 `<code_snippet>` 块。 |
+| `{{.Output}}` | `ask.Output` | **可选**。技术通道节选——与问题相关的 stdout/stderr 摘录，逐字保留（`args.go:104`）。 | 同上；调用方未填则为空字符串。 | `{{if .Output}}` 条件渲染，空则不输出 `<command_output>` 块。 |
+
+**注入链路全貌**：specialist agent 调 `advice` 工具 → JSON args 经 `json.Unmarshal` 成 `AskAdvice`（`handlers.go:231-235`）→ 进入外层闭包 → `enricherHandler` 取 `ask.Question/Code/Output` 构造 user context → `RenderTemplate` 填充三占位符 → 结果作为 enricher agent 首轮 user 消息 → `performEnricher` 跑工具链 → 产出 `enricherResult.Result` → 作为 `enriches` 喂给 adviser 的 `{{.Enriches}}`（`handlers.go:162`）。
+
+---
+
+### 附：与用户假设的差异点（查缺补漏）
+
+1. **"无工具"**：仅在"本模板文件无工具占位符"层面成立；enricher **agent 本身工具齐全**（见第 5 节表）。
+2. **"adviser handler 内部可选步骤"**：实际是 advice 流程中**先于 adviser 的强制前置步骤**，"可选"仅指产出内容可为空。
+3. **"由 handlers.go:performEnricher 渲染"**：`performEnricher` 位于 `performers.go:755` 且只负责**执行**；**渲染**发生在 `handlers.go:120`。

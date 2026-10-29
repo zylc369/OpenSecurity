@@ -1,0 +1,98 @@
+# execution_logs.tmpl 分析
+
+> 本文档只写分析结论，不复述原模板正文。所有结论均可在 PentAGI 源码中溯源（`file:line`）。
+
+---
+
+## 1. 原文件名
+
+`execution_logs.tmpl`
+
+在 `templates.go` 中注册的 PromptType 为 `"execution_logs"`，注释为 *formats execution history for display*（`templates.go:60`）。
+
+---
+
+## 2. 类型与用途
+
+**C 类工具辅助 Prompt，且是"二级摘要"链路中的中间产物。**
+
+关键判据不是"它格式化日志"，而是**它的渲染结果从不被直接消费**——渲染产物会原样喂给 summarizer 再做一次压缩：
+
+- `getTaskMsgLogsSummary` 先用本模板 `RenderTemplate` 得到 `message`（`helpers.go:412`）；
+- 紧接着 `summarizerHandler(ctx, message)` 把这段 `message` 当作输入再摘要一次（`helpers.go:433`）；
+- `summarizerHandler` 实际渲染的是 `PromptTypeSummarizer`（`handlers.go:895`），即**本模板的产出是 summarizer 的输入**。
+
+因此调用链是 **原始 MsgLogs → 本模板（格式化为叙事性 XML 段）→ summarizer（再压成一句话摘要）**。本模板处于第一级摘要的位置，最终被注入下游 prompt 的 `{{.ExecutionLogs}}` 是 summarizer 的输出，不是本模板的直接输出。
+
+它不是 agent 角色模板：没有 agent 身份、不接收用户输入、不直接驱动 LLM 决策，纯粹是数据装配器。
+
+---
+
+## 3. 配对关系
+
+**无配对。**
+
+它挂在 `ToolsPrompts` 结构下，字段名 `GetExecutionLogs`（`templates.go:481`、`templates.go:586`），而不是挂在按 agent 角色组织的 system/user 配对体系里。
+
+对比佐证：agent 角色模板（如 Refiner/Reporter/Summarizer）在 `models_gen.go:1048` 的可用枚举里与本类型同列，但只有 agent 角色才会渲染 system + user 两段；本模板仅渲染单段 user 内容，无 system 配对、无 `AvailableSystemPrompts` 入口。
+
+---
+
+## 4. 调用时机
+
+**仅在两个场景、同一条渐进式阈值链路的末端被渲染。**
+
+渲染入口统一是 `getTaskMsgLogsSummary`（`helpers.go:376`），它只在两处被调用：
+
+| 调用方 | 位置 | 语义 |
+|---|---|---|
+| Subtasks Refiner | `provider.go:477` | 单个子任务完成后，判断是否要补任务/重规划时 |
+| Task Reporter | `provider.go:570` | 所有子任务完成后，生成最终报告时 |
+
+两处都受**三层渐进式阈值**控制，本模板处于第三层（最末端、信息最重）：
+
+1. **第一层**：仅渲染基础模板（refiner / reporter 自身）。若长度已 `≥ msgRefinerSizeLimit` / `msgReporterSizeLimit`，直接停在此层，**本模板根本不会被渲染**（`provider.go:463`、`provider.go:556`）。
+2. **第二层**：追加 `ExecutionState`（primary agent 链摘要）后再次渲染。若仍超阈值才进入第三层（`provider.go:476`、`provider.go:569`）。
+3. **第三层**：才调用 `getTaskMsgLogsSummary` → 渲染本模板 → summarizer 二次压缩 → 注入 `ExecutionLogs`（`provider.go:477-486`、`provider.go:570-579`）。
+
+> 设计意图：日志是最详尽也最占 token 的上下文，只有在前面两层"轻量上下文"仍填不满预算时才追加，避免无谓膨胀。
+
+---
+
+## 5. 工具列表
+
+**无工具。纯文本渲染器。**
+
+模板体内不包含任何 `{{tool ...}}`、不声明 available tools、不产生 tool call。它只做一件事：把 `MsgLogs` 切片循环渲染成 `<log>...</log>` 条目。工具能力完全由下游真正消费 `ExecutionLogs` 的 agent（refiner / reporter）各自声明。
+
+---
+
+## 6. 非工具占位符
+
+本模板唯一的非工具占位符是 `{{.MsgLogs}}`（声明于 `templates.go:391-393`，`PromptVariables` 仅含 `"MsgLogs"`）。
+
+### 数据类型
+
+`[]database.Msglog`（结构体定义 `models.go:995`，注意是小写 `Msglog`）。模板内逐字段取值：`.SubtaskID`（`sql.NullInt64`）、`.Type`、`.Message`、`.Result`。
+
+### 数据来源
+
+由 `fp.db.GetTaskMsgLogs(ctx, taskID)` 提供（`helpers.go:391`）。底层 SQL 显式 **`ORDER BY ml.created_at ASC`**（`msglogs.sql.go:212`），即按操作发生的时间顺序注入，保证模板产出的叙事性顺序与真实执行顺序一致。
+
+### 注入前的预处理（三级裁剪）
+
+数据从数据库取出后、进入模板前，经过严格的大小控制，这是本模板区别于普通渲染器的地方：
+
+1. **单条 Result 截断到 1 KB**：遍历每条 `Msglog`，`Result` 超过 `msgLogResultEntrySizeLimit = 1024` 字节则截断并追加 `"\n\n[...truncated]"` 标记（`helpers.go:407-409`，常量 `helpers.go:36`、`provider.go:43`）。
+2. **整体对半裁剪**：首次渲染后若 `message` 仍 `≥ msgLogResultSummarySizeLimit = 70 KB`，进入 `for l := len(msgLogs)/2; l > 2; l /= 2` 循环，**每次丢弃最早的一半日志、只保留尾部**，重新渲染直到低于阈值或窗口收敛到 ≤2 条（`helpers.go:419-431`）。
+   > 这意味着：日志超量时**优先丢弃早期操作、保留近期操作**——与"按时间顺序叙述进展"的模板要求在超量场景下存在张力（近期细节优先于完整时间线）。
+3. **二次摘要**：最终 `message` 喂给 `summarizerHandler` 再压一次（`helpers.go:433`），产出才是真正注入下游 `{{.ExecutionLogs}}` 的内容。
+
+### 注入时机（落到下游 prompt）
+
+`getTaskMsgLogsSummary` 的返回值 `msgLogsSummary` 被写入下游 context 的 `"ExecutionLogs"` 键，随后触发下游模板的**第 3 次渲染**：
+
+- refiner：`provider.go:482` 写入 → `provider.go:483` 第三次渲染 `PromptTypeSubtasksRefiner`；
+- reporter：`provider.go:575` 写入 → `provider.go:576` 第三次渲染 `PromptTypeTaskReporter`。
+
+即：本模板渲染 → summarizer 压缩 → 作为 `{{.ExecutionLogs}}` 嵌入 refiner/reporter 的最终 prompt。本模板自身**永远不会作为独立 prompt 发送给 LLM**。

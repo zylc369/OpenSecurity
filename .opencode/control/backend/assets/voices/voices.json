@@ -1,0 +1,11 @@
+[
+  {
+    "id": "official_female",
+    "name": "官方女声",
+    "gender": "female",
+    "description": "CosyVoice3 官方参考女声（真人录音参考; plus 引擎，听书验收定稿音色）",
+    "wav": "official_female.wav",
+    "ref_text": "希望你以后能够做的比我还好呦。",
+    "default_speed": 0.9
+  }
+]

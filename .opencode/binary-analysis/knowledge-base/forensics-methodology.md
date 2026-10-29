@@ -1,4 +1,4 @@
-# 数字取证 CTF 方法论
+# 数字取证方法论
 
 > 遇到内存镜像/pcap/磁盘镜像/日志取证题时读取。覆盖取证流程与各类取证工具命令。**命令行工具为主**（AI 可执行，避免 GUI 依赖）。不依赖主 prompt 上下文。
 
@@ -13,20 +13,31 @@
 | `.pcap`/`.pcapng` | 网络取证 | §2 |
 | 内存镜像（`.raw`/`.vmem`/`.dmp`，常无扩展名，`file` 显示 "Windows dump"/"data"） | 内存取证 | §3 |
 | 磁盘镜像（`.dd`/`.E01`/`.img`） | 磁盘取证 | §4 |
+| VM 镜像（`.ova`/`.vmdk`/`.vdi`） | 虚拟机镜像取证 | `disk-memory-forensics.md` §2（qemu-img 展开 + mmls/fls/icat） |
 | `.evtx`/`/var/log/*`/access.log | 日志分析 | §5 |
+| 图像/音频/视频/文档疑似藏数据 | 隐写分析 | `steganography-forensics.md`（专项文件） |
+| Office 宏文档（`.docm`/`.pptm`/`.xlsm`，含 VBA 宏） | Office 宏取证 | `malware-analysis.md` §8a（olevba/pcodedmp 提取宏） |
+| pcap 加密流量/隐蔽信道/隧道/文件层修复 | 网络取证进阶 | `network-forensics.md`（专项文件，本文件 §2 是基础侦察） |
+| 磁盘恢复/加密卷/内存 key/容器云/文件系统修复 | 磁盘内存进阶 | `disk-memory-forensics.md`（专项文件，本文件 §3-§4 是基础） |
+| Windows 事件ID/USN/ADS/反取证/MPLog | Windows 专项 | `windows-forensics.md` |
+| USB 外设/逻辑分析/显示信号/侧信道/3D 打印 | 硬件信号 | `hardware-signal-forensics.md` |
+| `.log` 含 `POST /v1/messages`（LLM API 网关日志） | AI 网关日志取证 | §6a |
 | 压缩包/混合 | 先解压分类，按内容类型分流 | — |
 
 **通用第一步（任何类型先做）**：
 ```bash
 file <素材>                                          # 确认真实类型
-strings -n 8 <素材> | grep -iE "flag|ctf|key|pass"   # 快速捞敏感串
+strings -n 8 <素材> | grep -iE "flag|key|pass"   # 快速捞敏感串
 ```
+
+**未持有原始素材（仅有描述/截图，无附件）**：以名称等线索检索公开来源获取原始文件，下载后先 `file` 校验类型（分享链接用对应下载工具，如 Google Drive 链接 `python -m gdown "<id>"`（随用随装）；直链用 `curl`）；大体积先确认总大小再下载。
+**被改名/伪装的标准 artifact**（配置文件/键盘布局/脚本被改 name 或文件名）：不要肉眼比对，与上游权威原件逐字节 `diff` 定身份（例见 `disk-memory-forensics.md` §6a）。
 
 ---
 
 ## 2. 网络取证（pcap）
 
-工具：**tshark**（Wireshark CLI，AI 友好）。
+工具：**tshark**。
 
 **基本侦察**：
 ```bash
@@ -47,27 +58,31 @@ tshark -r cap.pcap -Y "dns" -T fields -e dns.qry.name           # DNS 查询名
 **文件 carving（pcap 内嵌文件）**：
 ```bash
 tshark -r cap.pcap --export-objects "smb,./out/"     # SMB 传输文件
-foremost -i cap.pcap -o out/                          # 按 magic 提取嵌入文件
+tshark -r cap.pcap -z expert                          # 专家信息汇总（告警/错误分组统计）
+tshark -r cap.pcap -z follow,tcp,0                    # 命令行追踪流（ASCII 流还原）
+tshark -r cap.pcap -z conv,ip                          # IP 会话统计（谁和谁聊最多）
+# 捕获过滤器（BPF，-f 抓包时）与显示过滤器（-Y 读包时）语法不同: BPF=`tcp port 80 and host 1.2.3.4`; 显示=`tcp.port==80 && ip.addr==1.2.3.4`
+tshark -r cap.pcap --export-objects http,out_http       # HTTP 传输文件导出（pcap 场景首选）
 ```
 
 ---
 
 ## 3. 内存取证（Volatility 3）
 
-工具：**Volatility 3**（命令 `vol` 或 `python -m volatility3`；v3 自动识别 profile，无需像 v2 手动指定）。
+工具：**Volatility 3**——命令 `$(dirname $PYTHON_CMD)/vol`（v3 自动识别 profile，无需指定）。
 
 **Windows 镜像常用插件**：
 ```bash
-vol -f mem.raw windows.info                                    # OS 版本/架构
-vol -f mem.raw windows.pslist                                  # 进程列表
-vol -f mem.raw windows.pstree                                  # 进程树（看父子异常）
-vol -f mem.raw windows.netscan                                 # 网络连接（找 C2）
-vol -f mem.raw windows.cmdline                                 # 各进程命令行
-vol -f mem.raw windows.filescan | grep -iE "flag|\.txt|\.zip"  # 扫文件名
-vol -f mem.raw windows.dumpfiles --pid <PID>                   # 提取某进程文件
-vol -f mem.raw windows.hashdump                                # SAM 密码哈希
-vol -f mem.raw windows.registry.printkey --key "SAM\\Domains\\Account"  # 注册表
-vol -f mem.raw windows.malfind --pid <PID>                     # 检测注入代码（malware）
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.info                                    # OS 版本/架构
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.pslist                                  # 进程列表
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.pstree                                  # 进程树（看父子异常）
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.netscan                                 # 网络连接（找 C2）
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.cmdline                                 # 各进程命令行
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.filescan | grep -iE "flag|\.txt|\.zip"  # 扫文件名
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.dumpfiles --pid <PID>                   # 提取某进程文件
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.hashdump                                # SAM 密码哈希
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.registry.printkey --key "SAM\\Domains\\Account"  # 注册表
+$(dirname $PYTHON_CMD)/vol -f mem.raw windows.malfind --pid <PID>                     # 检测注入代码（malware）
 ```
 
 **Linux 镜像**：插件前缀换 `linux.`（`linux.pslist`/`linux.netscan`/`linux.bash` 等）。
@@ -87,8 +102,8 @@ AI 用命令行（autopsy 是 GUI，不便自动化）。
 
 **文件 carving（按 magic 提取，含已删文件）**：
 ```bash
-foremost -i image.dd -o out/             # 通用 carving（图片/文档/zip）
-binwalk -e firmware.bin                  # 固件/嵌入文件系统提取
+binwalk -e firmware.bin            # 固件/嵌入文件提取（-e 提取可解类型; 递归解包加 -M）
+binwalk -e -C out image.dd         # 按签名提取嵌入文件到 out/（v3.1 无 v2 的 --dd; 需要全量 magic 雕刻时用 foremost）
 ```
 
 **挂载只读分析**：
@@ -98,7 +113,7 @@ mount -o ro,loop,show_sys_files -t ntfs-3g image.dd /mnt   # NTFS（含 $MFT 等
 ```
 
 **Windows artifact（解析注册表 hive：SAM/SYSTEM/SOFTWARE/NTUSER.DAT）**：
-- 工具：regripper（`rip.pl -r <hive> -f <profile>`）或 python-registry
+- 注册表解析: `$PYTHON_CMD -c "import Registry; r=Registry.Registry(chr(78)+chr(84)+chr(85)+chr(83)+chr(69)+chr(82)+chr(46)+chr(68)+chr(65)+chr(84)); print(r.root())"`
 - 关键键：`UserAssist`（程序执行记录）、`Shellbags`（浏览过的文件夹）、`Run`/`RunOnce`（持久化）、`MountedDevices`
 - 捞串：`strings -n 8 NTUSER.DAT | grep -iE "flag|recent"`
 
@@ -110,7 +125,7 @@ mount -o ro,loop,show_sys_files -t ntfs-3g image.dd /mnt   # NTFS（含 $MFT 等
 
 **Windows 事件日志（`.evtx`）**：
 ```bash
-evtx_dump security.evtx > sec.xml        # 转 XML（python-evtx 或 evtx-dump）
+$PYTHON_CMD -c "from Evtx.Evtx import Evtx; [print(r.xml()) for r in Evtx(chr(115)+chr(101)+chr(99)+chr(117)+chr(114)+chr(105)+chr(116)+chr(121)+chr(46)+chr(101)+chr(118)+chr(116)+chr(120)).records()]" > sec.xml   # evtx→XML
 grep -iE "4624|4625|4688|4698" sec.xml
 ```
 关键事件 ID：
@@ -122,8 +137,16 @@ grep -iE "4624|4625|4688|4698" sec.xml
 **Web 日志（access.log）**：
 ```bash
 grep -iE "union|select|%3Cscript|cmd=|wget|curl" access.log   # SQLi/XSS/RCE 痕迹
-awk '{print $1}' access.log | sort | uniq -c | sort -rn        # IP 频次（扫描识别）
+awk '{print $1}' access.log | sort |uniq -c | sort -rn        # IP 频次（扫描识别）
 ```
+
+**盲注日志还原**（攻击已完成、从日志反推被拖出的数据）: 布尔盲注日志形如 `...ORD(RDER BY flag LIMIT 0,1),(N,1))>V HTTP/1.1" 200 LEN`——正则提取三元组（字符位 N/比较值 V/响应长度 LEN）: 响应长度与"正确页"一致则真实 ascii=V+1、否则=V; 全部字符位按 N 排序后 `chr()` 拼接即明文。`re.findall(r'%2C(\d+)%2C1%29%29%3E(\d+).*? 200 (\d+)', line)` + 以 LEN 区分真假页。
+
+**扫描器 UA/请求指纹**（应急响应定性攻击工具）: awvs→`http contains "acunetix"`（或 wvs）/ netsparker→"netsparker" / appscan→"Appscan" / nessus→"nessus" / sqlmap→"sqlmap"。
+
+**应急响应流量/日志搜索套路**（问什么搜什么）: 黑客后台→`http contains "admin"`; webshell→搜 eval/base64 POST; robots 泄露→"Disallow"; 数据库凭据→"dbhost"; 网卡配置→"eth0"; VPN/CC 地址→统计→端点按流量排序; 暴力枚举范围→`tcp.connection.syn and ip.src==攻击者IP`; telnet 登录信息→`ip.addr==攻击者 and telnet contains "login"`。
+
+**中国菜刀 webshell 流量特征**（pcap 取证解码）: POST 参数典型三元组 `z1`=目标主机名+连接用户名+数据库密码（以自定义分隔符拼接，分隔符看 webshell 源码 `$ar = explode("分隔符", $conf)` 得知）/ `z2`=库名 / `z3`=base64 的 SQL 语句（`c2VsZWN0...` 解码即 `select ...`）; 抓到 z1 串后按分隔符切开即得数据库凭据，无需解密。登录成功判别: 同一批 POST 中响应长度显著异于其余（如 75x vs 4xx）的即成功登录。中文乱码处理: 追踪 TCP 流→显示"原始数据"→save as 文本。
 
 **Linux 日志**：`/var/log/auth.log`（登录/sudo/SSH）、`/var/log/syslog`、`/var/log/cron`、`.bash_history`。
 
@@ -147,19 +170,73 @@ awk '{print $1}' access.log | sort | uniq -c | sort -rn        # IP 频次（扫
 
 ---
 
+## 6a. AI 网关日志取证（LLM 会话痕迹）
+
+> 素材是 LLM API 网关/代理的会话日志（AI 辅助开发/攻击的痕迹）时用本节。
+
+**识别信号**：
+- 日志含 `POST /v1/messages`（Anthropic）或 `/v1/chat/completions`（OpenAI 兼容网关）
+- 单文件体积大（多轮会话可达数十 MB）；JSON 结构含 `model`/`messages`/`tool_use` 字段
+
+**核心原理（Anthropic Messages API）**：该 API 无服务端会话状态——客户端每轮请求都要**回显完整对话历史**。因此**最后一个请求的 body 就是全量会话记录**：全部用户输入、assistant 回复、以及 assistant 发起的每个工具调用。只需解析最后一条请求，无需拼接中间轮次。
+
+**重建目标源码（重放工具调用）**：
+```python
+import json
+last_body = None
+for line in open("messages.log", encoding="utf-8", errors="ignore"):
+    line = line.strip()
+    if "v1/messages" not in line or not line.startswith("{"):
+        continue
+    try:                       # JSON-lines 网关日志: 每行一条请求记录
+        rec = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    body = rec.get("body") or rec.get("request_body") or rec
+    if isinstance(body, str):
+        try: body = json.loads(body)
+        except json.JSONDecodeError: continue
+    if isinstance(body, dict) and "messages" in body:
+        last_body = body        # Anthropic 回显特性: 只留最后一条即全量
+assert last_body, "未找到含 messages 数组的请求体"
+files = {}
+for msg in last_body["messages"]:               # content 是分块数组
+    for block in msg.get("content", []):
+        if block.get("type") != "tool_use":
+            continue
+        name, inp = block["name"], block["input"]
+        if name == "Write":                     # {file_path, content} → 建文件
+            files[inp["file_path"]] = inp["content"]
+        elif name == "Edit":                    # {file_path, old_string, new_string, replace_all}
+            fp, old, new = inp["file_path"], inp["old_string"], inp["new_string"]
+            n = -1 if inp.get("replace_all") else 1
+            files[fp] = files[fp].replace(old, new, n)
+for fp, content in files.items():
+    print(fp, len(content))
+```
+- 非 JSON-lines 格式（如 access log + 独立 body 文件）: 先 `grep -n "POST /v1/messages" messages.log` 定位，取最大 body 解析
+- 重放产物是**完整源码树含 baked-in 密钥**（硬编码 secret、S-box 种子、HKDF salt 常直接写在源码里）——先 grep `secret|key|salt|password` 再读文件
+- 工具名按实际 agent 而变：`Write/Edit` 是编码 agent 常见形态；其他日志可能是 `str_replace_editor`/`apply_patch` 等——先 `grep -o '"name": *"[a-z_]*"' messages.log | sort | uniq -c` 枚举工具名再写重放器
+- 非最后一条请求也可用于交叉验证（历史请求是会话前缀子集）
+
+**成功判据**：重建的文件树能通过语法检查/导入执行；密钥能解出嵌入数据。**失败排查**：工具调用有遗漏（日志截断/中间轮缺失）→ 对比相邻请求的 messages 数组长度找缺口。
+
+**本地 LLM 工具（Ollama 类）痕迹取证**: 与 API 网关不同，本地推理留痕在主机——①`~/.ollama/history` 明文保存全部 prompt/回复（口令、密钥派生 passphrase、恶意意图常直接写在请求里）②`/etc/systemd/system/ollama.service` + journal/syslog 存在性证明安装与运行 ③auditd `EXECVE` 事件记录 `ollama pull/run` 与后续脚本执行链 ④`~/.Trash` 或未彻底删除的生成脚本本体 ⑤脚本产物（加密归档、外发路径）与 auditd 文件访问事件交叉。bash_history 清空不影响以上任一来源。流程: history 提 passphrase → 回收站脚本还原派生逻辑（如 `blake2b(pass, digest_size=32).hexdigest()[:20]` 类 ZIP 口令变换）→ 解密归档恢复已删除敏感文件（与现存文件按 SHA-256 比对定位被删的那份）。
+
+---
+
 ## 7. 工具速查
 
 | 工具 | 用途 | 关键命令/插件 |
 |------|------|--------------|
 | tshark | pcap 分析 | `-r`/`-Y <filter>`/`--export-objects <proto,dir>` |
 | vol (Volatility 3) | 内存取证 | `vol -f <dump> windows.<plugin>`；Linux 用 `linux.*` |
-| foremost | 文件 carving | `foremost -i <img> -o <dir>` |
-| binwalk | 固件/嵌入文件 | `binwalk -e <file>` |
+| binwalk | 文件 carving/固件提取 | `binwalk -e [-C <dir>] <file>`（递归加 `-M`） |
 | strings | 字符串提取 | `strings -n 8 <file>` |
-| evtx_dump | Windows 日志 | `evtx_dump <evtx>` |
-| regripper | 注册表 hive | `rip.pl -r <hive> -f <profile>` |
+| Evtx→XML | Windows 事件日志 | 上节 python-evtx 命令 |
+| python-registry | 注册表 hive | `import Registry; Registry.Registry("NTUSER.DAT")` |
 
-**安装**：`pip install volatility3`；tshark/foremost/binwalk 走系统包管理（brew/apt）；`pip install python-evtx python-registry`。
+**pcap 抓包文件处理**: `tshark -r cap.pcap`（命令行分析/对象导出）; python 侧 `from scapy.all import rdpcap`（程序化解析/重组 HTTP 对象）。
 
 > autopsy/FTK/X-Ways 是 GUI 工具，AI 自动化优先用上方命令行替代；确需 GUI 时参考 `$SHARED_DIR/knowledge-base/gui-automation.md`。
 

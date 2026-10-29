@@ -1,0 +1,241 @@
+# task_descriptor.tmpl 详细分析
+
+> 源码路径：`pentagi/backend/pkg/templates/prompts/task_descriptor.tmpl`
+> 模板变量定义：`templates/templates.go:385-390`（`PromptTypeTaskDescriptor`）
+> 触发逻辑：`controller/task.go:47`（`NewTaskWorker`）、`controller/tasks.go:66`（`CreateTask`）、`providers/provider.go:281`（`GetTaskTitle`）
+> 时间工具：`providers/helpers.go:929`（`getCurrentTime`）
+
+---
+
+## 元信息
+
+| 项目 | 值 |
+|------|-----|
+| **原文件名** | `task_descriptor.tmpl` |
+| **常量名** | `PromptTypeTaskDescriptor` |
+| **所属分类** | C 类 · 工具/辅助 Prompt（功能性模板） |
+| **结构体归属** | `ToolsPrompts.GetTaskDescription`（`templates/templates.go:585`） |
+| **配对关系** | 无配对（不是 agent 角色模板） |
+| **注册工具** | 无 |
+| **定义位置** | `templates/templates.go:59`（常量）、`templates.go:385-390`（占位符注册）、`templates.go:585`（结构体挂载） |
+| **触发源码** | `controller/tasks.go:66-82`（入口 `CreateTask`）、`controller/task.go:47-61`（`NewTaskWorker`）、`providers/provider.go:281-316`（`GetTaskTitle`） |
+| **下游消费** | `database.CreateTask` 的 `Title` 字段（`controller/task.go:63-68`）→ 落库 + `Publisher.TaskCreated` 广播 |
+
+---
+
+## 一、原文件名
+
+`task_descriptor.tmpl`
+
+对应模板类型常量：`templates.PromptTypeTaskDescriptor = "task_descriptor"`（定义于 `templates/templates.go:59`，注释为 `// generates task titles from user requests`）。
+
+在 prompter 初始化时，它被挂载到 `ToolsPrompts` 结构体的 `GetTaskDescription` 字段（`templates.go:585`），紧邻 `GetFlowDescription`（flow_descriptor）——两者并排挂载，构成"描述符工具"双子，但分属不同粒度（见 §三、§七）。
+
+---
+
+## 二、类型与用途
+
+**C 类功能性/辅助 Prompt**——一段纯文本生成模板，用于在 task 创建期为该 task 生成一个简洁、有描述性的标题。
+
+### 2.1 核心定位
+
+本模板**不是面向执行 agent 的角色 system prompt**，而是一次性的"元数据生成器"。它解决的问题：用户提交的 task 描述（`input`）可能很长，需要一个不超过 N 个字符的短标题，供 task 列表展示、日志检索、subtask 关联区分。
+
+它归属于 `ToolsPrompts`（功能性模板集合），而非 `AgentsPrompts`（agent 角色模板集合）。这一归属决定了它：
+
+- **无工具**（不参与 function calling 编排）
+- **无配对 Human 模板**（不构成 System+Human 对话）
+- **无消息链**（单次 LLM 调用即结束）
+
+### 2.2 与 flow_descriptor 的粒度区分
+
+本模板与 `flow_descriptor.tmpl`（flow 级标题）是**同构兄弟**——模板结构、占位符集合、`<role>/<task>/<guidelines>` 段落骨架完全一致。两者的根本区别是**作用域粒度**：
+
+| 维度 | `flow_descriptor`（flow 标题） | `task_descriptor`（task 标题，本模板） |
+|------|-------------------------------|----------------------------------------|
+| 服务对象 | 一个 flow（顶层会话） | flow 下的单个 task（执行单元） |
+| 调用频次 | flow 启动期 1 次 | 每 task 创建 1 次（一 flow 可多 task） |
+| 字符上限 `{{.N}}` | `20` | `150` |
+| 语言来源 | 启动时现场跑 `language_chooser` | 复用 flow 已固化的 `fp.language` |
+| 输出去向 | provider 结构体 `title` 字段 | 数据库 `task.Title` 记录 |
+
+task 标题上限（150）显著高于 flow 标题上限（20），因为 task 承载更具体的执行意图，需要更多字符表达技术目标与方法。
+
+---
+
+## 三、配对关系
+
+**无配对。**
+
+- 不属于 `AgentsPrompts` 结构体，不与任何 `question_xxx.tmpl` 配对（全仓库 grep 确认无 `question_task_descriptor`）。
+- 归属于 `ToolsPrompts`（功能性工具模板集合），与 `flow_descriptor.tmpl`（flow 级标题生成）是**兄弟关系**而非配对关系——`flow_descriptor` 服务于 flow 粒度，本模板服务于 task 粒度，两者各自独立调用、互不喂入对方。
+- 它的输出（标题字符串）落库为 `task.Title`，**不作为占位符注入下游模板**。本模板的输出只流向数据库与 UI/广播层（`Publisher.TaskCreated`）。
+
+---
+
+## 四、调用时机
+
+### 4.1 触发场景
+
+本模板在**每次新 task 创建时触发一次**，是 task 落库前的前置步骤。触发链自 controller 层发起，经 provider 接口方法完成 LLM 调用：
+
+| 环节 | 函数 | 源码位置 | 说明 |
+|------|------|---------|------|
+| 入口 | `taskController.CreateTask` | `controller/tasks.go:66` | task 控制器的创建方法，加锁后调 `NewTaskWorker` |
+| 工作单元构造 | `NewTaskWorker` | `controller/task.go:47` | 取标题 → 落库 → 广播的编排点 |
+| **取标题** | `flowCtx.Provider.GetTaskTitle` | `controller/task.go:58` | provider 接口方法（接口定义于 `provider.go:94`） |
+| 渲染模板 | `fp.prompter.RenderTemplate(PromptTypeTaskDescriptor, …)` | `providers/provider.go:295` | 注入 4 个占位符，产出 prompt 文本 |
+| **LLM 调用** | `fp.Call(ctx, pconfig.OptionsTypeSimple, titleTmpl)` | `providers/provider.go:305` | 裸 LLM 调用，返回标题字符串 |
+| 落库 | `flowCtx.DB.CreateTask` | `controller/task.go:63` | `Title: title` 写入 task 记录 |
+| 广播 | `flowCtx.Publisher.TaskCreated` | `controller/task.go:73` | 标题随 task 创建事件下发 UI |
+
+### 4.2 调用链全貌
+
+```
+taskController.CreateTask(ctx, input, updater)        // tasks.go:66
+  └─ NewTaskWorker(ctx, flowCtx, input, updater)      // task.go:47
+       │
+       ├─ task.go:58  flowCtx.Provider.GetTaskTitle(ctx, input)
+       │    └─ provider.go:281  GetTaskTitle
+       │         ├─ provider.go:295  RenderTemplate(PromptTypeTaskDescriptor, {Input, Lang, CurrentTime, N})
+       │         └─ provider.go:305  fp.Call(ctx, OptionsTypeSimple, titleTmpl) → title
+       │
+       ├─ task.go:63  DB.CreateTask({ Status, Title: title, Input, FlowID })   ← 标题先于落库生成
+       └─ task.go:73  Publisher.TaskCreated(ctx, task, ...)
+```
+
+关键时序：**标题生成发生在 task 数据库写入之前**（`task.go:58` 在 `task.go:63` 之前）。若标题生成失败，整个 task 创建流程直接 `return err`（`task.go:59-61`），不会写入无标题的 task 记录。
+
+### 4.3 调用特征
+
+- **per-task 触发**：每个新 task 创建调用一次。一个 flow 下可创建多个 task，故本模板在同一 flow 生命周期内可被多次触发（区别于 flow_descriptor 的"flow 启动期仅 1 次"）。
+- **同步阻塞**：在 `NewTaskWorker` 内同步完成，task 后续执行（`Run`）必须等标题生成结束。
+- **OptionsTypeSimple**：见 §五，裸 LLM 调用，无工具、无消息链。
+- **无显式结果清洗**：与 flow_descriptor 不同，`GetTaskTitle`（`provider.go:281-316`）未对返回值做 `strings.TrimSpace`，直接将 LLM 原始输出作为 title 返回并落库。标题的格式规范（无前缀、无引号）完全依赖 prompt 指令的约束力 + LLM 遵从性。
+
+---
+
+## 五、工具列表
+
+**本模板不注册、不绑定任何工具。**
+
+- 调用时传入的是 `pconfig.OptionsTypeSimple`（`providers/provider.go:305`）。
+- `GetOptionsForType(OptionsTypeSimple)` 返回的是 `pc.Simple.BuildOptions()`——即模型配置选项（temperature、model name 等），**不含 function calling 工具**。
+- 与带工具的 agent 模板（如 enricher 走 `OptionsTypeEnricher` 并由 executor 注册工具集）的本质区别：本模板的 LLM 只输出纯文本（一个标题），不能、也不需要调用任何工具。
+- 模板内容中不包含任何 `{{.XxxToolName}}` 占位符。
+
+它是一个**纯文本渲染器 + 单轮纯文本生成**模板：输入 4 个标量值，输出一段 prompt 文本，喂给 LLM 得到一个标题字符串。
+
+---
+
+## 六、非工具占位符详解
+
+本模板注册了 4 个非工具占位符（`templates/templates.go:385-390`）：
+
+```go
+PromptTypeTaskDescriptor: {
+    "Input",
+    "Lang",
+    "CurrentTime",
+    "N",
+},
+```
+
+注册表与模板正文引用的 4 个 `{{.Xxx}}` 完全一致，无多余、无遗漏。注入点统一在 `providers/provider.go:295-300`：
+
+```go
+titleTmpl, err := fp.prompter.RenderTemplate(templates.PromptTypeTaskDescriptor, map[string]any{
+    "Input":       input,
+    "Lang":        fp.language,
+    "CurrentTime": getCurrentTime(),
+    "N":           150,
+})
+```
+
+### 6.1 占位符清单
+
+| 占位符 | Go 类型 | 注入值来源 | 用途 |
+|--------|---------|-----------|------|
+| `{{.Input}}` | `string` | `GetTaskTitle` 的 `input` 形参（用户提交的该 task 原始描述） | 作为待概括的输入材料，注入 `<input>` 段 |
+| `{{.Lang}}` | `string` | `fp.language`（provider 结构体已固化的 flow 级语言字段） | 注入 `<user_language>` 段，约束标题使用该语言 |
+| `{{.CurrentTime}}` | `string` | `getCurrentTime()`（`helpers.go:929`） | 注入 `<current_time>` 段 |
+| `{{.N}}` | `int` | **硬编码字面量 `150`**（`provider.go:299`） | 标题字符数上限，注入 `<task>` 段的"in N characters or less"指令 |
+
+### 6.2 各占位符的注入时机与来源
+
+#### `{{.Input}}` — 用户原始输入
+
+- **来源**：沿调用链 `CreateTask(input)` → `NewTaskWorker(input)` → `GetTaskTitle(ctx, input)`（`provider.go:281`）的 `input` 形参逐层透传，即用户提交该 task 的原始文本。
+- **注入时机**：task 创建瞬间，原样透传，不做任何预处理（不截断、不清洗）。
+
+#### `{{.Lang}}` — 复用 flow 级语言（关键设计点）
+
+- **来源**：`fp.language`——provider 结构体上**早已固化**的字段。该字段在 flow 启动期由 `language_chooser` 一次性决策并写入（`NewFlowProvider`/`NewAssistantProvider` 构造期间）。
+- **与 flow_descriptor 的本质区别**：flow_descriptor 在调用前会**现场重新跑一次** `language_chooser` LLM 调用来获取语言；而本模板**不再重新判定语言**，直接读取 `fp.language` 字段复用。
+- **设计含义**：
+  - **省一次 LLM 调用**——每个 task 创建不再多花一次 language_chooser 的开销。
+  - **保证一致性**——同一 flow 下所有 task 的标题语言严格统一（都跟随 flow 启动时判定的语言），不会因 task 级独立判定而产生语言漂移。
+  - **改造约束**：若要让某个 task 独立切换语言，必须改 `fp.language` 的读取逻辑，不能只改本模板。
+
+#### `{{.CurrentTime}}` — 当前时间戳
+
+- **来源**：`getCurrentTime()`（`providers/helpers.go:929-931`）：
+  ```go
+  func getCurrentTime() string {
+      return time.Now().Format("2006-01-02 15:04:05")
+  }
+  ```
+- **格式**：`YYYY-MM-DD HH:MM:SS`（Go 时间格式化参考串）。
+- **注入时机**：模板渲染瞬间实时取值。
+- **实用性备注**：标题生成场景对时间信息的实际需求较弱（标题以"目标/动作"为核心，鲜少需要时间），此处注入更多是 PentAGI 全模板的统一惯例（多数模板都注入 CurrentTime 提供时序感知）。对本模板而言属冗余但无害的占位符。
+
+#### `{{.N}}` — 字符上限（硬编码常量）
+
+- **来源**：字面量 `150`，在 `provider.go:299` 硬编码：
+  ```go
+  titleTmpl, _ := fp.prompter.RenderTemplate(templates.PromptTypeTaskDescriptor, map[string]any{
+      "Input":       input,
+      "Lang":        fp.language,
+      "CurrentTime": getCurrentTime(),
+      "N":           150,   // ← 硬编码，非配置项
+  })
+  ```
+- **作用**：注入 prompt 的 `<task>` 段，指示 LLM "in 150 characters or less"。
+- **含义**：task 标题长度上限固定为 150 字符，不可通过配置调整。若需放宽/收紧，需改源码而非改配置——这是当前实现的硬约束。注意此值（150）远大于 flow_descriptor 的 `N=20`，体现了 task 标题需要承载更详细执行意图的设计取向。
+
+### 6.3 注入时机总结
+
+四个占位符**全部在 task 创建瞬间一次性注入**，无运行时更新、无跨请求缓存。其中：
+
+- `{{.Lang}}` 是**读已固化字段**（`fp.language`），不涉及新的 LLM 调用，故无串行依赖等待；
+- `{{.Input}}` / `{{.CurrentTime}}` / `{{.N}}` 在调用 `RenderTemplate` 的瞬间即可取值。
+
+这意味着本模板的渲染不存在 flow_descriptor 那样的"启动期串行依赖链"（language_chooser → descriptor），它是**自包含的单次渲染**——这是复用 `fp.language` 带来的解耦收益。
+
+---
+
+## 七、关键设计点
+
+### 7.1 "task 粒度元数据生成"模式
+
+本模板是 PentAGI"按粒度生成元数据"模式的 task 级实现：flow 启动期生成 flow 标题（flow_descriptor，存入 provider 字段），task 创建期生成 task 标题（本模板，存入 DB 记录）。两者职责分明，各自服务于其粒度的展示与检索需求，不互相喂入。
+
+### 7.2 N=150 硬编码 vs 可配置
+
+`{{.N}}` 取值 150 是源码字面量，未走配置系统。对比 `OptionsTypeSimple` 自身可通过 provider config 调整模型/温度，标题长度上限却是写死的。若不同部署环境对 task 标题长度有差异需求，当前实现无法适配，需改源码。同时该值与 flow_descriptor 的 `N=20` 各自独立硬编码，两者之间无统一来源，存在潜在不一致风险。
+
+### 7.3 语言复用：效率与一致性的权衡
+
+本模板读取 `fp.language` 而非重新跑 language_chooser，是相对 flow_descriptor 的设计优化：
+
+- **收益**：省一次 LLM 调用/task；保证 flow 内 task 标题语言统一。
+- **代价**：task 无法独立切换语言；若用户在 flow 中途希望某 task 用另一语言，当前实现无法支持。
+- **前提假设**：flow 内所有 task 共享同一语言是合理默认。这一假设在多数场景成立，但多语言混合任务场景下是潜在局限。
+
+### 7.4 缺失的结果清洗
+
+与 flow_descriptor（返回前 `strings.TrimSpace`）不同，`GetTaskTitle`（`provider.go:281-316`）未对 LLM 输出做任何清洗，直接作为 `title` 返回并落库。若 LLM 违反指令（如带换行、带前缀 "Title:"），这些噪声会原样进入 `task.Title`。当前完全依赖 prompt 指令的约束力，结果侧无兜底。这是相对 flow_descriptor 的一个防御性缺口。
+
+### 7.5 失败即中止的强约束
+
+标题生成失败（`provider.go:302`/`:307` 任一 `err`）会导致 `GetTaskTitle` 返回 error，进而 `NewTaskWorker`（`task.go:59-61`）整体失败、`CreateTask`（`tasks.go:75-77`）整体失败——**不会写入无标题的 task 记录**。这是"标题为 task 必备元数据"的强约束体现：宁可中止创建，不留空标题脏数据。

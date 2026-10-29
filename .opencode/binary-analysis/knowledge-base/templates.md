@@ -68,6 +68,19 @@ else:
 IDA_QUERY=<类型> IDA_OUTPUT="$TASK_DIR/result.json" [IDA_FUNC_ADDR=<地址>] [IDA_PATTERN=<模式>] \
   "$IDAT" -A -S"$SHARED_DIR/query.py" -L"$TASK_DIR/idat.log" "<目标文件>"
 
+# ── 调用陷阱 ──
+# 1. 地址参数必须带 0x 前缀: 脚本对纯数字串按 16 进制解析（int(x,16)）。shell 算术展开
+#    $(($base+$off)) 产出 10 进制串（如 8320）会被误当 0x8320 读到全 FF——拼接地址用
+#    printf '0x%x' $((0x2040+64)) 或直接手写 0x2080。
+# 2. IDA_PATTERN 是 glob 语义（fnmatch）不是正则: ".*" 只匹配以字面 '.' 开头的名字
+#    （.init_proc 等），匹配全部请留空。
+# 3. read_data 大块读原始字节须用 IDA_READ_MODE=bytes: bytes 模式下 IDA_READ_SIZE 可传
+#    任意大小（如 256/4096）; 默认 auto 模式当数据被判定为原始字节时（既非字符串也非
+#    指针的兜底分支），实际读取长度被压到最多 64 字节（实现为 min(size_hint,64)）——
+#    传 4096 也只返回 64，勿据返回的 length 字段推断该区域真实大小。
+# 4. 长跑/交互式 python 一律加 -u（$PYTHON_CMD -u script.py）: 管道/重定向下 print 是
+#    块缓冲，程序真挂起与"在跑但输出憋着"无法区分——-u 后超时才是真超时。
+
 # 更新操作（单操作）
 IDA_OPERATION=<操作> IDA_OUTPUT="$TASK_DIR/result.json" [其他参数] \
   "$IDAT" -A -S"$SHARED_DIR/update.py" -L"$TASK_DIR/idat.log" "<目标文件>"
@@ -76,7 +89,14 @@ IDA_OPERATION=<操作> IDA_OUTPUT="$TASK_DIR/result.json" [其他参数] \
 IDA_OPERATION=batch IDA_BATCH_FILE="$TASK_DIR/ops.json" IDA_OUTPUT="$TASK_DIR/result.json" \
   "$IDAT" -A -S"$SHARED_DIR/update.py" -L"$TASK_DIR/idat.log" "<目标文件>"
 
-# 初始分析流水线（首次分析时首选）
+# ── 参数传递机制：为什么用环境变量而不是命令行参数 ──
+# 1. -S"script.py --arg val" 的参数只能经 idc.ARGV 获取（sys.argv 拿不到，实测），
+#    且外层引号已被 -S 占据——$TASK_DIR 含空格时内层无法再加引号，bash/PowerShell 转义各不相同
+# 2. 环境变量的值不经过 shell 二次解析，路径含空格/特殊字符天然安全，双平台行为一致
+# 3. IDA_OUTPUT 等变量只被脚本读取（_base.env_str），idat 本身只认 -L（日志路径）
+
+# 初始分析流水线（首次分析时首选；binary/mobile 共用——目标可为 PE/Mach-O/.so/.dylib）
+# initial.json = 脚本写的结构化数据（各字段自带 description 自解释）；initial.log = idat 运行日志（失败诊断用）
 IDA_OUTPUT="$TASK_DIR/initial.json" \
   "$IDAT" -A -S"$SHARED_DIR/scripts/initial_analysis.py" -L"$TASK_DIR/initial.log" "<目标文件>"
 
@@ -154,7 +174,6 @@ idat 执行失败时：
 
 > Windows 上使用 PowerShell 执行。与上方 bash 模板一一对应。
 > 关键差异: `VAR=xxx command` → `$env:VAR="xxx"; command`，路径分隔符 `\`。
-> `$PYTHON_CMD` 由 Plugin 保证为 venv Python 绝对路径（含第三方包），无需区分平台。
 
 ### 预检查脚本
 

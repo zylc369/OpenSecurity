@@ -24,10 +24,10 @@
 
 检测到已知壳名（`packer_name` 不为 null 且不为 "unknown"）时：
 
-1. 检查系统是否安装对应脱壳工具（`which upx` 等）
-2. **已安装** → 执行脱壳（输出到 `$TASK_DIR`，不覆盖原文件），如 `upx -d "<原始文件>" -o "$TASK_DIR/<文件名>_unpacked"`
+1. UPX 壳: `upx -d 目标.bin`（同架构版本不对时换历史版本重试）
+2. **已安装** → 执行脱壳（输出到 `$TASK_DIR`，不覆盖原文件），如 `upx -d "<原始文件>" -o "$TASK_DIR/<文件名>_unpacked"`; UPX 失败时先验魔改——核对 UPX 节名/头部字段/版本标记完整性，疑似篡改对照 UPX 源码（GitHub）定位修改点
 3. **已安装但脱壳失败** → 进入阶段 2.5
-4. **未安装** → 告知用户安装命令（如 `brew install upx`），然后进入阶段 2.5
+4. **脱壳失败**（版本不符/修改过壳）→ 进入阶段 2.5
 
 脱壳成功后 → 用 `file` 命令验证输出文件类型 → 跳到"脱壳后后续流程"。
 
@@ -99,6 +99,17 @@
 1. **首选 IDA 调试器 dump**（阶段 3.5a）
 2. **IDA 调试器失败**（反调试 / 无法启动 / 超时）→ 尝试 Frida（阶段 3.5b）
 3. **Frida 也失败**（未安装 / 非 PE 格式 / 反 Frida）→ 回退到阶段 3（静态分析）
+
+**memfd_create 无文件载荷**（games-and-vms-3）: 载荷经 memfd_create+fexecve 全内存执行、磁盘零落盘——解密产物在 fexecve 前拦截: hook memfd_create 取缓冲，或 dump `/proc/<pid>/fd/` 的匿名 fd 条目（fd 指向 `memfd:xxx`），照常分析 dump 出的二进制。
+
+**多层嵌套容器的提取策略**（ELF→PyInstaller→VMProtect→Game Boy ROM→伪装 ELF 型五层链）:
+
+1. **逐层剥离用标记+变换对**: PyInstaller stub 后找 `<<<PAYLOAD_START>>>` 类标记——其后 `LE32 长度 + 混淆数据`，逆变换（如 `reverse(bytes[i] ^ [a5,3c,ff,00,55,aa][i%6])`）还原内层 PE; 每层的嵌入标记/密钥在该层二进制里静态可查。
+2. **拦截"最终动作"API 阻止执行分叉**: VMProtect 层会用 `ShellExecuteA`（弹出内嵌 ROM 文件）、`MessageBoxW` 等产生 GUI/文件副作用——Frida `Interceptor.replace` 让它们直接返回成功值（如 33）不执行真动作，进程留在"解包完成、即将行动"的稳定状态，此时按**固定 RVA** 从主模块读出全部内嵌资源（ROM 起始 base+0x4000、长度 base+0xc000 等——RVA 在脱壳后的 `.data` 布局稳定）。
+3. **诱饵层识别**: 某层的"看起来是下一层入口"的元数据（如 ROM 里的 140 条虚拟 opcode 表）与外层证据矛盾（PE 级 `.data` 里另有完整 ELF 资源 + 长度字段）时，判定该表为 decoy 跳过——**跨层证据矛盾是诱饵信号**，别把每层元数据都当真payload 挖到底。
+4. **伪装数据容器**: 最内层"ELF"可能只是**借 ELF 格式存数据**（无代码）——直接解析 section headers 取 `.rodata`（key）与 `.data`（密文）做 AES 解密，别找入口点。
+
+**总原则**: 比起完整脱壳每层 protector，"跑到解包完成点 → 按 RVA 抄资源"更短且可复现（Frida spawn + hook + 100×0.1s 轮询即一个稳定提取器）。
 
 ## 阶段 3：静态分析脱壳（最后手段）
 
@@ -242,7 +253,7 @@ $PYTHON_CMD "$SHARED_DIR/scripts/frida_unpack.py" <目标二进制> -o "$TASK_DI
    ```
    **注意**：此处用 `initial_analysis.py` 而非 `query.py`，以便一次性获取解壳后的完整信息
 2. 读取输出 JSON，获取解壳后的场景分类
-3. 根据新的 scene_tags 进入对应的分析方案（`analysis-planning.md`）
+3. 根据解壳后的信号（imports/strings/packer_detect）重新判断场景，进入对应分析方案（判断表见 `analysis-planning.md`）
 4. 脱壳机/dump 脚本保留在 `$TASK_DIR/`
 
 ## 禁止操作（加壳版本上）
@@ -273,3 +284,10 @@ $PYTHON_CMD "$SHARED_DIR/scripts/frida_unpack.py" <目标二进制> -o "$TASK_DI
 ### 处理方式
 
 **不要尝试让 IDA 完整分析 VMP 段**。内核驱动分析需要双机调试等特殊方法，详见 `$SHARED_DIR/knowledge-base/kernel-driver-analysis.md`。
+
+
+---
+
+## .NET 保护器（ConfuserEx 型）
+
+.NET 保护器加密方法体，运行时从 <Module> .cctor 解密。dump: de4dot 解混淆 → ilspycmd 反编译定位 <Module> .cctor 解密逻辑 → 复现解密算法还原方法体: F5 跑到构建完成 → 右键 Save Module（token 完整）→ `de4dot` 清混淆符号。原理: 磁盘代码被保护但运行时表示是明文——与 native 壳 OEP dump 同理。

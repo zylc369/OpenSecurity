@@ -1,6 +1,6 @@
 # Unicorn 模拟执行脚本模板
 
-> AI 编排器在需要模拟执行验证算法时按需加载。
+> Unicorn 是 CPU 模拟框架（`import unicorn`，$PYTHON_CMD 环境已装）——不运行原始二进制，只加载代码片段模拟执行。AI 编排器按需加载本模板。
 
 ## 触发条件
 
@@ -170,7 +170,7 @@ run_headless(_main)
 ## 模板 2: 纯 Python 脚本（不依赖 IDA）
 
 > 在 Python 进程中直接运行，需要手动提供二进制数据。适用于算法验证。
-> **必须使用 `$PYTHON_CMD` 运行**（需要 unicorn 包，安装在 venv 中）。
+> **必须使用 `$PYTHON_CMD` 运行**（unicorn 包随 $PYTHON_CMD 环境提供）。
 
 ```python
 """Unicorn 模拟执行 — 纯 Python 模板
@@ -245,6 +245,29 @@ if __name__ == "__main__":
 
 ---
 
+## 混合模式 64↔32 切换
+
+64 位 ELF 经 retf（0xCB/0xCA，0x48 前缀=retfq）跳入 32 位 blob（识别: 32 位区 SSE 紧循环 psubb/pxor/paddb + 计算跳转落 32 位区）。三步:
+1. 建 UC_MODE_32 模拟器，拷贝内存 + GPR + **EFLAGS + XMM 全套**（blob 依赖继承状态，缺了输出错）
+2. 执行 32 位块
+3. 内存+寄存器拷回 64 位侧继续
+
+陷阱: retf 弹 **6 字节**（4B EIP + 2B CS）不是 8。fork/ptrace 反调试配套时先模拟父进程 log POKE 序列再子侧重放。
+
+## Ghidra EmulatorHelper 替代模板
+
+Ghidra 内置模拟器，免搭 Unicorn 环境、复用 Ghidra 已有分析（函数边界/地址直接引用）。Java 脚本五步:
+```java
+EmulatorHelper emu = new EmulatorHelper(currentProgram);
+emu.writeRegister("RSP", 0x2fff0000);            // 1. 栈指针（RBP 同设）
+emu.writeMemory(dataAddress, encryptedBytes);     // 2. 写输入
+emu.writeRegister("RDI", arg1);                   // 3. 设参数（x86-64 ABI）
+emu.setBreakpoint(returnAddress);                 // 4. 返回地址断点
+emu.run(functionEntryAddress);
+byte[] out = emu.readMemory(outputAddress, len);  // 5. 读输出
+```
+适用: 一次性"跑函数拿解密结果"（密钥派生枚举同思路）。逐指令 hook 追踪仍首选 Unicorn（UC_HOOK_CODE）; Ghidra API 生态为 Java，速度略慢。
+
 ## 常见陷阱
 
 | 陷阱 | 说明 |
@@ -254,4 +277,28 @@ if __name__ == "__main__":
 | 未处理系统调用 | 模拟不包含 OS API 调用（如 malloc、printf）。遇到时需手动 hook 返回值 |
 | 浮点指令 | Unicorn 默认不映射浮点寄存器。需要时手动映射 |
 | 自修改代码 | 某些壳/保护会修改自身代码。需要在写操作后重新读取 |
+| 未实现寄存器告警噪音 | 设环境变量 `UC_IGNORE_REG_BREAK=1` 静默未实现寄存器告警 |
 | 函数边界判断 | `emu_start` 的结束地址不一定是下一条指令。用 `emu_stop()` 在 hook 中手动停止更可靠 |
+
+## Unicorn 2.1.2 已知限制（x86-64，触发: 拟模拟含信号/自修改/单步的目标前必查）
+
+**限制 1: `EFLAGS.TF` 写入不产生单步 trap**。`reg_write(UC_X86_REG_EFLAGS, ...|0x100)` 后继续执行不会触发 INTR。TF 单步须手动模拟，三要素缺一不可:
+1. `UC_HOOK_INTR` 中对 intno=1 按 SIGTRAP 递送（构造 ucontext 后跳原 handler）
+2. 进入 handler 前清 CPU 的 TF 位（内核语义: handler 运行时无 TF），但 **INTR(1) 触发时 unicorn 报告的 EFLAGS 已无 TF**——写 ucontext.gregs[REG_EFL] 时必须显式 `|= 0x100` 回填（真实内核保留 TF 在信号帧）
+3. sigreturn 恢复时按 ucontext EFL 的 TF 位重新激活手动单步
+
+**限制 2: SMC 页 TB 执行后不自动续**。被 `UC_HOOK_MEM_WRITE` 监听的 RWX 页（JIT 槽/自修改代码）执行一个翻译块后 `emu_start` 即返回，即使远未到 until。`ctl_remove_cache` 只保证重翻译，不保证连续执行——须外层 `while not finished: emu_start(当前RIP, until)` 重启驱动。
+
+**限制 3: `until=0` 存在提前停止路径**。`emu_start(begin, 0)` 在部分场景执行单条/单块后返回。until 一律传具体哨兵地址（如 RET magic）。
+
+**综合判定: 信号递送（手动 ucontext/sigreturn）+ TF 单步 + SMC 三者叠加的全程序模拟不可行**——重构循环追三个限制的组合 bug 的成本远超收益。遇信号驱动 VM/信号混淆直接转 LD_PRELOAD 原生观测（见 `$SHARED_DIR/knowledge-base/vm-bytecode-reversing.md` §dispatcher 第四形态）。
+
+## 模拟模式选择判据（触发: 决定用 Unicorn 时先过此表）
+
+| 目标特征 | 模式 | 要点 |
+|---------|------|------|
+| 纯计算函数（无 libc 调用、无信号） | **单函数调用**（首选） | 映射 .text+栈+数据区; 设 rdi/rsi/rdx; RET 哨兵压栈作 until; 参见模板 2 |
+| 需要 libc（malloc/printf 族） | PLT hook 全程序 | 按地址范围 hook .plt 各项，Python 实现 libc 语义后 `do_ret` |
+| 含信号 handler（sigaction 当 dispatcher） | **放弃模拟** | 三限制叠加（见上）; 转 LD_PRELOAD 包装器原生观测 |
+| 含 TF 单步执行 / RWX 自修改槽 | **放弃模拟** | 限制 1/2 必踩; 转原生观测 |
+| 仅需跑"指令解码/哈希/解密"等独立函数 | **单函数调用** | 即便宿主程序是信号 VM，解码函数本身无信号——逐条喂参数调用，绕开全程序模拟 |

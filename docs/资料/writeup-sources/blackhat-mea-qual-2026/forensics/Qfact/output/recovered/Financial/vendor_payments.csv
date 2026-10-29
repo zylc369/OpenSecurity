@@ -1,0 +1,43 @@
+﻿VENDOR PAYMENT SCHEDULE - Q3 2025
+Prepared by: Accounts Payable
+Classification: Internal
+Last Updated: June 14, 2025
+
+PAYMENT CALENDAR
+
+Vendor,Invoice Number,Description,Amount,Currency,Due Date,Payment Method,Status,Approver,Cost Center
+Amazon Web Services,AWS-2025-Q3-001,Cloud infrastructure (July),USD .00,USD,Jul 01,Wire Transfer,Scheduled,M. Torres,CC-4100
+Amazon Web Services,AWS-2025-Q3-002,Cloud infrastructure (August),USD .00,USD,Aug 01,Wire Transfer,Pending,M. Torres,CC-4100
+Amazon Web Services,AWS-2025-Q3-003,Cloud infrastructure (September),USD .00,USD,Sep 01,Wire Transfer,Pending,M. Torres,CC-4100
+Salesforce Inc,SF-2025-Q3-ENT,Enterprise CRM license renewal,USD .00,USD,Jul 01,ACH,Scheduled,R. Kim,CC-3200
+Datadog Inc,DD-2025-Q3-001,Infrastructure monitoring (quarterly),USD .00,USD,Jul 10,ACH,Scheduled,R. Kim,CC-4100
+GitHub Enterprise,GH-ENT-2025-Q3,Source control and CI/CD,USD .00,USD,Aug 01,Wire Transfer,Pending Approval,S. Chen,CC-4200
+Slack Technologies,SLK-2025-Q3,Business communication platform,USD .00,USD,Jul 01,ACH,Scheduled,R. Kim,CC-4300
+Zoom Communications,ZM-2025-Q3-001,Video conferencing (quarterly),USD .00,USD,Jul 15,ACH,Scheduled,R. Kim,CC-4300
+Adobe Creative Cloud,ADB-CC-2025-Q3,Design team licenses (15 seats),USD .00,USD,Aug 01,ACH,Pending Approval,S. Chen,CC-3100
+Cloudflare Inc,CF-2025-Q3-001,CDN and security services,USD .00,USD,Jul 15,ACH,Scheduled,R. Kim,CC-4100
+HashiCorp,HC-2025-Q3-001,Terraform and Vault licenses,USD .00,USD,Aug 15,Wire Transfer,Pending,R. Kim,CC-4200
+Okta Inc,OKTA-2025-Q3,Identity management platform,USD .00,USD,Jul 01,ACH,Scheduled,R. Kim,CC-4400
+CrowdStrike,CS-2025-Q3-001,Endpoint protection (annual prorate),USD .00,USD,Sep 01,Wire Transfer,Pending,M. Torres,CC-4400
+Snowflake Inc,SNF-2025-Q3-001,Data warehouse compute credits,USD .00,USD,Jul 15,ACH,Scheduled,S. Chen,CC-4100
+PagerDuty,PD-2025-Q3-001,Incident management platform,USD .00,USD,Jul 01,ACH,Scheduled,R. Kim,CC-4200
+Atlassian,ATL-2025-Q3-001,Jira and Confluence licenses,USD .00,USD,Aug 01,ACH,Pending,R. Kim,CC-4200
+Figma Inc,FIG-2025-Q3-001,Design tool licenses (8 seats),USD .00,USD,Jul 15,ACH,Scheduled,R. Kim,CC-3100
+WeWork,WW-2025-Q3-SF,San Francisco satellite office,USD .00,USD,Jul 01,Wire Transfer,Scheduled,M. Torres,CC-5100
+WeWork,WW-2025-Q3-LON,London satellite office,GBP 38000.00,GBP,Jul 01,Wire Transfer,Scheduled,M. Torres,CC-5200
+Mercer Consulting,MC-2025-Q3-001,Compensation benchmarking study,USD .00,USD,Aug 15,Wire Transfer,Pending Approval,M. Torres,CC-2100
+
+PAYMENT SUMMARY BY MONTH
+Month,Total USD Equivalent,Wire Transfers,ACH Payments,Pending Approval
+July,,3,8,0
+August,,2,3,3
+September,,1,0,1
+
+NOTES
+- All payments over ,000 require CFO approval per policy FIN-POL-003
+- FX payments (GBP) hedged at 1.27 USD/GBP through September
+- AWS commitment increasing ~2.2% monthly due to GPU instance usage
+- CrowdStrike renewal includes 200 additional endpoint licenses
+- Mercer engagement approved by Board Compensation Committee
+
+Contact: accounts.payable@company.com

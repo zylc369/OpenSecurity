@@ -102,6 +102,31 @@ window.addEventListener('message', function(ev) {
 | 敏感数据传递 | 是否通过 postMessage 传递了敏感数据（如 token、URL）？ |
 | 消息触发的操作 | 收到消息后是否执行了危险操作（如重定向、执行代码）？ |
 
+### 2.4 MessagePort 转交劫持（"等就绪信号"类流程）
+
+`MessageChannel` 创建一对互相连通的消息端口（port1/port2）；`postMessage(msg, target, [port])` 的第三个参数可把端口**转移**给另一窗口（转移后原持有者不可再使用；允许跨源）。
+
+**信任缺陷**：端口消息不携带可验证的发送者身份——持有端口 A 的一方只认"从端口 B 送来的消息"，无法验证实际发送者是谁。凡"把端口交给沙箱/iframe，等它回报完成信号（ready）后继续流程"的审批/就绪机制，都存在此缺口。
+
+攻击模式（A 等待沙箱内 B 的 "ready"）：
+
+1. A 建立 MessageChannel，把 port2 随消息转入沙箱内的 B；
+2. B 的脚本不自己发送 "ready"，而是把 port2 再转交给攻击者页面 C（用窗口链引用转发，如 `parent.opener.postMessage(0, "*", e.ports)`）；
+3. C 用 port2 发送 "ready"；A 侧 port1 收到即认定"B 已完成"，按流程继续（如调用批准接口）。
+
+```javascript
+// 沙箱内：收到端口后不回复，直接转交
+onmessage = e => { if (e.ports[0]) parent.opener.postMessage(0, "*", e.ports); };
+// 攻击者页面：用转交来的端口发送就绪信号
+onmessage = e => { const p = e.ports[0]; if (!p) return; p.postMessage("ready"); };
+```
+
+要点：
+
+- 转交可以多跳（沙箱 → 弹窗 → 顶层），每跳只要求持有端口与目标窗口引用；
+- 与目标窗口同源时才可操作其 `history` 等属性；跨源时仅能 `postMessage` 与转移端口；
+- 审计检查：等待信号的一方是否验证信号来源；端口是否被传给了不可信方。
+
 ---
 
 ## 3. Bot 时间差利用
@@ -253,47 +278,3 @@ function getSafeReturnTarget() {
 }
 ```
 
----
-
-## 5. 完整攻击编排案例
-
-### 5.1 Yipiter 完整编排
-
-```
-组件：
-  - 控制器页面（httpbin.org 托管）
-  - 恶意 notebook JSON（webhook.site 托管）
-  - Bot 浏览器（firstPage + secondPage）
-
-时间线：
-  t=0s    Bot 的 firstPage 访问控制器页面 URL
-  t=0.5s  控制器 window.open(challenge/new/?url=notebook) → 弹窗 seed
-  t=1s    challenge 应用下载恶意 notebook
-  t=2s    sandboxed iframe 中的 JS 执行 → postMessage(blobUrl) 给控制器
-  t=2.5s  控制器收到 blob URL → window.open(sso_callback?return=blobUrl)
-  t=3s    SSO 回调验证 blob URL origin → 通过 → 重定向到 blob URL
-  t=3.5s  blob URL 作为顶级页面加载 → 无 sandbox → 开始轮询 localStorage
-  t=5s    Bot 关闭 firstPage（popup 和顶级 blob 页面存活）
-  t=8s    Bot 在 secondPage 注册新用户
-  t=12s   Bot 执行 print(FLAG) → 保存到 localStorage
-  t=12.5s 轮询检测到 flag → Image beacon 外泄到 webhook
-  t=13s   Bot 关闭浏览器
-```
-
-### 5.2 future.js 完整编排
-
-```
-组件：
-  - Python 攻击脚本（攻击者运行）
-  - nginx 缓存（中间人）
-  - Next.js 应用（目标）
-  - Bot 浏览器（单页面）
-
-时间线：
-  Step 1: 攻击者投毒缓存（带 Host/RSC/CT/x-nonce/AE）
-  Step 2: 攻击者验证缓存命中（模拟 Bot 请求）
-  Step 3: 攻击者发送 Bot URL
-  Step 4: Bot 访问投毒 URL → HIT → XSS 执行
-  Step 5: XSS 读取 Cookie → fetch 到另一个缓存路径
-  Step 6: 攻击者读取第二个缓存路径 → 拿到 flag
-```

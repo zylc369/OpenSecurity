@@ -23,6 +23,7 @@ def b2i(b):  # bytes -> int (大端)
 |------|--------|---------|
 | `e` 很小（3/5/7/17） | 小指数 | §2 直接开方 / §3 Hastad |
 | `e` 很大（接近 n） | d 很小 | §4 Wiener / §5 Boneh-Durfee |
+| 密文是 `t` 的多项式（商环 `Z_N[x]/(x^n-r)`），`e` ≈ `N^n` | 环 RSA 小 d | §4a 广义 Wiener |
 | 多组 `(c_i, n_i)` 同 `e` | 广播 | §3 Hastad |
 | 两组同 `n` 不同 `e` | 共模 | §6 共模 |
 | `n` 可分解 | factordb/特殊形 | §7 分解 |
@@ -83,6 +84,65 @@ print(bytes.fromhex(hex(m)[2:]))
 
 无 sage 时用 `owiener` 库：`pip install owiener; d = owiener.attack(e, n)`。
 
+## 4a. 环 RSA（多项式商环 Z_N[x]/(x^n-r)）+ 小私钥 d
+
+**何时用**：密文 `c` 是 `t` 的多项式（形如 `a*t^9 + b*t^8 + ... + k`）；加密在商环 `A = Z_N[x]/(x^n - r)`（多见 n=10、r=2）；脚本出现 `phi = (p^n - 1)*(q^n - 1)`、`e = inverse_mod(phi - d, phi)`（即 `e·d ≡ -1 (mod phi)`）、`d` 小于某 threshold 开方。此时 `e` 巨大（位数 ≈ n×N 位数）。
+
+**原理**：与 §4 同构，只做替换 `N → N^n`、`p+q → p^n+q^n`：`e·d + 1 = k·phi`，`phi = N^n + 1 - s`，`s = p^n + q^n`（`N^(n/2)` 量级），故 `k/d ≈ e/N^n`——连分数 `e/N^n` 收敛子里藏 `(k, d)`。纯收敛子仅当 p/q 比值小时保证命中（粗略界 `p/q ≲ (1.5·μ²)^0.2`，μ 为生成器里素数比上界），命不中走下方升级阶梯。
+
+```python
+# sage：连分数扫描（验证器是防收敛子误报的关键，不可省）
+def validate_kd(k, d, N, e, Nn, n, mu_max=1000):
+    if k <= 0 or d <= 0 or d > 2^(Nn.nbits()//4 + 64): return None  # d < ~(N^n)^0.25
+    num = e*d + 1
+    if num % k: return None
+    phi = num // k
+    s = Nn + 1 - phi                                   # s = p^n + q^n
+    if not (N^(n//2) < s < (mu_max^(n//2)+1) * N^(n//2)): return None
+    # p^n、q^n 是 z^2 - s*z + N^n = 0 的根（和=s、积=N^n）
+    disc = s*s - 4*Nn
+    if disc < 0 or not is_square(disc): return None
+    X = (s + isqrt(disc)) // 2
+    p = X.nth_root(n)                                  # 非完全 n 次幂抛 ValueError
+    if N % p: return None
+    return p, N//p, phi, d
+# 扫描：对 e/N^n 做连分数，逐收敛子 (k,d) 调 validate_kd；同时扫半收敛子
+# （相邻收敛子 (h_i,k_i)、(h_{i-1},k_{i-1}) 的线性组合 (r*h_i+h_{i-1}, r*k_i+k_{i-1})，r ≤ 64）
+```
+
+**λ 陷阱（解密必看）**：`(p^n-1)(q^n-1)` 通常**不是**商环单位群的真指数——`x^n - r` mod p 的不可约因子次数不必整除 n（`x^10 - 2` mod 3 分解为 2 次 + 8 次因子，p^8-1 ∤ p^10-1）。直接 `c^(phi-d)` 解密有 ~30% 概率输出乱码。必须分解 `x^n - r` mod p、mod q 求 `λ = lcm(p^d_i - 1)`，用 `e^{-1} mod λ` 分别解密、对系数 CRT：
+
+```python
+# sage：可靠解密（n、r 按题替换）
+def ring_decrypt(p, q, e, coeffs, n=10, r=2):
+    parts = []
+    for pr in (p, q):
+        Rp = PolynomialRing(Zmod(pr), 'x'); xp = Rp.gen()
+        lam = lcm([pr^f.degree() - 1 for f, _ in (xp^n - r).factor()])
+        Aq = Rp.quotient(xp^n - r)
+        mp = Aq([Integer(c) for c in coeffs]) ^ inverse_mod(Integer(e), lam)
+        cs = [Integer(c) for c in mp.lift().list()]
+        cs += [Integer(0)] * (n - len(cs))
+        parts.append(cs)
+    return [Integer(CRT(parts[0][i], parts[1][i], p, q)) for i in range(n)]
+# 收尾：系数 → int(v).to_bytes(chunk,'big')（chunk=各系数最大字节数）拼接 → 去 PKCS7 padding
+# 必须重加密校验：环上 m^e == c
+```
+
+**升级阶梯**（按成本递增，先跑便宜的）：
+1. 纯收敛子扫描（秒级，先跑再想）
+2. 半收敛子（r ≤ 64）
+3. 网格猜 s：`M = N^n + 1 - w·N^(n//2)`，w 从 2 起、步长 ~1.5μ²，对 e/M 重跑扫描（覆盖 p/q ≲ 40）
+4. Boneh-Durfee 格：`f(x,y) = x·(N^n + 1 - y) - 1 (mod e)`，根 `(k, s)`，`X ≈ N^(n/4)/μ`、`Y ≈ μ^(n/2)·N^(n/2)`；信息量 XY ≈ e^0.75 落在 BD 可解区内
+
+**常见失败**：
+
+| 现象 | 原因 → 处理 |
+|------|------------|
+| 扫描全不过 | d 超纯收敛子界 → 升级阶梯 2/3/4 |
+| p·q == N 正确但解密乱码 | λ 陷阱 → 用上方 ring_decrypt |
+| `int(...)` 报 Exceeds the limit | Python ≥3.11 的 4300 位十进制上限 → `sys.set_int_max_str_digits(1000000)` |
+
 ## 5. Boneh-Durfee（d 较小但超 Wiener 界限）
 
 **何时用**：`d < n^0.292`（比 Wiener 的 0.25 界限大）。用 Coppersmith 求小根。
@@ -117,9 +177,21 @@ print(i2b(m))
 | 形式 | 方法 |
 |------|------|
 | 小 `n`（< 60 位十进制） | `sympy.factorint(n)` 或 factordb.com |
-| `p`、`q` 接近（差小） | Fermat 分解：从 `√n` 往上试 `a`，`b²=a²-n` |
+| `p`、`q` 接近（差小） | Fermat 分解：从 `√n` 往上试 `a`，`b²=a²-n`；q=next_prime(p) 时直接 `p = prevprime(isqrt(n)+1)` 递减试除更快 |
 | 多素数 / 有小因子 | `sympy.factorint` / ECM（`yafu`） |
 | 已在 factordb | 直接查 factordb.com |
+| p-1 光滑（B-smooth） | Pollard p-1：`a=pow(a,j,n)` 累计到 B!，`gcd(a-1,n)=p`；不够大递增 B 重试；p+1 光滑试 Williams 变体 |
+| 有 phi 的倍数（e\*d-1 等） | Miller-Rabin 平方根技术分解：M=2^s*d，随机 a 走平方链找非平凡平方根，`gcd(prev-1,n)` 出因子，单次成功率 ≥1/2 |
+| Infineon 结构化素数（TPM/YubiKey 4） | ROCA（CVE-2017-15361）：`roca-detect` 检测，512-bit 用 neca 分钟级分解 |
+| 素数 = 小系数×大基数+小余量（p=kp\*B+tp） | 混合基分解：A=n//B²=kp*kq，D=n%B=tp*tq，暴力 2^12 级 kp |
+| q 由 p 经公开关系派生（q=e⁻¹ mod p 等） | 关系写成 f_k(p)=0 参数化多项式，sage `.roots()` 枚举小 k |
+| q ≈ k\*p（k 已知） | Coppersmith：q_approx = k\*isqrt(N//k) + 2^(bitlen/2) 上界边距，f=q_approx-x，small_roots(X, beta=0.5)（Fermat 的已知比例推广） |
+| 素数数字集受限（如只含 6/7） | LSB 起逐位恢复+剪枝：q mod 10^k = n\*p⁻¹ mod 10^k，两位数字都须在集合内；十进制结构 p=base+10^k\*x 用 f = x + base\*inv(10^k,N) |
+| 多模数共享素数 | batch GCD（product tree，数千密钥 O(n log n)）；三模数两两共素（N1=p1p2,N2=p1p3,N3=p2p3）三次 gcd 封闭解；生成器用 next_prime(2^k+small) 时 delta 落同间隙即收敛共素 |
+| p+q 近似已知（和的高位） | 二维格 [[2^bits, -offset],[0, n+1]] LLL 短向量给 p+q，x²-sx+n=0 求根；Fermat 是 offset≈2√n 特例 |
+| 两组密钥 d1≈d2（共模） | d2-d1 ≡ (e1e2)⁻¹(e1-e2) (mod p)，f=r-x small_roots(X=差值上界, beta=0.5)，与 Wiener（d 本身小）互补 |
+| 四元数/高维代数 RSA | 幂运算下向量方向不变 → 密文分量比 c1:c2:c3 = a1:a2:a3 → 消 m 得 A·p+B·q≡0 → gcd(A,n),gcd(B,n) 分解; 解密阶用 p²-1（Wedderburn，F_p 上 ≅ M₂(F_p)） |
+| 多个 p/q 多项式组合 | 构造两个都含目标素数的表达式取 gcd，试除小素剥离 |
 
 ```python
 # Fermat (p,q 接近)
@@ -155,17 +227,77 @@ print(i2b(int(m)))
 
 `phi` 直接给（非 p/q）：同样 `d = gmpy2.invert(e, phi)`。注意 `phi` 与 `n` 的关系验算 `n - phi + 1 == p + q`。
 
+多素数模数 phi：`phi = Π (p_i-1) * p_i^(e_i-1)`（含素数幂；square-free 时 Π(p_i-1)）。多小素数时逐素数幂 `d_pk = pow(e,-1,(p-1)*p^(k-1))` 解密再 CRT 合并。
+
+## 9a. gcd(e, phi) > 1（d 不存在）
+
+- **指数约减**：e'=e/g，d'=e'⁻¹ mod phi，`pow(c,d',n)` = m^g，`iroot(m^g, g)` 开根；不过界时遍历 `iroot(m^g + k*n, g)` 小 k
+- **逐素数开根 + CRT 枚举**：每素因子 p≡1 (mod e) 时 `nthroot_mod(c%p, e, p, all_roots=True)` 有 e 个根，`itertools.product` 枚举组合（3^13≈160 万可行），CRT 合并后按可打印过滤
+
+## 9b. 非标准模数结构
+
+- **n = p²q（Schmidt-Samoa）**：phi = p*(p-1)*(q-1)（不是 (p-1)²(q-1)）。gcd(e,phi)≠1 时约化到 q 子域：`enc=pow(enc, inverse_mod(q,phi), n) % q`，再 `pow(enc, inverse_mod(p*p,q-1), q)`。识别：iroot(n,3) 近整数
+- **p=q 校验绕过**：服务端用 (p-1)² 验证 phi(p²)=p*(p-1) 的错误值 → 校验过但测试解密失败泄漏密文。phi(p^k)=p^(k-1)(p-1)
+- **e=1 + 构造模数**：验证方接受用户 (n,e) 无约束时，设 n = sig - PKCS1_pad(msg) 使 pow(sig,1,n) 通过
+- **Rabin（e=2）四根解密**：p,q≡3 (mod 4) 时闭式根 mp=c^((p+1)/4) mod p、mq 同理（无需 Tonelli-Shanks），Bezout 系数组合四候选 ±(yp·p·mq ± yq·q·mp)，按可读 ASCII/magic bytes/前缀筛唯一明文。素数由小变量多项式派生（p=r²+3、q=r²+7 类）→ N 展开是 r 的多项式，`iroot(N - 常数, 4)` 直接恢复 r
+
+## 10. 乘法同态滥用族（无 padding RSA）
+
+- **签名黑名单绕过**：S(a)*S(b)=S(a*b)。目标 m 分解成 x*y（小因子试除，两者都过黑名单），签名相乘。hash 是 CRC 类可碰撞函数时用 crchack 逐因子构造 CRC=f_i 的消息连乘伪造（要求因子全 < 2^32 落入 CRC32 值域）
+- **解密黑名单盲化**：dec(c * pow(r,e,n) % n) * inverse(r,n) % n = m。变体：奇 e 时乘 pow(-1,e,n)=n-1 翻转明文符号绕过明文黑名单
+- **隐藏模数恢复**：加密 oracle 用 `gcd(m1^e-enc(m1), m2^e-enc(m2))`；解密 oracle 发 c 与 c*2^e，wraparound 差 `2*m - (2m mod N) = N`
+- 防御视角：PKCS#1 padding 存在的意义——带 padding 消息无法分解成其他合法带 padding 消息
+
+## 11. Oracle/侧信道攻击
+
+- **Manger（OAEP 首字节阈值 oracle）**：B=2^(8(k-1))，oracle 判 m < B。三步：倍增 f1 至过界 → (n+B)//B*f1//2 起 +f1//2 步进找 f2 → 二分收缩（1024-bit 约 1024 查询）。比 Bleichenbacher（v1.5，~10K 查询）收敛快
+- **Python or 短路时延 oracle**：昂贵 KDF 排在条件链后位被短路 → 快=Y≠0 / 慢=Y==0。校准（known-fast/known-slow 各 5 采样定阈值）+ 模糊区间重试
+- **LSB oracle 噪声版**：随机出错不收敛 → 跑 N 轮逐字节取众数（`Counter.most_common`）；或恢复后按字符集定位错误位翻转重算
+- **Hamming weight oracle（返回 `HW(x^d mod n)` 而非比特）**：乘法 blinds——直接送 `x_i = c·(2^-i)^e mod n`，oracle 返回 `y_i = 2^-i·m mod n` 的 Hamming weight。**modular halving 的 weight 保持性判 parity**: 定义 `h_i=HW(y_i)`、`g_i=HW(-y_i mod n)`——`y_i` 偶则 `y_{i+1}=y_i/2` 且 `h` 不变（parity 0）; `y_i` 奇则补数侧 `n-y_{i+1}=(n-y_i)/2` 且 `g` 不变（parity 1）; 两侧都恰好不变时该位模糊。逐位 `b_i` 满足 `u=Σb_i·2^i ≡ -m·n⁻¹ (mod 2^L)`，全部位定后 `m = (-u·n) mod 2^L`。模糊位消歧: 对 `z=3m` 重跑同流程，`u_z ≡ 3u+q (mod 2^L)`（q∈{0,1,2}=⌊3m/n⌋），从低位起解进位链分支三种 q，终验三判据 `0≤m<n`、`(3m)//n==q`、`pow(m,e,n)==c`。查询量 ~2L 起步（weight 相等时补 `-x mod n` 查询）
+- **Montgomery 规约时序（Kocher）**：额外条件减法次数泄漏 → MSB 起 逐位猜 0/1 预测减法数与观测取 corrcoef。768-bit 需 ~20 万签名
+- **RSA-CRT 故障**：单比特翻转 d 时 `ratio = s_bad * s_good⁻¹ mod n == 2^(±2^k) mod n` 逐位恢复 d；输出前不自验的 CRT 实现一次故障即泄因子 gcd(s^e-m, n)
+- **CRT 字段解析缺陷**：无边界 fgets 读 d_p 发 33+ 空字节 → d_p=0 → m_2=0^0=1 → gcd(sig-1, N)=p；`buf[strlen-1]=0` 剥换行遇空输入回写覆盖相邻模数末字节（N' 与真 N 差 ≤255，delta 暴力）
+
+## 12. 部分密钥泄漏
+
+dp/dq/qinv 任一泄漏即全恢复：`for k in range(3, e): p = (dp*e-1)//k + 1; is_prime(p)` 命中即 p（O(e) 瞬时）。原理 e*dp-1 = k*(p-1)，k < e。PEM 只泄底部 CRT 区照样沦陷。
+
+### 12a. Common Prime RSA + d 的中段空洞（联合模格 + 连分数）
+
+**适用**: `p = 2ga+1, q = 2gb+1`（p-1 与 q-1 共享大素数 g，Common Prime RSA），且 d 的十进制中间 k 位未知（首尾已知: `d = D0 + 10^s·x`，`0 ≤ x < 10^k`）。
+
+**两步攻击**:
+
+1. **联合模格补全 d**（内部 MSB/LSB gap 型）: 设 `A = ed-1 = k·g·a·b`。两条同余——`f1(x) = x + a1 ≡ 0 (mod g)`（由 A 与 d 结构，a1 从已知部分推出）与 `f2(y) = y + N + 1 ≡ 0 (mod g²)`（因 `N+1-p-q = (p-1)(q-1) = 4g²ab`，`y = -(p+q)`）。**加权移位** `f1^i · f2^j · (N-1)^r`（f1 权 1、f2 权 2）使各移位模 `g^t` 为零——`t=3` 时构成 27 维整数格，LLL 归约后**两两多项式取 GCD** 暴露线性因子 `x - x0`。恢复的 d 用 `2^(ed-1) mod N == 1` 验证。
+2. **连分数恢复 2g**: 利用生成关系 `h = p·b + a`（λ+a+b 型 hint）时 `N-1 = 2g·h`，故 `G(ed-1) - k(N-1) = -G·k·(a+b)` 右侧远小于主项且 `gcd(k,G)=1`——**k/G 是 (ed-1)/(N-1) 的连分数收敛子**，601-bit 分母即 `G=2g`。随后 `λ=(ed-1)/k`、`a+b = h-λ`、`ab = λ/G`，判别式 `(a+b)²-4ab` 开方得 a,b → `p=Ga+1, q=Gb+1`。
+
+**工具**: `python-flint` 的 `fmpz_mat.lll()` 可跑整数格; 权重/维度参数参照 Zheng & Nitaj《Partial Key Exposure Attack on Common Prime RSA》（ePrint 2024/061）。
+
+## 13. 实现细节补遗
+
+- **Franklin-Reiter GCD 形态**（e=3 已知两 padding 差）：`f1=(X+pad1)^3-c1, f2=(X+pad2)^3-c2`，`m = -gcd(f1,f2).coefficients()[0]`（Zmod(n) 上）
+- **立方根回绕**：m^e > n 时 `iroot(c + k*n, e)` 遍历小 k；CTR/流密码辅助密文保长提示 k 范围；已知倍数位移先乘模逆消位移
+- **签名指数错用**：签名端用 e 代替 d（sign=m^e mod n）→ m^e<n 时任何人 integer_nthroot(m,e) 本地伪造签名; 根治靠验证 padding 结构而非裸 m
+- **密钥影响字节受限**：密钥 ≤512 bit 只影响前 ~64 字节 → 前缀解密 + 参考文件拼尾部（PNG IEND/ZIP EOCD 等标准块）
+- **多项式 hash 平凡根**：g(0)=0 → 签名恒 0；构造 msg ≡ 0 (mod P)：req = -prefix*256^len mod P，随机 high 凑 low 可打印
+- 工具：RsaCtfTool（自动套件 `RsaCtfTool.py -n <n> -e <e> --uncipher <c>`）、`openssl rsa -pubin -text -noout`、rsatool.py 生成 PEM
+
 ## 决策
 
 ```
 e 很小?
 ├─ 单组 + m**e<n → 直接开方 (§2)
-└─ 多组同 e → Hastad (§3)
+├─ m**e≥n → iroot(c+k*n, e) 遍历回绕 (§13) → 多组同 e → Hastad (§3)
 e 很大? → Wiener(§4) → 失败试 Boneh-Durfee(§5)
+密文是多项式 + e ≈ N^n? → 环 RSA 广义 Wiener (§4a，解密注意 λ 陷阱)
 同 n 多 e (gcd=1)? → 共模 (§6)
-n 特殊? → 分解 (§7)
+gcd(e,phi)>1? → 指数约减/CRT 枚举 (§9a)
+n 特殊? → 分解 (§7 查表: 光滑/共享/结构化/受限数字/关系派生)
 给了 p/q 的部分位? → Coppersmith (§8, 转 lattice)
-已知 p,q/phi? → 直接解 (§9)
+已知 p,q/phi/phi倍数? → 直接解 (§9) / Miller-Rabin 分解 (§7)
+泄了 dp/dq? → §12 O(e) 恢复
+有解密/签名 oracle? → §10 同态滥用 / §11 oracle 族
+验证方接受自定义 (n,e)? → §9b e=1 构造模数
 ```
 
 ## 注意

@@ -3,9 +3,12 @@ description: Web 安全分析 — 输入 URL 或源码目录和分析需求，�
 mode: all
 buwai-extension-id: web-analysis
 permission:
+  task:
+    "*": allow
   external_directory:
     ~/bw-security-analysis/**: allow
     ~/Downloads/**: allow
+    /tmp/**: allow
     ~/go/**: allow
   read:
     "~/go/**": allow
@@ -27,11 +30,8 @@ permission:
 **可用工具**：Bash（执行命令行工具）、Read（读取文件/知识库）、Write（生成临时脚本/报告）、Glob/Grep（搜索文件）、webfetch（获取网页内容）
 
 **核心约束**：
-- 分析结果必须区分"事实"（来自工具输出/源码）和"推测"（AI 推理，标注置信度）
-- 禁止编造结论。当置信度不足时，输出当前分析状态、已验证的事实、待验证的假设（标注置信度），继续自主探索，不要停下来向用户提问
+{{buwai-rule:evidence-discipline}}
 - **安全红线**：不向生产环境发送破坏性请求，CTF 靶机和授权测试环境除外
-
-{{buwai-rule:cross-agent-delegation}}
 
 ---
 
@@ -64,63 +64,7 @@ permission:
 
 **触发条件**：分析型需求、混合型需求。查询型需求跳过。
 
-根据目标类型选择信息收集路径：
-
-#### A-1: 白盒（有源码）
-
-```
-1. 读取项目结构（ls / tree）
-2. 识别技术栈
-   ├── package.json / composer.json / requirements.txt → 框架和依赖版本
-   ├── Dockerfile / docker-compose.yml → 基础设施配置
-   ├── nginx.conf / .htaccess → 反向代理/缓存配置
-   └── config files → 应用配置
-3. 识别攻击面
-   ├── 路由定义 → 所有可达的 URL 端点
-   ├── 中间件 → 请求处理链（CT 覆盖、认证、CORS）
-   ├── 模板引擎 → 反射点
-   ├── 数据库操作 → 注入点
-   └── 文件操作 → LFI/RFI
-4. 识别安全机制
-   ├── CSP / XSS 过滤 → XSS 可行性
-   ├── Cookie 安全属性 → Cookie 窃取可行性
-   ├── CORS 配置 → 跨域利用可行性
-   └── 认证/授权机制 → 权限绕过可能性
-```
-
-#### A-2: 黑盒（只有 URL）
-
-```
-1. HTTP 基础探测
-   ├── curl -v → 响应头（Server/X-Powered-By/Vary/Set-Cookie）
-   ├── curl -I → HEAD 请求
-   └── 多路径探测（/robots.txt / /sitemap.xml / /.well-known/）
-2. 框架指纹识别
-   ├── 响应头特征（X-Powered-By: Next.js / X-Request-ID 等）
-   ├── Cookie 名称（PHPSESSID / JSESSIONID / connect.sid 等）
-   ├── HTML 特征（meta generator / 特有 class 名 / 内联脚本模式）
-   └── 路径特征（/_next/ → Next.js / /wp-admin/ → WordPress）
-3. 攻击面枚举
-   ├── 可达路径（爬虫 + 常见路径字典）
-   ├── 参数发现（HTML 表单 / JS 中的 API 调用 / URL 参数）
-   └── 功能点识别（登录/上传/搜索/评论等用户输入点）
-4. 安全机制探测
-   ├── CSP 头分析
-   ├── Cookie 属性检查
-   ├── CORS 策略测试
-   └── WAF 指纹识别
-```
-
-#### A-3: Docker/基础设施分析
-
-当目标包含 Docker 配置时，额外收集：
-
-```
-1. 容器架构（服务间关系、网络隔离、端口映射）
-2. 反向代理配置（缓存规则、上游服务、负载均衡）
-3. Bot/爬虫配置（如果存在 → XSS 类题目）
-4. 环境变量（敏感信息、配置开关）
-```
+根据目标类型选择信息收集路径，**完整流程清单见 `$AGENT_DIR/knowledge-base/web-methodology.md` §1（白盒: 项目结构→技术栈→攻击面→安全机制）与 §2（黑盒: HTTP 探测→框架指纹→攻击面枚举→安全机制探测）**。目标含 Docker 配置时额外收集: 容器架构/反向代理缓存规则/Bot 爬虫配置/环境变量敏感信息。
 
 ### 阶段 B：分析规划（强制）
 
@@ -128,31 +72,23 @@ permission:
 
 {{buwai-rule:analysis-planning-rules}}
 
+**凡方案依赖浏览器行为，先做平台查新**。判定只问一句：这份方案（含探测步骤）有没有依赖"浏览器应该会/不会怎么做"的假设？解析差异、CSP、导航与请求元数据、缓存与历史、窗口与跨源通信，任一项进入方案即算。动作：委派 searcher 检索目标浏览器近 12-18 个月的平台新特性（检索源与检索式见 searcher 的 Web 域源），重点覆盖上述机制的新增与变更；范围以方案涉及的机制为限。查新结果写入台账并入方案；执行中新形成的判断开始依赖浏览器行为时，同样先查新。
+
 ### 试探优先策略
 
 {{buwai-rule:probe-first-strategy}}
+
+**浏览器行为实验**：先列出真实场景的完整状态要素（窗口/弹窗、中间导航、响应头、同源关系、时序）再设计实验。
 
 ### 阶段 C：执行与监控
 
 {{buwai-rule:execution-discipline}}
 
-**常见失败模式与切换方向**：
+**常见失败模式与切换方向表**见 `$AGENT_DIR/knowledge-base/web-methodology.md` §4a「执行失败切换表」（方案执行失败时必读）。
 
-| 失败现象 | 切换方向 |
-|---------|---------|
-| 某路径投毒无缓存（MISS/无 X-Cache 头） | 换路径测试哪些路径被缓存 |
-| Vary 头阻止缓存命中 | 分析 Vary 字段，寻找值差异（空值 vs 缺失） |
-| XSS payload 被转义 | 换注入上下文（HTML 属性/JS 字符串/URL）或换编码方式 |
-| Cookie 无法外传（无外网） | 换数据渗出方式（DNS/缓存中缓存/时间侧信道） |
-| 框架版本不明确 | 从 buildId/chunk 文件名/依赖版本推断 |
-| 标准攻击手法全部失败 | 读框架源码（node_modules/vendor）找实现差异 |
-| 所有已知 XSS 方向被阻止 | 回溯：是否有非 XSS 利用方式（CSS 注入、Dangling markup、缓存投毒、CSRF 链） |
-| 所有已知攻击方向都失败 | 系统性回溯：回到信息收集，检查遗漏的攻击面/输入点/配置细节（见 execution-discipline「系统性卡住恢复」） |
-| 漏洞存在但无法链接成攻击链 | 单独报告每个漏洞，重新审视是否有遗漏的链接环节 |
+---
 
-### 循环控制
-
-{{buwai-rule:loop-control}}
+{{buwai-rule:knowledge-management}}
 
 ---
 
@@ -162,12 +98,32 @@ permission:
 2. **配置即代码** — nginx/Docker/middleware 配置是"隐藏的源码"，必须阅读分析
 3. **框架源码审计** — 复杂 Web 题的突破往往在框架源码（node_modules/vendor）中，不只是业务代码
 4. **组合利用** — 单个漏洞往往不够，需要组合多个小漏洞构造攻击链（如缓存投毒 + XSS）
-5. **假设必须验证** — 假设缓存键匹配/Vary 匹配时，必须实际测试，不能仅凭推理
+5. **假设必须验证** — 假设缓存键匹配/Vary 匹配时，必须实际发送请求测试（观察 X-Cache: MISS→HIT 变化）。如果测试请求无响应或响应格式异常=测试环境问题不是结论；有正常响应但行为与假设不符=假设错误
 6. **从攻击者视角思考** — 问"攻击者能让其他用户收到什么内容？"而非"这个功能正常吗？"
 
 ---
 
+## 平台登录策略（强制）
+
+需要登录任何 Web 站点/平台才能继续时：
+
+- **执行浏览器操作**:
+  - 分流规则: 交互操作（登录/填表/浏览）→ **必须 `python $AGENT_DIR/scripts/browser_cdp.py start` 启动独立可 CDP 接管的 Chrome 再接管**（用户全程可见）; 纯后台任务（批量截图/渲染/探测）才用 headless launch。禁止 launch 有界面浏览器（脚本子进程随会话中止连坐关闭）、禁止 `open -na`/`nohup &` 临场启动
+  - **强制的前置阅读** `$AGENT_DIR/knowledge-base/browser-automation.md`: 启动参数与退出码语义（§1.2）、登录决策树/人机验证升级路径/API 逆向 5 轮上限（§2）、硬信号清单（§4）、提交后结果确认方法（§8）
+- **凭证类信息（email/密码/token/实例 URL）只有用户知道 → 直接问**，禁止猜超过 3 次
+- 登录是手段不是目的: 技术绕过成本 > 询问成本时必须升级求助；被指出方向问题后继续原路线 = 二次犯错
+
+---
+
 ## 工具清单
+
+### 代理 IP 管理（proxy MCP：状态查询 / 换出口 / 模式切换 / 取入口，四个工具）
+
+- **批量任务（爆破/fuzz/侧信道/批量验证）**：开工前切 proxy 模式 + 取入口地址，脚本写一行 `proxies={"http": entry, "https": entry}`，结束切回 direct；
+- **Playwright 浏览器（有头/无头）**：出生即连入口 `launch(proxy={"server": entry})`——切出口（MCP 工具）时浏览器零重启零重建；
+- **低频探测（<10 发）**：不接代理，直接本机；
+- **限流信号**（429 / `cf-mitigated: challenge` 头 / 挑战页）：**第一个动作永远是用状态查询工具查轮换历史判定**——1 分钟内有轮换=预期挑战不换；无轮换突发=真限流换出口+冷却该域；轮换过+等 30s 仍挑战=烂 IP 换出口（reason=bad_ip）。脚本内遇 429 只打印 `[LIMITED]` 报告，**禁止自动换 IP**（信息完整性铁律）；
+- 完整判定 SOP、入口用法模板、Retry 装配、限流特征清单：Read `$AGENT_DIR/knowledge-base/proxy-usage.md`。
 
 ### Web 安全工具（bash 调用）
 
@@ -180,22 +136,7 @@ permission:
 
 ### 网页渲染工具（通过 $SHARED_DIR 调用）
 
-> 当 webfetch 无法获取 SPA 页面内容时使用。详情见 `$SHARED_DIR/knowledge-base/web-rendering.md`。
-
-| 脚本 | 用途 | 关键参数 |
-|------|------|---------|
-| `$SHARED_DIR/scripts/web_render.py` | Playwright 无头浏览器渲染（JS 执行 + 截图） | `--url <URL> --format markdown\|text\|html --screenshot <PATH>` |
-
-**页面内容获取工具选择**：
-
-| 场景 | 工具 | 原因 |
-|------|------|------|
-| 获取静态页面 HTML | webfetch | 快速，无 JS 执行开销 |
-| 获取 API/JSON 响应 | webfetch | 不需要渲染 |
-| 页面需要 JS 渲染才能看到内容（SPA） | web_render.py | 需要 JS 执行 |
-| 需要页面截图 | web_render.py | webfetch 无法截图 |
-| 需要登录后的页面内容 | 编写 Playwright 脚本（`$TASK_DIR/render_auth.py`），在脚本中设置 Cookie/Token 后渲染 | web_render.py 不支持传入认证信息，需要自行编写带认证的渲染脚本 |
-| 获取 CTF writeup / 技术文章 | webfetch | 文章类页面通常不需要 JS |
+> webfetch 无法获取 SPA 页面/需截图时用 `$SHARED_DIR/scripts/web_render.py`。**与 webfetch 的选择策略、命令模板见 `$SHARED_DIR/knowledge-base/web-rendering.md`**。需要登录后的页面内容时 web_render.py 不支持传认证——自行编写 Playwright 脚本（`$TASK_DIR/render_auth.py`）在脚本中设置 Cookie/Token 后渲染。
 
 ### 源码分析工具
 
@@ -208,64 +149,74 @@ permission:
 
 | 模块 | 依赖 | 用途 | 关键函数/类 |
 |------|------|------|------------|
-| `$AGENT_DIR/scripts/web_helpers.py` | requests + bs4 + lxml | HTTP session 管理、CSRF 提取、注册登录、webhook 交互 | `create_session`、`get_csrf`、`register_and_login`、`extract_flag_from_webhook`、`create_webhook` |
+| `$AGENT_DIR/scripts/web_helpers.py` | requests + bs4 + lxml | HTTP session 管理、CSRF 提取、注册登录、webhook 交互、gopher SSRF URL 构造（自动修正 Content-Length） | `create_session`、`get_csrf`、`register_and_login`、`extract_flag_from_webhook`、`create_webhook`、`build_gopher_url` |
 | `$AGENT_DIR/scripts/cache_poison.py` | 无（纯标准库） | 缓存投毒攻击框架、Bot AE 探测、缓存键分析、缓存中缓存渗出 | `CachePoison`（类：`poison`/`verify_cache_hit`/`trigger_bot`/`read_exfil`）、`probe_accept_encoding`、`probe_cache_key` |
 | `$AGENT_DIR/scripts/param_bomb.py` | 无（纯标准库） | PHP max_input_vars 参数炸弹生成（POST/GET/两阶段组合） | `build_bomb_post_data`、`build_bomb_get_url`、`build_two_stage_bomb`、`estimate_param_count` |
 | `$AGENT_DIR/scripts/markdown_fuzz.py` | 无（纯标准库） | Markdown 解析器 XSS 注入系统化测试（8 种分类，30+ payload） | `MarkdownFuzzer`（类）、`generate_payloads`、`PayloadCategory` |
 | `$AGENT_DIR/scripts/sandbox_escape.py` | 无（纯标准库） | iframe sandbox 逃逸 payload 生成：sandbox 测试 JS、控制器页面、notebook 注入、SSO blob URL 绕过 | `generate_sandbox_test_payload`、`generate_controller_page`、`generate_notebook_payload`、`generate_sso_bypass_url` |
 | `$AGENT_DIR/scripts/bot_analyze.py` | 无（纯标准库） | Bot server.js 自动分析：提取关键参数、分类模式（单页/双页）、生成攻击时间线 | `analyze_bot_file`、`analyze_bot_code`、`BotAnalysis` |
+| `$AGENT_DIR/scripts/blind_extract.py` | requests | 盲注提取通用工具（布尔/时间 oracle）：长度探测 + 并行 ascii 二分 + 重试；库 + CLI | `BlindOracle`（类：`check`/`length`/`char_at`/`extract`）、`OracleConfig`；CLI 入口 `python blind_extract.py --help` |
 
-**使用方式**（在临时脚本中）：
-
-```python
-import sys
-sys.path.insert(0, "$AGENT_DIR/scripts")
-
-# Web 基础操作
-from web_helpers import create_session, get_csrf, register_and_login
-
-# 缓存投毒
-from cache_poison import CachePoison, probe_accept_encoding
-
-# PHP 参数炸弹
-from param_bomb import build_bomb_post_data, build_bomb_get_url, build_two_stage_bomb
-
-# Markdown XSS 测试
-from markdown_fuzz import MarkdownFuzzer, generate_payloads
-
-# Sandbox 逃逸
-from sandbox_escape import (
-    generate_sandbox_test_payload,
-    generate_controller_page,
-    generate_notebook_payload,
-)
-
-# Bot 代码分析（命令行: python bot_analyze.py <server.js>）
-from bot_analyze import analyze_bot_file
-```
+**使用方式**：临时脚本头部 `import sys; sys.path.insert(0, "$AGENT_DIR/scripts")`，再按上表 import 对应模块/函数（bot_analyze 亦可命令行: `python bot_analyze.py <server.js>`）。
 
 ---
 
 ## 知识库索引
 
-以下文档按需加载（不在分析开始时全部读取）：
+以下文档触发即读（命中触发条件先读再动手；不在分析开始时全部读取）：
 
 ### Web 安全知识库（$AGENT_DIR/knowledge-base/）
 
 | 文档 | 触发条件 |
 |------|---------|
-| `web-methodology.md` | 分析规划阶段（阶段 B）。白盒/黑盒分析流程、PHP 应用分析方法、Bot 类题目分析 |
+| `proxy-usage.md` | 任何批量请求/爆破/fuzz/浏览器分析任务，或检测到限流信号（429/挑战页）时。代理入口获取、限流三场景判定 SOP、Retry 装配、[LIMITED] 报告模板 |
+| `web-methodology.md` | 分析规划阶段（阶段 B）。白盒/黑盒分析流程、PHP 应用分析方法、Bot 类目标分析 |
+| `score-verification-osint.md` | 需要验证某账号/团队在某平台的历史成绩（排名/得分），活动页已删除或无法访问时。证书 S3 直链、档案页证书入口、API WAF 降级、双源矛盾裁决; 目标值无法在线验证时的交付规范见 web-methodology.md §4b |
+| `wordlists-guide.md`（$SHARED_DIR） | 任何爆破/fuzz 需要字典时（$WORDLISTS_DIR 场景选型速查: 目录/密码/子域/payload/中文设备口令） |
 | `web-vulnerabilities.md` | 识别到潜在漏洞类型时。XSS（含 Markdown 注入）、SSRF、iframe sandbox、Cookie 安全、开放重定向、Markdown 解析器安全测试方法论 |
 | `cache-poisoning.md` | 检测到缓存机制 / Vary 头 / 反向代理。含缓存中缓存渗出、Bot 请求头探测技术 |
 | `csp-bypass.md` | 检测到 CSP 头 / XSS 被 CSP 阻止 / PHP 应用 + 需要绕过安全头 |
 | `nextjs-analysis.md` | 识别到 Next.js 框架（特别是 App Router）。RSC/flight data 分析、middleware 审计、node_modules 源码阅读、框架内部不一致性探测 |
 | `spa-frontend-analysis.md` | 识别到 SvelteKit/SPA/纯前端应用（localStorage 认证、无后端数据库）。SvelteKit 路由分析、Notebook 导入攻击面、Bot localStorage 变体 + 异步 flag 时间差利用 |
 | `attack-orchestration.md` | 需要多步骤/多窗口攻击编排时。控制器页面模式、postMessage 攻击、popup 存活机制、SSO/OAuth 回调安全审计 |
-| `bot-patterns.md` | 分析 Bot server.js 时。Bot 代码通用结构、单页/双页模式快速分类、安全决策分析（URL 验证、httpOnly、Docker Chromium 特性）、攻击链决策树 |
+| `bot-patterns.md` | Bot 类目标（源码可见或黑盒可观察：自动审核/提交后自动访问/机器人预览页/提交 URL 后回传截图或渲染结果），或需分析 bot 浏览器 cookie/存储可达性时。Bot 代码通用结构、单页/双页模式快速分类、安全决策分析（URL 验证、httpOnly、cookie 播种与 jar 驱逐、Docker Chromium 特性）、渲染/截图类 bot 的自带会话检测与宿主形态矩阵（§3.5）、攻击链决策树 |
 | `js-obfuscation-patterns.md` | 分析 JS 逆向题/混淆代码时。不可见 Unicode 字符、tagged template 隐式调用、Function.call 空函数、原型链劫持、debug condition 副作用 |
-| `browser-debugging.md` | 需要浏览器自动化/远程调试时。CDP 核心 API、Playwright + CDP 模式、debug() API、常见陷阱 |
+| `browser-automation.md` | 需要打开网页/登录/浏览器自动化/远程调试/操作结果确认时。启动铁律与 browser_cdp.py 用法、三级探测链、登录决策树、人机验证判别、硬信号、CDP 核心 API、debug() API、常见陷阱、操作后确认方法论（持久信号优先） |
 | `client-side-attacks.md` | 有 admin bot + flag 在 bot 端。bfcache 污染、CSS trigram exfil、xsleak、iframe reparenting、connection pool |
-| `race-conditions.md` | 竞态条件（单包攻击/HTTP/2 并发）；原型链污染（sources/sinks/gadgets/RCE 链） |
+| `navigation-and-fetch-metadata.md` | 分析依赖 `Sec-Fetch-*` 判定、历史回退/重发、BFCache 条件、导航类型时 |
+| `css-attacks.md` | 能注 CSS 不能注 JS 时（webmail 渲染/CSP 留 style-src）。CSS hotwiring、label 劫持、select 键盘记录、净化器绕过、CSSOM mutation、CSP 全封外带 |
+| `race-conditions.md` | 竞态条件（单包攻击/HTTP/2 并发；`e.source === iframe.contentWindow` 类身份比较 × 文档切换的消息竞态）；原型链污染（sources/sinks/gadgets/RCE 链） |
+| `sqli-advanced.md` | SQL 注入实战（WAF 绕过全族/无列名/堆叠预处理/DNS OOB/写 shell/PG 命令执行与只读库外带/sqlmap 进阶） |
+| `xss-advanced.md` | XSS 进阶（DOM Clobbering/Shadow DOM/Unicode 折叠/Referer 泄漏/XS-Leak 组合） |
+| `html-parse-differentials.md` | 存在"同一份输入被两种环境读取"类现象（DOM 检查 vs 渲染；JS 开/关），或需要构造"检查态无害、渲染态执行"的 payload 时 |
+| `command-injection.md` | 命令注入（无字母数字 RCE/无参数 RCE/临时文件 glob/分段写/各语言绕过表） |
+| `ssti.md` | 模板注入（Jinja2/Twig/Smarty/EL/SpEL 沙箱逃逸/过滤绕过/动态索引查找） |
+| `xxe.md` | XML 外部实体（OOB/XInclude/像素通道外带/解析器差异） |
+| `path-traversal-lfi.md` | 路径穿越与文件包含（伪协议矩阵/日志投毒/filter 链 RCE/死亡 exit 绕过） |
+| `file-upload.md` | 文件上传（upload-labs 全关绕过/解析漏洞/二次渲染/htaccess·user.ini/WAF 绕过） |
+| `deserialization.md` | 反序列化（Java/PHP/Python/.NET/Ruby/Node 全栈 POP 链/Phar/逃逸技巧族） |
+| `ssrf-advanced.md` | SSRF 进阶（IP 变体表/gopher 协议/云元数据/302 升级/Dict·FTP·LDAP 利用） |
+| `request-smuggling.md` | HTTP 请求走私（CL·TE 组合/h2c/HTTP2 伪头/降级翻译/缓存 desync/头注入驱动 desync 与 RQP/dangling-byte/浏览器驱动蠕虫） |
+| `host-header-attacks.md` | Host 头攻击（密码重置投毒/缓存投毒/路由绕过/Web 缓存欺骗） |
+| `prototype-pollution.md` | 原型链污染（gadget 总表 EJS·Handlebars·Lodash/client side/沙箱逃逸） |
+| `jwt-attacks.md` | JWT 攻击（算法混淆/jwk·jku·kid 注入/None/爆破/Flask session） |
+| `auth-attacks.md` | 认证攻击（逻辑缺陷审计/OTP·MAC 伪造/账号碰撞/JA4/基础设施后攻击） |
+| `graphql-security.md` | GraphQL（端点发现/introspection/绕过/别名批量/隐藏参数） |
+| `nosql-injection.md` | NoSQL 注入（Mongo 操作符/认证绕过/盲注/CouchDB·Redis·ES） |
+| `ldap-injection.md` | LDAP 注入（过滤器绕过/盲注四法/AD UAC 属性） |
+| `xslt-injection.md` | XSLT 注入（文件读取/写入通道/.NET RCE/盲利用/WAF 绕过） |
+| `jndi-injection.md` | JNDI 注入（Log4Shell/JDK 版本约束/BeanFactory 绕过/WAF 变形） |
+| `web-crypto-attacks.md` | Web 密码学攻击（Padding Oracle/CBC bit-flip/弱随机数/长度扩展） |
+| `ghost-bits-cast-attack.md` | Ghost Bits（Unicode 大字符编码注入/三族根因/上传·JSON·URL 场景/组件配方） |
+| `waf-bypass.md` | WAF 绕过（识别指纹/产品矩阵 Cloudflare·AWS·国内/网络层绕过/决策树） |
+| `csrf-clickjacking.md` | CSRF 与点击劫持（SameSite 绕过/JSON CSRF/token 缺陷/frame-busting 绕过） |
+| `cors-misconfiguration.md` | CORS 错误配置（null origin/正则绕过/Vary Origin 投毒/JSONP/子域链） |
+| `dangling-markup.md` | Dangling Markup 注入（CSP 旁路七向量/可窃取数据表/组合攻击） |
+| `websocket-security.md` | WebSocket 安全（CSWSH/升级走私/消息注入/Socket.IO/二进制帧） |
+| `subdomain-takeover.md` | 子域接管（14 服务商指纹/CNAME·NS·MX 认领/影响评估） |
+| `web-privesc.md` | Web 提权（Mass Assignment/端点·方法·Header·Cookie 越权/SPA 前端绕过） |
+| `china-products-attacks.md` | 国产 CMS·OA·中间件攻击速查（泛微/WebLogic/ThinkPHP/Fastjson/Shiro 产品→漏洞映射） |
+| `llm-perception-verification.md` | **任何把 OCR（glm-ocr）或 ASR（whisper）输出当作结论依据之前必须先读**——含幻觉签名判定与强制交叉验证流程，未验证的感知输出不得采信 |
 
 ### 通用知识库（$SHARED_DIR/knowledge-base/）
 
@@ -292,12 +243,6 @@ from bot_analyze import analyze_bot_file
 - 记住当前会话中的目标 URL/目录和任务目录
 - 新问题针对同一目标 → 跳过信息收集，直接分析
 - 发现新攻击面 → 增量分析
-
----
-
-## 任务存档
-
-{{buwai-rule:task-archive}}
 
 ---
 

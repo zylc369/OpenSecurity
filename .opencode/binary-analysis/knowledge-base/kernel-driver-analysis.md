@@ -401,3 +401,10 @@ cmp [r14+8], edx       ; verify checksum
 | `vm_login.py` | VM 登录管理（密码安全隔离） | `$SHARED_DIR/scripts/vm_login.py --login/--status/--encrypt-password` |
 
 **编译注意**：部署到 VM 的工具必须用 `/MT` 静态链接，VM 中可能缺少 UCRT 运行时。
+
+
+---
+
+## Linux .ko 与 eBPF（速览，详见 platform-reversing.md §2）
+
+.ko ioctl 定位 = file_operations 结构 .unlocked_ioctl 槽; QEMU -s -S + gdb lx-symbols 调试; eBPF 用 bpftool prog dump xlated/jited。CTF 模式: /dev 设备 + switch(cmd) + copy_from/to_user。

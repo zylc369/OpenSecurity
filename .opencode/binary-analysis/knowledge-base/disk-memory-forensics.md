@@ -1,0 +1,84 @@
+# 磁盘与内存取证 (Disk & Memory Forensics)
+
+> 磁盘镜像/内存 dump/文件系统恢复/加密卷/容器云取证时加载。
+> 基础（Volatility 常用插件/挂载/carving/注册表 hive）见 `forensics-methodology.md` §3-§4，不重复。
+
+## §1 内存 dump 专项
+
+- **GIMP 帧缓冲扫描**（Volatility 失败兜底）: 按 RGB×显示器宽（1920/1366/1280/1024）当 stride 渲染 raw 像素——曾显示的桌面/浏览器截图显形; Python 批扫启发式 `10<mean<245 且 std>20`
+- **勒索 key 恢复方法论**: 先验 zip 完整性→strings 快逆向定模式（AES-256-OFB+IV 前置典型）→Volatility Linux 插件失败即转 raw 扫描→锚串（enc_key.bin 路径）定位+页对齐 32B 候选→**魔术字节当 key oracle**（解多文件首块验 %PDF/PK/89PNG，多签名共过才留）→恢复数对账 zip 清单→metadata flag 当诱饵处理（全库 rg 唯一性复核）
+- **内存样本两层解密**: 减 0x32→超长循环 XOR key（可达数百字节 ASCII art）; 勿信 strings 表（红鲱鱼），提取真实二进制逆向; key 藏样本 data 段大段可打印文本
+- **LUKS 主密钥**: 内存搜 AES 密钥: python 生成候选 key 的扩展密钥前 32 字节（AES key schedule），在 dump 中二进制搜索命中偏移 检测 AES key schedule 结构→`cryptsetup luksAddKey --master-keyfile`→开卷。伴生 rsakeyfind/aesfix。适用 LUKS/dm-crypt/FileVault/BitLocker
+- **VMware 快照**: volatility 3 原生支持 VMware 快照层——`$(dirname $PYTHON_CMD)/vol -f snap.vmem windows.info` 直接分析（.vmss 元数据文件需与 .vmem 同目录）
+
+## §2 加密卷与 VM
+
+- **TrueCrypt/VeraCrypt 识别**: 无魔术/高熵/尺寸 512 倍数/上下文线索; VeraCrypt 容器密码爆破: `hashcat -m 13721 容器文件 字典`（--veracrypt-pim 指定 PIM） -t -p pw vol.tc /mnt`（keyfile 加 -k; 旧 TC 加 --truecrypt）; 隐藏卷=第二密码; cryptsetup `--type tcrypt` 等价
+- **OVA/VMDK 展开**: OVA=TAR（`tar xf` 得 .ovf+.vmdk）; 展开前先 `qemu-img info disk.vmdk` 判子格式——**streamOptimized**（OVA 导出常见）7z/7zz 打不开（报 `Cannot open the file as [VMDK] archive`），必须 `qemu-img convert -f vmdk -O raw disk.vmdk disk.raw` 转原始镜像; flat/monolithicSparse 可试 `7zz x disk.vmdk` 按路径抽文件（命令名随安装：7z/7zz/7za），split/extent 多文件形态仍走 qemu-img 展开
+- **raw 镜像取文件（Sleuth Kit 链）**: `mmls disk.raw` 读分区表（根分区 Start 列，单位=512B 扇区）→ `fls -o <start> -r -p disk.raw > filelist.txt` 全盘列目录+inode → `icat -o <start> disk.raw <inode> > out` 按 inode 提取。**镜像传绝对路径**（相对路径按 CWD 解析，路径不符报 `Error stat(ing) image file`）
+- **VMDK/镜像关键文件**: Windows 侧 config/{SAM,SYSTEM,SOFTWARE}、Users/*/NTUSER.DAT、AppData；Linux 侧 /etc、/home/*、/usr/share（桌面/服务配置）
+
+## §3 文件系统恢复
+
+| 文件系统 | 删除机制 | 恢复路径 |
+|---|---|---|
+| NTFS | MFT 记录 0x16 标志翻转 | mftparser --offset 定向 dump $DATA; resident<700B 内联; windows.mftscan 兜底 |
+| FAT16/32 | 目录项首字节 0xE5+簇标 free | `fls -r -d img` + `icat img inode`（删除恢复: 目录项还在时） |
+| ext2/3/4 | 目录项移除，inode 孤立 | `e2fsck -y` 接回 /lost+found; debugfs `lsdel`; extundelete; ext2 无日志最可靠 |
+| XFS | — | inode 内联 extent [startoff,startblock,blockcount] 直读 dd; `xfs_db -r -c 'inode N' -c print'`; 超 4 extent 走 B+tree |
+| BTRFS | CoW 快照保留 | `btrfs subvolume list`→`mount -o subvol=@backup`; btrfs-find-root 找孤儿子卷 |
+| APFS | CoW 快照 | 扫 `APSB` magic（-16 偏移读 XID）→ `icat -f apfs -B <快照块> img inode` 跨 XID 读同 inode 取快照值 |
+| ZFS | label 可被清零 | strings 找 nvlist 残留→Fletcher4 重算修复→PBKDF2 参数 GPU 爆破（PyOpenCL ~24k/s） |
+
+- **RAID 5**: 双盘 XOR 恢复第三盘 `bytes(a^b)`; 布局四型（left/right×a/symmetric）用 PGM 可视化判 parity 旋转; mdadm --build 仅 RAID0——RAID5 用 fusepy 自实现块映射; XFS 只读挂载加 `norecovery`
+- **HFS+ Resource Fork**: python 解析 HFS+ catalog B-tree（卷头 magic H+ 查双 fork 记录）读 extent 分段 dd 拼接; .fseventsd（FSEventsParser）还原历史操作
+- **tar 重名条目**: `--occurrence=N` 取第 N 个（默认解包只剩最后一个）; python tarfile 遍历替代
+- **null 交织反 carving**: 隔位插 null 稀释魔术（尺寸≈2×是信号）——文件系统 extent 取原始块后 `data[0::2]`
+
+## §4 归档修复与密码
+
+- **ZIP 修复族**: ①filename length 双处修复（LFH@26+CDE@28 必须一致）②中央目录缺失→local header `PK\x03\x04` 迭代独立解（zlib raw -15）③字节反转双向归档（正反都是合法 zip）④IEND 后 overlay 魔术复原
+- **XZ 头重建**: 尾部 `YZ` footer 反推——footer 的 stream_flags（EOF-6）拷来+本地重算 CRC32 拼 12B 头; 通用: 头坏先查尾字节找真签名
+- **bkcrack**（ZipCrypto 已知明文）: ≥12B 已知明文（参照文件/可猜文件头）; `-C zip -c target -P known.zip -p k.txt`→`-k k0 k1 k2 -d out`; pkcrack 失败就换。坑点: ①构造明文包必须用与目标**相同的压缩软件**（WinRAR 压的目标用 7z 构造参照包直接报错——比对两 zip 同文件压缩后体积是否一致可预检）②"口令未找到"≠失败——`加密密钥已成功恢复`即可停（key 足以解密，无需密码）
+- **伪加密**（无真实密码、只改了加密标志位）: ZIP 通用位标记（general purpose bit flag）bit0=1 即"加密"——伪加密通常只改**目录区**（CDE）加密位、数据区（LFH）仍为 0（真加密两处都置 1）——对比两处判真假。修复: python 定位 CDE 加密位翻转回 0（`d=bytearray(open("x.zip","rb").read()); off=定位的CDE头; d[off+8]&=~1; open("x_fixed.zip","wb").write(d)`）/ `binwalk -e` 无视伪加密直接解 / macOS·Kali 部分解压器直接可开 / ZipCenOp.jar 批量改（副作用: 对真加密包会改成"CRC 校验错误"损坏态）。RAR 同理: 文件头块（0x74）HEAD_FLAGS 位标记改伪加密——具体偏移: 文件头第 24 字节 `PASSWORD_ENCRYPTED` 或第 11 字节 `BLOCK_HEADERS_ENCRYPTED`（010 Editor RAR 模板字段）置 1 即伪加密、置 0 解除。压缩包注释也藏密码（明文/反色/空格-tab 摩斯）
+- **exrex 正则密码链**: `list(exrex.generate(regex))` 物化匹配串（每层个位数候选）→extract-hint-repeat 千层秒级
+- **冷门**: FemtoZip（.model 共享字典+同构 corpus）/Brotli 无魔术试解法（逐库 decompress 不抛错即命中）
+
+## §5 结构化存储取证
+
+- **BSON**: 4B 小端 size 头修复缺失字节; bson.decode_all; {index,data:base64} 分块按 index 排序重建
+- **SQLite 编辑历史重放**: diff 表（type/position/text）按 id 重放——**每个中间态查 flag**（先输后删的秘密）
+- **SQLite varint**: 两版本 diff→serial type varint（≥13=串，len=(t-13)/2）定位被改字段→相邻载荷读隐藏字符
+- **Kyoto Cabinet 探针法**: key 清零时逐个插入探针 key+kchashmgr set→xxd diff 看哪个槽位被覆写→恢复 key→槽位映射→按原序重排值。"黑盒存储探针写入+diff 逆推布局"通用思想
+
+## §6 平台取证
+
+- **KAPE triage**: 顺序 PowerShell 历史（最快）→Amcache（regipy recurse_subkeys，执行时间线+SHA1）→MFT resident（<700B 内联直 grep）→注册表 hive→minidump 环境变量 strings
+- **Docker**: `docker save` 分层 tar——**后层删除的文件在早期层仍在**（.wh. whiteout 只是标记）; `docker history --no-trunc` 看 ARG/ENV secret; config JSON 保留全部 RUN; dive 逐层 diff; export 免运行抽 fs
+- **云存储**: S3 版本控制桶 `list-object-versions`+`get-object --version-id` 恢复已删; gsutil/az 同理
+- **Android**: adb pull/backup→abe.jar 解包; 高价值: shared_prefs/（硬编码 secret）、databases/（SQLite）、wpa_supplicant.conf（WiFi 密码）、packages.xml
+- **GPT GUID 信道**: 分区 GUID 16B 任意值——非零 GUID 拼接常是压缩流（首 GUID 魔术定格式）
+- **MD5 PDF 碰撞**: corkami/pocs `pdf.py`+fastcoll 一条命令; chosen-prefix 用 hashclash
+
+## §6a 应用取证
+
+- **浏览器 artifact**: Chrome History/Downloads（SQLite; **WebKit epoch 1601 微秒** `datetime(t/1000000-11644473600,'unixepoch')`）; Firefox places.sqlite（Unix 微秒）/formhistory; Local Storage=LevelDB（strings *.ldb）; **session restore**: recovery.jsonlz4 跳 8B 魔术头 lz4.block.decompress→windows[].tabs[].entries[-1].url
+- **Chrome 密码**: Local State `os_crypt.encrypted_key`（b64→去 5B DPAPI 前缀→CryptUnprotectData）; Login Data password_value v10/v11 格式 nonce[3:15]/ct[15:-16]/tag[-16:] AES-GCM; Firefox 走 firepwd
+- **git 三式**: gitdumper 暴露 .git; squash 恢复 `git reflog --all`+`git fsck --unreachable --no-reflogs`（gc 前 2 周孤儿存活）→`git show <hash>:path`; 损坏 blob 单字节爆破（期望 SHA-1 在 tree 里已知，git hash-object 验证）
+- **KeePass v4**: 标准 keepass2john 不支持 KDBX4/Argon2——ivanmrsulja fork 或 keepass4brute; hashcat -m 13400; python 内联爬页面提词（requests+re 分词生成字典）; SSH key 在 Notes/附件字段
+- **KeePass master key 内存恢复**（CVE-2023-32784，KeePass 2.x < 2.54）: 有内存镜像/KeePass 进程 dump 时**优先于爆破**——密码逐字符以单字节 key XOR 后残留内存（每字符后跟其反序拷贝的特征模式），可恢复**除首字符外的完整密码**。工具: vdohney/keepass-dump-masterkey（`python3 dump-masterkey.py <dump>` 直接吐候选串）; 首字符枚举可打印 ASCII 补全。失败判据: dump 里特征模式不全（密码分片太碎）→ 回退 hashcat -m 13400 爆破
+- **pyrasite**: 运行中进程源码恢复——pyrasite-shell <PID> 注入（ptrace_scope），globals() 直接读 secret，func_code 用 uncompyle6（≤3.8）/pycdc（3.9+，先 marshal.dump 落盘）; /proc/PID/fd 见 deleted 标记即此场景
+- **Linux 攻击链四源**: auth.log "session opened"+.bash_history+`find /usr/bin -newer auth.log`+tshark tftp; 恶意样本常见 AES-ECB+同 key XOR 存 .enc
+- **XKB 键盘布局识别**（VM 镜像问"机器主人用哪个布局"）: 布局文件在 `/usr/share/X11/xkb/symbols/<名字>`。文件名与 `name[Group1]` 可被改成通用名隐藏身份——**不按字母肉眼比对**，把文件与上游公开布局（社区布局仓库的 `Linux/xkb/*`）逐字节 `diff`：变体间常只差 2-3 个键（colstag/rowstag 是若干键位的循环换位），diff 一步定案。辅证：全盘 `grep -a` 布局名命中必须带上下文复核（压缩数据随机字节、`workman` 在 `NetworkManager` 中会假阳性）; 顺带排除其他布局来源（`/etc/conf.d/loadkmap`、`/etc/X11`、`setxkbmap` 痕迹）
+
+## §7 域环境与密码
+
+- Firefox firepwd（key4.db+logins.json）/ SSH Accepted publickey 溯源（authorized_keys×auth.log）/ 哥斯拉流量 AES-ECB 解密后乱码先 gunzip
+- **PGM 可视化**: `("P5 W H 255"; cat img) > x.pgm`——黑区=零、横纹=元数据/parity、均匀噪声=加密; RAID 盘序判定（子块求和矩阵对齐/裂缝）
+
+## §8 关联文件
+
+- `forensics-methodology.md` — 总入口/Volatility/日志
+- `network-forensics.md` — pcap 侧（TLS key、SMB3、外发）
+- `$SHARED_DIR/knowledge-base/ad-domain-attacks.md` — AD 攻击视角
+- `mobile-analysis/knowledge-base/` — Android 逆向侧

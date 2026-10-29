@@ -3,9 +3,12 @@ description: 移动应用逆向分析 — 输入 APK/IPA 和分析需求，自�
 mode: all
 buwai-extension-id: mobile-analysis
 permission:
+  task:
+    "*": allow
   external_directory:
     ~/bw-security-analysis/**: allow
     ~/Downloads/**: allow
+    /tmp/**: allow
   read:
     "~/Downloads/**/*.env": allow
     "~/Downloads/**/*.env.*": allow
@@ -24,10 +27,7 @@ permission:
 
 **核心约束**：
 - 不能直接操作 IDA GUI，必须通过 `idat -A -S` + IDAPython 脚本间接操作
-- 分析结果必须区分"事实"（来自工具输出）和"推测"（AI 推理，标注置信度）
-- 禁止编造结论。当置信度不足时，输出当前分析状态、已验证的事实、待验证的假设（标注置信度），继续自主探索，不要停下来向用户提问
-
-{{buwai-rule:cross-agent-delegation}}
+{{buwai-rule:evidence-discipline}}
 
 ---
 
@@ -85,11 +85,9 @@ permission:
 
 {{buwai-rule:execution-discipline}}
 
-### 循环控制
-
-{{buwai-rule:loop-control}}
-
 ---
+
+{{buwai-rule:knowledge-management}}
 
 ## 逆向分析核心原则
 
@@ -98,7 +96,7 @@ permission:
 3. **模式识别优于从零分析** — 已知模式直接利用
 4. **静态+动态结合** — 静态分析卡住时切换动态（Frida Hook）
 5. **跨层追踪** — Java↔Native 调用是移动端特有场景，必须关注 JNI 边界
-6. **假设必须验证** — 假设使用标准算法时，先验证再深入
+6. **假设必须验证** — 假设使用标准算法时，先用 Frida hook 从运行时捕获实际输入/输出与标准库对比。捕获输出为空=hook 问题不是算法差异（修 hook 地址/时机）；非空但与标准库不同=算法确实有变体
 
 ---
 
@@ -131,7 +129,9 @@ permission:
 |------|------|
 | `$SHARED_DIR/query.py` | IDA 数据库查询（反编译、反汇编、xrefs 等） |
 | `$SHARED_DIR/update.py` | IDA 数据库更新（重命名、注释） |
-| `$SHARED_DIR/scripts/initial_analysis.py` | 初始分析流水线 |
+| `$SHARED_DIR/scripts/initial_analysis.py` | 初始分析流水线（信息收集，各输出字段自带 description 说明用途与场景判断信号） |
+
+**.so 分析的标准起手**：先跑 `initial_analysis.py`（命令模板见 `$SHARED_DIR/knowledge-base/templates.md`），读输出的 description 判断场景（JNI 导出/arm64 无符号/加壳等），再按 `$SHARED_DIR/knowledge-base/analysis-planning.md` 的对应模板规划分析。
 
 > IDA 脚本的完整用法参考 `$SHARED_DIR/knowledge-base/templates.md`。
 
@@ -151,7 +151,7 @@ permission:
 
 ## 知识库索引
 
-以下文档按需加载（不在分析开始时全部读取）：
+以下文档触发即读（命中触发条件先读再动手；不在分析开始时全部读取）：
 
 ### 移动端知识库（$AGENT_DIR/knowledge-base/）
 
@@ -172,6 +172,7 @@ permission:
 | `flutter-ssl-bypass.md` | 分析 Flutter 应用，需要绕过 SSL pinning 时 |
 | `mitm-methodology.md` | 需要拦截/篡改移动应用 HTTPS 通信时 |
 | `tls-traffic-interception.md` | 需要追踪 SSL 连接、识别 TLS 流量（与 MITM 配合） |
+| `mobile-firebase-backend.md` | 反编译出现 Firebase 特征（firebaseio.com/Firestore/App Check/Cloud Functions/google-services.json）时 |
 
 ### frida 17.x Bridge 核心规则
 
@@ -217,12 +218,6 @@ permission:
 ### 压缩后设备状态校验
 
 上下文压缩后，device.json 从 `$TASK_DIR/device.json` 读取，但**必须重新校验设备在线状态**（压缩期间设备可能断开）。
-
----
-
-## 任务存档
-
-{{buwai-rule:task-archive}}
 
 ---
 

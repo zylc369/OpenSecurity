@@ -1,0 +1,45 @@
+<%- include("partials/head", { title }) %>
+    <section class="grid">
+      <div class="panel">
+        <h2>Create note</h2>
+        <form method="post" action="/create">
+          <p>
+            <label for="title">Title</label>
+            <input id="title" name="title" maxlength="10" required>
+          </p>
+          <p>
+            <label for="html">HTML body</label>
+            <textarea id="html" name="html" maxlength="512" required></textarea>
+          </p>
+          <button type="submit">Create</button>
+        </form>
+      </div>
+
+      <div class="panel">
+        <h2>Report document</h2>
+        <p class="muted">Send the URL to the team, yeah?</p>
+        <form method="post" action="/report">
+          <p>
+            <label for="url">URL</label>
+            <input id="url" name="url" placeholder="https://example.com/" required>
+          </p>
+          <button type="submit">Send</button>
+        </form>
+      </div>
+    </section>
+
+    <section>
+      <h2>Your visible notes</h2>
+      <% if (notes.length) { %>
+        <% for (const note of notes) { %>
+          <article class="note">
+            <h3><%= note.title %></h3>
+            <p class="muted">public - <%= note.id %></p>
+            <a href="/note/<%= encodeURIComponent(note.id) %>">preview</a>
+          </article>
+        <% } %>
+      <% } else { %>
+        <p class="muted">No notes yet.</p>
+      <% } %>
+    </section>
+<%- include("partials/foot") %>

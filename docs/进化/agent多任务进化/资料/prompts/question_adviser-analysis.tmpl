@@ -1,0 +1,99 @@
+# question_adviser.tmpl 分析
+
+## 1. 原文件名
+
+`question_adviser.tmpl`，在源码中以 `PromptTypeQuestionAdviser = "question_adviser"`（`templates/templates.go:42`）注册，注释标注用途为 *human input seeking expert advice*。
+
+## 2. 类型与用途
+
+**B 类 Agent Human Prompt**（向 agent 交付任务/问题的人类消息模板）。
+
+它在 agent prompt 注册表里被挂在 Adviser 条目的 `Human` 字段（`templates/templates.go:551-554`）：
+
+```
+Adviser: AgentPrompts{
+    System: getPrompt(PromptTypeAdviser),        // adviser.tmpl
+    Human:  getPrompt(PromptTypeQuestionAdviser), // 本模板
+}
+```
+
+用途是把"谁在问、问什么、附带哪些上下文"打包成结构化消息，作为 adviser agent 这一轮推理的 user 输入。
+
+## 3. 配对关系
+
+与 `adviser.tmpl`（`PromptTypeAdviser`，system prompt）**成对使用**：
+
+- `adviser.tmpl` = system 消息，定义 adviser 的角色、授权状态、三种工作模式、回复风格、容器/终端机制等常驻规则。
+- `question_adviser.tmpl` = human 消息，承载本次具体咨询的动态数据（发起者、问题、代码、输出、增强数据）。
+
+两模板在 `providers/handlers.go:198` 与 `:203` 先后渲染，再一并传入 `performSimpleChain`（`:219`）作为 `systemMsg` / `userMsg` 启动一次 adviser 单链调用。二者通过 `adviserContext["system"]` 与 `adviserContext["user"]` 两套上下文分别注入，互不重叠。
+
+> 注意：adviser 有三种工作模式（直接咨询 / Planner / Mentor），后两种使用 `question_task_planner.tmpl`、`question_execution_monitor.tmpl`，**不使用本模板**。本模板只服务于 Mode 1「直接技术咨询」。
+
+## 4. 调用时机
+
+触发链（已逐段验证）：
+
+1. 任何挂载了 `advice` 工具的 agent（**不止 primary_agent**，见下方说明）在其推理过程中调用 `AdviceToolName`（工具名 `"advice"`，schema 在 `tools/registry.go:372`，参数结构 `AskAdvice`）。
+2. 工具调用路由到 `flowProvider.GetAskAdviceHandler` 返回的闭包（`handlers.go:73` 定义、`:227-248` 为入口闭包，span 名为 `providers.flowProvider.getAskAdviceHandler`）。
+3. 入口闭包按顺序执行两步：
+   - **先**调 `enricherHandler`（`:84-148`）跑一遍 enricher agent，对同一份 `ask.Question/Code/Output` 做上下文增强，产出 `enriches` 字符串。
+   - **再**调 `adviserHandler`（`:150-225`）：在 `:198` 用 `adviserContext["user"]` 渲染 **本模板** 得到 `userAdviserTmpl`，在 `:203` 渲染 `adviser.tmpl` 得到 `systemAdviserTmpl`，随后 `:219` 发起 adviser 单链。
+4. adviser 返回的建议字符串经入口闭包回传给发起 agent，作为 `advice` 工具调用的 result。
+
+**关于"primary_agent 触发"的修正**：从工具注册看，`advice` 工具对 primary_agent、pentester、coder、installer、assistant 五类 agent 全部开放（adviser.tmpl 的能力矩阵与 `tools.go` 注册逻辑一致），任何一类调用都会走到同一个 `GetAskAdviceHandler`。所以更准确的说法是"**任一注册了 AdviceToolName 的 agent 调用 advice 工具时**"，而非特指 primary_agent。
+
+## 5. 工具列表
+
+**无工具**。本模板是纯消息包装模板，渲染产物是一段结构化文本（`<question_adviser_context>` 包裹），不含任何工具调用或 function-calling 定义。adviser 这一轮能用的工具由 `OptionsTypeAdviser` 的 provider 配置决定，与模板无关。
+
+## 6. 非工具占位符
+
+模板声明使用的 5 个占位符在 `templates/templates.go:264-270` 的 `PromptTypeQuestionAdviser` 白名单中登记：`InitiatorAgent`、`Question`、`Code`、`Output`、`Enriches`。全部由 `adviserHandler` 内构造的 `adviserContext["user"]` map（`handlers.go:156-163`）注入。各占位符细节如下。
+
+### {{.InitiatorAgent}}
+
+- **用途**：标识"是谁在向 adviser 求助"，让 adviser 据此选择适配该发起者能力边界与完成工具的建议（adviser.tmpl 中的能力矩阵按此字段匹配）。
+- **注入信息**：发起 advice 请求的 agent 类型字符串。来源 `tools.GetAgentContext(ctx).CurrentAgentType`（`handlers.go:151-154`）。取值域：`primary_agent` / `pentester` / `coder` / `installer` / `searcher` / `assistant`；当 ctx 中取不到 AgentContext 时回退为 `"unknown"`。
+- **注入时机**：进入 `adviserHandler` 时即从 ctx 读取并写入 context map，模板渲染（`:198`）时取出。
+- **渲染特性**：无条件渲染（模板中无 `{{if}}` 包裹）。
+
+### {{.Question}}
+
+- **用途**：本次咨询的核心问题正文，adviser 主要围绕它作答。
+- **注入信息**：`AskAdvice.Question`（`tools/args.go:102`，`json:"question"`，必填）。由发起 agent 在调用 `advice` 工具时通过参数传入；按 schema 描述属"技术频道载荷"，固定用英文书写、不翻译。
+- **注入时机**：入口闭包 `json.Unmarshal` 出 `ask`（`handlers.go:231-235`）后，原样透传给 `adviserHandler`，写入 context map。
+- **渲染特性**：无条件渲染。
+
+### {{.Code}}
+
+- **用途**：附带给 adviser 分析的代码片段（如可疑 exploit 代码、报错脚本等）。
+- **注入信息**：`AskAdvice.Code`（`tools/args.go:103`，`json:"code"`，可选）。发起 agent 调 advice 时按需附带，要求原样保留、不翻译。
+- **注入时机**：同 `Question`，随 `ask` 透传进 context map。
+- **渲染特性**：**条件渲染**——模板用 `{{if .Code}}…{{end}}` 包裹，空值时整段 `<code_snippet>` 不出现。
+
+### {{.Output}}
+
+- **用途**：附带给 adviser 参考的命令执行输出（stdout/stderr 片段，如报错日志、扫描结果）。
+- **注入信息**：`AskAdvice.Output`（`tools/args.go:104`，`json:"output"`，可选）。发起 agent 调 advice 时按需附带，要求原样保留。
+- **注入时机**：同 `Question`，随 `ask` 透传进 context map。
+- **渲染特性**：**条件渲染**——模板用 `{{if .Output}}…{{end}}` 包裹，空值时整段 `<command_output>` 不出现。
+
+### {{.Enriches}}
+
+- **用途**：把 enricher agent 预跑出的补充上下文喂给 adviser，避免 adviser 在信息不足的情况下给建议。adviser.tmpl 的 `<enrichment_data_usage>` 节明确要求"先读 enrichment、再作答"。
+- **注入信息**：enricher agent 的输出字符串。来源是入口闭包先执行的 `enricherHandler`（`handlers.go:84-148`）——它用同一份 `ask.Question/Code/Output` 渲染 `question_enricher.tmpl` + `enricher.tmpl`，调 `performEnricher`（`:142`）跑 enricher agent，整合历史执行结果、文件系统分析、技术文档、记忆/知识图谱发现等，返回 markdown 文本。该返回值作为 `enriches` 形参传入 `adviserHandler`（`:150`、`:162`）。
+- **注入时机**：在 `adviserHandler` **之前**由入口闭包先跑 enricher 生成，再注入。换句话说，本模板渲染时 enricher 这一轮已经跑完。
+- **渲染特性**：**条件渲染**——模板用 `{{if .Enriches}}…{{end}}` 包裹，enricher 无产出时整段 `<enrichment_data>` 不出现。
+
+---
+
+### 小结表
+
+| 占位符 | 必填 | 条件渲染 | 数据来源 | 备注 |
+|---|---|---|---|---|
+| `{{.InitiatorAgent}}` | 否（有 `unknown` 兜底） | 否 | ctx 中的 AgentContext | 决定 adviser 适配哪类发起者 |
+| `{{.Question}}` | 是 | 否 | `AskAdvice.Question` | 英文技术问题正文 |
+| `{{.Code}}` | 否 | 是 | `AskAdvice.Code` | 可选代码片段 |
+| `{{.Output}}` | 否 | 是 | `AskAdvice.Output` | 可选命令输出 |
+| `{{.Enriches}}` | 否 | 是 | enricher agent 预跑结果 | adviser 渲染前已生成 |

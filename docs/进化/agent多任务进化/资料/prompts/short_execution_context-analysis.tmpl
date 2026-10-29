@@ -1,0 +1,91 @@
+# short_execution_context.tmpl 分析文档
+
+## 1. 原文件名
+
+`short_execution_context.tmpl`
+
+## 2. 类型与用途
+
+**类型**：C 类工具辅助 Prompt —— 精简执行上下文（execution context）渲染模板。
+
+- 对应 `PromptType` 常量 `PromptTypeShortExecutionContext = "short_execution_context"`（templates/templates.go:62）。
+- 源码注释明确其定位为 *"prepares minimal context for quick processing"*，与 `PromptTypeFullExecutionContext`（*"prepares complete context for summarization"*）形成"精简版 / 完整版"的**功能分工**：本模板面向 agent 快速读取的轻量上下文，后者面向 summarizer 的完整上下文。
+
+**核心用途**：在 agent 链启动前，把"当前任务 + 历史任务 + 子任务进度"组装成一段结构化 XML 上下文，注入到下游 prompt（如各 agent 的 system prompt 或 enricher 上下文的 `ExecutionContext` 字段），让 agent 在不翻阅完整对话历史的前提下，快速对齐"我在做什么、做到哪了、接下来做什么"。
+
+**特性**：它本身**不产生** agent 的对话输出，是纯粹的上下文供给片段；渲染结果是字符串，被调用方（handlers/performer）塞进下游 prompt 的占位符里。
+
+## 3. 配对关系
+
+**无独立配对 prompt**（无对应的 `question_short_execution_context` 之类的成对模板）。它不是对话型 agent prompt，不需要 question 伴随模板。
+
+> 补充提醒（查缺补漏）：虽然无配对，但 `full_execution_context.tmpl` 与本模板的**占位符集合完全一致**（`Task` / `Tasks` / `CompletedSubtasks` / `Subtask` / `PlannedSubtasks`，见 templates/templates.go:394-407）。两者是同字段、不同渲染粒度的兄弟模板——`full` 版用于 summarization（信息更全），`short` 版用于 quick processing（信息更简）。分析或改动本模板时，应同步审视 `full_execution_context.tmpl`，避免两者语义漂移。
+
+## 4. 调用时机
+
+本模板**不直接由业务逻辑调用**，而是经由 `flowProvider.getExecutionContext`（providers/helpers.go:764）这一**分发器**间接渲染。完整时机如下：
+
+### 4.1 主要渲染入口：`performAgentChain` 开头
+
+providers/performer.go:81 在每条 agent 链开始时调用：
+
+```go
+executionContext, err := fp.getExecutionContext(ctx, taskID, subtaskID)
+```
+
+`performAgentChain` 被各 agent performer（performers.go 中 9 处、assistant.go、provider.go）统一调用，因此**每条 agent 链启动时都会获取一次执行上下文**——这是用户所述"每次 performAgentChain 开始时获取上下文"的准确含义。
+
+### 4.2 次要渲染入口：各工具 Handler 构建上下文时
+
+providers/handlers.go 中多处 Handler 在返回工具执行闭包前，也会调用 `getExecutionContext`（GetAskAdviceHandler:79、GetCoderHandler:257，以及 357/454/592/694/786 等）。这些上下文随后作为 `ExecutionContext` 注入对应 agent（如 enricher）的 system prompt。即：**不仅是链开头，每个需要"感知任务进度"的子 agent 工具初始化时都会重新取一次上下文**。
+
+### 4.3 `getExecutionContext` 的三分发（helpers.go:764-774）
+
+分发器按 `(taskID, subtaskID)` 是否为 nil 选择路径，**三条路径并非都会渲染本模板**：
+
+| 路径 | 触发条件 | 是否渲染本模板 |
+|------|----------|----------------|
+| `getExecutionContextBySubtask` (776) | taskID、subtaskID 均非 nil | **通常不渲染**：若该 subtask 已缓存 `Context`（数据库字段），直接返回缓存字符串 |
+| `getExecutionContextByTask` (785) | 仅 taskID 非 nil（或 BySubtask 未命中缓存回退） | **渲染**（helpers.go:792） |
+| `getExecutionContextByFlow` (806) | 两者皆 nil | **渲染**（helpers.go:825 / 840） |
+
+> 关键边界：`BySubtask` 命中缓存时跳过模板渲染，是一种性能优化——缓存值通常是此前已渲染好的上下文字符串。模板真正执行的只有 `ByTask` 和 `ByFlow` 两条路径。
+
+## 5. 工具列表
+
+**无工具。** 本模板是纯上下文渲染片段，不在 `templates` 的工具映射中注册任何 function tool，也不产出 tool call。其输出仅作为字符串被下游 prompt 消费。
+
+## 6. 非工具占位符
+
+本模板声明 5 个占位符（templates/templates.go:401-407），全部为"上下文数据"占位，无工具占位。数据由 `getTasksInfo`（helpers.go:177）+ `getSubtasksInfo`（helpers.go:224）从数据库实时查询并分类组装后注入。
+
+### 6.1 数据来源与分类逻辑（注入前置）
+
+- **`getTasksInfo`**（helpers.go:177-222）：调用 `GetFlowTasks` 取当前 flow 全部任务，然后**把 taskID 对应当前任务从切片中剔除**单独存入 `info.Task`，剩余存入 `info.Tasks`。
+- **`getSubtasksInfo`**（helpers.go:224-242）：遍历 `GetFlowSubtasks` 结果，按 `taskID` 过滤，再按 `Status` 三分类：
+  - `SubtaskStatusCreated` → `Planned`
+  - `SubtaskStatusFinished` / `SubtaskStatusFailed` → `Completed`
+  - 其它状态（即"进行中"）→ `Subtask`（取最后一个匹配，**循环覆盖**，故 `Subtask` 语义为"当前唯一进行中子任务"）
+
+类型定义见 providers/provider.go:118-128（`tasksInfo`、`subtasksInfo`）。
+
+### 6.2 各占位符明细
+
+| 占位符 | Go 类型 | 模板内使用字段 | 注入信息（含义） | 注入时机 |
+|--------|---------|----------------|------------------|----------|
+| `{{.Task}}` | `database.Task`（单个，非指针） | `.Input` | **当前任务**：用户本次请求的原始输入。来自 `getTasksInfo.Task`（已从 `Tasks` 切片中剔除）。`ByFlow` 末尾兜底分支（helpers.go:839-845）**不注入**该字段（为空），模板内 `{{if .Task}}` 为 false，整段全局任务块不渲染 | 每次 `getExecutionContext` 的 `ByTask`/`ByFlow` 路径渲染时，由 `getTasksInfo` 实时从 DB 查询 |
+| `{{.Tasks}}` | `[]database.Task`（切片） | `.ID` `.Title` `.Status` | **历史/其它任务**（**不含当前任务**）：同一 flow 内除当前外的所有任务。`getTasksInfo` 剔除当前任务后剩余；`ByFlow` 兜底分支注入全部任务 | 同上，与 `.Task` 同源、同时注入 |
+| `{{.CompletedSubtasks}}` | `[]database.Subtask`（切片） | `.ID` `.Title` `.Status` | **已完成子任务**：当前 taskID 下 Status 为 `Finished` 或 `Failed` 的子任务 | `getSubtasksInfo` 渲染时按 Status 实时分类 |
+| `{{.Subtask}}` | `*database.Subtask`（指针，可空） | `.ID` `.Title` `.Description` | **当前进行中子任务**：Status 非 Created/Finished/Failed 的子任务（"进行中"态）。取分类循环中最后一个匹配。为空时模板渲染"无进行中子任务"兜底消息，引导 agent 参考 planned/completed | `getSubtasksInfo` 渲染时按 Status 实时分类 |
+| `{{.PlannedSubtasks}}` | `[]database.Subtask`（切片） | `.ID` `.Title` | **计划中子任务**：Status 为 `Created` 的子任务（尚未开始）。为空时渲染"所有子任务已完成（当前除外）"兜底消息 | `getSubtasksInfo` 渲染时按 Status 实时分类 |
+
+### 6.3 数据模型字段参考（database/models.go）
+
+- `Task`（1074）：`ID` / `Status` / `Title` / `Input` / `Result` / `FlowID` / `CreatedAt` / `UpdatedAt`
+- `Subtask`（1062）：`ID` / `Status` / `Title` / `Description` / `Result` / `TaskID` / `CreatedAt` / `UpdatedAt` / `Context`
+
+> 本模板只用到上述字段的一个子集（见"模板内使用字段"列），未使用的字段（如 `Task.Result`、`Subtask.Result`/`Context` 等）即使注入也不被消费——这正是它区别于 `full_execution_context`（消费更多字段）之处。
+
+### 6.4 注入时机小结
+
+所有占位符的注入**统一发生在 `RenderTemplate` 调用瞬间**（helpers.go:792 / 825 / 840），数据新鲜度取决于该次 DB 查询，不缓存于模板层（`BySubtask` 缓存的是整段渲染结果字符串，而非字段级缓存）。因此每次链启动或 Handler 初始化取到的上下文，都反映到那一刻为止的最新任务/子任务进度。

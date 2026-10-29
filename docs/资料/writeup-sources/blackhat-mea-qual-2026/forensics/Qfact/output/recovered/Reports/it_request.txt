@@ -1,0 +1,4 @@
+﻿IT Request - Software Install
+Requested: Python 3.12, Visual Studio Code
+Justification: Data analysis and reporting scripts
+Status: Approved June 5, 2025

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# OpenSecurity 一键安装 (macOS / Linux)
+# 用法: bash .opencode/install.sh
+# 逻辑在 detect_py_deps.py install（python 依赖）+ detect_tools.py install（外部工具）。
+# 两层都是必需层: python 依赖失败立即中断; 工具层单项失败不中断其余安装，
+# 但只要有失败，本脚本以非零退出码结束（重装命令见输出末尾汇总）。
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 找 python3
+PYTHON=""
+for cmd in python3 python; do
+    if command -v "$cmd" &>/dev/null; then
+        PYTHON="$cmd"
+        break
+    fi
+done
+
+if [[ -z "$PYTHON" ]]; then
+    echo "错误：未找到 Python。请安装 Miniforge 或 Python 3.10+。" >&2
+    exit 1
+fi
+
+# 参数: --force（透传给 detect_tools install——忽略幂等跳过强制重装，
+# wrapper 模板升级后批量重新生成时用）
+FORCE=""
+if [[ "${1:-}" == "--force" ]]; then
+    FORCE="--force"
+elif [[ $# -gt 0 ]]; then
+    echo "错误：install.sh 仅支持 --force 参数（收到: $*）。" >&2
+    exit 1
+fi
+
+# 子脚本以 services.* 形式导入控制台后端 → 注入模块搜索路径（系统 python 阶段同样适用；
+# detect_py_deps 内部切 venv 重 exec 时继承本环境）
+export PYTHONPATH="${SCRIPT_DIR}/control/backend${PYTHONPATH:+:${PYTHONPATH}}"
+
+# 1. Python 依赖（必需层: 失败即中断）
+"$PYTHON" "${SCRIPT_DIR}/control/backend/services/detect_py_deps.py" install
+
+# 2. 外部工具（必需层: 单项失败不中断其余，但整体失败 → 非零退出码）
+echo "[*] === 安装外部工具（单项失败不中断，失败汇总在末尾） ==="
+"$PYTHON" "${SCRIPT_DIR}/control/backend/services/detect_tools.py" install $FORCE

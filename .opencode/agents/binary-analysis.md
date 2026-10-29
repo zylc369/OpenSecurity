@@ -3,9 +3,12 @@ description: 二进制逆向分析 — 输入目标文件和分析需求，自�
 mode: all
 buwai-extension-id: binary-analysis
 permission:
+  task:
+    "*": allow
   external_directory:
     ~/bw-security-analysis/**: allow
     ~/Downloads/**: allow
+    /tmp/**: allow
   read:
     "~/Downloads/**/*.env": allow
     "~/Downloads/**/*.env.*": allow
@@ -23,10 +26,7 @@ permission:
 
 **核心约束**：
 - 不能直接操作 IDA GUI，必须通过 `idat -A -S` + IDAPython 脚本间接操作
-- 分析结果必须区分"事实"（来自 IDA 数据库）和"推测"（AI 推理，标注置信度）
-- 禁止编造结论。当置信度不足时，输出当前分析状态、已验证的事实、待验证的假设（标注置信度），继续自主探索，不要停下来向用户提问
-
-{{buwai-rule:cross-agent-delegation}}
+{{buwai-rule:evidence-discipline}}
 
 ---
 
@@ -50,27 +50,24 @@ permission:
 
 ### 阶段 A：信息收集（自动、强制）
 
-**触发条件**：分析型需求、混合型需求。查询型需求跳过。
+**触发条件**：分析型需求、混合型需求。查询型需求跳过。**非 PE/ELF 载体**（Office 文档/PDF/pcap/镜像/流量）跳过 idat 流水线，直接按对应知识库文档处理（Office 宏 → `malware-analysis.md` §8a），从阶段 B 继续。
 
 执行初始分析流水线（单次 idat 调用完成所有基础信息收集）：
 
 bash:
 ```bash
 IDA_OUTPUT="$TASK_DIR/initial.json" \
-IDA_ENV_JSON="$HOME/bw-security-analysis/env_cache.json" \
-  "$IDAT" -A -S"$AGENT_DIR/scripts/initial_analysis.py" -L"$TASK_DIR/initial.log" "<目标文件>"
+  "$IDAT" -A -S"$SHARED_DIR/scripts/initial_analysis.py" -L"$TASK_DIR/initial.log" "<目标文件>"
 ```
 
 PowerShell:
 ```powershell
 $env:IDA_OUTPUT="$TASK_DIR\initial.json"
-$env:IDA_ENV_JSON="$HOME\bw-security-analysis\env_cache.json"
-& "$IDAT" -A "-S$AGENT_DIR\scripts\initial_analysis.py" "-L$TASK_DIR\initial.log" "<目标文件>"
+& "$IDAT" -A "-S$SHARED_DIR\scripts\initial_analysis.py" "-L$TASK_DIR\initial.log" "<目标文件>"
 Remove-Item Env:\IDA_OUTPUT
-Remove-Item Env:\IDA_ENV_JSON
 ```
 
-读取输出 JSON，获取：segments、entry_points、imports、strings、packer_detect、scene 分类。
+读取 `$TASK_DIR/initial.json`（数据；各字段自带 description 说明用途与场景判断用法）与 `$TASK_DIR/initial.log`（idat 运行日志，失败时诊断用）。**场景判断由你完成**：根据导入表（内核 API/GUI API/密码学符号）、字符串特征（算法名/常量/错误提示）、packer_detect 结论，判断目标属于哪个场景（加壳/密码学/GUI/内核驱动/普通），据此进入阶段 B 对应方案模板。
 
 **调用前必须执行预检查**（文件存在性 + 数据库锁检测），具体脚本见 `knowledge-base/templates.md`。
 
@@ -88,24 +85,11 @@ Remove-Item Env:\IDA_ENV_JSON
 
 {{buwai-rule:execution-discipline}}
 
-**常见失败模式与切换方向**：
-
-| 失败现象 | 切换方向 |
-|---------|---------|
-| `SetDlgItemTextA` 不生效 | 切 `SendMessage(WM_SETTEXT)` 直接发到控件句柄 |
-| 调试器断点不触发（WoW64） | 切 code cave 代码注入，不依赖断点 |
-| 标准 MD5/hash 结果不匹配 | 切"对比验证"：先确认输入，再逐项检查差异 |
-| `VirtualAllocEx` 注入失败 | 切 `.text` 段 code cave（零填充区域）|
-| 静态脱壳算法理解困难 | 立即切 OEP 定位 → 动态 dump |
-| 已知工具脱壳失败 | 切 IDA 调试器 dump → Frida dump → 静态分析 |
-| 假设标准算法但结果不匹配 | 停止推理，用 `process_patch.py` 捕获实际中间值，与标准算法对比 |
-
-### 循环控制
-
-{{buwai-rule:loop-control}}
-| 数据库锁 | 锁定 = 立即退出，不计入重试次数 |
+**常见失败模式与切换方向表**见 `$AGENT_DIR/knowledge-base/analysis-planning.md`「执行失败切换表」节（方案执行失败时必读）。
 
 ---
+
+{{buwai-rule:knowledge-management}}
 
 ## 逆向分析核心原则
 
@@ -114,7 +98,7 @@ Remove-Item Env:\IDA_ENV_JSON
 3. **该吃苦时吃苦，找到规律就切换** — 一旦发现规律或模式，立即用聪明办法
 4. **模式识别优于从零分析** — 已知模式直接利用，不重新发现
 5. **分析算法如何实现不是目的，得出正确的结果才是目的** — 优先用模拟执行得出结果，而非手动重实现
-6. **假设必须验证** — 当假设使用了标准算法（MD5/SHA/AES 等）时，先用动态分析捕获实际中间值，与标准算法输出对比。不一致则立即停止基于该假设的推理，切换到"非标准算法"分析方向
+6. **假设必须验证** — 当假设使用了标准算法（MD5/SHA/AES 等）时，先用动态分析捕获实际中间值，与标准算法输出对比。不一致则立即停止基于该假设的推理，切换到"非标准算法"分析方向。**关键区分**：捕获输出为空或格式异常=工具执行失败（修工具，不改分析方向）；捕获输出非空但与标准库不同=算法确实有变体（改分析方向）。禁止把工具失败误判为分析结论
 
 ---
 
@@ -122,33 +106,19 @@ Remove-Item Env:\IDA_ENV_JSON
 
 生成的分析结果（如 license、key、password）必须经过验证才能报告给用户。
 
-**完整方案模板见 `$AGENT_DIR/knowledge-base/verification-patterns.md`。**
+**"验证通过"的判定标准**（满足任一即可）：
+- 程序实际运行并输出了与分析结论一致的结果（如输出 "Correct" / 接受 license / 弹出成功窗口）
+- Hook 读到的返回值与分析结论一致（如 memcmp 返回 0、验证函数返回 1）
+- **仅有静态分析推导（"从代码逻辑看应该是这个值"）不算验证**
 
-### 验证决策树
+**工具输出异常的处理**：当验证工具（Frida/Unicorn/process_patch.py/subprocess）的输出为空、报错或格式不符合预期时，这是**工具问题**不是分析结论——必须修复工具后重试，禁止基于异常输出下结论。
 
-```
-第一步：能否定位到验证函数？
-├─ 能 → 函数是否"干净"（纯计算，不调系统 API，无 SEH）？
-│       ├─ 是 → Unicorn 模拟原函数
-│       └─ 否 → Hook 注入参数 + Hook 读返回值
-│               （DLL 例外：直接 ctypes 加载调用，更简单可靠）
-└─ 不能 → 程序类型？
-        ├─ 命令行 → subprocess 传参，读 stdout/退出码
-        ├─ DLL → 枚举导出函数 + ctypes 逐个调用
-        └─ GUI → 视觉驱动 GUI 自动化（首选）
-                  ├─ 截图 → MCP 定位控件 → 键鼠操作 → 截图读结果
-                  ├─ MCP 连续 2 次超时或不可用 → 降级 gui_verify.py
-                  │   ├─ 控件 ID 未知 → --discover
-                  │   ├─ 标准操作 → 默认模式
-                  │   ├─ 输入不进去 → --hook-inject
-                  │   ├─ 读不出结果 → --hook-result
-                  │   └─ 全部失败 → Patch 排除法 → 用户人工确认
-                  └─ 全部失败 → Patch 排除法 → 用户人工确认
-```
+**完整验证决策树与方案模板见 `$AGENT_DIR/knowledge-base/verification-patterns.md`**（GUI 降级护栏: 降级到 gui_verify.py 后，每次 GUI 操作前仍尝试 MCP 1 次，恢复则切回视觉驱动）。
 
 **核心禁令**:
 - **绝对禁止**用自己重实现代码验证自己重实现结果（作弊式验证）
 - 验证优先用 Hook 读返回值（代码层面 100% 可靠），后备观察程序多维行为（原样报告由 AI 判断）
+- **Hook 可靠性检查**：Hook 脚本必须输出非空的 send() 消息（至少捕获到一次函数调用）。如果 Hook 运行后无任何输出，说明 hook 地址错误或函数未被调用——这是 hook 问题不是分析结论。修复 hook 后重试，禁止基于"hook 无输出"判定函数不存在或算法非标准
 
 **GUI 降级护栏**: 降级到 gui_verify.py 后，每次 GUI 操作前仍尝试 MCP（1 次），恢复则切回视觉驱动。
 
@@ -174,11 +144,14 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 
 ### query.py 查询类型
 
+> 逆向使用策略: 需要看多个函数时优先 `decompile_all` 一次拿全量（输出落盘后用 Read/Grep 检索函数源码，避免逐函数 idat 轮询——每次 idat 启动约 8s）; 仅跟进单个已知函数或需 `IDA_FORCE_CREATE` 时用 `decompile`。
+
 | IDA_QUERY | 说明 | 额外参数 |
 |-----------|------|---------|
 | `entry_points` | 枚举入口点 | 无 |
 | `functions` | 按模式匹配函数 | `IDA_PATTERN` |
 | `decompile` | 反编译函数 | `IDA_FUNC_ADDR` `IDA_FORCE_CREATE` |
+| `decompile_all` | 批量反编译全部函数到单文件（Read/Grep 离线检索，替代逐函数轮询） | `IDA_PATTERN` `IDA_SKIP_PLT` `IDA_MAX_FUNCS` |
 | `disassemble` | 反汇编函数 | `IDA_FUNC_ADDR` `IDA_FORCE_CREATE` |
 | `func_info` | 函数详情 | `IDA_FUNC_ADDR` `IDA_FORCE_CREATE` |
 | `xrefs_to` | 谁引用了它 | `IDA_ADDR` 或 `IDA_FUNC_ADDR` |
@@ -201,27 +174,9 @@ LLM 响应超 60s → 用户会中断，收到中断后必须反思方案是否�
 
 通用：`IDA_DRY_RUN=1` 只预览不执行。
 
-### 沉淀脚本
-
-检查 `$AGENT_DIR/scripts/registry.json`。调用方式和参数模板见 `knowledge-base/templates.md`。
-
-### 环境检测脚本
-
-```bash
-$PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" --output "$TASK_DIR/env.json"
-```
-
 ### GUI 自动化工具
 
-> 视觉驱动 GUI 自动化方案详情见 `$AGENT_DIR/knowledge-base/gui-automation.md`。
-> 以下为脚本快速参考。
-
-| 脚本 | 用途 | 关键参数 |
-|------|------|---------|
-| `gui_launch.py` | 启动/等待/终止目标程序 | `--action launch\|wait_window\|kill --exe <TARGET> --pid <PID>` |
-| `gui_capture.py` | 截图 | `--output-dir "$TASK_DIR/views" --name <名称>` |
-| `gui_act.py` | 键鼠操作 | `--action click\|type --x <X> --y <Y> --text <TEXT> --paste` |
-| `gui_verify.py` | Win32 控件方案（MCP 不可用时降级） | `--exe <TARGET> --discover\|--hook-inject\|--hook-result` |
+> 视觉驱动 GUI 自动化方案与脚本命令模板（gui_launch/gui_capture/gui_act/gui_verify 四脚本）详见 `$AGENT_DIR/knowledge-base/gui-automation.md`。
 
 ### 脚本生成与沉淀规则
 
@@ -229,11 +184,7 @@ $PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" --output "$TASK_DIR/env.json"
 
 ### 网页渲染工具
 
-> 当 webfetch 无法获取 SPA 页面内容时使用。详情见 `$AGENT_DIR/knowledge-base/web-rendering.md`。
-
-| 脚本 | 用途 | 关键参数 |
-|------|------|---------|
-| `web_render.py` | Playwright 无头浏览器渲染（JS 执行 + 截图） | `--url <URL> --format markdown\|text\|html --screenshot <PATH>` |
+> 当 webfetch 无法获取 SPA 页面内容时使用。命令模板与切换条件详见 `$AGENT_DIR/knowledge-base/web-rendering.md`。
 
 ### 进程 Patch 工具
 
@@ -244,7 +195,7 @@ $PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" --output "$TASK_DIR/env.json"
 
 ## 知识库索引
 
-以下文档按需加载（不在分析开始时全部读取）：
+以下文档触发即读（命中触发条件先读再动手；不在分析开始时全部读取）：
 
 | 文档 | 触发条件 |
 |------|---------|
@@ -264,7 +215,7 @@ $PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" --output "$TASK_DIR/env.json"
 | `verification-patterns.md` | 需要验证分析结果（license/key/password） |
 | `gui-automation.md` | GUI 自动化操作（视觉驱动方案） |
 | `web-rendering.md` | webfetch 失败后需要渲染 SPA 页面、获取页面截图 |
-| `forensics-methodology.md` | 取证题：拿到 pcap/内存镜像/磁盘镜像/.evtx 日志时 |
+| `forensics-methodology.md` | 取证题：拿到 pcap/内存镜像/磁盘镜像/VM 镜像（.ova/.vmdk）/.evtx 日志，或仅有题面截图需先获取素材时 |
 | `process-patch-reference.md` | 使用 process_patch.py 时的完整参数参考 |
 | `arm64-reverse-methodology.md` | arm64 无符号二进制中定位函数和数据（ADRP 搜索、调用约定） |
 | `frida-native-shell-tricks.md` | Frida 中 Java bridge 不可用时的 native 替代方案（popen/fgets） |
@@ -274,6 +225,27 @@ $PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" --output "$TASK_DIR/env.json"
 | `pwn-kernel-methodology.md` | pwn 题：内核漏洞利用（结构体泄漏、msg_msg、Dirty PageTable、竞态扩大） |
 | `arm64-pwn-methodology.md` | pwn 题目标为 ARM64 架构（调用约定、ROP gadget 形态、PAC/BTI/MTE 绕过） |
 | `deobfuscation-selection.md` | 反编译含混淆代码（OLLVM/平坦化/MBA/VM），需选择反混淆工具（D-810/deflat/QSynth） |
+| `anti-debugging-bypass.md` | 目标含反调试/反调试检测（PEB/NtQuery/INT3 扫描/时序/自哈希/Frida 检测），需绕过 |
+| `reverse-patterns.md` | 逆向通用解题模式（校验逻辑三原则/编码可视化/trace diffing/博弈论等 50+ 模式速查） |
+| `language-binary-reversing.md` | 识别语言运行时特征（Go/Rust/Kotlin/Swift/Python 字节码/PyArmor/NativeAOT/编译器指纹） |
+| `platform-reversing.md` | 平台/固件逆向（IoT 解包链/U-Boot/CAN·UDS/工控协议/WASM/冷门 ISA/macOS·iOS） |
+| `vm-bytecode-reversing.md` | 目标为自定义 VM/字节码解释器（dispatcher 识别/ISA 提取/VMProtect·Tigress/Sleigh）; 导入表仅 sigaction/sigaltstack 等信号 API + int3/ud2/除零 trap 轮转（信号驱动 VM） |
+| `v8-browser-exploitation.md` | V8/浏览器引擎利用（addrof-fakeobj/WASM RWX/沙箱逃逸/Mojo/补丁 diff 法） |
+| `jsc-exploitation.md` | JSC（WebKit）引擎利用——目标为 jsc shell/出现 butterfly、haveABadTime、FTL、StringImpl 标识时 |
+| `windows-shellcode-loader.md` | Windows shellcode 加载与 evasion（回调执行族/编码存储/SEH+CFG 三件套/loader 组件） |
+| `angr-symbolic-execution.md` | 符号执行求解（angr pipeline/Z3 模式/Qiling 模拟/Triton 对比/路径爆炸管理） |
+| `sandbox-escape.md` | 沙箱逃逸（pyjail/bashjail/chroot/Docker/K8s/Lua/Ruby/模拟器注入面） |
+| `malware-analysis.md` | 恶意软件分析（C2 协议族/RAT 家族取证/YARA 规则/内存注入检测/Office 宏文档 docm·pptm·xlsm 与 VBA·.NET 配置提取） |
+| `osint-techniques.md` | OSINT 情报收集（社交媒体追踪/地理定位/用户名枚举/WHOIS·Shodan·GitHub 挖掘） |
+| `steganography-forensics.md` | 隐写分析（图片/音频/文档载体/PNG·GIF 结构/QR/工具分诊表） |
+| `wordlists-guide.md` | 任何爆破/fuzz 需要字典时（$WORDLISTS_DIR 场景选型速查: 目录/密码/子域/payload） |
+| `network-forensics.md` | 网络流量取证（pcap 修复/TLS 解密/WiFi/DNS 隧道/协议重组/元数据信道） |
+| `disk-memory-forensics.md` | 磁盘与内存取证（文件系统恢复/RAID/加密容器/VM 镜像展开（OVA/VMDK）/volatility 命令族/勒索处置） |
+| `windows-forensics.md` | Windows 取证（事件日志/注册表/ADS/timestomping/反取证/内存凭证顺序） |
+| `hardware-signal-forensics.md` | 硬件信号取证（GPIO 协议重建/RF·SDR/声学侧信道/显示协议/外设信道） |
+| `internal-pentest-methodology.md` | 内网渗透（Linux·Windows 提权/横向移动/隧道矩阵/网络服务渗透速查/痕迹清除） |
+| `ad-domain-attacks.md` | AD 域渗透（攻击链/Kerberoast/NTLM relay/哈希离线破解 hashcat·john） |
+| `mail-services-pentesting.md` | 邮件服务渗透（POP3/IMAP/SMTP 枚举·爆破·利用/SEG 绕过/伪造矩阵） |
 
 ---
 
@@ -297,20 +269,8 @@ $PYTHON_CMD "$AGENT_DIR/scripts/detect_env.py" --output "$TASK_DIR/env.json"
 
 ---
 
-## 任务存档
-
-{{buwai-rule:task-archive}}
-
----
-
 ## 安全规则
 
 - 数据库修改操作执行前在输出中列出预览，批量修改支持 `IDA_DRY_RUN=1` 预览
 - 不执行可能损坏数据库的操作，数据库锁定时立即报错退出
 - 失败后不静默忽略，必须说明失败原因
-
----
-
-## IDAPython 编码规范
-
-需要生成 IDAPython 脚本时，读取 `$AGENT_DIR/knowledge-base/idapython-conventions.md` 获取完整编码规范（导入规则、日志规范、代码风格）。

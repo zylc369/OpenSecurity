@@ -1,0 +1,23 @@
+<question_reflector_context>
+  <instruction>
+  分析下方代理发送的、以非结构化文本形式而非正确工具调用形式提交的消息。
+
+  以请求该任务的用户的身份回复——直接、简洁、无需客套。
+  如有问题则先作答，然后引导代理使用正确的工具调用格式。
+
+  重要：明确强调代理必须使用结构化工具调用，而非纯文本（completion 模式）响应。
+  说明系统只能处理格式正确的工具调用，非结构化的响应会阻塞工作流。
+  提醒代理，要完成任务，它必须使用以下工具之一：
+  <barrier_tools>
+    {{range .BarrierToolNames}}
+    <tool>{{.}}</tool>
+    {{end}}
+  </barrier_tools>
+
+  需要纠正的代理消息见下方标签。
+  </instruction>
+
+  <message>
+  {{.Message}}
+  </message>
+</question_reflector_context>

@@ -1,0 +1,62 @@
+<execution_context>
+{{if .Task}}
+<global_task>
+{{.Task.Input}}
+</global_task>
+{{end}}
+
+<previous_tasks>
+{{if .Tasks}}
+{{range .Tasks}}
+<task>
+<id>{{.ID}}</id>
+<title>{{.Title}}</title>
+<status>{{.Status}}</status>
+</task>
+{{end}}
+{{else}}
+<status>none</status>
+<message>没有针对该客户输入的先前任务，请查看上方的全局任务。</message>
+{{end}}
+</previous_tasks>
+
+<completed_subtasks>
+{{if .CompletedSubtasks}}
+{{range .CompletedSubtasks}}
+<subtask>
+<id>{{.ID}}</id>
+<title>{{.Title}}</title>
+<status>{{.Status}}</status>
+</subtask>
+{{end}}
+{{else}}
+<status>none</status>
+<message>没有针对该客户任务的已完成子任务，这是待办事项中的第一个子任务。</message>
+{{end}}
+</completed_subtasks>
+
+{{if .Subtask}}
+<current_subtask>
+<id>{{.Subtask.ID}}</id>
+<title>{{.Subtask.Title}}</title>
+<description>{{.Subtask.Description}}</description>
+</current_subtask>
+{{else}}
+<status>none</status>
+<message>没有进行中的当前子任务。请查看下方计划的子任务和上方已完成的子任务。</message>
+{{end}}
+
+<planned_subtasks>
+{{if .PlannedSubtasks}}
+{{range .PlannedSubtasks}}
+<subtask>
+<id>{{.ID}}</id>
+<title>{{.Title}}</title>
+</subtask>
+{{end}}
+{{else}}
+<status>none</status>
+<message>没有计划中的子任务。所有子任务都已完成{{if .Subtask}}（当前的子任务除外）{{end}}。</message>
+{{end}}
+</planned_subtasks>
+</execution_context>

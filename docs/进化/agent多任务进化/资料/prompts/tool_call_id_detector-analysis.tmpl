@@ -1,0 +1,91 @@
+# tool_call_id_detector.tmpl 分析
+
+## 1. 原文件名
+
+`tool_call_id_detector.tmpl`，注册的 PromptType 字符串为 `tool_call_id_detector`（`templates/templates.go:64`）。
+
+## 2. 类型与用途
+
+**C 类工具辅助 Prompt**，用于从已采集的 tool call ID 样本中**反推**出描述其格式的模式模板（如 `toolu_{r:24:b}`、`call_{r:24:x}`、`{f}:{r:1:d}`）。
+
+- 装配于 `ToolsPrompts.DetectToolCallIDPattern`（`templates/templates.go:592`）。
+- 隶属 `DetermineToolCallIDTemplate` 流程（`providers/provider/agents.go:89`）中的 **AI 分析环节**，与采样器 `tool_call_id_collector`（上游）和兜底的 `fallbackHeuristicDetection`（启发式字符级分析，`agents.go:437`）三者协同：collector 负责取样，本 prompt 负责"看样归纳"，启发式函数负责 AI 失败时的保底。
+- 输出物是一个 pattern 字符串，最终被 `storeInCache` 按 provider 类型缓存（`agents.go:45`），供后续 `GenerateFromPattern` 生成"伪造但符合格式"的 tool call ID——这是 PentAGI 绕过部分 LLM provider 在 tool call 链路里 ID 缺失/不一致问题的关键能力。
+- 调用模式为**单轮 function-calling**：模型必须通过调用 `submit_pattern` 函数提交结论，而非输出纯文本。
+
+## 3. 配对关系
+
+**无配对**。
+
+本 prompt 是独立的工具型辅助 prompt，没有"主 prompt + input 变体"那样的成对结构。它与 `tool_call_id_collector.tmpl` 是**上下游数据流关系**（collector 采样 → detector 归纳），但二者各自独立注册（`templates.go:591` 与 `:592`），不共享 System/Human 配对语义，不构成配对。
+
+## 4. 调用时机
+
+单一入口 `DetermineToolCallIDTemplate`（`agents.go:89`），本 prompt 仅在其内部的 `detectPatternWithAI`（`agents.go:340`）中被渲染（`agents.go:355`）。完整时序如下：
+
+| 阶段 | 位置 | 行为 | 是否调用本 prompt |
+|------|------|------|------------------|
+| Step 0 | `agents.go:122` | 命中 `cacheTemplates` 缓存直接返回 | 否（短路） |
+| Step 0.5 | `agents.go:127` | 用 collector 取 1 个样本验证传入的 `defaultTemplate` | 否（仅 collector） |
+| Step 1 | `agents.go:133` | `collectToolCallIDSamples` 并行取 `sampleCount = 5` 个样本 | 否（仅 collector） |
+| Step 2-4 | `agents.go:144-180` | 循环最多 `maxRetries = 5` 次：调本 prompt → 验证 → 失败则把失败记录追加进 `PreviousAttempts` 重试 | **是（`agents.go:355`）** |
+| 兜底 | `agents.go:154-158` | AI 路径连续失败后改用 `fallbackHeuristicDetection` | 否（已放弃 AI） |
+
+**关键约束（源码验证）**：
+
+- 触发前提是"采样完成且未被缓存/默认模板短路"。collector 没拿到样本时直接报错退出（`agents.go:138`），不会进入本 prompt。
+- 本 prompt 处于一个**带反馈的重试循环**中：每一轮验证失败都会让 `previousAttempts` 增长（`agents.go:173`），下一轮渲染时这些失败记录会通过 `{{.PreviousAttempts}}` 回喂给模型，要求它"分析失败原因并修正"。因此同一流程内本 prompt 可能被渲染多达 5 次，每次内容（因 PreviousAttempts 不同）都不一样。
+- `detectPatternWithAI` 任何错误（模型没调函数、返回解析失败等）也会记为一次 attempt（`agents.go:148`），同样进入重试。
+
+## 5. 工具列表
+
+**无常规工具注册**，但强制 LLM 调用一个一次性 function 提交结论：
+
+- 函数名固定为 `submit_pattern`（常量 `patternFunctionName`，`agents.go:25`），也是注入到 `{{.FunctionName}}` 的值。
+- 该 tool 在 `detectPatternWithAI` 内**动态构造、单次挂载**（`agents.go:365-381`），schema 极简——只有一个必填字段 `template: string`，描述里直接写明了期望的格式样例。
+- prompt 用 `<mandatory_protocol>` 段落强制模型"必须且只能"通过调用 `submit_pattern` 响应，任何纯文本回复都被视为严重错误并触发重试（与 `agents.go:426` 的 `detectedTemplate == ""` 判空 + 重试逻辑呼应）。
+
+**反直觉点（重要）**：这次 `submit_pattern` 调用本身就会产生一个新的 tool call ID，该 ID 不会被丢弃——它被提取为 `newSample`（`agents.go:408-412`），与原样本合并成 `allSamples`（`agents.go:163`）一并交给 `ValidatePattern` 验证。也就是说，**检测器调用本身既是"提交结论"又是"再取一个样本"**，相当于顺便复用了这次 LLM 往返来做交叉验证，同时也把 detector 调用纳入了待匹配样本集。
+
+> 补充提醒（查缺补漏）：上游 `tool_call_id_collector.tmpl` 也含一个 `{{.FunctionName}}`，但注入的是诱导采样的 `testFunctionName = "get_number"`（`agents.go:24`），与本 prompt 的 `submit_pattern` 完全不同。两个 prompt 同名占位符语义不同，分析或改动时不要混为一谈。
+
+## 6. 非工具占位符
+
+占位符白名单声明于 `templates/templates.go:420-424`，共 3 项。注入点单一——`detectPatternWithAI` 内一次 `map[string]any` 填充全部值（`agents.go:355-359`）。注入时机均为"每轮检测调用发起前、样本与失败记录已就绪时"；由于处于重试循环，**每一轮都会重新渲染一次**。
+
+| 占位符 | 注入来源（变量 → 值） | 注入信息 | 用途 / 注入时机 |
+|--------|----------------------|----------|----------------|
+| `{{.FunctionName}}` | `patternFunctionName`（`agents.go:356`） | 固定字符串 `"submit_pattern"`（常量 `agents.go:25`） | 指明模型唯一允许调用的提交函数名，与同函数内动态注册的 tool 名（`agents.go:368`）严格一致；模板内多处引用，确保 prompt 文案与实际 tool 名绑定，不因重命名而脱节。 |
+| `{{.Samples}}` | `sampleValues`（`agents.go:357`） | `[]string`——从 collector 采集的 `[]PatternSample` 中只抽取 `Value` 字段得到（`agents.go:349-352`），即"纯 ID 字符串列表"。首轮 5 个，后续轮次会并入 detector 调用产生的新样本（见 §5 反直觉点）。 | 模板用 `{{range}}` 逐条列出供模型归纳；是模型推导 pattern 的**唯一正例输入**。 |
+| `{{.PreviousAttempts}}` | `previousAttempts`（`agents.go:358`） | `[]attemptRecord`（`agents.go:31-34`），每项含 `Template`（失败模板）与 `Error`（失败原因，来自 `ValidatePattern` 的 `PatternValidationError` 或"未调函数"等错误）。首轮为 `nil`（`agents.go:143`），模板用 `{{if .PreviousAttempts}}` 控制是否渲染该段。 | 反馈回路：把历史失败喂回，要求模型"分析失败原因、给出修正模板"，是重试循环能收敛的关键。 |
+
+> 说明：本模板**不含**任何工具型占位符（如 `{{.Tools}}`/`{{.AvailableTools}}`），3 个占位符全部是上下文数据注入；唯一的"工具"是 prompt 文案点名、由调用方在 `agents.go:365` 独立动态注册的 `submit_pattern`。
+
+### pattern 格式规范
+
+模板内 `<pattern_format>` 段给出的格式即为系统**唯一权威约定**，其解析与消费由 `templates` 包统一实现：`parsePattern` 负责拆解，`GenerateFromPattern`（`templates.go:875`）负责按模板生成新串，`ValidatePattern`（`templates.go:924`）负责用样本反验。三种结构共用同一套词法，因此 prompt 对格式的描述必须与代码完全对齐：
+
+- **字面部分**：跨所有样本位置不变的固定文本（如 `toolu_`、`call_`、`chatcmpl-tool-`、`:`），原样写入模板。
+- **随机部分 `{r:LENGTH:CHARSET}`**：
+  - `LENGTH` = 随机字符的**精确**个数；
+  - `CHARSET` = 字符集代号，取值见下表。代号大小写敏感（`h` 与 `H` 是不同集合）。
+
+  | 代号 | 别名 | 字符集 |
+  |------|------|--------|
+  | `d` | `digit` | `[0-9]` |
+  | `l` | `lower` | `[a-z]` |
+  | `u` | `upper` | `[A-Z]` |
+  | `a` | `alpha` | `[a-zA-Z]` |
+  | `x` | `alnum` | `[a-zA-Z0-9]` |
+  | `h` | `hex` | `[0-9a-f]` |
+  | `H` | `HEX` | `[0-9A-F]` |
+  | `b` | `base62` | `[0-9A-Za-z]` |
+
+- **函数占位符 `{f}`**：代表"会变化的函数/工具名"。当样本跨不同函数名（如 `get_number:0` 与 `submit_pattern:0`）时用它替代可变段；`GenerateFromPattern` 在 `functionName` 非空时直接拼接实际函数名，为空时回退为字面量 `"function"`（`templates.go:882-887`）。
+
+**两个需要模型特殊处理的归纳规则**（对应模板 `<identical_samples_rule>`，属于设计层面的约定，而非纯格式）：
+
+1. **全同样本仍须拆出可变段**：当 5 个样本完全一致时（典型场景：某些 provider 的 ID 退化为 `函数名:序号` 且序号稳定为 `0`），不能原样返回该串，而要识别出"逻辑上可能变化"的部分并用随机模式替换——如 `get_number:0` → `get_number:{r:1:d}`。这是因为 pattern 的用途是**生成未来样本**，必须保留可变性才能覆盖后续 ID。
+2. **跨函数名样本用 `{f}`**：若样本集合含多个不同函数名，必须用 `{f}` 占位可变函数名段，而非把它们当作字面量——如 `get_number:0` + `submit_pattern:0` → `{f}:{r:1:d}`。
+
+> 这两条规则是 prompt 与 `ValidatePattern` 的隐性契约：验证器会把 detector 本次调用产生的、来自 `submit_pattern` 函数的 ID 也纳入校验样本（§5 反直觉点），若模型把函数名当字面量、或把可变段当常量，验证会在新样本上失败并触发重试，进而通过 `{{.PreviousAttempts}}` 回喂纠偏——这正是该重试回路能自我修复的机制闭环。

@@ -127,3 +127,27 @@
   --settle 5 \
   --output "$TASK_DIR/mem_read.json"
 ```
+
+---
+
+## 文件级静态修补（替代方案）
+
+process_patch.py 修补的是**运行中进程**的内存；需要产出修补后的**静态文件**时用以下三路:
+
+```bash
+# 1. dd 精确偏移写入（字节级最精确）
+echo -ne '\x90\x90\x90\x90' | dd of=target.bin bs=1 seek=0x1234 conv=notrunc
+
+# 2. xxd 管道批量替换
+xxd target.bin | sed 's/0a0b0c0d/90909090/g' | xxd -r > patched.bin
+
+# 3. IDA: Edit → Patch program → Change byte / idaapi.patch_byte(ea, 0x90)，再 Apply patches to input file
+```
+
+## 程序化修补 API
+
+批量/流水线修补用 Python API 两选:
+
+**Binary Ninja**: `bv.write(addr, b"\x90"*5)` NOP / `bv.write(addr, b"\x74")` JNZ→JZ 翻转 / `bv.write(addr, b"\xb8\x01\x00\x00\x00\xc3")` mov eax,1;ret 恒真 / `bv.save()`。
+
+**LIEF（跨格式 ELF/PE/Mach-O 统一 API）**: `lief.parse()` → `add(section)` 加节（EXECINSTR|ALLOC）/ `header.entrypoint` 改入口 / `patch_pltgot("strcmp", addr)` 劫持导入函数到自写代码 → `write()` 落盘。适合加节注入与 GOT 劫持类结构性修改。

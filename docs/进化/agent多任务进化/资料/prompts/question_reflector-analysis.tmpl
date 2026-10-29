@@ -1,0 +1,82 @@
+# question_reflector.tmpl 分析
+
+> 本文件为分析结论，不含模板原文。源码参照 PentAGI `backend/pkg/`。
+
+## 1. 原文件名
+
+`question_reflector.tmpl`，对应枚举 `PromptTypeQuestionReflector = "question_reflector"`（`templates/templates.go:50`）。
+
+## 2. 类型与用途
+
+**B 类 Agent Human Prompt**。
+
+登记为 **Reflector agent** 的 `Human` 角色 prompt（`templates/templates.go:567-570`）：
+
+```go
+Reflector: AgentPrompts{
+    System: getPrompt(PromptTypeReflector),        // reflector.tmpl
+    Human:  getPrompt(PromptTypeQuestionReflector), // 本文件
+},
+```
+
+用途：当某个子 agent 错误地以"纯文本（completion 模式）"而非"结构化工具调用"返回结果时，系统用本模板把那条**异常文本**连同"可用终止工具清单"组装成一条 Human 消息，喂给 Reflector agent。Reflector 随后以用户口吻生成一段纠正性 advice，回灌给原 agent，逼迫其改用正确工具调用格式或显式收尾。
+
+## 3. 配对关系
+
+与 `reflector.tmpl`（`PromptTypeReflector`，**A 类 Agent System Prompt**）配对，二者构成 Reflector agent 的 System + Human 双角色 prompt：
+
+| 角色 | 模板 | 类型 | 传入的 context 键 |
+|------|------|------|-------------------|
+| System | `reflector.tmpl` | A 类 System | `BarrierTools` / `CurrentTime` / `ExecutionContext` / `Request` |
+| Human | `question_reflector.tmpl`（本文件） | B 类 Human | `Message` / `BarrierToolNames` |
+
+分工要点：`reflector.tmpl` 设定 Reflector 的人设、沟通风格与"结构化工具调用强制器"职责，并把**带 schema 的完整工具描述**交给它；`question_reflector.tmpl` 则只承载"本次要被纠正的具体那条 agent 文本"以及"工具名清单"，作为单次纠正任务的输入载体。二者在 `performer.go:639-645` 同一处先后渲染、再一同送入 `performSimpleChain`（`performer.go:660-661`）。
+
+## 4. 调用时机
+
+触发入口为 `flowProvider.performReflector`（`providers/performer.go:557`），有两条进入路径：
+
+1. **主路径——纯文本而非工具调用**：agent 链路在 `performAgentChain` 内一轮 LLM 调用后，若 `len(result.funcCalls) == 0`（即没有产生任何工具调用），且该 agent **不是** `OptionsTypeAssistant`（Assistant 类型走 `processAssistantResult`，不进 reflector），则进入 `performReflector`（`performer.go:141-154`）。被纠正的 `content` 即该轮 agent 返回的纯文本。
+
+2. **次路径——工具调用重试耗尽**：`performCallerReflector`（`performer.go:718`）在工具调用多次重试仍失败时，把失败原因拼成一段 reflector content，再调用 `performReflector`（`performer.go:762-765`）。
+
+防护与边界（验证自源码）：
+
+- **递归上限**：`iteration > maxReflectorCallsPerChain` 直接报错返回（`performer.go:583-598`）。
+- **递归熔断**：`markReflectorRetry` / `isReflectorRetry` 标记 context；caller reflector 已介入后，若 LLM 仍不返回工具调用，再次进入 reflector 会被拦截并报 `reflector recursion detected`（`performer.go:702-712`、`738-749`）。
+- **Assistant 豁免**：Assistant agent 不触发 reflector（`performer.go:142-144`）。
+
+进入后流程：`performReflector` 渲染本 Human 模板 + System 模板 → `performSimpleChain`（**单轮、无工具执行器**，见下节）生成 advice → 把 advice 追加回原 chain → `callWithRetries` 让原 agent 带着纠正提示重跑（`performer.go:660-676`）。
+
+## 5. 工具列表
+
+**本模板（以及 Reflector agent 整体）无工具。**
+
+依据：`performSimpleChain` 内部调用 `fp.CallEx(ctx, opt, chain, nil)`，末位 tools executor 参数为 `nil`（`providers/performers.go:981`）。Reflector 是纯文本进/纯文本出的单轮对话，不持有任何可调用工具。
+
+模板中出现的 `{{.BarrierToolNames}}` **不是工具定义**，而是一份注入的**文本清单**：仅把"屏障/终止类工具的名字"告知 Reflector，让它在生成的 advice 里点名——"你要么改用结构化工具调用，要么用 `done` / `ask` 这些终止工具结束流程"。这些工具实际归**原 agent**所有（由原 agent 的 executor 提供），Reflector 只是口头上引用它们。
+
+被引用的屏障工具（`executor.GetBarrierToolNames()`，`tools/executor.go:380`）来自 `tools/registry.go`：
+
+- `done`（`FinalyToolName`）—— 始终注册（`tools/tools.go:1088`）；
+- `ask`（`AskUserToolName`）—— 视 `cfg.Barrier` 配置条件注册（`tools/tools.go:1094-1096`）。
+
+## 6. 非工具占位符
+
+本模板允许的 context 键在 `templates/templates.go:340-343` 声明：`Message`、`BarrierToolNames`。两者均在 `performReflector` 内构造（`performer.go:602-612`），并在 `fp.prompter.RenderTemplate(PromptTypeQuestionReflector, reflectorContext["user"])`（`performer.go:639`）处一次性注入。
+
+### {{.Message}}
+
+- **用途**：承载"本次需要被纠正的那条 agent 原始文本"——即子 agent 错误返回的纯文本（completion 模式）内容，是 Reflector 据以生成纠正 advice 的唯一业务素材。
+- **注入信息**：`performReflector` 形参 `content`（`performer.go:604`：`"Message": content`）。该值在主路径下来自上一轮 LLM 返回的 `result.content`（funcCalls 为空但有正文）；在次路径下来自 `performCallerReflector` 拼接的失败说明文本。注意：用户的**原始任务请求**不进本键，而是经 `humanMessage` 注入到 System 模板的 `{{.Request}}`（`performer.go:614-616`）。
+- **注入时机**：`performReflector` 构造 `reflectorContext["user"]` 时赋值（`performer.go:604`），随后随模板渲染一并注入（`performer.go:639`）。
+
+### {{.BarrierToolNames}}
+
+- **用途**：向 Reflector 列出"原 agent 可用的终止/屏障类工具名"，供其在 advice 中点名引导原 agent 正确收尾。仅作信息引用，不构成可调用工具。
+- **注入信息**：`executor.GetBarrierToolNames()` 的返回切片（`performer.go:605`：`"BarrierToolNames": executor.GetBarrierToolNames()`）。具体为 `done`（恒在）和 `ask`（条件在），见第 5 节。与 System 模板中的 `{{.BarrierTools}}`（带 schema 的 `[]FunctionInfo`）形成"名字清单 vs 完整描述"的分工。
+- **注入时机**：同 `{{.Message}}`，于 `reflectorContext["user"]` 构造阶段赋值（`performer.go:605`），并在 `performer.go:639` 模板渲染时注入。
+
+---
+
+**小结**：`question_reflector.tmpl` 是 Reflector 这一"工具调用流程强制器"的 Human 侧输入模板，结构极简——仅承载被纠正文本 + 终止工具名清单两类信息；它本身不携带任何工具，触发点是子 agent 返回空工具调用（或重试耗尽），由 `performReflector` 在单轮无工具对话中生成纠正 advice 回灌原 agent。

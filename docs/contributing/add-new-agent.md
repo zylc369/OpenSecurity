@@ -73,6 +73,7 @@ permission:
 - `mode: all`：允许在主 session 和子 session 中使用（详见 OpenCode 文档）
 - `buwai-extension-id`：**必须与文件名一致**，Plugin 据此判断是否做占位符展开
 - `permission`：固定模板，允许 Agent 读写任务目录和 Downloads
+  - 注：`permission` 模式由 opencode 静态匹配（仅展开 `~/`、`$HOME`，不支持自定义变量）——数据主目录被 `OPENSECURITY_HOME` 覆盖时需手动同步此模式
 
 **prompt 正文骨架**（参考 `binary-analysis.md` 的结构）：
 
@@ -171,7 +172,6 @@ permission:
 .opencode/<your-agent>/
 ├── README.md              # 工具脚本说明（参考 binary-analysis/README.md）
 ├── scripts/
-│   ├── registry.json      # 脚本注册表
 │   ├── initial_analysis.py  # 阶段 A 的初始分析流水线
 │   └── <其他脚本>.py
 └── knowledge-base/
@@ -180,7 +180,6 @@ permission:
 ```
 
 **最小内容**：
-- `scripts/registry.json`：空对象 `{}` 即可，后续沉淀脚本时填充
 - `scripts/initial_analysis.py`：实现阶段 A 的初始信息收集（输出 JSON）
 - `knowledge-base/analysis-planning.md`：列出场景分类和对应方案
 
@@ -415,12 +414,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
-### `.opencode/echo-analysis/scripts/registry.json`
-
-```json
-{}
 ```
 
 ### `.opencode/echo-analysis/README.md`
