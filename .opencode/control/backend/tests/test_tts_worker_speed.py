@@ -5,7 +5,6 @@ _atempo: 真实 ffmpeg 跑正弦波, 断言输出时长 ≈ 原时长/speed（�
 """
 from __future__ import annotations
 
-import importlib.util
 import shutil
 import subprocess
 import sys
@@ -13,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
-# worker 是 scripts/ 下脚本（非包）, 按路径加载; 模块级无副作用（模型惰性加载）
-_WORKER = Path(__file__).resolve().parents[1] / "scripts" / "tts_worker.py"
-_spec = importlib.util.spec_from_file_location("tts_worker", _WORKER)
-tts_worker = importlib.util.module_from_spec(_spec)
-sys.modules.setdefault("tts_worker", tts_worker)
-_spec.loader.exec_module(tts_worker)  # type: ignore[union-attr]
+# worker 是 scripts/ 下脚本（非包）——sys.path 注入后常规 import
+# （pyright 可静态解析其类型; 模块级无副作用: 常量+函数+main guard）
+_SCRIPTS_DIR = str(Path(__file__).resolve().parents[1] / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+import tts_worker  # noqa: E402 —— sys.path 注入后加载（scripts 非包）
 
 
 @pytest.mark.parametrize("speed, expected", [
@@ -85,16 +84,21 @@ def test_atempo_integration_chain_3x(tmp_path: Path) -> None:
 # ───────────────────── _ffmpeg_bin 双路解析 ─────────────────────
 
 
-def test_ffmpeg_bin_path_hit(monkeypatch) -> None:
+def test_ffmpeg_bin_path_hit(monkeypatch: pytest.MonkeyPatch) -> None:
     """① PATH 命中（brew/系统来源）优先返回 which 结果。"""
-    monkeypatch.setattr(tts_worker.shutil, "which",
-                        lambda _: "/opt/homebrew/bin/ffmpeg")
+    def _which_hit(cmd: str) -> str:
+        return "/opt/homebrew/bin/ffmpeg"
+
+    monkeypatch.setattr(tts_worker.shutil, "which", _which_hit)
     assert tts_worker._ffmpeg_bin() == "/opt/homebrew/bin/ffmpeg"
 
 
-def test_ffmpeg_bin_cmddir_fallback(monkeypatch, tmp_path: Path) -> None:
+def test_ffmpeg_bin_cmddir_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """② PATH 未命中 → $OPENSECURITY_HOME/bin 回落（detect_tools 产物目录）。"""
-    monkeypatch.setattr(tts_worker.shutil, "which", lambda _: None)
+    def _which_none(cmd: str) -> None:
+        return None
+
+    monkeypatch.setattr(tts_worker.shutil, "which", _which_none)
     monkeypatch.setenv("OPENSECURITY_HOME", str(tmp_path))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -102,17 +106,23 @@ def test_ffmpeg_bin_cmddir_fallback(monkeypatch, tmp_path: Path) -> None:
     assert tts_worker._ffmpeg_bin() == str(bin_dir / "ffmpeg")
 
 
-def test_ffmpeg_bin_missing_raises(monkeypatch, tmp_path: Path) -> None:
+def test_ffmpeg_bin_missing_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """③ 两级皆缺 → RuntimeError 含安装指引（不静默返回假路径）。"""
-    monkeypatch.setattr(tts_worker.shutil, "which", lambda _: None)
+    def _which_none(cmd: str) -> None:
+        return None
+
+    monkeypatch.setattr(tts_worker.shutil, "which", _which_none)
     monkeypatch.setenv("OPENSECURITY_HOME", str(tmp_path))
     with pytest.raises(RuntimeError, match="ffmpeg 不可用"):
         tts_worker._ffmpeg_bin()
 
 
-def test_ffmpeg_bin_no_env_var(monkeypatch) -> None:
+def test_ffmpeg_bin_no_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
     """④ OPENSECURITY_HOME 未注入且 PATH 无 → RuntimeError（非 IndexError）。"""
-    monkeypatch.setattr(tts_worker.shutil, "which", lambda _: None)
+    def _which_none(cmd: str) -> None:
+        return None
+
+    monkeypatch.setattr(tts_worker.shutil, "which", _which_none)
     monkeypatch.delenv("OPENSECURITY_HOME", raising=False)
     with pytest.raises(RuntimeError):
         tts_worker._ffmpeg_bin()

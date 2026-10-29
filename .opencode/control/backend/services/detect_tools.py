@@ -26,6 +26,7 @@ import sys
 import tarfile
 import tempfile
 import ssl
+import urllib.error
 import urllib.request
 import zipfile
 from collections.abc import Callable
@@ -2368,12 +2369,12 @@ docker run --rm -i -e PUID=$(id -u) -e PGID=$(id -g) \
             with urllib.request.urlopen(req, timeout=ToolsInstaller.TIMEOUT) as resp:  # pyright: ignore[reportAny]
                 return resp.read()  # pyright: ignore[reportAny]
         except urllib.error.URLError as e:
-            if not isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+            if not isinstance(e.reason, ssl.SSLCertVerificationError):
                 raise
         import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
+        ctx = ssl.create_default_context(cafile=str(certifi.where()))
         with urllib.request.urlopen(req, timeout=ToolsInstaller.TIMEOUT,  # pyright: ignore[reportAny]
-                                     context=ctx) as resp:
+                                     context=ctx) as resp:  # pyright: ignore[reportAny]
             return resp.read()  # pyright: ignore[reportAny]
 
     @staticmethod
