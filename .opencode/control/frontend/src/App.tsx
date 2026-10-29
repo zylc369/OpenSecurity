@@ -229,12 +229,12 @@ const App: React.FC = () => {
   );
 
   const pyMissing = useMemo(
-    () => (scan.data?.global.python_packages ?? []).filter((p) => !p.available),
+    () => (scan.data?.global?.python_packages ?? []).filter((p) => !p.available),
     [scan.data],
   );
 
   const dockerMissing = useMemo(
-    () => scan.data?.global.docker.images.filter((i) => !i.pulled) ?? [],
+    () => scan.data?.global?.docker?.images.filter((i) => !i.pulled) ?? [],
     [scan.data],
   );
 
@@ -744,7 +744,7 @@ const App: React.FC = () => {
               }
             >
               <DockerSection
-                docker={scan.data?.global.docker}
+                docker={scan.data?.global?.docker}
                 onRefresh={() => scan.refresh()}
               />
             </Card>
@@ -870,7 +870,7 @@ const App: React.FC = () => {
                 packages={
                   scan.loading && catStat("deps").total === 0
                     ? undefined
-                    : (scan.data?.global.python_packages ?? [])
+                    : (scan.data?.global?.python_packages ?? [])
                 }
                 venvPath={system.data?.venv_path}
                 onRefresh={() => scan.refresh()}

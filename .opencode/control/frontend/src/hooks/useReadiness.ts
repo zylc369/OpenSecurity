@@ -45,10 +45,10 @@ export function computeReadiness(
   models: ModelsResponse | null,
   required: RequiredStatusMap | null,
 ): Readiness {
-  const pyPkgs: PyPackageStatus[] = scan?.global.python_packages ?? [];
+  const pyPkgs: PyPackageStatus[] = scan?.global?.python_packages ?? [];
   const toolsAll: ToolStatus[] = Object.values(scan?.agents ?? {}).flat();
   const tools = dedupTools(toolsAll);
-  const images = scan?.global.docker.images ?? [];
+  const images = scan?.global?.docker?.images ?? [];
   const modelsAll: ModelAsset[] = models?.models ?? [];
   const reqEntries = Object.entries(required ?? {});
 
