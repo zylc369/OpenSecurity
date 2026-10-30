@@ -104,16 +104,33 @@ export default defineConfig(async (): Promise<UserConfig> => {
   // 异步配置：proxy target 用控制台真实 TCP 端口（顺延场景自动对齐）
   const consolePort = await fetchConsoleTcpPort();
   const target = `http://127.0.0.1:${consolePort}`;
+
+  /** 代理条目（统一 error handler——后端不可达时显式 502 JSON，禁止 fallthrough
+   到 vite SPA fallback: 那会返回 200+HTML，被前端 axios 当数据用导致深层崩溃）。 */
+  const proxyEntry = () => ({
+    target,
+    changeOrigin: true,
+    configure: (proxy: import("http-proxy").Server) => {
+      proxy.on("error", (err: Error, _req: unknown, res: unknown) => {
+        const r = res as { writeHead?: (c: number, h: Record<string, string>) => void; end?: (b: string) => void };
+        if (typeof r.writeHead === "function" && typeof r.end === "function") {
+          r.writeHead(502, { "Content-Type": "application/json" });
+          r.end(JSON.stringify({ detail: `控制台后端(${target})不可达: ${err.message}` }));
+        }
+      });
+    },
+  });
+
   return {
     plugins: [react(), reportDevPort()],
   server: {
     port: 5173,
     // 反向代理 API 请求到控制台后端
     proxy: {
-      "/api": { target, changeOrigin: true },
-      "/health": { target, changeOrigin: true },
-      "/embed": { target, changeOrigin: true },
-      "/rerank": { target, changeOrigin: true },
+      "/api": proxyEntry(),
+      "/health": proxyEntry(),
+      "/embed": proxyEntry(),
+      "/rerank": proxyEntry(),
     },
   },
   build: {
