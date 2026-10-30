@@ -229,7 +229,13 @@ const App: React.FC = () => {
   );
 
   const pyMissing = useMemo(
-    () => (scan.data?.global?.python_packages ?? []).filter((p) => !p.available),
+    () => {
+      // 契约告警（同 useReadiness.computeReadiness 的留痕原则）: 拒绝静默降级
+      if (scan.data && !scan.data.global) {
+        console.warn("[App] scan 数据缺 global 字段（后端契约异常）:", scan.data);
+      }
+      return (scan.data?.global?.python_packages ?? []).filter((p) => !p.available);
+    },
     [scan.data],
   );
 
@@ -382,7 +388,11 @@ const App: React.FC = () => {
 
   // ─── 硬件 Popover ───
   // CPU 频率 <1GHz 视为伪值不显示；frequency_mhz 为 null（平台不支持查询）时同样不显示
-  const cpuFreqGHz = hardware.data?.cpu.frequency_mhz
+  // cpu 缺失 = 数据契约异常 → 降级不显示 + 控制台留痕（拒绝静默吞掉）
+  if (hardware.data && !hardware.data.cpu) {
+    console.warn("[App] hardware 数据缺 cpu 字段（后端契约异常）:", hardware.data);
+  }
+  const cpuFreqGHz = hardware.data?.cpu?.frequency_mhz
     ? hardware.data.cpu.frequency_mhz / 1000
     : 0;
   const hwContent = hardware.data ? (

@@ -25,7 +25,17 @@ const instance: AxiosInstance = axios.create({
 });
 
 instance.interceptors.response.use(
-  (resp) => resp,
+  (resp) => {
+    // 防线: 代理失效时 vite SPA fallback 返回 200+HTML——string 被当数据用
+    // 必在深层属性访问处崩溃（页面白屏）。非 JSON 的 string 响应统一转错误
+    // （错误信息含内容摘要，控制台可直接诊断）; blob（音频下载）不在此列。
+    const ct = String(resp.headers?.["content-type"] ?? "");
+    if (typeof resp.data === "string" && resp.data && !ct.includes("json")) {
+      return Promise.reject(
+        new Error(`非 JSON 响应 (${ct || "未知类型"}): ${resp.data.slice(0, 80)}`));
+    }
+    return resp;
+  },
   (error) => {
     if (error.response) {
       const msg = error.response.data?.detail || error.response.statusText;

@@ -45,6 +45,11 @@ export function computeReadiness(
   models: ModelsResponse | null,
   required: RequiredStatusMap | null,
 ): Readiness {
+  // 数据契约告警: scan 非 null 但 global 缺失 = 后端结构异常/响应被替换——
+  // 防御性降级为空集（不崩页面），但必须在控制台留痕（拒绝静默吞掉）
+  if (scan && !scan.global) {
+    console.warn("[readiness] scan 数据缺 global 字段（后端契约异常）:", scan);
+  }
   const pyPkgs: PyPackageStatus[] = scan?.global?.python_packages ?? [];
   const toolsAll: ToolStatus[] = Object.values(scan?.agents ?? {}).flat();
   const tools = dedupTools(toolsAll);
