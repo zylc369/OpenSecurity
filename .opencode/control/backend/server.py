@@ -220,7 +220,9 @@ def create_app() -> FastAPI:
         _relay_supervise_task = asyncio.create_task(_supervise())
 
     # 开发态自动拉起 vite dev server（此前依赖手动启动，控制台重启后
-    # 前端 404）。幂等：vite 已运行则跳过；拉起失败由 dev 提示页指路。
+    # 前端 404）。级联重启: 收割非本代 vite（孤儿/漂移残留）后重拉——
+    # 控制台重启窗口恰是 vite 代理损坏高危期，陈旧 vite 一律不保留;
+    # 拉起失败由 dev 提示页指路。
     # 注意不能把 ConfigManager 类当谓词调用（构造单例恒真——曾在生产
     # 每次 create_app 都 spawn vite）
     if ConfigManager.get_instance().is_dev_mode:

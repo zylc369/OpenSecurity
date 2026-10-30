@@ -106,16 +106,27 @@ export default defineConfig(async (): Promise<UserConfig> => {
   const target = `http://127.0.0.1:${consolePort}`;
 
   /** 代理条目（统一 error handler——后端不可达时显式 502 JSON，禁止 fallthrough
-   到 vite SPA fallback: 那会返回 200+HTML，被前端 axios 当数据用导致深层崩溃）。 */
+   到 vite SPA fallback: 那会返回 200+HTML，被前端 axios 当数据用导致深层崩溃）。
+   headersSent 防护: mid-stream 代理错误（headers 已发、body 未完）不能再
+   writeHead——会抛 ERR_HTTP_HEADERS_SENT，且本 handler 先于 vite 自带防护
+   执行、vite 无 uncaughtException 兜底，一个请求失败会击穿整个 dev server；
+   此时只能 destroy 连接。 */
   const proxyEntry = () => ({
     target,
     changeOrigin: true,
     configure: (proxy: import("http-proxy").Server) => {
       proxy.on("error", (err: Error, _req: unknown, res: unknown) => {
-        const r = res as { writeHead?: (c: number, h: Record<string, string>) => void; end?: (b: string) => void };
-        if (typeof r.writeHead === "function" && typeof r.end === "function") {
+        const r = res as {
+          headersSent?: boolean; destroy?: () => void;
+          writeHead?: (c: number, h: Record<string, string>) => void;
+          end?: (b: string) => void;
+        };
+        if (!r) return;
+        if (!r.headersSent && typeof r.writeHead === "function" && typeof r.end === "function") {
           r.writeHead(502, { "Content-Type": "application/json" });
           r.end(JSON.stringify({ detail: `控制台后端(${target})不可达: ${err.message}` }));
+        } else if (typeof r.destroy === "function") {
+          r.destroy();
         }
       });
     },
@@ -125,6 +136,9 @@ export default defineConfig(async (): Promise<UserConfig> => {
     plugins: [react(), reportDevPort()],
   server: {
     port: 5173,
+    // strictPort: 端口被占时立即退出而非静默漂移（漂移孤儿收割不到且会被
+    // vite_port 兜底探测当作活端口）——收割链已保证启动前端口释放
+    strictPort: true,
     // 反向代理 API 请求到控制台后端
     proxy: {
       "/api": proxyEntry(),
