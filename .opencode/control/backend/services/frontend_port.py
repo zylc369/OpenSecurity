@@ -4,7 +4,8 @@
   • 控制台浏览器通道 TCP bind（9776 起顺延候选段）+ 真实端口注册
   • vite dev 端口注册（vite 启动时经 IPC POST /api/dev-url 上报）
   • console_url 计算（发布态 = 控制台 TCP；开发态 = vite 端口，死了回退）
-  • vite dev server 拉起（开发态，幂等，不抢占手动实例）
+  • vite dev server 拉起（开发态，控制台启动级联重启: 收割非本代 vite 后重拉——
+    vite 代理健康无法从外部探测，永不带陈旧状态跨代存活）
 
 所有获取真实端口号的代码都从这里取（本模块单例 frontend_ports）。
 
@@ -187,26 +188,27 @@ class FrontendPortRegistry:
     def ensure_vite_dev(self) -> bool:
         """确保 5173 上是本代拉起的 vite（控制台启动级联重启前端）。
 
-        收割策略: 5173 上任何非本代 Popen 的 vite（上代孤儿/exec 遗留/用户残留）
-        一律 kill 重拉。理由: 控制台重启窗口恰是 vite 代理损坏高危期（后端短暂
-        不可达可致 http-proxy 永久失效），TCP 存活探测不出代理健康——唯一可靠
-        策略是级联重启，vite 永不带陈旧状态跨代存活。dev 工具重启代价仅页面闪连。
+        收割策略: 5173-5175 上任何非本代 Popen 的 vite（上代孤儿/exec 遗留/
+        端口漂移残留）一律 kill 重拉。理由: 控制台重启窗口恰是 vite 代理损坏
+        高危期（后端短暂不可达可致 http-proxy 永久失效），TCP 存活探测不出
+        代理健康——唯一可靠策略是级联重启，vite 永不带陈旧状态跨代存活。
+        dev 工具重启代价仅页面闪连。依赖未装时不动现有实例（先检查后收割）。
 
         Returns:
             True = 已在运行或本次已拉起；False = 无法拉起（依赖未装）。
         """
         if not ConfigManager.get_instance().opencode_root:
             return False
+        frontend_dir = Path(ConfigManager.get_instance().opencode_root) / "control" / "frontend"
+        vite_bin = frontend_dir / "node_modules" / ".bin" / "vite"
+        if not vite_bin.is_file():
+            return False  # 依赖未装——dev 提示页指路（不动现有实例）
         with self._launch_lock:
             own_alive = (self._vite_proc is not None
                          and self._vite_proc.poll() is None)
             if own_alive and self.vite_running():
                 return True
             self._reap_stale_vite()
-            frontend_dir = Path(ConfigManager.get_instance().opencode_root) / "control" / "frontend"
-            vite_bin = frontend_dir / "node_modules" / ".bin" / "vite"
-            if not vite_bin.is_file():
-                return False  # 依赖未装——dev 提示页指路
             # 日志落盘（替换原 DEVNULL——vite 层故障必须有现场可查）
             log_dir = Path(os.environ.get(
                 "OPENSECURITY_HOME", str(Path.home() / "bw-security-analysis"))) / "logs"
@@ -222,27 +224,59 @@ class FrontendPortRegistry:
                         self._vite_proc.pid, log_dir / "vite-dev.log")
             return True
 
+    VITE_REAP_TIMEOUT_SEC = 5.0  # SIGTERM 后等待端口释放的上限（超时升级 SIGKILL）
+
     def _reap_stale_vite(self) -> None:
-        """收割 5173 上的非本代 vite（孤儿/上代遗留）。找不到 PID 则跳过。"""
+        """收割 5173-5175 上的非本代 vite + 有界等待端口释放。
+
+        端口范围含 5174/5175: vite 无 strictPort 时端口被占会静默漂移，漂移
+        孤儿收割不到会被 vite_port() 兜底探测当作活端口（陈旧代理还魂）。
+        SIGTERM 后有界轮询（优雅退出有 Teardown 窗口），超时 SIGKILL——保证
+        新实例必能绑 5173（vite.config 已配 strictPort: true 兜底）。
+        """
         import signal
-        try:
-            r = subprocess.run(["lsof", "-ti", "tcp:5173", "-sTCP:LISTEN"],
-                               capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
+        import time
+        victims = [p for p in self._vite_listener_pids()
+                   if p != (self._vite_proc.pid if self._vite_proc is not None else -1)]
+        if not victims:
             return
-        own_pid = self._vite_proc.pid if self._vite_proc is not None else -1
-        for pid_str in r.stdout.split():
-            try:
-                pid = int(pid_str)
-            except ValueError:
-                continue
-            if pid == own_pid:
-                continue  # 本代（poll 已判死——由下方重拉覆盖）
+        for pid in victims:
             try:
                 os.kill(pid, signal.SIGTERM)
                 logger.info("[frontend] 收割非本代 vite (pid=%s)", pid)
             except OSError:
                 continue
+        deadline = time.monotonic() + self.VITE_REAP_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            if not any(self._port_alive(p) for p in (5173, 5174, 5175)):
+                return
+            time.sleep(0.2)
+        for pid in victims:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                logger.warning("[frontend] vite 收割超时 %.1fs, SIGKILL (pid=%s)",
+                               self.VITE_REAP_TIMEOUT_SEC, pid)
+            except OSError:
+                continue
+        time.sleep(0.5)  # 内核回收端口缓冲
+
+    @staticmethod
+    def _vite_listener_pids() -> "list[int]":
+        """5173-5175 上 LISTEN 进程 PID（lsof 缺失/超时返回空——不阻断启动）。"""
+        try:
+            r = subprocess.run(
+                ["lsof", "-t", "-i", "tcp:5173", "-i", "tcp:5174", "-i", "tcp:5175",
+                 "-sTCP:LISTEN"],
+                capture_output=True, text=True, timeout=10)  # noqa: S603 —— 固定参数
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        pids: "list[int]" = []
+        for pid_str in r.stdout.split():
+            try:
+                pids.append(int(pid_str))
+            except ValueError:
+                continue
+        return pids
 
 
 
