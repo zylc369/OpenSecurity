@@ -131,7 +131,11 @@ class PyDepsDetector:
                    description="进程/内存监控库，控制台资源管理依赖"),
         PyPkgField(name="soundfile", pip_name="soundfile", agents=["all"],
             tags=(DepTag.CONSOLE_RUNTIME,),
-                   description="音频读写库（TTS 音色库上传转换; libsndfile 轻量包装）"),
+            # 下界=最严消费方约束（mlx-audio-plus >=0.13.1; librosa/funasr >=0.12.1）
+            # 防旧版混入破坏加载链（transformers/datasets 的音频模块连带 import——
+            # 文本模型 bge-m3 加载也会被旧版 libsndfile 炸掉）
+            version_spec=">=0.13.1",
+            description="音频读写库（TTS 音色库上传转换; libsndfile 轻量包装）"),
         # ── TTS plus 引擎链(mlx-audio-plus; macOS/MLX 专属) ──
         PyPkgField(name="mlx_audio", pip_name="mlx-audio", agents=["all"],
              platforms=("darwin",), tags=(DepTag.CONSOLE_RUNTIME,),
